@@ -1,0 +1,25 @@
+# herdr-review — herdr plugin manifest.
+#
+# Declares a right split pane that runs the review sidebar and a key to toggle it.
+# Modeled on the verified `herdr pane split --direction right --ratio 0.35
+# --no-focus` command (see docs/herdr-api-notes.md and specs/herdr-host.md).
+# Field names track herdr 0.7; adjust if your plugin schema differs.
+
+name = "herdr-review"
+description = "Browse an agent's changes and send comments back to chat."
+
+# The sidebar pane. herdr opens/closes it; the binary just runs inside.
+# It discovers the repo from the pane's cwd, normalized to the git top-level.
+[[panes]]
+id = "review"
+placement = "split"
+direction = "right"
+ratio = 0.35
+focus = false
+command = "herdr-review"
+
+# Toggle the sidebar on/off.
+[[keybindings]]
+key = "ctrl-r"
+action = "toggle-pane"
+pane = "review"
