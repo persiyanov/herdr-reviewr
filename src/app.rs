@@ -353,8 +353,13 @@ impl App {
         self.select_anchor = None;
     }
 
-    /// Scroll the diff horizontally by `delta` columns, clamped at the left edge.
+    /// Scroll the diff horizontally by `delta` columns, clamped at the left edge. A no-op
+    /// while wrap is on, since the renderer ignores `h_scroll` when wrapping — so the offset
+    /// never silently accumulates and then jumps the view when wrap is toggled off.
     pub fn scroll_h(&mut self, delta: isize) {
+        if self.wrap {
+            return;
+        }
         self.h_scroll = if delta >= 0 {
             self.h_scroll + delta as usize
         } else {
@@ -435,6 +440,9 @@ impl App {
         if self.scope != scope && !self.composing() {
             self.scope = scope;
             self.file_cursor = 0;
+            // A file's old side can differ between scopes at the same path+new-content, so
+            // drop cached diffs rather than risk returning the other scope's build.
+            self.cache = DiffCache::new();
             self.reset_diff_view();
             self.reload()?;
         }

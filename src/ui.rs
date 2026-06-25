@@ -697,7 +697,7 @@ fn render_row(row: &Row, layout: RowLayout, state: RowState) -> Vec<Line<'static
     let RowState { commented, cursor, selected } = state;
     if let Row::Fold { .. } = row {
         let label = if cursor {
-            format!("  ⋯  {} unmodified lines — ⏎ expand", row.hidden())
+            format!("  ⋯  {} unmodified lines — → expand", row.hidden())
         } else {
             format!("  ⋯  {} unmodified lines", row.hidden())
         };

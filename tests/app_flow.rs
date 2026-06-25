@@ -205,6 +205,18 @@ fn page_keys_move_the_cursor_in_both_panes() {
     assert!(app.reveal_diff);
 }
 
+#[test]
+fn horizontal_scroll_is_inert_while_wrapping() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    app.wrap = true;
+    app.scroll_h(8);
+    assert_eq!(app.h_scroll, 0, "h-scroll does nothing while wrap is on, so it can't accumulate");
+    app.wrap = false;
+    app.scroll_h(8);
+    assert_eq!(app.h_scroll, 8, "h-scroll moves once wrap is off");
+}
+
 /// The index of the first diff row with the given marker (`'+'`, `'-'`, or `' '`).
 fn row_with(app: &App, marker: char) -> usize {
     app.diff.rows.iter().position(|r| r.marker() == marker).expect("a row with that marker")

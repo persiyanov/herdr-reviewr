@@ -42,6 +42,27 @@ fn render_buffer(app: &App) -> Buffer {
 /// Catppuccin surface2 — the shared selection/cursor fill.
 const SELECTION_BG: ratatui::style::Color = ratatui::style::Color::Rgb(0x58, 0x5b, 0x70);
 
+#[test]
+fn the_fold_hint_names_the_arrow_key() {
+    use std::fmt::Write as _;
+    let r = Repo::init();
+    let mut body = String::new();
+    for i in 0..30 {
+        let _ = writeln!(body, "line {i}");
+    }
+    r.write("f.rs", &body);
+    r.commit_all("init");
+    r.write("f.rs", &body.replace("line 15", "LINE 15")); // one change, long runs fold
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.reload().unwrap();
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|row| row.hidden() > 0).expect("a fold row");
+
+    let out = render(&app);
+    assert!(out.contains("→ expand"), "the fold hint names the `→` key");
+    assert!(!out.contains("⏎ expand"), "no stale enter hint remains");
+}
+
 fn edited_app() -> App {
     let r = Repo::init();
     r.write("hello.rs", "alpha\nbeta\n");

@@ -415,9 +415,10 @@ impl DiffCache {
         Self::default()
     }
 
-    /// Return the cached diff when `old`/`new` are unchanged for `path`, else build,
-    /// cache, and return it. `previous_path` (the rename source) is metadata for the build,
-    /// not part of the cache key — it is stable for a given path within a scope.
+    /// Return the cached diff when `old`/`new`/`previous_path` are unchanged for `path`,
+    /// else build, cache, and return it. `previous_path` (the rename source) is part of the
+    /// key, so the same path appearing as a rename in one scope and plain in another never
+    /// returns a stale header; the cache is also cleared on a scope switch (`set_scope`).
     pub fn get(
         &mut self,
         path: String,
@@ -426,7 +427,7 @@ impl DiffCache {
         new: &str,
         hl: &Highlighter,
     ) -> FileDiff {
-        let key = content_hash(old, new);
+        let key = content_hash(previous_path.as_deref(), old, new);
         if let Some((cached, diff)) = self.entries.get(&path)
             && *cached == key
         {
@@ -441,8 +442,9 @@ impl DiffCache {
     }
 }
 
-fn content_hash(old: &str, new: &str) -> u64 {
+fn content_hash(previous_path: Option<&str>, old: &str, new: &str) -> u64 {
     let mut h = DefaultHasher::new();
+    previous_path.hash(&mut h);
     old.hash(&mut h);
     new.hash(&mut h);
     h.finish()
@@ -456,6 +458,18 @@ mod tests {
     fn build(old: &str, new: &str) -> FileDiff {
         let hl = Highlighter::new(None);
         FileDiff::build("a.rs".into(), None, old, new, &hl)
+    }
+
+    #[test]
+    fn cache_keys_on_previous_path_so_a_rename_and_a_plain_edit_differ() {
+        let hl = Highlighter::new(None);
+        let mut cache = DiffCache::new();
+        // Same path + same content, but one is a rename (carries a previous_path) and one is
+        // not. The cache must not return the rename's build for the plain edit.
+        let renamed = cache.get("f.rs".into(), Some("old.rs".into()), "x\n", "y\n", &hl);
+        let plain = cache.get("f.rs".into(), None, "x\n", "y\n", &hl);
+        assert_eq!(renamed.previous_path.as_deref(), Some("old.rs"));
+        assert_eq!(plain.previous_path, None);
     }
 
     #[test]
