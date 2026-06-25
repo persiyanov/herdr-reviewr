@@ -28,9 +28,11 @@ use anyhow::Result;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
+    MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::supports_keyboard_enhancement;
 use ratatui::layout::Rect;
 
 use crate::app::{App, Focus, Mode};
@@ -57,7 +59,20 @@ pub fn run() -> Result<()> {
     // Bracketed paste so a multi-line paste arrives as one event, not raw keystrokes whose
     // embedded newlines would submit the comment early.
     let _ = execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    // The kitty keyboard protocol reports modifiers on keys the legacy encoding drops — most
+    // notably Ctrl/Alt+arrows — so word-jump by arrow works where the terminal supports it.
+    let kbd = supports_keyboard_enhancement().unwrap_or(false);
+    logln!("keyboard enhancement supported={kbd}");
+    if kbd {
+        let _ = execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
     let result = event_loop(&mut terminal, &mut app, cfg.poll);
+    if kbd {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     result
