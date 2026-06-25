@@ -329,13 +329,26 @@ impl App {
     /// Expand the fold under the cursor, revealing its hidden lines. Expansion is
     /// permanent for the session — an expand is taken as intentional, so there is no
     /// collapse-back.
-    pub fn expand_fold(&mut self) {
-        let Some(anchor) = self.visible.get(self.diff_cursor).and_then(Row::fold_anchor) else {
+    /// Expand the fold under the cursor, keeping the viewport visually still. Where the fold
+    /// sits decides which way it grows: a fold in the top half of the diff expands upward (the
+    /// lines below it hold their screen position); one in the bottom half expands downward (the
+    /// lines above hold theirs). `heights`/`viewport` are this frame's pre-expand diff geometry.
+    pub fn expand_fold(&mut self, heights: &[usize], viewport: usize) {
+        let fold_idx = self.diff_cursor;
+        let Some(anchor) = self.visible.get(fold_idx).and_then(Row::fold_anchor) else {
             return;
         };
+        // Expanding replaces the 1 fold row with N context rows; rows below it shift by N-1.
+        let shift = self.visible[fold_idx].hidden().saturating_sub(1);
+        // Display rows between the viewport top and the fold; < half ⇒ fold is in the top half.
+        let above: usize = heights.get(self.diff_scroll..fold_idx).map_or(0, |s| s.iter().sum());
+        let top_half = above < viewport / 2;
         self.expanded_folds.insert(anchor);
         self.rebuild_visible();
-        self.reveal_diff = true; // row heights shifted; keep the cursor visible
+        if top_half {
+            self.diff_scroll += shift; // hold the content below the fold; grow upward
+        }
+        // bottom half: leave diff_scroll — the content above the fold stays put, grow downward
     }
 
     /// The old and new content of `file` for the current scope: old from `HEAD` (or the
@@ -500,7 +513,11 @@ impl App {
             }
             Focus::Diff => {
                 if !self.visible.is_empty() {
-                    self.diff_cursor = step(self.diff_cursor, delta, self.visible.len());
+                    let mut target = step(self.diff_cursor, delta, self.visible.len());
+                    if let Some(a) = self.select_anchor {
+                        target = self.fold_clamped(a, target);
+                    }
+                    self.diff_cursor = target;
                     self.reveal_diff = true;
                 }
             }
@@ -631,11 +648,23 @@ impl App {
     pub fn drag_select_to(&mut self, index: usize) {
         if index < self.visible.len() {
             self.focus = Focus::Diff;
-            if self.select_anchor.is_none() {
-                self.select_anchor = Some(self.diff_cursor);
-            }
-            self.diff_cursor = index;
+            let anchor = *self.select_anchor.get_or_insert(self.diff_cursor);
+            self.diff_cursor = self.fold_clamped(anchor, index);
             self.reveal_diff = true;
+        }
+    }
+
+    /// Clamp `target` so the inclusive range from `anchor` to `target` crosses no fold: a
+    /// selection treats a fold as a hard boundary, so its line range and snippet always agree
+    /// (never bracketing hidden lines the snippet omits). Stops the moving end shy of the fold.
+    fn fold_clamped(&self, anchor: usize, target: usize) -> usize {
+        if target > anchor {
+            (anchor + 1..=target).find(|&i| !self.visible[i].is_content()).map_or(target, |i| i - 1)
+        } else {
+            (target..anchor)
+                .rev()
+                .find(|&i| !self.visible[i].is_content())
+                .map_or(target, |i| i + 1)
         }
     }
 

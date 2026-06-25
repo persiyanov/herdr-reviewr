@@ -335,6 +335,12 @@ fn editing_a_comment_surfaces_its_file_from_a_collapsed_directory() {
     assert!(matches!(app.mode, Mode::Composing { editing: Some(_) }));
 }
 
+/// Expand the fold under the cursor with synthetic geometry (these tests don't render).
+fn expand_fold(app: &mut App) {
+    let heights = vec![1usize; app.visible.len()];
+    app.expand_fold(&heights, 80);
+}
+
 /// Place the diff cursor on the first row with `marker` and write a comment there.
 fn comment_on(app: &mut App, marker: char, text: &str) {
     app.focus = Focus::Diff;
@@ -441,15 +447,65 @@ fn a_fold_expands_permanently_and_keeps_the_cursor_in_range() {
     // Land on the leading fold and expand it (the `→` action) — the visible count grows.
     app.diff_cursor = app.visible.iter().position(|row| row.hidden() > 0).unwrap();
     assert!(app.on_fold(), "`→` expands here");
-    app.expand_fold();
+    expand_fold(&mut app);
     let expanded = app.visible.len();
     assert!(expanded > folded, "expanding reveals the hidden lines");
     assert!(app.diff_cursor < app.visible.len(), "cursor stays in range");
     assert!(!app.on_fold(), "the fold is gone, so `→` now scrolls instead");
 
     // Expansion is permanent — pressing again on a revealed content line does nothing.
-    app.expand_fold();
+    expand_fold(&mut app);
     assert_eq!(app.visible.len(), expanded, "no collapse-back");
+}
+
+#[test]
+fn a_selection_cannot_cross_a_fold() {
+    let r = folded_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+
+    // Anchor just above the trailing fold, then try to select well past it.
+    let tail = app.visible.iter().rposition(|row| row.hidden() > 0).unwrap();
+    app.diff_cursor = tail - 1;
+    app.toggle_select();
+    app.move_cursor(10).unwrap();
+    assert_eq!(app.diff_cursor, tail - 1, "the cursor stops shy of the trailing fold");
+    let (lo, hi) = app.selection_range();
+    assert!((lo..=hi).all(|i| app.visible[i].is_content()), "no fold row is in the selection");
+
+    // The same upward, across the leading fold.
+    let head = app.visible.iter().position(|row| row.hidden() > 0).unwrap();
+    app.select_anchor = None;
+    app.diff_cursor = head + 1;
+    app.toggle_select();
+    app.move_cursor(-10).unwrap();
+    assert_eq!(app.diff_cursor, head + 1, "the cursor stops just after the leading fold");
+}
+
+#[test]
+fn expanding_a_fold_keeps_the_viewport_still() {
+    let r = folded_repo();
+
+    // A fold in the top half grows upward: scroll advances so the lines below hold position.
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    let head = app.visible.iter().position(|row| row.hidden() > 0).unwrap();
+    let shift = app.visible[head].hidden() - 1;
+    app.diff_cursor = head;
+    app.diff_scroll = 0;
+    let heights = vec![1usize; app.visible.len()];
+    app.expand_fold(&heights, 20);
+    assert_eq!(app.diff_scroll, shift, "top-half fold grows upward");
+
+    // A fold in the bottom half grows downward: scroll holds so the lines above stay put.
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    let tail = app.visible.iter().rposition(|row| row.hidden() > 0).unwrap();
+    app.diff_cursor = tail;
+    app.diff_scroll = 0;
+    let heights = vec![1usize; app.visible.len()];
+    app.expand_fold(&heights, tail + 2); // the fold sits in the bottom half of the viewport
+    assert_eq!(app.diff_scroll, 0, "bottom-half fold grows downward");
 }
 
 #[test]
@@ -470,7 +526,7 @@ fn a_comment_through_a_fold_anchors_to_gits_line_and_survives_a_poll() {
 
     // A fold expand plus a poll keeps the comment.
     app.diff_cursor = app.visible.iter().position(|row| row.hidden() > 0).unwrap();
-    app.expand_fold();
+    expand_fold(&mut app);
     app.reload().unwrap();
     assert_eq!(app.store.len(), 1, "the comment survives a fold expand and a poll");
     assert!(app.commented_lines().iter().any(|&i| app.visible[i].text().contains("LINE 20")));

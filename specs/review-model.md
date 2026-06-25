@@ -32,7 +32,7 @@ The central object is a comment — a note attached to a run of diff lines in on
 | `lines` | string | yes | The verbatim diff lines the comment anchors to, each keeping its `+`/`-`/space marker. |
 | `text` | string | yes | Free-form reviewer text, no categories or severities. May span multiple lines. |
 
-`lines` is the authoritative anchor: it lets the agent find the exact code even after later edits shift line numbers. `side`/`start`/`end` orient a human and are not re-bound when the diff shifts.
+`lines` is the authoritative anchor: it lets the agent find the exact code even after later edits shift line numbers. `side`/`start`/`end` orient a human and are not re-bound when the diff shifts. The range is always contiguous — `lines` covers every line in `start..end` — because a selection cannot cross a fold (`diff-view.md`), so the range never brackets hidden lines the snippet omits.
 
 ### Scopes
 

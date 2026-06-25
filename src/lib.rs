@@ -290,7 +290,10 @@ fn handle_key(app: &mut App, key: KeyEvent, area: Rect) -> Result<()> {
         // (`scroll_h` is a no-op while wrapping, so it only acts when h-scroll is meaningful).
         (Right, _) if app.on_folder() => app.expand_dir(),
         (Left, _) if app.on_folder() => app.collapse_dir(),
-        (Right, _) if app.on_fold() => app.expand_fold(),
+        (Right, _) if app.on_fold() => {
+            let heights = ui::diff_row_heights(app, area);
+            app.expand_fold(&heights, ui::diff_viewport_height(area, app.list_pct));
+        }
         (Right, _) => app.scroll_h(8),
         (Left, _) => app.scroll_h(-8),
         (Char('u'), false) => app.set_scope(Scope::Uncommitted)?,
@@ -344,8 +347,8 @@ fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect, heights: &[usize]) -> 
                 app.focus = Focus::Diff;
                 app.diff_cursor = i;
                 app.select_anchor = None;
-                // A click on a fold marker toggles it.
-                app.expand_fold();
+                // A click on a fold marker expands it, keeping the viewport still.
+                app.expand_fold(heights, ui::diff_viewport_height(area, app.list_pct));
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {

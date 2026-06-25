@@ -74,6 +74,7 @@ A row is one of four kinds. Content rows (`context`, `deletion`, `insertion`) ar
 
 - An unchanged run longer than the context margin collapses to one `fold` row showing its hidden-line count, drawn as a distinct band so it reads as a hunk separator.
 - Expanding a `fold` replaces it with its lines as `context` rows; expansion is permanent for the session — an expand is intentional, so there is no collapse-back.
+- Expanding keeps the viewport visually still: a fold in the top half of the diff grows upward, so the lines below it hold their screen position; a fold in the bottom half grows downward, so the lines above it hold theirs.
 - A file's leading and trailing unchanged regions fold the same way, so the pane opens focused on the changes.
 
 ### Wrapping and the gutter
@@ -87,7 +88,7 @@ A row is one of four kinds. Content rows (`context`, `deletion`, `insertion`) ar
 ### Comment anchoring
 
 - A comment anchors to the diff exactly as `review-model.md` defines it: a `side` plus a `start..end` line range, with the verbatim snippet.
-- A selection runs over content rows; folds are skipped. The export snippet is reconstructed from the selected rows as `+`/`−`/space-prefixed lines — the markers live in the snippet sent to the agent, not on screen.
+- A selection runs over content rows; a fold is a hard boundary it cannot cross, so the `start..end` range never brackets hidden lines the snippet would omit. The export snippet is reconstructed from the selected rows as `+`/`−`/space-prefixed lines — the markers live in the snippet sent to the agent, not on screen.
 
 ### Config
 
