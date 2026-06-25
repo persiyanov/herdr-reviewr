@@ -327,7 +327,8 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
         .skip(app.file_scroll)
         .take(inner.height as usize)
         .map(|(i, row)| {
-            let selected = i == app.file_cursor;
+            // The selected row fills with the cursor color, dimmed when the list is unfocused.
+            let fill = (i == app.file_cursor).then(|| cursor_bg(app.focus == Focus::Files));
             let indent = "  ".repeat(row.depth);
             match &row.kind {
                 RowKind::Dir { expanded, .. } => {
@@ -342,11 +343,11 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
                             Style::default().fg(cat::SUBTEXT0).add_modifier(Modifier::BOLD),
                         ),
                     ];
-                    selectable_row(spans, width, selected)
+                    selectable_row(spans, width, fill)
                 }
-                RowKind::File { change, additions, deletions, .. } => file_row_item(
-                    &indent, *change, &row.name, *additions, *deletions, width, selected,
-                ),
+                RowKind::File { change, additions, deletions, .. } => {
+                    file_row_item(&indent, *change, &row.name, *additions, *deletions, width, fill)
+                }
             }
         })
         .collect();
@@ -363,7 +364,7 @@ fn file_row_item(
     additions: u32,
     deletions: u32,
     width: usize,
-    selected: bool,
+    fill: Option<Color>,
 ) -> ListItem<'static> {
     let marker = format!("{} ", change.marker());
     let stats = stats_str(additions, deletions);
@@ -390,7 +391,7 @@ fn file_row_item(
         spans.push(Span::raw(" ".repeat(pad)));
         spans.extend(stats_spans(additions, deletions));
     }
-    selectable_row(spans, width, selected)
+    selectable_row(spans, width, fill)
 }
 
 /// The `+a −d` stats text, dropping a side that is zero (`+210`, `−4`, or empty); used to
@@ -451,7 +452,7 @@ fn comment_card_lines(c: &Comment, width: usize) -> Vec<Line<'static>> {
     let box_w = width.saturating_sub(INDENT).max(10);
     let text_w = box_w.saturating_sub(4).max(1); // inside "│ " … " │"
     let border = Style::default().fg(cat::OVERLAY0);
-    let title = Style::default().fg(cat::YELLOW).add_modifier(Modifier::BOLD);
+    let title = Style::default().fg(cat::PEACH).add_modifier(Modifier::BOLD);
     let body_style = Style::default().fg(cat::TEXT);
     let pad = || Span::raw(" ".repeat(INDENT));
 
@@ -532,7 +533,13 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     let total_lines: usize =
         app.diff.rows.iter().map(|r| if r.is_content() { 1 } else { r.hidden() }).sum();
     let gutter_w = gutter_width(total_lines);
-    let layout = RowLayout { gutter_w, width, h_scroll: app.h_scroll, wrap: app.wrap };
+    let layout = RowLayout {
+        gutter_w,
+        width,
+        h_scroll: app.h_scroll,
+        wrap: app.wrap,
+        focused: app.focus == Focus::Diff,
+    };
     let commented = app.commented_lines();
     let cards = app.comment_cards();
     let editing = editing_comment(app);
@@ -635,6 +642,12 @@ const CURSOR_BG: Color = cat::SURFACE2;
 const SEL_BG: Color = cat::SURFACE1;
 const FOLD_BG: Color = cat::SURFACE0;
 
+/// The cursor-row fill: full brightness in the focused pane, a step dimmer when the pane is
+/// not focused, so which pane has the cursor reads at a glance.
+fn cursor_bg(focused: bool) -> Color {
+    if focused { CURSOR_BG } else { cat::SURFACE1 }
+}
+
 /// The line-number column width for a diff of `rows` lines.
 fn gutter_width(rows: usize) -> usize {
     rows.to_string().len().max(3)
@@ -663,6 +676,8 @@ struct RowLayout {
     width: usize,
     h_scroll: usize,
     wrap: bool,
+    /// Whether the diff pane is focused — dims the cursor row when it is not.
+    focused: bool,
 }
 
 /// A row's per-row highlight state.
@@ -678,7 +693,7 @@ struct RowState {
 /// into `code_width`-wide rows; a continuation row carries a blank gutter so numbers
 /// stay aligned. With wrap off, the line is one row scrolled by `h_scroll`.
 fn render_row(row: &Row, layout: RowLayout, state: RowState) -> Vec<Line<'static>> {
-    let RowLayout { gutter_w, width, h_scroll, wrap } = layout;
+    let RowLayout { gutter_w, width, h_scroll, wrap, focused } = layout;
     let RowState { commented, cursor, selected } = state;
     if let Row::Fold { .. } = row {
         let label = if cursor {
@@ -690,19 +705,20 @@ fn render_row(row: &Row, layout: RowLayout, state: RowState) -> Vec<Line<'static
         if let Some(pad) = width.checked_sub(line.width()).filter(|p| *p > 0) {
             line.push_span(Span::raw(" ".repeat(pad)));
         }
-        let bg = if cursor { CURSOR_BG } else { FOLD_BG };
+        let bg = if cursor { cursor_bg(focused) } else { FOLD_BG };
         return vec![line.style(Style::default().bg(bg).add_modifier(Modifier::BOLD))];
     }
     let num = row.new_no().or_else(|| row.old_no()).map_or(String::new(), |n| n.to_string());
-    // Line numbers sit a step brighter than other dim chrome so they stay legible while read.
-    let num_color = if commented { cat::YELLOW } else { cat::OVERLAY1 };
+    // A commented line's number takes the peach comment accent; others sit a step brighter
+    // than the dim chrome so they stay legible while read.
+    let num_color = if commented { cat::PEACH } else { cat::OVERLAY1 };
     let (bar, bar_color) = match row.marker() {
         '-' => ("▌", cat::RED),
         '+' => ("▌", cat::GREEN),
         _ => (" ", cat::OVERLAY0),
     };
     let row_bg = if cursor {
-        Some(CURSOR_BG)
+        Some(cursor_bg(focused))
     } else if selected {
         Some(SEL_BG)
     } else {
@@ -953,7 +969,8 @@ fn render_comments_list(frame: &mut Frame, app: &App, area: Rect) {
             if stale.contains(&c.file) {
                 spans.push(Span::styled("  (stale)", Style::default().fg(cat::RED)));
             }
-            selectable_row(spans, width, i == app.list_cursor)
+            // The list overlay is the active modal, so its row reads at full brightness.
+            selectable_row(spans, width, (i == app.list_cursor).then_some(CURSOR_BG))
         })
         .collect();
     frame.render_widget(List::new(items), inner);
@@ -971,15 +988,15 @@ fn text_style() -> Style {
 fn selectable_row(
     mut spans: Vec<Span<'static>>,
     width: usize,
-    selected: bool,
+    fill: Option<Color>,
 ) -> ListItem<'static> {
-    if selected {
+    if let Some(bg) = fill {
         let used: usize = spans.iter().map(Span::width).sum();
         if width > used {
             spans.push(Span::raw(" ".repeat(width - used)));
         }
         for s in &mut spans {
-            s.style = s.style.bg(CURSOR_BG).add_modifier(Modifier::BOLD);
+            s.style = s.style.bg(bg).add_modifier(Modifier::BOLD);
         }
     }
     ListItem::new(Line::from(spans))
