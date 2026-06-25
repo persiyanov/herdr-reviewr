@@ -83,7 +83,7 @@ The inline box is a plain-text field that behaves like an ordinary editor: the c
 | `←` / `→` | move the caret one character |
 | `↑` / `↓` | move the caret one wrapped row, keeping the column where the row allows |
 | `Home` / `End`, `Ctrl+A` / `Ctrl+E` | move the caret to the start / end of the logical line |
-| `Alt`/`Ctrl` + `←` / `→` | move the caret by a word |
+| `Alt+b` / `Alt+f` (or `Alt`/`Ctrl` + `←` / `→`) | move the caret by a word |
 | `Backspace` / `Delete` | delete the character before / after the caret |
 | `Ctrl+W` | delete the word before the caret |
 | `Ctrl+U` / `Ctrl+K` | delete to the start / end of the logical line |
@@ -93,7 +93,7 @@ The inline box is a plain-text field that behaves like an ordinary editor: the c
 - A paste arrives as one insertion at the caret via bracketed paste, so a multi-line paste keeps its newlines instead of the first one submitting the comment; `\r\n` and `\r` normalize to `\n`.
 - The caret is a char position into the text; movement, insertion, and deletion are character-wise (multi-byte and wide characters count as whole characters), and the box word-wraps and grows exactly as it measures.
 - `↑` / `↓` move by what you see (wrapped rows); `Home` / `End` and the kill keys act on the logical line — the run of text between explicit newlines — so they ignore soft wrapping.
-- Word-jump uses modified arrows, which some terminals or multiplexers do not deliver; the character arrows, `Home`/`End`, and `Ctrl+A`/`Ctrl+E` always work.
+- Word-jump is `Alt+b` / `Alt+f` (which survive as ESC-prefixed sequences); the `Alt`/`Ctrl` + `←`/`→` variants also work where the terminal delivers modified arrows, which many multiplexers strip. The character arrows, `Home`/`End`, and `Ctrl+A`/`Ctrl+E` always work.
 
 ### Refresh
 

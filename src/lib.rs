@@ -214,6 +214,11 @@ fn handle_key(app: &mut App, key: KeyEvent, area: Rect) -> Result<()> {
             Char('e') if ctrl => app.caret_end(),
             Char('u') if ctrl => app.input_kill_to_start(),
             Char('k') if ctrl => app.input_kill_to_end(),
+            // Word-jump: `Alt+b`/`Alt+f` (readline; survives as ESC-prefixed, unlike modified
+            // arrows, which many terminals/multiplexers strip) and modified arrows where they
+            // are delivered. These precede the plain-character insert below.
+            Char('b') if alt => app.caret_word_left(),
+            Char('f') if alt => app.caret_word_right(),
             Left if word => app.caret_word_left(),
             Right if word => app.caret_word_right(),
             Left => app.caret_left(),
