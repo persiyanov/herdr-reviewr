@@ -41,6 +41,48 @@ fn render_buffer(app: &App) -> Buffer {
 
 /// Catppuccin surface2 — the shared selection/cursor fill.
 const SELECTION_BG: ratatui::style::Color = ratatui::style::Color::Rgb(0x58, 0x5b, 0x70);
+/// Catppuccin peach — the comment-editor caret block.
+const PEACH: ratatui::style::Color = ratatui::style::Color::Rgb(0xfa, 0xb3, 0x87);
+
+/// Open the comment composer on the first changed line of `edited_app`.
+fn composing(app: &mut App) {
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|r| r.marker() == '+').unwrap();
+    app.start_comment();
+}
+
+#[test]
+fn the_empty_comment_box_shows_a_placeholder() {
+    let mut app = edited_app();
+    composing(&mut app);
+    assert!(render(&app).contains("Leave a comment…"), "an empty box shows the placeholder");
+}
+
+#[test]
+fn the_caret_block_sits_on_the_character_at_the_caret() {
+    let mut app = edited_app();
+    composing(&mut app);
+    app.input_push('a');
+    app.input_push('b');
+    app.caret_left(); // caret between 'a' and 'b' → block over 'b'
+    let buf = render_buffer(&app);
+    let mut found = false;
+    for y in 0..40 {
+        for x in 0..140 {
+            if buf.cell((x, y)).is_some_and(|c| c.bg == PEACH && c.symbol() == "b") {
+                found = true;
+            }
+        }
+    }
+    assert!(found, "the caret block highlights the character at the caret");
+}
+
+#[test]
+fn caret_vertical_moves_between_wrapped_rows() {
+    // "abcdef" hard-wraps at width 3 to "abc"/"def"; caret 4 (def col 1) up → 1; 1 down → 4.
+    assert_eq!(ui::caret_vertical("abcdef", 4, 3, false), 1);
+    assert_eq!(ui::caret_vertical("abcdef", 1, 3, true), 4);
+}
 
 #[test]
 fn the_fold_hint_names_the_arrow_key() {

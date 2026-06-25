@@ -346,6 +346,75 @@ fn comment_on(app: &mut App, marker: char, text: &str) {
     app.submit_comment();
 }
 
+/// An app sitting in the comment composer on the first changed line, caret at 0.
+fn composing_app() -> App {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.diff_cursor = row_with(&app, '+');
+    app.start_comment();
+    app
+}
+
+fn typed(app: &mut App, text: &str) {
+    for ch in text.chars() {
+        app.input_push(ch);
+    }
+}
+
+#[test]
+fn the_editor_inserts_and_deletes_at_the_caret() {
+    let mut app = composing_app();
+    typed(&mut app, "ac");
+    assert_eq!((app.input.as_str(), app.caret), ("ac", 2));
+    app.caret_left();
+    app.input_push('b'); // insert mid-text, not at the end
+    assert_eq!((app.input.as_str(), app.caret), ("abc", 2));
+    app.input_backspace(); // deletes the char before the caret ('b')
+    assert_eq!((app.input.as_str(), app.caret), ("ac", 1));
+    app.input_delete_forward(); // deletes the char at the caret ('c')
+    assert_eq!((app.input.as_str(), app.caret), ("a", 1));
+}
+
+#[test]
+fn the_editor_moves_by_char_word_and_line() {
+    let mut app = composing_app();
+    typed(&mut app, "hello world");
+    app.caret_home();
+    assert_eq!(app.caret, 0);
+    app.caret_end();
+    assert_eq!(app.caret, 11);
+    app.caret_word_left();
+    assert_eq!(app.caret, 6, "to the start of 'world'");
+    app.caret_word_left();
+    assert_eq!(app.caret, 0, "to the start of 'hello'");
+    app.caret_word_right();
+    assert_eq!(app.caret, 5, "to the end of 'hello'");
+}
+
+#[test]
+fn the_editor_kills_to_line_bounds_and_pastes_multiline() {
+    let mut app = composing_app();
+    typed(&mut app, "alpha beta");
+    app.caret_home();
+    app.caret_word_right(); // caret after "alpha"
+    app.input_kill_to_end();
+    assert_eq!(app.input, "alpha");
+    app.input_kill_to_start();
+    assert_eq!((app.input.as_str(), app.caret), ("", 0));
+    // A multi-line paste lands as one unit with normalized newlines.
+    app.input_paste("x\r\ny");
+    assert_eq!((app.input.as_str(), app.caret), ("x\ny", 3));
+}
+
+#[test]
+fn a_paste_outside_the_editor_is_ignored() {
+    let r = edited_repo();
+    let mut app = app_on(&r); // Normal mode, not composing
+    app.input_paste("ignored");
+    assert!(app.input.is_empty(), "paste does nothing outside the comment editor");
+}
+
 /// A repo whose `big.rs` has 40 lines with one change in the middle, so the head and
 /// tail unchanged runs fold.
 fn folded_repo() -> Repo {

@@ -188,14 +188,14 @@ fn editing_comment(app: &App) -> Option<usize> {
 
 /// Rows the inline comment box occupies at the diff pane's `width`: the wrapped body height
 /// (so the box grows as text wraps, not only on explicit newlines) plus the two borders.
-/// Uses the same wrapped lines as [`render_composer`], so the reserved height matches.
 #[must_use]
 pub fn composer_height(app: &App, width: usize) -> usize {
-    composer_lines(app, composer_content_width(width)).len() + 2
+    box_rows(&app.input, composer_content_width(width)).len() + 2
 }
 
 /// The text width inside the comment box: the diff pane width minus its two borders.
-fn composer_content_width(width: usize) -> usize {
+#[must_use]
+pub fn composer_content_width(width: usize) -> usize {
     width.saturating_sub(2).max(1)
 }
 
@@ -206,26 +206,125 @@ pub fn diff_inner_width(area: Rect, list_pct: u16) -> usize {
     inner_rect(panes(area, list_pct).diff).width as usize
 }
 
-/// The comment box's display lines at `content_w`: each input line word-wrapped (via the
-/// diff's [`wrap_segments`], so the box wraps exactly as it renders), the last carrying the
-/// cursor block.
+/// The comment box's display lines at `content_w`: each input line word-wrapped, with the
+/// caret drawn as a block at its mapped (row, column). An empty box shows a placeholder.
 fn composer_lines(app: &App, content_w: usize) -> Vec<Line<'static>> {
-    let mut texts: Vec<String> = Vec::new();
-    for logical in app.input.split('\n') {
-        texts.extend(wrap_text(logical, content_w));
+    if app.input.is_empty() {
+        return vec![Line::from(vec![
+            Span::styled(" ", caret_style()),
+            Span::styled("Leave a comment…", Style::default().fg(cat::OVERLAY0)),
+        ])];
     }
-    let last = texts.len() - 1; // always ≥ 1: an empty input yields one empty line
-    texts
-        .into_iter()
+    let rows = box_rows(&app.input, content_w);
+    let (caret_row, caret_col) = caret_rowcol(&rows, app.caret);
+    rows.iter()
         .enumerate()
-        .map(|(i, t)| {
-            if i == last {
-                Line::from(vec![Span::raw(t), Span::styled("█", Style::default().fg(cat::PEACH))])
-            } else {
-                Line::from(t)
-            }
+        .map(|(i, (_, text))| {
+            if i == caret_row { row_with_caret(text, caret_col) } else { Line::from(text.clone()) }
         })
         .collect()
+}
+
+/// The block-cursor style: the character under the caret shown dark-on-peach.
+fn caret_style() -> Style {
+    Style::default().fg(cat::SURFACE0).bg(cat::PEACH)
+}
+
+/// One box row with the caret block over the character at `col` (a trailing block at the end).
+fn row_with_caret(text: &str, col: usize) -> Line<'static> {
+    let chars: Vec<char> = text.chars().collect();
+    let col = col.min(chars.len());
+    let left: String = chars[..col].iter().collect();
+    let mut spans = vec![Span::raw(left)];
+    if col < chars.len() {
+        spans.push(Span::styled(chars[col].to_string(), caret_style()));
+        spans.push(Span::raw(chars[col + 1..].iter().collect::<String>()));
+    } else {
+        spans.push(Span::styled(" ".to_string(), caret_style()));
+    }
+    Line::from(spans)
+}
+
+/// Wrap one logical line's `chars` to `width` display columns, returning contiguous half-open
+/// char ranges (every char is in exactly one row, so a char index maps cleanly to a row). A
+/// greedy word wrap that keeps the break space on its row; an over-wide word hard-breaks.
+fn box_wrap(chars: &[char], width: usize) -> Vec<(usize, usize)> {
+    if chars.is_empty() {
+        return vec![(0, 0)];
+    }
+    let w = width.max(1);
+    let mut rows = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let (mut col, mut i, mut last_space) = (0usize, start, None);
+        while i < chars.len() {
+            let cw = UnicodeWidthChar::width(chars[i]).unwrap_or(0);
+            if col + cw > w && i > start {
+                break;
+            }
+            col += cw;
+            if chars[i] == ' ' {
+                last_space = Some(i);
+            }
+            i += 1;
+        }
+        // Break after the last space that fits (keeping it on this row), else hard-break.
+        let end = if i < chars.len() {
+            last_space.filter(|&s| s + 1 > start).map_or(i, |s| s + 1)
+        } else {
+            i
+        };
+        rows.push((start, end));
+        start = end;
+    }
+    rows
+}
+
+/// The box's visual rows over the whole `input`: `(start_char_index, text)` per row, wrapping
+/// each logical line (split on `\n`) with [`box_wrap`]. A trailing newline yields an empty row.
+fn box_rows(input: &str, width: usize) -> Vec<(usize, String)> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut rows = Vec::new();
+    let mut i = 0;
+    loop {
+        let line_end = chars[i..].iter().position(|&c| c == '\n').map_or(chars.len(), |p| i + p);
+        for (a, b) in box_wrap(&chars[i..line_end], width) {
+            rows.push((i + a, chars[i + a..i + b].iter().collect::<String>()));
+        }
+        match chars[line_end..].first() {
+            Some('\n') => {
+                i = line_end + 1;
+                if i == chars.len() {
+                    rows.push((i, String::new())); // a trailing newline opens an empty row
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    if rows.is_empty() {
+        rows.push((0, String::new()));
+    }
+    rows
+}
+
+/// Map a caret char index to its `(row, col)` in the box rows: the last row that starts at or
+/// before the caret, with the column clamped to that row's length.
+fn caret_rowcol(rows: &[(usize, String)], caret: usize) -> (usize, usize) {
+    let row = rows.iter().rposition(|(start, _)| *start <= caret).unwrap_or(0);
+    let (start, text) = &rows[row];
+    (row, (caret - start).min(text.chars().count()))
+}
+
+/// The new caret char index after moving up (`down == false`) or down one wrapped row, keeping
+/// the column where the target row allows. For `↑`/`↓` in the comment editor.
+#[must_use]
+pub fn caret_vertical(input: &str, caret: usize, content_w: usize, down: bool) -> usize {
+    let rows = box_rows(input, content_w);
+    let (row, col) = caret_rowcol(&rows, caret);
+    let target = if down { (row + 1).min(rows.len() - 1) } else { row.saturating_sub(1) };
+    let (start, text) = &rows[target];
+    start + col.min(text.chars().count())
 }
 
 /// Word-wrap a plain string to `width` columns, reusing the diff's [`wrap_segments`] so the

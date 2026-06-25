@@ -107,6 +107,8 @@ pub struct App {
     pub list_cursor: usize,
     pub mode: Mode,
     pub input: String,
+    /// The comment editor's caret: a char index into `input` (`0..=chars().count()`).
+    pub caret: usize,
     pub status: String,
     pub should_quit: bool,
     highlighter: Highlighter,
@@ -143,6 +145,7 @@ impl App {
             list_cursor: 0,
             mode: Mode::Normal,
             input: String::new(),
+            caret: 0,
             status: String::new(),
             should_quit: false,
             highlighter: Highlighter::new(None),
@@ -662,6 +665,7 @@ impl App {
             self.diff_cursor = self.selection_range().1;
             self.reveal_diff = true; // scroll the anchored line into view before the box opens
             self.input.clear();
+            self.caret = 0;
             self.resume_list = false; // a fresh diff comment returns to the diff, not the list
             self.mode = Mode::Composing { editing: None };
         }
@@ -705,32 +709,146 @@ impl App {
         }
         self.focus = Focus::Diff;
         self.reveal_diff = true; // scroll the edited line into view before the box opens
+        self.caret = text.chars().count(); // edit opens with the caret at the end
         self.input = text;
         self.resume_list = from_list;
         self.mode = Mode::Composing { editing: Some(i) };
     }
 
+    // --- comment editor: a character caret into `input`; edits happen at the caret ---------
+    // `caret` is a char index in `0..=input.chars().count()`. Edits round-trip through a
+    // `Vec<char>` (comments are short), so every op is character-wise and multi-byte safe.
+
+    /// Insert `ch` at the caret.
     pub fn input_push(&mut self, ch: char) {
-        if self.composing() {
-            self.input.push(ch);
+        if !self.composing() {
+            return;
         }
+        let mut v: Vec<char> = self.input.chars().collect();
+        let at = self.caret.min(v.len());
+        v.insert(at, ch);
+        self.caret = at + 1;
+        self.input = v.into_iter().collect();
     }
 
+    /// Insert pasted `text` at the caret as one unit, normalizing `\r\n`/`\r` to `\n`.
+    pub fn input_paste(&mut self, text: &str) {
+        if !self.composing() {
+            return;
+        }
+        let norm: Vec<char> = text.replace("\r\n", "\n").replace('\r', "\n").chars().collect();
+        let mut v: Vec<char> = self.input.chars().collect();
+        let at = self.caret.min(v.len());
+        let n = norm.len();
+        v.splice(at..at, norm);
+        self.caret = at + n;
+        self.input = v.into_iter().collect();
+    }
+
+    /// Delete the character before the caret.
     pub fn input_backspace(&mut self) {
-        if self.composing() {
-            self.input.pop();
+        if !self.composing() || self.caret == 0 {
+            return;
+        }
+        let mut v: Vec<char> = self.input.chars().collect();
+        let at = self.caret.min(v.len());
+        if at == 0 {
+            return;
+        }
+        v.remove(at - 1);
+        self.caret = at - 1;
+        self.input = v.into_iter().collect();
+    }
+
+    /// Delete the character at the caret (`Delete`).
+    pub fn input_delete_forward(&mut self) {
+        if !self.composing() {
+            return;
+        }
+        let mut v: Vec<char> = self.input.chars().collect();
+        if self.caret < v.len() {
+            v.remove(self.caret);
+            self.input = v.into_iter().collect();
         }
     }
 
-    /// Delete the word before the cursor (`Ctrl+W`): first any trailing whitespace, then the
-    /// run of non-whitespace before it, so one press clears one word.
+    /// Delete the word before the caret (`Ctrl+W`): the trailing whitespace, then the run of
+    /// non-whitespace before it, so one press clears one word.
     pub fn input_delete_word(&mut self) {
         if !self.composing() {
             return;
         }
-        let trimmed = self.input.trim_end_matches(|c: char| c.is_whitespace());
-        let cut = trimmed.trim_end_matches(|c: char| !c.is_whitespace());
-        self.input.truncate(cut.len());
+        let mut v: Vec<char> = self.input.chars().collect();
+        let end = self.caret.min(v.len());
+        let start = word_start(&v, end);
+        v.drain(start..end);
+        self.caret = start;
+        self.input = v.into_iter().collect();
+    }
+
+    /// Delete from the start of the logical line to the caret (`Ctrl+U`).
+    pub fn input_kill_to_start(&mut self) {
+        if !self.composing() {
+            return;
+        }
+        let mut v: Vec<char> = self.input.chars().collect();
+        let end = self.caret.min(v.len());
+        let start = line_start(&v, end);
+        v.drain(start..end);
+        self.caret = start;
+        self.input = v.into_iter().collect();
+    }
+
+    /// Delete from the caret to the end of the logical line (`Ctrl+K`).
+    pub fn input_kill_to_end(&mut self) {
+        if !self.composing() {
+            return;
+        }
+        let mut v: Vec<char> = self.input.chars().collect();
+        let start = self.caret.min(v.len());
+        let end = line_end(&v, start);
+        v.drain(start..end);
+        self.input = v.into_iter().collect();
+    }
+
+    /// Move the caret one character left / right.
+    pub fn caret_left(&mut self) {
+        if self.composing() {
+            self.caret = self.caret.saturating_sub(1);
+        }
+    }
+    pub fn caret_right(&mut self) {
+        if self.composing() {
+            self.caret = (self.caret + 1).min(self.input.chars().count());
+        }
+    }
+
+    /// Move the caret to the start / end of the logical line (between newlines).
+    pub fn caret_home(&mut self) {
+        if self.composing() {
+            let v: Vec<char> = self.input.chars().collect();
+            self.caret = line_start(&v, self.caret.min(v.len()));
+        }
+    }
+    pub fn caret_end(&mut self) {
+        if self.composing() {
+            let v: Vec<char> = self.input.chars().collect();
+            self.caret = line_end(&v, self.caret.min(v.len()));
+        }
+    }
+
+    /// Move the caret one word left / right.
+    pub fn caret_word_left(&mut self) {
+        if self.composing() {
+            let v: Vec<char> = self.input.chars().collect();
+            self.caret = word_start(&v, self.caret.min(v.len()));
+        }
+    }
+    pub fn caret_word_right(&mut self) {
+        if self.composing() {
+            let v: Vec<char> = self.input.chars().collect();
+            self.caret = word_end(&v, self.caret.min(v.len()));
+        }
     }
 
     pub fn cancel_comment(&mut self) {
@@ -741,6 +859,7 @@ impl App {
     /// from it (and any comments remain), else to Normal.
     fn leave_compose(&mut self) {
         self.input.clear();
+        self.caret = 0;
         let resume = std::mem::take(&mut self.resume_list);
         if resume && !self.store.is_empty() {
             self.list_cursor = self.list_cursor.min(self.store.len() - 1);
@@ -995,6 +1114,40 @@ fn keep_in_view(cursor: usize, scroll: usize, heights: &[usize], viewport: usize
 /// (and 0 when the content fits). Called every frame after any reveal.
 fn bound(scroll: usize, total: usize, viewport: usize) -> usize {
     scroll.min(total.saturating_sub(viewport))
+}
+
+/// The start of the logical line (after the previous `\n`, or 0) containing char `caret`.
+fn line_start(v: &[char], caret: usize) -> usize {
+    v[..caret].iter().rposition(|&c| c == '\n').map_or(0, |p| p + 1)
+}
+
+/// The end of the logical line (the next `\n`, or the end) containing char `caret`.
+fn line_end(v: &[char], caret: usize) -> usize {
+    v[caret..].iter().position(|&c| c == '\n').map_or(v.len(), |p| caret + p)
+}
+
+/// The start of the word before `caret`: skip trailing whitespace, then the word run.
+fn word_start(v: &[char], caret: usize) -> usize {
+    let mut i = caret;
+    while i > 0 && v[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    while i > 0 && !v[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    i
+}
+
+/// The end of the word after `caret`: skip leading whitespace, then the word run.
+fn word_end(v: &[char], caret: usize) -> usize {
+    let mut i = caret;
+    while i < v.len() && v[i].is_whitespace() {
+        i += 1;
+    }
+    while i < v.len() && !v[i].is_whitespace() {
+        i += 1;
+    }
+    i
 }
 
 /// Move a scroll offset by `delta` rows, saturating at 0. The upper bound is applied

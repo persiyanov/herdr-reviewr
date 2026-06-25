@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::Rect;
@@ -54,9 +54,11 @@ pub fn run() -> Result<()> {
     app.reload()?;
 
     let mut terminal = ratatui::init();
-    let _ = execute!(io::stdout(), EnableMouseCapture);
+    // Bracketed paste so a multi-line paste arrives as one event, not raw keystrokes whose
+    // embedded newlines would submit the comment early.
+    let _ = execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste);
     let result = event_loop(&mut terminal, &mut app, cfg.poll);
-    let _ = execute!(io::stdout(), DisableMouseCapture);
+    let _ = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
     result
 }
@@ -115,7 +117,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
         if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    if let Err(e) = handle_key(app, k) {
+                    if let Err(e) = handle_key(app, k, area) {
                         app.status = format!("error: {e}");
                     }
                     logln!(
@@ -154,6 +156,11 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
                         app.select_anchor
                     );
                 }
+                // Bracketed paste: insert at the caret while composing, ignored otherwise.
+                Event::Paste(text) => {
+                    app.input_paste(&text);
+                    logln!("paste {} chars -> composing={}", text.len(), app.composing());
+                }
                 _ => {}
             }
         }
@@ -179,8 +186,11 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
 const PAGE: isize = 15;
 const HALF_PAGE: isize = 8;
 
-fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
-    use KeyCode::{Backspace, Char, Down, Enter, Esc, Left, PageDown, PageUp, Right, Tab, Up};
+fn handle_key(app: &mut App, key: KeyEvent, area: Rect) -> Result<()> {
+    use KeyCode::{
+        Backspace, Char, Delete, Down, End, Enter, Esc, Home, Left, PageDown, PageUp, Right, Tab,
+        Up,
+    };
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     // A keypress ends any in-progress divider drag, so opening a modal mid-drag (which makes
@@ -188,7 +198,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     app.resizing = false;
 
     if app.composing() {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         let alt_or_shift = key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
+        let word = alt || ctrl; // word-jump on Alt/Ctrl + arrow (terminal-dependent)
+        // The wrapped width of the box, for vertical (wrapped-row) caret movement.
+        let cw = ui::composer_content_width(ui::diff_inner_width(area, app.list_pct));
         match key.code {
             Esc => app.cancel_comment(),
             // Alt/Shift+Enter (and Ctrl+J) insert a newline; plain Enter submits.
@@ -196,6 +210,19 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             Enter => app.submit_comment(),
             Char('j') if ctrl => app.input_push('\n'),
             Char('w') if ctrl => app.input_delete_word(),
+            Char('a') if ctrl => app.caret_home(),
+            Char('e') if ctrl => app.caret_end(),
+            Char('u') if ctrl => app.input_kill_to_start(),
+            Char('k') if ctrl => app.input_kill_to_end(),
+            Left if word => app.caret_word_left(),
+            Right if word => app.caret_word_right(),
+            Left => app.caret_left(),
+            Right => app.caret_right(),
+            Up => app.caret = ui::caret_vertical(&app.input, app.caret, cw, false),
+            Down => app.caret = ui::caret_vertical(&app.input, app.caret, cw, true),
+            Home => app.caret_home(),
+            End => app.caret_end(),
+            Delete => app.input_delete_forward(),
             Backspace => app.input_backspace(),
             Char(c) if !ctrl => app.input_push(c),
             _ => {}
