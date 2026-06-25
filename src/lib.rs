@@ -258,7 +258,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
 }
 
 fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect) -> Result<()> {
-    if app.composing() {
+    // A modal (the comment composer or the comments-list overlay) captures the screen and is
+    // keyboard-driven, so the mouse is inert while one is open — otherwise clicks and the
+    // wheel would drive the panes drawn underneath it.
+    if app.composing() || app.mode == Mode::List {
         return Ok(());
     }
     match m.kind {

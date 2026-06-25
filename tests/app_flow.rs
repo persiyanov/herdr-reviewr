@@ -7,7 +7,7 @@ use std::cell::RefCell;
 
 use anyhow::{Result, bail};
 use common::Repo;
-use herdr_review::app::{App, Focus};
+use herdr_review::app::{App, Focus, Mode};
 use herdr_review::export::ExportTarget;
 use herdr_review::model::{Scope, Side};
 
@@ -208,6 +208,53 @@ fn page_keys_move_the_cursor_in_both_panes() {
 /// The index of the first diff row with the given marker (`'+'`, `'-'`, or `' '`).
 fn row_with(app: &App, marker: char) -> usize {
     app.diff.rows.iter().position(|r| r.marker() == marker).expect("a row with that marker")
+}
+
+/// The visible file-list row index for `path`.
+fn file_row(app: &App, path: &str) -> usize {
+    app.file_rows
+        .iter()
+        .position(|r| r.file_index().is_some_and(|i| app.files[i].path == path))
+        .expect("a file row for the path")
+}
+
+#[test]
+fn editing_a_comment_surfaces_its_file_from_a_collapsed_directory() {
+    let r = Repo::init();
+    r.write("src/foo.rs", "a\nb\nc\n");
+    r.write("src/bar.rs", "x\n");
+    r.write("root.rs", "1\n");
+    r.commit_all("init");
+    r.write("src/foo.rs", "a\nB\nc\n");
+    r.write("src/bar.rs", "y\n");
+    r.write("root.rs", "2\n");
+    let mut app = app_on(&r);
+
+    // Open src/foo.rs and comment on its changed line.
+    app.select_file(file_row(&app, "src/foo.rs")).unwrap();
+    comment_on(&mut app, '+', "note on foo");
+    let commented_line = app.store.get(0).unwrap().start;
+
+    // Switch the open diff to root.rs, then collapse `src` so foo's row is hidden.
+    app.select_file(file_row(&app, "root.rs")).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("root.rs"));
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
+    app.collapse_dir();
+    assert!(
+        !app.file_rows
+            .iter()
+            .any(|r| r.file_index().is_some_and(|i| app.files[i].path == "src/foo.rs")),
+        "foo's row is hidden under the collapsed src/"
+    );
+
+    // Edit the comment from the list: the diff must switch to foo and land on its line,
+    // even though foo has no visible row (the A2 bug opened the box over root.rs).
+    app.open_list();
+    app.start_edit();
+    assert_eq!(app.diff_path.as_deref(), Some("src/foo.rs"), "edit surfaced the comment's file");
+    let row = app.visible.get(app.diff_cursor).expect("cursor on a row");
+    assert_eq!(row.new_no(), Some(commented_line), "cursor landed on the commented line");
+    assert!(matches!(app.mode, Mode::Composing { editing: Some(_) }));
 }
 
 /// Place the diff cursor on the first row with `marker` and write a comment there.

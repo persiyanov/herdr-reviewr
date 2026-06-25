@@ -261,16 +261,22 @@ impl App {
         Ok(())
     }
 
-    /// Build the shown file's diff from its old and new content, flatten folds into the
-    /// visible rows, then clamp the cursor/scroll so a refresh keeps the position.
+    /// Build the shown file's diff (the file under the cursor, or the open file), flatten
+    /// folds into the visible rows, then clamp the cursor/scroll so a refresh keeps position.
     fn load_diff(&mut self) {
-        let Some(file) = self.shown_file() else {
+        if let Some(file) = self.shown_file() {
+            self.set_diff(file);
+        } else {
             self.diff = FileDiff::empty();
             self.diff_path = None;
             self.visible.clear();
             self.reset_diff_view();
-            return;
-        };
+        }
+    }
+
+    /// Build the diff for a specific `file` regardless of whether its row is visible in the
+    /// tree — so editing a comment can surface its file even from a collapsed directory.
+    fn set_diff(&mut self, file: ChangedFile) {
         self.diff_path = Some(file.path.clone());
         let (old, new) = self.content_sides(&file);
         self.diff = self.cache.get(file.path, file.previous_path, &old, &new, &self.highlighter);
@@ -634,13 +640,17 @@ impl App {
             (c.file.clone(), c.side, c.start, c.end, c.text.clone());
 
         // Bring the comment's file into the diff and land the cursor on its line, so the
-        // inline edit box opens over the comment — even when editing from the list.
+        // inline edit box opens over the comment — even when editing from the list, and even
+        // when the file's row is hidden inside a collapsed directory (load it by path, not by
+        // tree row). Move the list cursor onto its row when one exists.
         if self.diff_path.as_deref() != Some(file.as_str())
-            && let Some(fi) = self.file_row_of_path(&file)
+            && let Some(f) = self.files.iter().find(|f| f.path == file).cloned()
         {
-            self.file_cursor = fi;
             self.reset_diff_view();
-            self.load_diff();
+            self.set_diff(f);
+            if let Some(fi) = self.file_row_of_path(&file) {
+                self.file_cursor = fi;
+            }
         }
         // Only move the cursor when the open diff is actually the comment's file, so a
         // stale comment (file gone from the changeset) never jumps the cursor onto a
