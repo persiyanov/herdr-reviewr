@@ -69,9 +69,6 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
     let mut last_poll = Instant::now();
     let mut status_at = Instant::now();
     let mut last_status = String::new();
-    // Track the file cursor so the file list scrolls to it only when it moves — the wheel
-    // scrolls the viewport freely otherwise (selection and open diff stay put).
-    let mut last_file_cursor = usize::MAX;
     while !app.should_quit {
         // Expire a stale status line: restart the timer when the message changes, and clear
         // it once it has lingered past the TTL, so a notification doesn't stay up forever.
@@ -83,9 +80,11 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
             app.status.clear();
             last_status.clear();
         }
-        // Settle the sticky scroll for this frame's viewport before painting, so the
-        // diff window matches what mouse hit-testing will map against. While composing,
-        // reserve the inline box's rows so the anchored line stays visible above it.
+        // Settle both panes' scroll for this frame's viewport before painting, so the
+        // diff window matches what mouse hit-testing will map against. Each pane reveals its
+        // cursor only when a navigation requested it (so the wheel can scroll freely), then
+        // bounds the offset every frame. While composing, reserve the inline box's rows and
+        // keep revealing so the anchored line stays above the growing box.
         let size = terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
         let viewport = ui::diff_viewport_height(area, app.list_pct);
@@ -95,11 +94,14 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
         } else {
             viewport
         };
-        app.clamp_diff_scroll(&ui::diff_row_heights(app, area), effective);
+        let heights = ui::diff_row_heights(app, area);
+        if std::mem::take(&mut app.reveal_diff) || app.composing() {
+            app.reveal_diff_cursor(&heights, effective);
+        }
+        app.bound_diff_scroll(effective);
         let file_vp = ui::file_viewport_height(area, app.list_pct);
-        if app.file_cursor != last_file_cursor {
+        if std::mem::take(&mut app.reveal_files) {
             app.reveal_file_cursor(file_vp);
-            last_file_cursor = app.file_cursor;
         }
         app.bound_file_scroll(file_vp);
         terminal.draw(|f| ui::render(f, app))?;
@@ -213,21 +215,21 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
 
     match (key.code, ctrl) {
         // ctrl combos first, so they win over the plain `u`/`d` bindings below. Half-page
-        // scroll moves the focused pane.
-        (Char('u'), true) if app.focus == Focus::Files => app.scroll_files(-HALF_PAGE),
-        (Char('d'), true) if app.focus == Focus::Files => app.scroll_files(HALF_PAGE),
-        (Char('u'), true) => app.scroll_diff(-HALF_PAGE),
-        (Char('d'), true) => app.scroll_diff(HALF_PAGE),
+        // keys move the focused pane's cursor (the view follows), like `j`/`k`.
+        (Char('u'), true) if app.focus == Focus::Files => app.page_files(-HALF_PAGE),
+        (Char('d'), true) if app.focus == Focus::Files => app.page_files(HALF_PAGE),
+        (Char('u'), true) => app.page_diff(-HALF_PAGE),
+        (Char('d'), true) => app.page_diff(HALF_PAGE),
         (Char('q'), _) => app.should_quit = true,
         (Char('r'), _) => app.reload()?,
         (Tab, _) => app.toggle_focus(),
         (Char('j') | Down, _) => app.move_cursor(1)?,
         (Char('k') | Up, _) => app.move_cursor(-1)?,
-        // Page keys scroll the focused pane.
-        (PageDown, _) if app.focus == Focus::Files => app.scroll_files(PAGE),
-        (PageUp, _) if app.focus == Focus::Files => app.scroll_files(-PAGE),
-        (PageDown, _) => app.scroll_diff(PAGE),
-        (PageUp, _) => app.scroll_diff(-PAGE),
+        // Page keys move the focused pane's cursor.
+        (PageDown, _) if app.focus == Focus::Files => app.page_files(PAGE),
+        (PageUp, _) if app.focus == Focus::Files => app.page_files(-PAGE),
+        (PageDown, _) => app.page_diff(PAGE),
+        (PageUp, _) => app.page_diff(-PAGE),
         (Char('w'), _) => app.toggle_wrap(),
         // `]` widens the file list, `[` narrows it (widening the diff).
         (Char(']'), _) => app.resize_list(4),
@@ -309,17 +311,17 @@ fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect) -> Result<()> {
             }
         }
         MouseEventKind::Up(MouseButton::Left) => app.resizing = false,
-        // The wheel scrolls whichever pane it is over (the file list or the diff) vertically;
-        // horizontal scroll is keyboard-only (`←`/`→`), since multiplexers don't reliably
-        // deliver horizontal wheel events.
+        // The wheel scrolls the viewport of whichever pane it is over — never the cursor, so
+        // a comment is never anchored to a wheeled-past line. Horizontal scroll is
+        // keyboard-only (`←`/`→`), since multiplexers don't reliably deliver h-wheel events.
         MouseEventKind::ScrollDown if ui::in_files_pane(area, app.list_pct, m.column, m.row) => {
-            app.scroll_files(3);
+            app.wheel_files(3);
         }
         MouseEventKind::ScrollUp if ui::in_files_pane(area, app.list_pct, m.column, m.row) => {
-            app.scroll_files(-3);
+            app.wheel_files(-3);
         }
-        MouseEventKind::ScrollDown => app.scroll_diff(3),
-        MouseEventKind::ScrollUp => app.scroll_diff(-3),
+        MouseEventKind::ScrollDown => app.wheel_diff(3),
+        MouseEventKind::ScrollUp => app.wheel_diff(-3),
         _ => {}
     }
     Ok(())

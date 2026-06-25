@@ -54,11 +54,12 @@ fn app_on(r: &Repo) -> App {
     app
 }
 
-/// Clamp the diff scroll with one display row per logical row (no wrap), for tests that
-/// drive short-line diffs.
+/// Settle the diff scroll with one display row per logical row (no wrap), for tests that
+/// drive short-line diffs — reveal the cursor, then bound the offset, as the loop does.
 fn clamp(app: &mut App, viewport: usize) {
     let heights = vec![1usize; app.visible.len()];
-    app.clamp_diff_scroll(&heights, viewport);
+    app.reveal_diff_cursor(&heights, viewport);
+    app.bound_diff_scroll(viewport);
 }
 
 #[test]
@@ -83,12 +84,14 @@ fn the_file_list_decouples_viewport_scroll_from_selection() {
     // Wheel-scrolling moves the viewport only: the selection and the open diff stay put,
     // so browsing the list never reloads a diff (the performance fix). It may leave the
     // cursor off screen — it is not yanked back.
-    app.scroll_files(5);
+    app.reveal_files = false; // clear the flag the initial reload set (no event loop here)
+    app.wheel_files(5);
     app.bound_file_scroll(viewport);
     assert_eq!(app.file_scroll, 5);
     assert_eq!(app.file_cursor, 0);
     assert_eq!(app.diff_path, opened);
     assert!(app.file_cursor < app.file_scroll);
+    assert!(!app.reveal_files, "the wheel does not request a reveal");
 
     // Moving the selection reveals it and opens that one file.
     app.move_cursor(1).unwrap();
@@ -107,9 +110,99 @@ fn the_file_list_decouples_viewport_scroll_from_selection() {
     assert_eq!(app.file_scroll, 20 - viewport);
 
     // An over-scroll is bounded so the window never shows a blank tail.
-    app.scroll_files(100);
+    app.wheel_files(100);
     app.bound_file_scroll(viewport);
     assert_eq!(app.file_scroll, 20 - viewport);
+}
+
+/// A repo whose single file has `n` lines, all changed, so the diff has many visible rows.
+fn long_diff_app(n: usize) -> App {
+    use std::fmt::Write as _;
+    let r = Repo::init();
+    let (mut old, mut new) = (String::new(), String::new());
+    for i in 0..n {
+        let _ = writeln!(old, "line {i}");
+        let _ = writeln!(new, "LINE {i}");
+    }
+    r.write("a.rs", &old);
+    r.commit_all("init");
+    r.write("a.rs", &new);
+    let mut app = app_on(&r);
+    app.reload().unwrap();
+    app
+}
+
+#[test]
+fn the_wheel_scrolls_the_diff_without_moving_its_cursor() {
+    let mut app = long_diff_app(40);
+    app.focus = Focus::Diff;
+    app.diff_cursor = 3;
+    app.reveal_diff = false;
+    app.wheel_diff(10);
+    app.bound_diff_scroll(8);
+    assert_eq!(app.diff_cursor, 3, "the wheel leaves the comment cursor put");
+    assert!(app.diff_scroll > 0, "the wheel moved the viewport");
+    assert!(!app.reveal_diff, "the wheel does not request a reveal");
+}
+
+#[test]
+fn a_boundary_move_reveals_the_cursor_after_wheeling() {
+    // The B1 regression: a navigation that clamps to the same index must still reveal.
+    let r = Repo::init();
+    for i in 0..20 {
+        r.write(&format!("f{i:02}.txt"), "one\n");
+    }
+    r.commit_all("init");
+    for i in 0..20 {
+        r.write(&format!("f{i:02}.txt"), "two\n");
+    }
+    let mut app = app_on(&r);
+    let vp = 6;
+    app.wheel_files(10);
+    app.bound_file_scroll(vp);
+    assert!(app.file_cursor < app.file_scroll, "cursor (row 0) is wheeled off-screen above");
+    app.reveal_files = false;
+    app.move_cursor(-1).unwrap(); // `k` at row 0 — index stays 0
+    assert_eq!(app.file_cursor, 0);
+    assert!(app.reveal_files, "a clamp-to-same-index move still requests a reveal");
+    app.reveal_file_cursor(vp);
+    assert_eq!(app.file_scroll, 0, "the cursor is pulled back into view");
+}
+
+#[test]
+fn toggling_a_directory_requests_a_reveal() {
+    let r = Repo::init();
+    r.write("src/a.rs", "x\n");
+    r.write("src/b.rs", "y\n");
+    r.commit_all("init");
+    r.write("src/a.rs", "x2\n");
+    r.write("src/b.rs", "y2\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Files;
+    let dir = app.file_rows.iter().position(|row| row.dir_path() == Some("src")).unwrap();
+    app.file_cursor = dir;
+    app.reveal_files = false;
+    app.collapse_dir();
+    assert!(app.reveal_files, "collapsing a directory requests a reveal (even at the same index)");
+}
+
+#[test]
+fn page_keys_move_the_cursor_in_both_panes() {
+    let mut app = long_diff_app(40);
+    // File pane: page moves the selection (not just the viewport).
+    app.focus = Focus::Files;
+    app.file_cursor = 0;
+    app.reveal_files = false;
+    app.page_files(5);
+    assert_eq!(app.file_cursor, 5usize.min(app.file_rows.len() - 1));
+    assert!(app.reveal_files);
+    // Diff pane: page moves the cursor.
+    app.focus = Focus::Diff;
+    app.diff_cursor = 0;
+    app.reveal_diff = false;
+    app.page_diff(5);
+    assert_eq!(app.diff_cursor, 5);
+    assert!(app.reveal_diff);
 }
 
 /// The index of the first diff row with the given marker (`'+'`, `'-'`, or `' '`).

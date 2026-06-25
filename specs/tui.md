@@ -1,5 +1,5 @@
 ---
-Status: Current
+Status: Draft
 Created: 2026-06-23
 Last edited: 2026-06-25
 ---
@@ -45,7 +45,8 @@ Every action has a keyboard binding. The mouse-relevant ones also work by click 
 | move the cursor in the focused pane — in the file list this selects a file and loads its diff | `j` / `k` / `↑` / `↓` | click a file row |
 | collapse / expand the directory under the cursor | `←` / `→` | click the directory row |
 | switch focus between the file list and the diff | `tab` | click a pane |
-| scroll the focused pane (diff or file list) | `PageUp` / `PageDown` / `ctrl+u` / `ctrl+d` | wheel over the pane |
+| move the cursor a page in the focused pane | `PageUp` / `PageDown` / `ctrl+u` / `ctrl+d` | — |
+| scroll a pane's viewport, leaving the selection put | — | wheel over the pane |
 | scroll the diff horizontally, when wrap is off and not on a fold | `←` / `→` | — |
 | switch scope | `u` uncommitted / `b` branch | click the scope in the header |
 | expand the fold under the cursor | `→` | click the `⋯` fold row |
@@ -90,6 +91,7 @@ On save the input box closes and the comment stays visible: it renders as a **re
 ## Decisions
 
 - Two-pane focus, not scope on `tab` — `j`/`k` drive whichever pane is focused, and `tab` switches focus. Anchoring comments and jumping between them needs a per-line diff cursor, so the diff is independently focusable rather than scroll-only; scope moves to `u`/`b` (and a clickable scope chip).
+- One scroll model for both panes — each pane has a cursor and an independent viewport offset. The keyboard moves the cursor (the view reveals it); the mouse wheel scrolls the pane-under-the-pointer's viewport and never moves the cursor. So wheeling to read context never moves the comment anchor, and both panes behave identically. Rejected: cursor-coupled scrolling, where the wheel drags the cursor — it mis-anchors comments and made the two panes inconsistent.
 - Poll on a timer, not on agent turns — turn transitions are too coarse and slow for timely refresh; polling is simple and predictable.
 - Keyboard and mouse together — the asked-for flow includes a clickable `Send` button and click-to-open files.
 - Inline comment input — the box opens under the selected line (insert: the diff below shifts down) rather than in a detached footer, so the comment sits with the code it is about; it grows to fit multi-line text.

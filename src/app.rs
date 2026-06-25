@@ -51,6 +51,9 @@ pub enum Mode {
 }
 
 /// The full state of the review session.
+// The several bools (wrap, reveal_files, reveal_diff, resizing, should_quit) are independent
+// toggles, not a state machine in disguise, so the excessive-bools lint does not apply.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 pub struct App {
     pub repo: PathBuf,
@@ -65,6 +68,12 @@ pub struct App {
     /// Top visible row of the file list, kept so `file_cursor` stays on screen when the
     /// changeset is taller than the pane.
     pub file_scroll: usize,
+    /// Set by a navigation that moves `file_cursor`; consumed once per frame to scroll the
+    /// cursor into view. The wheel never sets it, so wheel-scrolling moves the viewport alone.
+    pub reveal_files: bool,
+    /// Set by a navigation that moves `diff_cursor`; consumed once per frame to scroll the
+    /// cursor into view. The wheel never sets it.
+    pub reveal_diff: bool,
     /// Directory paths the user has collapsed; every other directory is expanded. Keyed by
     /// path, so it survives a poll that rebuilds the tree.
     collapsed_dirs: HashSet<String>,
@@ -112,6 +121,8 @@ impl App {
             file_rows: Vec::new(),
             file_cursor: 0,
             file_scroll: 0,
+            reveal_files: false,
+            reveal_diff: false,
             collapsed_dirs: HashSet::new(),
             diff: FileDiff::empty(),
             visible: Vec::new(),
@@ -236,6 +247,7 @@ impl App {
             .or_else(|| self.first_file_row())
             .unwrap_or(0)
             .min(self.file_rows.len().saturating_sub(1));
+        self.reveal_files = true; // the tree may have reshuffled; keep the cursor visible
         // While composing, the open diff is frozen so the anchor under the comment
         // cannot shift beneath the writer.
         if !self.composing() {
@@ -271,6 +283,7 @@ impl App {
             self.diff_cursor = self.diff_cursor.min(last);
             self.diff_scroll = self.diff_scroll.min(last);
             self.select_anchor = self.select_anchor.map(|a| a.min(last));
+            self.reveal_diff = true; // a shrunk diff may have clamped the cursor; re-settle
         }
     }
 
@@ -301,6 +314,7 @@ impl App {
         };
         self.expanded_folds.insert(anchor);
         self.rebuild_visible();
+        self.reveal_diff = true; // row heights shifted; keep the cursor visible
     }
 
     /// The old and new content of `file` for the current scope: old from `HEAD` (or the
@@ -366,54 +380,47 @@ impl App {
         self.list_pct = pct.clamp(MIN_LIST_PCT, MAX_LIST_PCT);
     }
 
-    /// Keep `file_scroll` within range (no blank tail) without moving it onto the cursor.
-    /// The file-list viewport is independent of the selection — the wheel scrolls it while
-    /// the cursor stays put — so this only bounds it; `reveal_file_cursor` follows the
-    /// cursor. Called once per frame. File rows are height 1, so the window is plain rows.
-    pub fn bound_file_scroll(&mut self, viewport: usize) {
-        self.file_scroll = self.file_scroll.min(self.file_rows.len().saturating_sub(viewport));
-    }
+    // --- Scroll model (shared by both panes) ---------------------------------------
+    //
+    // Each pane has a cursor (selection) and a scroll offset (viewport top). They are
+    // independent: keyboard navigation moves the cursor and requests a reveal; the wheel
+    // moves the offset and requests nothing. Every frame the event loop reveals the cursor
+    // *only if a move requested it* (so the wheel can leave the cursor off screen) and then
+    // bounds the offset (so an over-scroll never shows a blank tail). Both panes run the
+    // same `keep_in_view` + `bound`; the file list passes all-height-1 rows.
 
-    /// Scroll the file list so `file_cursor` is on screen, the minimal nudge. Called only
-    /// when the cursor moves (not every frame), so wheel-scrolling can leave it off screen.
+    /// Scroll the file list so `file_cursor` is on screen — the minimal nudge. Called once
+    /// per frame when a navigation requested a reveal, not on a wheel scroll.
     pub fn reveal_file_cursor(&mut self, viewport: usize) {
-        if viewport == 0 || self.file_rows.is_empty() {
+        if self.file_rows.is_empty() {
             self.file_scroll = 0;
             return;
         }
         let cursor = self.file_cursor.min(self.file_rows.len() - 1);
-        if cursor < self.file_scroll {
-            self.file_scroll = cursor;
-        } else if cursor >= self.file_scroll + viewport {
-            self.file_scroll = cursor + 1 - viewport;
-        }
+        let heights = vec![1usize; self.file_rows.len()];
+        self.file_scroll = keep_in_view(cursor, self.file_scroll, &heights, viewport);
     }
 
-    /// Keep `diff_scroll` so the cursor's logical row fits in a `viewport`-display-row
-    /// window, scrolling only when it would leave. `heights` is the display height of
-    /// each visible row (1 unless a wrapped line spans several). Called once per frame.
-    pub fn clamp_diff_scroll(&mut self, heights: &[usize], viewport: usize) {
-        if viewport == 0 || self.visible.is_empty() {
+    /// Clamp `file_scroll` within range (no blank tail). Called every frame.
+    pub fn bound_file_scroll(&mut self, viewport: usize) {
+        self.file_scroll = bound(self.file_scroll, self.file_rows.len(), viewport);
+    }
+
+    /// Scroll the diff so `diff_cursor`'s row fits the `viewport`-display-row window —
+    /// `heights` is each visible row's display height (wrap + comment cards). Called once
+    /// per frame when a navigation requested a reveal, not on a wheel scroll.
+    pub fn reveal_diff_cursor(&mut self, heights: &[usize], viewport: usize) {
+        if self.visible.is_empty() {
             self.diff_scroll = 0;
             return;
         }
         let cursor = self.diff_cursor.min(self.visible.len() - 1);
-        if cursor < self.diff_scroll {
-            self.diff_scroll = cursor;
-        }
-        // Advance the top until the cursor row's display lines fit in the viewport.
-        while self.diff_scroll < cursor
-            && heights[self.diff_scroll..=cursor].iter().sum::<usize>() > viewport
-        {
-            self.diff_scroll += 1;
-        }
-        // Pull back so the bottom isn't left blank when content could fill it.
-        while self.diff_scroll > 0
-            && self.diff_scroll <= cursor
-            && heights[self.diff_scroll - 1..].iter().sum::<usize>() <= viewport
-        {
-            self.diff_scroll -= 1;
-        }
+        self.diff_scroll = keep_in_view(cursor, self.diff_scroll, heights, viewport);
+    }
+
+    /// Clamp `diff_scroll` within range (no blank tail). Called every frame.
+    pub fn bound_diff_scroll(&mut self, viewport: usize) {
+        self.diff_scroll = bound(self.diff_scroll, self.visible.len(), viewport);
     }
 
     /// Switch the changeset scope and reload. A no-op while composing, so a comment
@@ -444,11 +451,15 @@ impl App {
                 if !self.file_rows.is_empty() {
                     self.file_cursor = step(self.file_cursor, delta, self.file_rows.len());
                     self.open_cursor_file();
+                    // Reveal even when the index clamps unchanged (e.g. `k` at the top), so a
+                    // navigation always pulls the cursor back after a wheel scroll.
+                    self.reveal_files = true;
                 }
             }
             Focus::Diff => {
                 if !self.visible.is_empty() {
                     self.diff_cursor = step(self.diff_cursor, delta, self.visible.len());
+                    self.reveal_diff = true;
                 }
             }
         }
@@ -474,6 +485,7 @@ impl App {
         }
         self.focus = Focus::Files;
         self.file_cursor = index;
+        self.reveal_files = true;
         match self.file_rows[index].kind {
             RowKind::File { .. } => self.open_cursor_file(),
             RowKind::Dir { .. } => self.toggle_dir(),
@@ -532,28 +544,45 @@ impl App {
     fn apply_dir_change(&mut self) {
         self.rebuild_file_rows();
         self.file_cursor = self.file_cursor.min(self.file_rows.len().saturating_sub(1));
+        self.reveal_files = true; // the row may have moved off-screen; pull it back
     }
 
-    /// Move the diff cursor by `delta` lines (page keys, mouse wheel) regardless of
-    /// which pane is focused; the sticky scroll follows. Does not steal focus.
-    pub fn scroll_diff(&mut self, delta: isize) {
+    /// Page the diff: move `diff_cursor` by `delta` lines and reveal it. The page/half-page
+    /// keys when the diff is focused; the view follows the cursor like `j`/`k`.
+    pub fn page_diff(&mut self, delta: isize) {
         if !self.visible.is_empty() {
             self.diff_cursor = step(self.diff_cursor, delta, self.visible.len());
+            self.reveal_diff = true;
         }
     }
 
-    /// Scroll the file list's viewport, leaving the selection and the open diff untouched
-    /// — so browsing the list with the wheel never reloads a diff. The upper bound is
-    /// applied each frame by `bound_file_scroll` (which knows the viewport).
-    pub fn scroll_files(&mut self, delta: isize) {
+    /// Page the file list: move `file_cursor` by `delta`, open the file it lands on, and
+    /// reveal it. The page/half-page keys when the file list is focused.
+    pub fn page_files(&mut self, delta: isize) {
+        if !self.file_rows.is_empty() {
+            self.file_cursor = step(self.file_cursor, delta, self.file_rows.len());
+            self.open_cursor_file();
+            self.reveal_files = true;
+        }
+    }
+
+    /// Wheel-scroll the diff's viewport, leaving `diff_cursor` (the comment anchor) put —
+    /// so wheeling to read context never moves what a comment will attach to. The upper
+    /// bound is applied each frame by `bound_diff_scroll`.
+    pub fn wheel_diff(&mut self, delta: isize) {
+        if self.visible.is_empty() {
+            return;
+        }
+        self.diff_scroll = offset_by(self.diff_scroll, delta);
+    }
+
+    /// Wheel-scroll the file list's viewport, leaving the selection and the open diff
+    /// untouched — so browsing the list never reloads a diff. Bounded each frame.
+    pub fn wheel_files(&mut self, delta: isize) {
         if self.file_rows.is_empty() {
             return;
         }
-        self.file_scroll = if delta >= 0 {
-            self.file_scroll.saturating_add(delta.unsigned_abs())
-        } else {
-            self.file_scroll.saturating_sub(delta.unsigned_abs())
-        };
+        self.file_scroll = offset_by(self.file_scroll, delta);
     }
 
     /// Extend a mouse drag-selection to the diff line at `index`, anchoring on first drag.
@@ -564,6 +593,7 @@ impl App {
                 self.select_anchor = Some(self.diff_cursor);
             }
             self.diff_cursor = index;
+            self.reveal_diff = true;
         }
     }
 
@@ -574,6 +604,7 @@ impl App {
                 Some(_) => None,
                 None => Some(self.diff_cursor),
             };
+            self.reveal_diff = true;
         }
     }
 
@@ -590,6 +621,7 @@ impl App {
             // Anchor the cursor at the selection's last line so the scroll keeps it (and
             // the box drawn beneath it) in view.
             self.diff_cursor = self.selection_range().1;
+            self.reveal_diff = true; // scroll the anchored line into view before the box opens
             self.input.clear();
             self.mode = Mode::Composing { editing: None };
         }
@@ -626,6 +658,7 @@ impl App {
             self.select_anchor = None;
         }
         self.focus = Focus::Diff;
+        self.reveal_diff = true; // scroll the edited line into view before the box opens
         self.input = text;
         self.mode = Mode::Composing { editing: Some(i) };
     }
@@ -795,6 +828,7 @@ impl App {
         };
         if let Some(t) = target {
             self.diff_cursor = t;
+            self.reveal_diff = true;
         }
     }
 
@@ -872,6 +906,42 @@ fn step(cur: usize, delta: isize, n: usize) -> usize {
         (cur + delta as usize).min(max)
     } else {
         cur.saturating_sub(delta.unsigned_abs())
+    }
+}
+
+/// Move `scroll` the minimal amount so the row at `cursor` fits within a `viewport`-tall
+/// window, given each row's display `heights`. Scrolls up when the cursor is above the top,
+/// advances the top until the cursor's row fits, then pulls back so the bottom isn't left
+/// blank — the shared "keep the cursor visible" rule for both panes (the file list passes
+/// all-height-1 rows, where this degenerates to plain row arithmetic).
+fn keep_in_view(cursor: usize, scroll: usize, heights: &[usize], viewport: usize) -> usize {
+    if viewport == 0 || heights.is_empty() {
+        return 0;
+    }
+    let cursor = cursor.min(heights.len() - 1);
+    let mut top = scroll.min(cursor);
+    while top < cursor && heights[top..=cursor].iter().sum::<usize>() > viewport {
+        top += 1;
+    }
+    while top > 0 && heights[top - 1..].iter().sum::<usize>() <= viewport {
+        top -= 1;
+    }
+    top
+}
+
+/// Clamp a scroll offset so a `viewport`-tall window over `total` rows shows no blank tail
+/// (and 0 when the content fits). Called every frame after any reveal.
+fn bound(scroll: usize, total: usize, viewport: usize) -> usize {
+    scroll.min(total.saturating_sub(viewport))
+}
+
+/// Move a scroll offset by `delta` rows, saturating at 0. The upper bound is applied
+/// separately by `bound` once the frame's viewport is known.
+fn offset_by(scroll: usize, delta: isize) -> usize {
+    if delta >= 0 {
+        scroll.saturating_add(delta.unsigned_abs())
+    } else {
+        scroll.saturating_sub(delta.unsigned_abs())
     }
 }
 
