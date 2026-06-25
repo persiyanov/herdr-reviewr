@@ -8,6 +8,7 @@
 pub enum Scope {
     Uncommitted,
     Branch,
+    LastTurn,
 }
 
 impl Scope {
@@ -15,14 +16,17 @@ impl Scope {
         match self {
             Scope::Uncommitted => "uncommitted",
             Scope::Branch => "branch",
+            Scope::LastTurn => "last turn",
         }
     }
 
+    /// Cycle to the next scope, for the header chip click: uncommitted → branch → last turn.
     #[must_use]
     pub fn toggled(self) -> Self {
         match self {
             Scope::Uncommitted => Scope::Branch,
-            Scope::Branch => Scope::Uncommitted,
+            Scope::Branch => Scope::LastTurn,
+            Scope::LastTurn => Scope::Uncommitted,
         }
     }
 }
@@ -166,9 +170,12 @@ mod tests {
 
     #[test]
     fn scope_toggles_and_labels() {
+        // The chip click cycles through all three scopes and wraps.
         assert_eq!(Scope::Uncommitted.toggled(), Scope::Branch);
-        assert_eq!(Scope::Branch.toggled(), Scope::Uncommitted);
+        assert_eq!(Scope::Branch.toggled(), Scope::LastTurn);
+        assert_eq!(Scope::LastTurn.toggled(), Scope::Uncommitted);
         assert_eq!(Scope::Uncommitted.label(), "uncommitted");
+        assert_eq!(Scope::LastTurn.label(), "last turn");
     }
 
     #[test]

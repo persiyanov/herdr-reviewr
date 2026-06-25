@@ -91,7 +91,9 @@ fn base_ref(repo: &Path, base: Option<&str>) -> Option<String> {
 /// The diff range for a scope. `None` means working tree vs `HEAD`.
 fn range(repo: &Path, scope: Scope, base: Option<&str>) -> Option<String> {
     match scope {
-        Scope::Uncommitted => None,
+        // Uncommitted diffs the worktree vs `HEAD`; last-turn diffs vs a snapshot tree
+        // (resolved by `changed_against_tree`). Neither is a committed range.
+        Scope::Uncommitted | Scope::LastTurn => None,
         // `base...HEAD` diffs against the merge-base, which is what branch scope means.
         Scope::Branch => base_ref(repo, base).map(|b| format!("{b}...HEAD")),
     }
@@ -119,6 +121,101 @@ pub fn file_content(repo: &Path, rev: &str, path: &str) -> String {
     git_lenient(repo, &["show", &format!("{rev}:{path}")])
 }
 
+// --- turn baseline (last-turn scope) -------------------------------------------
+//
+// See `specs/herdr-host.md`. The snapshot is non-disruptive: it writes a tree object
+// from the worktree through a temporary index, never touching the real index, the
+// worktree, or any branch, and persists the baseline under a private `refs/reviewr/`
+// ref keyed by the worktree path.
+
+/// A non-disruptive snapshot of the worktree as a tree object. Seeds a temporary index
+/// from the repo's real index so unchanged files keep their cached hash, then `add -A`
+/// and `write-tree`. Captures staged, unstaged, and untracked content alike. Touches
+/// only the object database and the temp index — never the real index or any ref.
+pub fn snapshot_worktree(repo: &Path) -> Result<String> {
+    let git_dir = PathBuf::from(git(repo, &["rev-parse", "--absolute-git-dir"])?.trim());
+    let tmp_index = git_dir.join("reviewr-turn-index");
+    let real_index = git_dir.join("index");
+    // Clear any temp index a prior hard crash left, then drop it on every exit path via the
+    // guard, so even a failed snapshot leaves nothing behind in the git dir.
+    let _ = std::fs::remove_file(&tmp_index);
+    let _guard = TempIndex(&tmp_index);
+    // Seed from the real index so git's stat cache lets unchanged files skip hashing;
+    // a fresh repo may have no index yet, so start empty in that case.
+    if real_index.exists() {
+        std::fs::copy(&real_index, &tmp_index).context("seeding the snapshot index")?;
+    }
+    git_with_index(repo, &tmp_index, &["add", "-A"])?;
+    let tree = git_with_index(repo, &tmp_index, &["write-tree"])?;
+    Ok(tree.trim().to_string())
+}
+
+/// Removes a temporary index on drop, so a snapshot that fails midway never leaves one behind.
+struct TempIndex<'a>(&'a Path);
+
+impl Drop for TempIndex<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+    }
+}
+
+/// Like [`git`], but runs against a throwaway index via `GIT_INDEX_FILE` so the snapshot
+/// never disturbs the repo's real index.
+fn git_with_index(repo: &Path, index: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["-c", "core.quotepath=false"])
+        .args(args)
+        .env("GIT_INDEX_FILE", index)
+        .output()
+        .with_context(|| format!("running git {args:?}"))?;
+    if !out.status.success() {
+        bail!("git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// A stable per-worktree key for the baseline ref, from the absolute top-level path, so
+/// sibling worktrees sharing one ref store do not collide. FNV-1a keeps it deterministic
+/// across rebuilds — a std `DefaultHasher` is seeded per process and is not.
+pub fn worktree_key(repo: &Path) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in repo.to_string_lossy().bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// The private ref holding a worktree's turn baseline — outside `refs/heads`, so it
+/// never appears in a branch list.
+fn baseline_ref(key: &str) -> String {
+    format!("refs/reviewr/turn-base/{key}")
+}
+
+/// The persisted turn baseline tree for this worktree, if a baseline exists.
+pub fn read_baseline_ref(repo: &Path, key: &str) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--verify", "--quiet", &baseline_ref(key)])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
+}
+
+/// Persist the turn baseline tree under the worktree's private ref. `update-ref` is
+/// atomic, so the baseline is never half-written.
+pub fn write_baseline_ref(repo: &Path, key: &str, sha: &str) -> Result<()> {
+    git(repo, &["update-ref", &baseline_ref(key), sha])?;
+    Ok(())
+}
+
 /// git's well-known empty-tree object, used as the diff base when a repo has no commits.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
@@ -132,6 +229,7 @@ fn diff_base(repo: &Path) -> String {
 }
 
 /// The changed files for `scope`, sorted by path. `base` overrides the branch base ref.
+/// `last-turn` is resolved separately by [`changed_against_tree`], so it lists nothing here.
 pub fn changed_files(repo: &Path, scope: Scope, base: Option<&str>) -> Result<Vec<ChangedFile>> {
     let (numstat, name_status) = match scope {
         Scope::Uncommitted => {
@@ -150,12 +248,36 @@ pub fn changed_files(repo: &Path, scope: Scope, base: Option<&str>) -> Result<Ve
             ),
             None => return Ok(Vec::new()),
         },
+        Scope::LastTurn => return Ok(Vec::new()),
     };
+    assemble(repo, &numstat, &name_status, scope == Scope::Uncommitted)
+}
 
-    let counts = parse_numstat(&numstat);
+/// The changed files between the turn baseline `tree` and the live worktree, for
+/// `last-turn`. Snapshots the worktree now and diffs tree-against-tree, so staged,
+/// unstaged, untracked, and committed-this-turn changes all show, with no phantom
+/// deletion for a file that is untracked at both ends (which a tree-vs-worktree diff
+/// would mis-report). Untracked files ride in the current snapshot, so no separate
+/// untracked pass is needed.
+pub fn changed_against_tree(repo: &Path, tree: &str) -> Result<Vec<ChangedFile>> {
+    let current = snapshot_worktree(repo)?;
+    let numstat = git(repo, &["diff", tree, &current, "--numstat", "-z"])?;
+    let name_status = git(repo, &["diff", tree, &current, "--name-status", "-z"])?;
+    assemble(repo, &numstat, &name_status, false)
+}
+
+/// Build the sorted `ChangedFile` list from `git diff` numstat + name-status output,
+/// optionally appending untracked files (which a `git diff` never reports).
+fn assemble(
+    repo: &Path,
+    numstat: &str,
+    name_status: &str,
+    include_untracked: bool,
+) -> Result<Vec<ChangedFile>> {
+    let counts = parse_numstat(numstat);
     let mut seen = HashSet::new();
     let mut files = Vec::new();
-    for (kind, path, previous_path) in parse_name_status(&name_status) {
+    for (kind, path, previous_path) in parse_name_status(name_status) {
         if !seen.insert(path.clone()) {
             continue;
         }
@@ -163,7 +285,7 @@ pub fn changed_files(repo: &Path, scope: Scope, base: Option<&str>) -> Result<Ve
         files.push(ChangedFile { path, kind, additions, deletions, previous_path });
     }
 
-    if scope == Scope::Uncommitted {
+    if include_untracked {
         for path in untracked(repo)? {
             if seen.insert(path.clone()) {
                 let additions = untracked_additions(repo, &path);

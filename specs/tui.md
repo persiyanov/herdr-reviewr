@@ -48,7 +48,7 @@ Every action has a keyboard binding. The mouse-relevant ones also work by click 
 | move the cursor a page in the focused pane | `PageUp` / `PageDown` / `ctrl+u` / `ctrl+d` | — |
 | scroll a pane's viewport, leaving the selection put | — | wheel over the pane |
 | scroll the diff horizontally, when wrap is off and not on a fold | `←` / `→` | — |
-| switch scope | `u` uncommitted / `b` branch | click the scope in the header |
+| switch scope | `u` uncommitted / `b` branch / `t` last-turn | click the scope in the header to cycle |
 | expand the fold under the cursor | `→` | click the `⋯` fold row |
 | toggle line wrap | `w` | — |
 | resize the panes — widen / narrow the file list | `]` / `[` | drag the divider between the panes |
@@ -101,7 +101,8 @@ The inline box is a plain-text field that behaves like an ordinary editor: the c
 - A poll reloads the changed-files list and the open diff, keeping the selected file and scroll position where the file still exists.
 - While you are composing a comment, the input and the diff you are commenting on are frozen; the file list still updates.
 - `r` forces an immediate reload.
-- Refresh is independent of agent state; it uses no herdr events.
+- Refresh cadence is timer-based and uses no herdr events; the same poll also samples the agent's status to track the `last-turn` baseline (`herdr-host.md`).
+- In `last-turn` scope, until a turn start has been observed the file list and diff show an empty state — `waiting for the agent's next turn` — rather than a stale or whole-worktree diff.
 
 ## Failure semantics
 
@@ -120,7 +121,7 @@ The inline box is a plain-text field that behaves like an ordinary editor: the c
 
 - Two-pane focus, not scope on `tab` — `j`/`k` drive whichever pane is focused, and `tab` switches focus. Anchoring comments and jumping between them needs a per-line diff cursor, so the diff is independently focusable rather than scroll-only; scope moves to `u`/`b` (and a clickable scope chip).
 - One scroll model for both panes — each pane has a cursor and an independent viewport offset. The keyboard moves the cursor (the view reveals it); the mouse wheel scrolls the pane-under-the-pointer's viewport and never moves the cursor. So wheeling to read context never moves the comment anchor, and both panes behave identically. Rejected: cursor-coupled scrolling, where the wheel drags the cursor — it mis-anchors comments and made the two panes inconsistent.
-- Poll on a timer, not on agent turns — turn transitions are too coarse and slow for timely refresh; polling is simple and predictable.
+- Poll on a timer, not on agent turns — turn transitions are too coarse and slow to drive the refresh cadence; polling is simple and predictable. The agent's turn signal moves only the `last-turn` baseline (`herdr-host.md`), never the refresh interval.
 - Keyboard and mouse together — the asked-for flow includes a clickable `Send` button and click-to-open files.
 - Inline comment input — the box opens under the selected line (insert: the diff below shifts down) rather than in a detached footer, so the comment sits with the code it is about; it grows to fit multi-line text.
 - One `Send`, not send-one vs send-all — there is just a set of written comments; `s` / `S` / the button send them all. Removing the distinction drops a needless choice from the hot path.

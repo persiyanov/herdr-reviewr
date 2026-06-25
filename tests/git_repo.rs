@@ -5,7 +5,10 @@ mod common;
 use std::collections::HashMap;
 
 use common::Repo;
-use herdr_review::git::{changed_files, file_content, merge_base};
+use herdr_review::git::{
+    changed_against_tree, changed_files, file_content, merge_base, read_baseline_ref,
+    snapshot_worktree, worktree_key, write_baseline_ref,
+};
 use herdr_review::model::{ChangeKind, ChangedFile, Scope};
 
 fn by_path(files: &[ChangedFile]) -> HashMap<&str, &ChangedFile> {
@@ -208,4 +211,99 @@ fn git_access_never_mutates_the_repo() {
 
     assert_eq!(head_before, r.git(&["rev-parse", "HEAD"]), "HEAD unchanged");
     assert_eq!(status_before, r.git(&["status", "--porcelain"]), "working tree unchanged");
+}
+
+// --- turn baseline (last-turn scope) -------------------------------------------
+
+#[test]
+fn changed_against_tree_shows_edits_creates_and_deletes_since_the_snapshot() {
+    let r = Repo::init();
+    r.write("tracked.rs", "one\ntwo\n");
+    r.write("doomed.rs", "bye\n");
+    r.commit_all("init");
+    r.write("idle_untracked.rs", "u\n"); // untracked already at snapshot time
+
+    let base = snapshot_worktree(r.path()).unwrap();
+
+    // The turn: edit a tracked file, create a new file, delete one, and leave the
+    // pre-existing untracked file untouched.
+    r.write("tracked.rs", "one\nTWO\nthree\n");
+    r.write("created.rs", "new\n");
+    r.remove("doomed.rs");
+
+    let files = changed_against_tree(r.path(), &base).unwrap();
+    let files = by_path(&files);
+    assert_eq!(files["tracked.rs"].kind, ChangeKind::Modified);
+    assert_eq!(files["created.rs"].kind, ChangeKind::Added);
+    assert_eq!(files["doomed.rs"].kind, ChangeKind::Deleted);
+    assert!(
+        !files.contains_key("idle_untracked.rs"),
+        "an untracked file unchanged across the turn is not a phantom delete"
+    );
+}
+
+#[test]
+fn changed_against_tree_sees_an_untracked_only_turn() {
+    // A turn whose only act is creating a new file must register as a change — the
+    // promotion path depends on this being a real diff.
+    let r = Repo::init();
+    r.write("a.rs", "a\n");
+    r.commit_all("init");
+    let base = snapshot_worktree(r.path()).unwrap();
+    r.write("fresh.rs", "x\n");
+    let files = changed_against_tree(r.path(), &base).unwrap();
+    assert_eq!(by_path(&files)["fresh.rs"].kind, ChangeKind::Added);
+}
+
+#[test]
+fn snapshot_worktree_never_mutates_the_repo() {
+    let r = Repo::init();
+    r.write("a.rs", "x\n");
+    r.commit_all("init");
+    r.write("a.rs", "y\n");
+    r.write("untracked.rs", "u\n");
+
+    let git_dir = r.git(&["rev-parse", "--absolute-git-dir"]);
+    let git_dir = std::path::Path::new(git_dir.trim());
+    // The index's logical content (entries, not the racy stat cache `git status` rewrites).
+    let staged_before = r.git(&["ls-files", "--stage"]);
+    let status_before = r.git(&["status", "--porcelain"]);
+    let head_before = r.git(&["rev-parse", "HEAD"]);
+    let branches_before = r.git(&["branch", "-a"]);
+
+    let tree = snapshot_worktree(r.path()).unwrap();
+    assert_eq!(tree.len(), 40, "a tree object id");
+
+    assert_eq!(r.git(&["ls-files", "--stage"]), staged_before, "real index entries untouched");
+    assert_eq!(r.git(&["status", "--porcelain"]), status_before, "working tree status unchanged");
+    assert_eq!(r.git(&["rev-parse", "HEAD"]), head_before, "HEAD unchanged");
+    assert_eq!(r.git(&["branch", "-a"]), branches_before, "no branch created");
+    assert!(!git_dir.join("reviewr-turn-index").exists(), "the temp index is cleaned up");
+}
+
+#[test]
+fn baseline_ref_round_trips_under_the_private_namespace() {
+    let r = Repo::init();
+    r.write("a.rs", "a\n");
+    r.commit_all("init");
+    let key = worktree_key(r.path());
+    assert!(read_baseline_ref(r.path(), &key).is_none(), "no baseline initially");
+
+    let tree = snapshot_worktree(r.path()).unwrap();
+    write_baseline_ref(r.path(), &key, &tree).unwrap();
+    assert_eq!(read_baseline_ref(r.path(), &key).as_deref(), Some(tree.as_str()));
+
+    assert!(!r.git(&["branch", "-a"]).contains("reviewr"), "the baseline is not a branch");
+    assert!(
+        r.git(&["show-ref"]).contains("refs/reviewr/turn-base/"),
+        "the baseline lives under the private ref namespace"
+    );
+}
+
+#[test]
+fn worktree_key_is_stable_and_path_specific() {
+    let a = std::path::Path::new("/repo/one");
+    let b = std::path::Path::new("/repo/two");
+    assert_eq!(worktree_key(a), worktree_key(a), "deterministic for one path");
+    assert_ne!(worktree_key(a), worktree_key(b), "distinct per worktree path");
 }

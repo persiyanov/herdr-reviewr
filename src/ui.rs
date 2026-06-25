@@ -407,7 +407,9 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     if app.file_rows.is_empty() {
-        frame.render_widget(dim_paragraph("no changes"), inner);
+        let msg =
+            if app.awaiting_turn() { "waiting for the agent's next turn" } else { "no changes" };
+        frame.render_widget(dim_paragraph(msg), inner);
         return;
     }
 
@@ -607,10 +609,14 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     if app.visible.is_empty() {
-        let msg = match app.diff.state {
-            FileState::Binary => "binary — no line comments",
-            FileState::TooLarge => "file too large to diff",
-            FileState::Normal => "no diff",
+        let msg = if app.awaiting_turn() {
+            "waiting for the agent's next turn"
+        } else {
+            match app.diff.state {
+                FileState::Binary => "binary — no line comments",
+                FileState::TooLarge => "file too large to diff",
+                FileState::Normal => "no diff",
+            }
         };
         frame.render_widget(dim_paragraph(msg), inner);
         return;
@@ -1027,7 +1033,7 @@ fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Composing { .. } => "enter save · alt/shift+enter newline · esc cancel",
         Mode::List => "↑↓ move · s send · y copy · e edit · d delete · esc close",
         Mode::Normal => {
-            "tab focus · u/b scope · v select · c comment · s send · y copy · n/N jump · l list · r refresh · q quit"
+            "tab focus · u/b/t scope · v select · c comment · s send · y copy · n/N jump · l list · r refresh · q quit"
         }
     };
     let line = Line::from(vec![

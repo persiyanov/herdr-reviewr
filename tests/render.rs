@@ -520,3 +520,15 @@ fn open_list_renders_the_comments_overlay() {
     assert!(out.contains("Comments ("), "overlay titled with a count");
     assert!(out.contains("overlay note"), "comment text listed");
 }
+
+#[test]
+fn last_turn_without_a_baseline_renders_the_waiting_state() {
+    let r = Repo::init();
+    r.write("a.rs", "a\n");
+    r.commit_all("init");
+    let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
+    app.reload().unwrap();
+    let out = render(&app);
+    assert!(out.contains("[last turn]"), "the scope chip reads last turn");
+    assert!(out.contains("waiting for the agent's next turn"), "the cold-start empty state shows");
+}

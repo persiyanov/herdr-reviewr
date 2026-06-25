@@ -1236,3 +1236,103 @@ fn jump_moves_the_cursor_onto_a_commented_line() {
     app.jump_comment(1);
     assert!(app.commented_lines().contains(&app.diff_cursor), "cursor landed on a comment");
 }
+
+// --- last-turn scope -----------------------------------------------------------
+
+#[test]
+fn last_turn_is_empty_until_a_turn_is_observed() {
+    let r = Repo::init();
+    r.write("a.rs", "a\n");
+    r.commit_all("init");
+    let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
+    app.reload().unwrap();
+    assert!(app.awaiting_turn(), "no baseline captured yet");
+    assert!(app.files.is_empty(), "the scope is empty before a turn");
+}
+
+#[test]
+fn last_turn_shows_a_change_producing_turn() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
+    app.apply_agent_status(Some("idle"));
+    app.apply_agent_status(Some("working")); // turn start: candidate = "one"
+    r.write("a.rs", "one\ntwo\n");
+    app.apply_agent_status(Some("working")); // first change promotes the baseline
+    app.reload().unwrap();
+    assert!(!app.awaiting_turn(), "the baseline is now set");
+    assert!(app.files.iter().any(|f| f.path == "a.rs"), "the turn's edit shows");
+}
+
+#[test]
+fn a_question_only_turn_keeps_the_previous_turns_diff() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
+    // Turn A edits a file.
+    app.apply_agent_status(Some("idle"));
+    app.apply_agent_status(Some("working"));
+    r.write("a.rs", "one\ntwo\n");
+    app.apply_agent_status(Some("working"));
+    // Turn B is a question — no file change.
+    app.apply_agent_status(Some("idle"));
+    app.apply_agent_status(Some("working"));
+    app.apply_agent_status(Some("idle"));
+    app.reload().unwrap();
+    assert!(
+        app.files.iter().any(|f| f.path == "a.rs"),
+        "A's diff persists across a question-only turn"
+    );
+}
+
+#[test]
+fn a_permission_pause_stays_one_turn() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
+    app.apply_agent_status(Some("idle"));
+    app.apply_agent_status(Some("working")); // turn start: candidate = "one"
+    r.write("a.rs", "one\nbefore\n"); // edit before the prompt
+    app.apply_agent_status(Some("blocked")); // permission prompt promotes baseline = "one"
+    app.apply_agent_status(Some("working")); // resume — must NOT re-baseline
+    r.write("a.rs", "one\nbefore\nafter\n"); // edit after the prompt
+    app.apply_agent_status(Some("working"));
+    app.reload().unwrap();
+    let a = app.files.iter().find(|f| f.path == "a.rs").expect("a.rs changed");
+    assert_eq!(a.additions, 2, "both the pre- and post-prompt edits belong to one turn");
+}
+
+#[test]
+fn the_baseline_survives_a_restart() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    {
+        let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
+        app.apply_agent_status(Some("idle"));
+        app.apply_agent_status(Some("working"));
+        r.write("a.rs", "one\ntwo\n");
+        app.apply_agent_status(Some("working")); // promotes and persists the ref
+    }
+    // A fresh App — a sidebar restart — resumes the persisted baseline.
+    let mut restarted = App::new(r.path_buf(), Scope::LastTurn, None);
+    restarted.reload().unwrap();
+    assert!(!restarted.awaiting_turn(), "baseline resumed from the private ref");
+    assert!(restarted.files.iter().any(|f| f.path == "a.rs"), "the turn's edit still shows");
+}
+
+#[test]
+fn no_agent_status_pauses_tracking() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
+    app.apply_agent_status(None); // no herdr / no resolvable agent
+    r.write("a.rs", "one\ntwo\n");
+    app.apply_agent_status(None);
+    app.reload().unwrap();
+    assert!(app.awaiting_turn(), "without a status signal the baseline never forms");
+}

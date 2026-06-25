@@ -10,7 +10,7 @@ herdr-review is a terminal review sidebar that runs in a herdr pane, where you b
 
 ## Overview
 
-The product is one binary (`herdr-review`, Rust + ratatui) in a right-hand herdr split pane, pointed at one git worktree. It is read-only against git and sends nothing on its own. It renders in your real terminal, so fonts and theming are whatever you already run.
+The product is one binary (`herdr-review`, Rust + ratatui) in a right-hand herdr split pane, pointed at one git worktree. It never edits the worktree and sends nothing on its own; its only git write is a private `last-turn` baseline ref (`herdr-host.md`). It renders in your real terminal, so fonts and theming are whatever you already run.
 
 A reviewer's loop:
 
@@ -26,7 +26,7 @@ The end-state vision is a review cockpit: a file viewer (`All files`), a changes
 In scope for this design:
 
 - The `Changes` view: a changed-files list for a scope, plus a syntax-highlighted diff viewer (`diff-view.md`).
-- Two scopes, `uncommitted` and `branch`, defined in `review-model.md`.
+- Three scopes — `uncommitted`, `branch`, and `last-turn` — defined in `review-model.md`.
 - Comments anchored to `path:start-end`, held in memory for the review pass.
 - Export of all comments to the agent (filling its input) or to the clipboard.
 - Poll-based refresh and a manual refresh key.
@@ -38,14 +38,13 @@ Named so the architecture stays open to them. None is part of this design.
 
 - An `All files` tab that browses the whole repo tree, not only changed files.
 - A `Checks` tab showing PR status and CI via `gh`, plus an aggregated comment list.
-- A `last-turn` scope that diffs only the latest agent turn.
 - Reviewed-file state — marking a file reviewed and greying it in the list.
 - A side-by-side split diff view, for wide panes.
 - Search within the diff, and live theme switching.
 
 ## Invariants
 
-- The sidebar never commits, stages, or mutates the worktree or refs.
+- The sidebar never commits, stages, or mutates the worktree, the index, or any branch; its one git write is the private `last-turn` baseline ref under `refs/reviewr/`.
 - A comment, saved or being typed, is never lost to a refresh or the agent's edits; only you remove it.
 - Comments leave only by an explicit export, to the agent pane or the clipboard.
 - The crate forbids `unsafe`.

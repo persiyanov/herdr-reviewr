@@ -19,6 +19,7 @@ pub mod highlight;
 #[macro_use]
 pub mod log;
 pub mod model;
+pub mod turn;
 pub mod ui;
 
 use std::io;
@@ -180,6 +181,9 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
             }
         }
         if last_poll.elapsed() >= poll {
+            // Advance the last-turn baseline before reloading, so a turn promoted this poll
+            // is visible to this poll's changed-files build.
+            app.track_turn();
             // A failed refresh must never crash the UI or drop a comment.
             if let Err(e) = app.reload() {
                 app.status = format!("refresh failed: {e}");
@@ -298,6 +302,7 @@ fn handle_key(app: &mut App, key: KeyEvent, area: Rect) -> Result<()> {
         (Left, _) => app.scroll_h(-8),
         (Char('u'), false) => app.set_scope(Scope::Uncommitted)?,
         (Char('b'), false) => app.set_scope(Scope::Branch)?,
+        (Char('t'), false) => app.set_scope(Scope::LastTurn)?,
         (Char('v'), _) => app.toggle_select(),
         (Char('c'), _) => app.start_comment(),
         // `e`/`d` act on the comment under the diff cursor, so they only fire with the diff

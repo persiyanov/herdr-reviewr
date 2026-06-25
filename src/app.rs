@@ -17,6 +17,7 @@ use crate::git;
 use crate::highlight::Highlighter;
 use crate::logln;
 use crate::model::{ChangedFile, Comment, CommentStore, Scope, Side};
+use crate::turn::{Status, TurnTracker};
 
 /// The file-list pane's default width and resize bounds, as a percent of the body. The
 /// bounds keep both panes usable however the reviewer drags the divider.
@@ -113,10 +114,18 @@ pub struct App {
     pub should_quit: bool,
     highlighter: Highlighter,
     cache: DiffCache,
+    /// The `last-turn` baseline lifecycle, driven by polling the agent's status.
+    turn: TurnTracker,
+    /// This worktree's key for the private baseline ref, fixed for the session.
+    turn_key: String,
 }
 
 impl App {
     pub fn new(repo: PathBuf, scope: Scope, base: Option<String>) -> Self {
+        // Resume any persisted turn baseline for this worktree, so `last-turn` keeps its
+        // anchor across a sidebar restart (specs/herdr-host.md).
+        let turn_key = git::worktree_key(&repo);
+        let turn = TurnTracker::with_baseline(git::read_baseline_ref(&repo, &turn_key));
         Self {
             repo,
             base,
@@ -150,6 +159,8 @@ impl App {
             should_quit: false,
             highlighter: Highlighter::new(None),
             cache: DiffCache::new(),
+            turn,
+            turn_key,
         }
     }
 
@@ -247,7 +258,15 @@ impl App {
         // file, then the first file. The collapsed-directory set survives untouched.
         let anchor = self.cursor_anchor();
         let open = self.diff_path.clone();
-        self.files = git::changed_files(&self.repo, self.scope, self.base.as_deref())?;
+        self.files = match self.scope {
+            // last-turn diffs the captured baseline; with none yet, it is empty until a
+            // turn start is observed (specs/review-model.md).
+            Scope::LastTurn => match self.turn.baseline() {
+                Some(t) => git::changed_against_tree(&self.repo, t)?,
+                None => Vec::new(),
+            },
+            _ => git::changed_files(&self.repo, self.scope, self.base.as_deref())?,
+        };
         self.rebuild_file_rows();
         self.file_cursor = anchor
             .and_then(|a| self.row_of_anchor(&a))
@@ -380,6 +399,56 @@ impl App {
                     mb.map(|m| git::file_content(&self.repo, &m, old_path)).unwrap_or_default();
                 (old, git::file_content(&self.repo, "HEAD", new_path))
             }
+            Scope::LastTurn => {
+                let old = self
+                    .turn
+                    .baseline()
+                    .map(|b| git::file_content(&self.repo, b, old_path))
+                    .unwrap_or_default();
+                (old, worktree_content(&self.repo, new_path))
+            }
+        }
+    }
+
+    /// Whether the `last-turn` scope is active but no baseline has been captured yet — the
+    /// cold-start (or no-herdr) state the UI paints as `waiting for the agent's next turn`.
+    pub fn awaiting_turn(&self) -> bool {
+        self.scope == Scope::LastTurn && !self.turn.has_baseline()
+    }
+
+    /// Sample the agent's status and advance the `last-turn` baseline. Reads the resolved
+    /// agent's status over the herdr CLI; absence or ambiguity pauses tracking. Never
+    /// propagates — a missing herdr is normal, so failures only log.
+    pub fn track_turn(&mut self) {
+        let status = crate::herdr::resolved_agent_status().ok().flatten();
+        self.apply_agent_status(status.as_deref());
+    }
+
+    /// Advance the baseline from one status sample — the core [`track_turn`](Self::track_turn)
+    /// wraps, and the seam tests drive without herdr. On a turn start (a resting→`working`
+    /// edge) it snapshots the worktree as the candidate; while a candidate is pending it
+    /// promotes once the worktree diverges from it, persisting the new baseline. Git errors
+    /// only log, so a transient git failure never crashes the poll.
+    pub fn apply_agent_status(&mut self, status: Option<&str>) {
+        let Some(status) = status else { return };
+        if self.turn.observe(Status::parse(status)) {
+            match git::snapshot_worktree(&self.repo) {
+                Ok(sha) => self.turn.set_candidate(sha),
+                Err(e) => logln!("turn snapshot failed: {e}"),
+            }
+        }
+        // Promote the pending candidate once the turn has changed a file. Compare full
+        // snapshots so a new untracked file counts as a change (specs/herdr-host.md).
+        let Some(candidate) = self.turn.candidate().map(str::to_string) else { return };
+        match git::snapshot_worktree(&self.repo) {
+            Ok(now) if now != candidate => {
+                self.turn.promote();
+                if let Err(e) = git::write_baseline_ref(&self.repo, &self.turn_key, &candidate) {
+                    logln!("turn baseline ref write failed: {e}");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => logln!("turn divergence check failed: {e}"),
         }
     }
 

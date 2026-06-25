@@ -42,8 +42,19 @@ A scope selects which changes the `Changes` view shows. The default is `uncommit
 |-------|-------|--------|
 | `uncommitted` | staged and unstaged changes vs `HEAD`, plus untracked files | `git diff HEAD` and `git status --porcelain` |
 | `branch` | `HEAD` vs the merge-base with the base branch | `git diff $(git merge-base <base> HEAD)...HEAD` |
+| `last-turn` | the worktree vs the turn baseline — what the agent changed in its most recent change-producing turn, including untracked files | `git diff <turn-baseline> <worktree snapshot>` |
 
 The base branch is `origin/main`, falling back to `origin/master`, then `main`, then `master`. It is overridable by config or flag.
+
+### Turn baseline
+
+The `last-turn` baseline is the worktree as it was at the start of the agent's most recent turn that changed a file. The scope diffs that baseline against the live worktree, so while the agent works it shows the turn in progress, and once the agent goes idle it shows the just-finished turn.
+
+- A turn that changes no file — a question answered, a plan discussed — leaves the baseline untouched, so the scope keeps showing the previous change-producing turn.
+- Until reviewr has observed a turn start, the baseline is unset and the scope is empty (`tui.md`); it becomes live on the next turn.
+- The baseline is independent of commits: if the agent commits mid-turn, the scope still diffs the baseline against the worktree, so committed and uncommitted work both appear.
+
+How reviewr observes turns and captures the baseline is in `herdr-host.md`.
 
 ### Changed file
 
@@ -136,7 +147,7 @@ Export is the only side effect, and comments are in-memory.
 - Flag stale comments, never auto-drop — silently losing a comment destroys trust and forces you to wait for the agent to stop; a comment is removed only by export or delete.
 - Send to the agent, with clipboard secondary — the fill-input-and-focus flow is the asked-for path; clipboard stays for paste-anywhere and remote.
 - One Send, not send-one vs send-all — the workflow is "write a few comments, then hand them over"; a per-comment send is a needless choice on the hot path, so `Send` always takes the whole set (`Copy` likewise).
-- Two scopes now, `last-turn` later — `last-turn` needs turn-snapshot machinery; the two git-native scopes deliver the value without it.
+- `last-turn` anchors to the most recent change-producing turn, not every turn — re-baselining on every turn start would blank the view after any text-only turn (a question, a plan); holding the baseline until a turn actually edits a file keeps the last real diff on screen. Rejected: re-baseline on every idle→working edge.
 
 ## Open decisions
 

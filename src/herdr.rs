@@ -53,32 +53,70 @@ fn parse_agents(json: &str) -> Result<Vec<Value>> {
         .context("agent list has no agents array")
 }
 
-/// The pane to send to: the unique agent in this tab, else the sole workspace agent. `me` is
-/// our own pane, excluded throughout — herdr lists the reviewr sidebar as an agent, so without
-/// this the real agent looks ambiguous in our own tab and workspace.
+/// The resolved agent's `agent_status` (`idle`/`working`/`blocked`/`done`/`unknown`), for
+/// turn tracking (`specs/herdr-host.md`). `Ok(None)` when no agent resolves, so the caller
+/// treats an absent or ambiguous agent the same as a missing herdr — turn tracking pauses.
+pub fn resolved_agent_status() -> Result<Option<String>> {
+    let tab = env::var("HERDR_TAB_ID").ok();
+    let ws = env::var("HERDR_WORKSPACE_ID").ok();
+    let me = env::var("HERDR_PANE_ID").ok();
+    let agents = parse_agents(&herdr(&["agent", "list"])?)?;
+    Ok(pick_agent(&agents, tab.as_deref(), ws.as_deref(), me.as_deref())
+        .and_then(|a| a.get("agent_status").and_then(Value::as_str).map(String::from)))
+}
+
+/// The pane to send to: the unique agent in this tab, else the sole workspace agent.
 fn pick_agent_pane(
     agents: &[Value],
     tab: Option<&str>,
     ws: Option<&str>,
     me: Option<&str>,
 ) -> Option<String> {
-    sole_pane(agents, "tab_id", tab, me).or_else(|| sole_pane(agents, "workspace_id", ws, me))
+    pick_agent(agents, tab, ws, me).and_then(pane_id)
 }
 
-/// The `pane_id` of the unique agent whose `key` equals `want`, ignoring our own pane `me`;
-/// `None` if zero or many remain.
-fn sole_pane(agents: &[Value], key: &str, want: Option<&str>, me: Option<&str>) -> Option<String> {
+/// The unique agent in this tab, else the sole workspace agent. `me` is our own pane,
+/// excluded throughout — herdr lists the reviewr sidebar as an agent, so without this the
+/// real agent looks ambiguous in our own tab and workspace.
+fn pick_agent<'a>(
+    agents: &'a [Value],
+    tab: Option<&str>,
+    ws: Option<&str>,
+    me: Option<&str>,
+) -> Option<&'a Value> {
+    sole_agent(agents, "tab_id", tab, me).or_else(|| sole_agent(agents, "workspace_id", ws, me))
+}
+
+/// The unique agent whose `key` equals `want`, ignoring our own pane `me`; `None` if zero
+/// or many remain.
+fn sole_agent<'a>(
+    agents: &'a [Value],
+    key: &str,
+    want: Option<&str>,
+    me: Option<&str>,
+) -> Option<&'a Value> {
     let want = want?;
-    let pane = |a: &Value| a.get("pane_id").and_then(Value::as_str).map(String::from);
     let mut matches = agents
         .iter()
         .filter(|a| a.get(key).and_then(Value::as_str) == Some(want))
-        .filter(|a| pane(a).as_deref() != me);
+        .filter(|a| pane_id(a).as_deref() != me);
     let first = matches.next()?;
     if matches.next().is_some() {
         return None;
     }
-    pane(first)
+    Some(first)
+}
+
+/// The `pane_id` of an agent entry.
+fn pane_id(agent: &Value) -> Option<String> {
+    agent.get("pane_id").and_then(Value::as_str).map(String::from)
+}
+
+/// The `pane_id` of the unique agent for `key`/`want`, ignoring `me`; a thin pane-returning
+/// wrapper over [`sole_agent`].
+#[cfg(test)]
+fn sole_pane(agents: &[Value], key: &str, want: Option<&str>, me: Option<&str>) -> Option<String> {
+    sole_agent(agents, key, want, me).and_then(pane_id)
 }
 
 /// Write literal text into the agent pane's input, without submitting.
