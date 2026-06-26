@@ -53,6 +53,40 @@ Pick the new version with semver: a behavior change or new feature is a minor bu
 
 The toolchain is pinned by `rust-toolchain.toml`, so CI and local builds match.
 
+## Reinstall locally after a release
+
+Switch your own machine from the dev link to the published release. This is also the cheapest
+end-to-end test: it exercises the exact `herdr plugin install` path a user hits.
+
+1. **Swap the link for the release.** Your config survives — `config.toml` lives in
+   `~/.config/herdr/plugins/config/persiyanov.reviewr/`, keyed by plugin id, untouched by a reinstall.
+
+   ```bash
+   herdr plugin unlink persiyanov.reviewr
+   herdr plugin install persiyanov/herdr-reviewr --yes   # install.sh downloads the vX.Y.Z binary
+   herdr plugin list --plugin persiyanov.reviewr          # confirm: github source + version X.Y.Z
+   ```
+
+2. **Relaunch the sidebar** so the open pane runs the new binary instead of the old process. The
+   simple way is to toggle it off and back on with your keybind — `sidebar.sh` owns the pane
+   lifecycle and the state file. Headless or scripted, do it over the API:
+
+   ```bash
+   herdr plugin pane close <reviewr_pane_id>              # close the open sidebar
+   herdr plugin pane open --plugin persiyanov.reviewr --entrypoint sidebar \
+     --placement split --direction right --target-pane <agent_pane_id> --cwd <repo> --no-focus
+   # keep the toggle keybind in sync — point the state file at the new pane:
+   echo -n <new_pane_id> > ~/.local/state/herdr/plugins/persiyanov.reviewr/pane-<workspace_id>
+   ```
+
+**Gotchas**
+
+- `herdr plugin pane close` unregisters a *plugin* pane; if the underlying pane lingers as an
+  orphan (a later close returns `plugin_pane_not_found` while it still shows in `pane list`), close
+  it with the general `herdr pane close <id>` instead.
+- Closing then immediately reopening can briefly leave two `reviewr` panes (async lag) — settle to
+  one and sync the state file to the survivor.
+
 ## Notes
 
 - **`min_herdr_version`** (in `herdr-plugin.toml`) only changes when a release depends on a newer
