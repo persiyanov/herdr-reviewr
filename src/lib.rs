@@ -148,7 +148,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
                         app.focus,
                         app.scope,
                         app.file_cursor,
-                        app.files.len(),
+                        app.entries.len(),
                         app.diff_cursor,
                         app.diff_scroll,
                         app.store.len()
@@ -190,7 +190,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
             }
             logln!(
                 "poll files={} composing={} diff_cursor={} scroll={}",
-                app.files.len(),
+                app.entries.len(),
                 app.composing(),
                 app.diff_cursor,
                 app.diff_scroll
@@ -277,6 +277,9 @@ fn handle_key(app: &mut App, key: KeyEvent, area: Rect) -> Result<()> {
         (Char('d'), true) => app.page_diff(HALF_PAGE),
         (Char('q'), _) => app.should_quit = true,
         (Char('r'), _) => app.reload()?,
+        // `1` / `2` switch tabs (provisional; the keymap is an Open Decision in tui.md).
+        (Char('1'), _) => app.set_tab(crate::app::Tab::Changes)?,
+        (Char('2'), _) => app.set_tab(crate::app::Tab::AllFiles)?,
         (Tab, _) => app.toggle_focus(),
         (Char('j') | Down, _) => app.move_cursor(1)?,
         (Char('k') | Up, _) => app.move_cursor(-1)?,
@@ -334,6 +337,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect, heights: &[usize]) -> 
                 app.resizing = true;
             } else if let Some(hit) = ui::hit_header(area, app, m.column, m.row) {
                 match hit {
+                    ui::HeaderHit::Tab(tab) => app.set_tab(tab)?,
                     ui::HeaderHit::Scope => app.set_scope(app.scope.toggled())?,
                     ui::HeaderHit::Send => app.export(&Agent),
                 }

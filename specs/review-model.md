@@ -1,5 +1,5 @@
 ---
-Status: Current
+Status: Draft
 Created: 2026-06-23
 Last edited: 2026-06-25
 ---
@@ -36,7 +36,7 @@ The central object is a comment — a note attached to a run of diff lines in on
 
 ### Scopes
 
-A scope selects which changes the `Changes` view shows. The default is `uncommitted`.
+A scope selects which changes the `Changes` view shows and which files `All files` annotates; the two tabs share one active scope. The default is `uncommitted`.
 
 | scope | means | source |
 |-------|-------|--------|
@@ -78,6 +78,10 @@ scripts/old_runner.py                 D   -47
 
 For the selected file in the current scope, a structured diff built from the file's old and new content, defined in `diff-view.md`. It is what comment anchors and snippets come from: a comment's `lines` snippet is reconstructed from the rows it covers. An untracked file diffs against empty old content; a binary file appears in the list but its pane reads `binary — no line comments`.
 
+### File content
+
+In the `All files` tab a comment anchors to plain file content instead of a diff (`diff-view.md`). Its `side` is always `new`, its `start`/`end` are line numbers in the current file, and its `lines` snippet is those content lines, each space-prefixed like a context line. So an `All files` comment and a context-only diff comment carry the same shape and export identically; the header is `path:start-end`, never with ` (removed)`.
+
 ## Behavior
 
 ### Lifecycle
@@ -89,6 +93,7 @@ Comments are lightweight and short-lived: a review pass, not a durable record.
 - You can add, edit, and delete a comment; editing changes its text in place.
 - Exporting sends the whole set at once and clears it — there is no single-comment export; a sent or copied batch has done its job.
 - A comment whose file leaves the changeset is flagged stale but kept; you decide whether to send or delete it.
+- An `All files` comment, anchored to content rather than a changeset, is flagged stale only when its file is deleted from the worktree.
 
 ### Export
 
@@ -148,6 +153,7 @@ Export is the only side effect, and comments are in-memory.
 - Send to the agent, with clipboard secondary — the fill-input-and-focus flow is the asked-for path; clipboard stays for paste-anywhere and remote.
 - One Send, not send-one vs send-all — the workflow is "write a few comments, then hand them over"; a per-comment send is a needless choice on the hot path, so `Send` always takes the whole set (`Copy` likewise).
 - `last-turn` anchors to the most recent change-producing turn, not every turn — re-baselining on every turn start would blank the view after any text-only turn (a question, a plan); holding the baseline until a turn actually edits a file keeps the last real diff on screen. Rejected: re-baseline on every idle→working edge.
+- A comment can anchor to file content, not only a diff — the `All files` tab comments on code the agent did not touch (a missed call site), so an anchor may be plain content with `side` always `new`. Rejected: restricting comments to changed lines.
 
 ## Open decisions
 

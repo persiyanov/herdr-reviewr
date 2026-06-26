@@ -472,7 +472,7 @@ fn a_binary_file_shows_the_no_line_comments_message() {
     r.write("logo.bin", "\0\0\0\0changed\0\0\0");
     let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
     app.reload().unwrap();
-    let idx = app.files.iter().position(|f| f.path == "logo.bin").expect("binary file listed");
+    let idx = app.entries.iter().position(|f| f.path == "logo.bin").expect("binary file listed");
     app.select_file(idx).unwrap();
 
     let out = render(&app);

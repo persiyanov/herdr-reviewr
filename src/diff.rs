@@ -118,6 +118,15 @@ pub enum FileState {
     TooLarge,
 }
 
+/// How the pane renders the model: the `Changes` diff, or the `All files` whole-file content.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum View {
+    /// Old-versus-new with change rows and folds (specs/diff-view.md).
+    Diff,
+    /// The whole current file as `Context` rows, no folds — the File view.
+    File,
+}
+
 /// The selected file modeled as rows.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FileDiff {
@@ -125,6 +134,7 @@ pub struct FileDiff {
     /// The old path when this file was renamed, for the `old → new` header; `None` otherwise.
     pub previous_path: Option<String>,
     pub state: FileState,
+    pub view: View,
     pub rows: Vec<Row>,
 }
 
@@ -133,6 +143,12 @@ pub struct FileDiff {
 const MAX_LINES: usize = 50_000;
 const MAX_BYTES: usize = 2_000_000;
 
+impl Default for FileDiff {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 impl FileDiff {
     /// An empty placeholder, for when no file is selected.
     pub fn empty() -> Self {
@@ -140,6 +156,7 @@ impl FileDiff {
             path: String::new(),
             previous_path: None,
             state: FileState::Normal,
+            view: View::Diff,
             rows: Vec::new(),
         }
     }
@@ -158,6 +175,7 @@ impl FileDiff {
             path: path.clone(),
             previous_path: previous_path.clone(),
             state,
+            view: View::Diff,
             rows: Vec::new(),
         };
         if old.contains('\0') || new.contains('\0') {
@@ -204,7 +222,46 @@ impl FileDiff {
             }
         }
         compute_emphasis(&mut rows);
-        Self { path, previous_path, state: FileState::Normal, rows: collapse_context(&rows) }
+        Self {
+            path,
+            previous_path,
+            state: FileState::Normal,
+            view: View::Diff,
+            rows: collapse_context(&rows),
+        }
+    }
+
+    /// Build the File view: the whole current `content` as `Context` rows, syntax-highlighted,
+    /// with no folds, change rows, or emphasis. Powers the `All files` tab (specs/diff-view.md).
+    /// Degrades to a `binary` or `too_large` notice on the same budgets as [`build`](Self::build).
+    pub fn build_file(path: String, content: &str, hl: &Highlighter) -> Self {
+        let notice = |state| Self {
+            path: path.clone(),
+            previous_path: None,
+            state,
+            view: View::File,
+            rows: Vec::new(),
+        };
+        if content.contains('\0') {
+            return notice(FileState::Binary);
+        }
+        if content.len() > MAX_BYTES || content.lines().count() > MAX_LINES {
+            return notice(FileState::TooLarge);
+        }
+        let spans = hl.highlight(content, language_of(&path).as_deref());
+        let rows = content
+            .lines()
+            .enumerate()
+            .map(|(i, _)| {
+                let no = i as u32 + 1;
+                Row::Context {
+                    old_no: no,
+                    new_no: no,
+                    spans: spans.get(i).cloned().unwrap_or_default(),
+                }
+            })
+            .collect();
+        Self { path, previous_path: None, state: FileState::Normal, view: View::File, rows }
     }
 }
 
@@ -440,6 +497,25 @@ impl DiffCache {
         self.entries.insert(path, (key, diff.clone()));
         diff
     }
+
+    /// Return the cached File view when `content` is unchanged for `path`, else build it.
+    /// File-view entries are namespaced under a `file:` key so a path's File view and Diff
+    /// view coexist in the cache instead of evicting each other on a tab switch.
+    pub fn get_file(&mut self, path: String, content: &str, hl: &Highlighter) -> FileDiff {
+        let cache_key = format!("file:{path}");
+        let key = content_hash(None, content, content);
+        if let Some((cached, diff)) = self.entries.get(&cache_key)
+            && *cached == key
+        {
+            return diff.clone();
+        }
+        let diff = FileDiff::build_file(path, content, hl);
+        if self.entries.len() >= CACHE_CAP {
+            self.entries.clear();
+        }
+        self.entries.insert(cache_key, (key, diff.clone()));
+        diff
+    }
 }
 
 fn content_hash(previous_path: Option<&str>, old: &str, new: &str) -> u64 {
@@ -452,8 +528,36 @@ fn content_hash(previous_path: Option<&str>, old: &str, new: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiffCache, FileDiff, FileState, Row, language_of};
+    use super::{DiffCache, FileDiff, FileState, Row, View, language_of};
     use crate::highlight::Highlighter;
+
+    #[test]
+    fn file_view_is_all_context_with_no_folds() {
+        use std::fmt::Write as _;
+        let hl = Highlighter::new(None);
+        let mut content = String::new();
+        for i in 0..40 {
+            writeln!(content, "line {i}").unwrap();
+        }
+        let d = FileDiff::build_file("a.rs".into(), &content, &hl);
+        assert_eq!(d.view, View::File);
+        assert_eq!(d.state, FileState::Normal);
+        assert_eq!(d.rows.len(), 40);
+        assert!(d.rows.iter().all(|r| matches!(r, Row::Context { .. })), "every row is context");
+        // Even a long unchanged run never folds in the File view.
+        assert!(!d.rows.iter().any(|r| matches!(r, Row::Fold { .. })));
+        assert_eq!(d.rows[0].new_no(), Some(1));
+        assert_eq!(d.rows[39].new_no(), Some(40));
+    }
+
+    #[test]
+    fn file_view_degrades_on_binary() {
+        let hl = Highlighter::new(None);
+        let d = FileDiff::build_file("blob.bin".into(), "a\0b", &hl);
+        assert_eq!(d.state, FileState::Binary);
+        assert_eq!(d.view, View::File);
+        assert!(d.rows.is_empty());
+    }
 
     fn build(old: &str, new: &str) -> FileDiff {
         let hl = Highlighter::new(None);

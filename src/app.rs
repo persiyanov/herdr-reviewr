@@ -12,11 +12,11 @@ use anyhow::Result;
 
 use crate::diff::{DiffCache, FileDiff, Row};
 use crate::export::{ExportTarget, format_all};
-use crate::file_list::{self, RowKind};
+use crate::file_list::{self, Entry, RowKind};
 use crate::git;
 use crate::highlight::Highlighter;
 use crate::logln;
-use crate::model::{ChangedFile, Comment, CommentStore, Scope, Side};
+use crate::model::{Comment, CommentStore, Scope, Side};
 use crate::turn::{Status, TurnTracker};
 
 /// The file-list pane's default width and resize bounds, as a percent of the body. The
@@ -37,6 +37,32 @@ pub enum Focus {
 enum Anchor {
     File(String),
     Dir(String),
+}
+
+/// Which top-level tab is active: the changes reviewer or the whole-repo browser.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tab {
+    Changes,
+    AllFiles,
+}
+
+/// The inactive tab's saved navigation and left-pane state, swapped in on a tab switch so
+/// each tab keeps its own selection and scroll (specs/tui.md).
+#[derive(Debug, Default)]
+struct TabStash {
+    entries: Vec<Entry>,
+    file_rows: Vec<file_list::Row>,
+    file_cursor: usize,
+    file_scroll: usize,
+    toggled_dirs: HashSet<String>,
+    diff: FileDiff,
+    visible: Vec<Row>,
+    expanded_folds: HashSet<u32>,
+    diff_path: Option<String>,
+    diff_cursor: usize,
+    diff_scroll: usize,
+    h_scroll: usize,
+    select_anchor: Option<usize>,
 }
 
 /// The interaction mode the UI is in.
@@ -60,10 +86,14 @@ pub struct App {
     pub repo: PathBuf,
     pub base: Option<String>,
     pub scope: Scope,
+    /// The active tab; it drives both panes and selects the per-tab state in play.
+    pub tab: Tab,
     pub focus: Focus,
-    pub files: Vec<ChangedFile>,
-    /// The flattened directory tree over `files` — the rows the navigator paints. The
-    /// `file_cursor` indexes this, not `files`.
+    /// The navigator's source for the active tab: changed files in `Changes`, the whole
+    /// worktree in `All files`.
+    pub entries: Vec<Entry>,
+    /// The flattened directory tree over `entries` — the rows the navigator paints. The
+    /// `file_cursor` indexes this, not `entries`.
     pub file_rows: Vec<file_list::Row>,
     pub file_cursor: usize,
     /// Top visible row of the file list, kept so `file_cursor` stays on screen when the
@@ -78,9 +108,16 @@ pub struct App {
     /// Whether the current compose was opened from the comments-list overlay, so finishing it
     /// returns there rather than dropping to the diff.
     resume_list: bool,
-    /// Directory paths the user has collapsed; every other directory is expanded. Keyed by
-    /// path, so it survives a poll that rebuilds the tree.
-    collapsed_dirs: HashSet<String>,
+    /// Directory paths toggled away from the tab's resting state — collapsed in `Changes`
+    /// (expanded by default), expanded in `All files` (collapsed by default). Keyed by path,
+    /// so it survives a poll that rebuilds the tree.
+    toggled_dirs: HashSet<String>,
+    /// The inactive tab's saved state, swapped in on a tab switch.
+    stash: TabStash,
+    /// Repo-relative paths changed in the active scope, recomputed every reload regardless of
+    /// the active tab. Backs the header's changed-file count and comment staleness — both scope
+    /// concepts that stay correct while `All files` is shown.
+    changed_paths: HashSet<String>,
     pub diff: FileDiff,
     /// The rows actually shown: `diff.rows` with each fold collapsed to a marker or
     /// expanded to its lines. The cursor, scroll, selection, and hit-testing index this.
@@ -130,15 +167,18 @@ impl App {
             repo,
             base,
             scope,
+            tab: Tab::Changes,
             focus: Focus::Files,
-            files: Vec::new(),
+            entries: Vec::new(),
             file_rows: Vec::new(),
             file_cursor: 0,
             file_scroll: 0,
             reveal_files: false,
             reveal_diff: false,
             resume_list: false,
-            collapsed_dirs: HashSet::new(),
+            toggled_dirs: HashSet::new(),
+            stash: TabStash::default(),
+            changed_paths: HashSet::new(),
             diff: FileDiff::empty(),
             visible: Vec::new(),
             expanded_folds: HashSet::new(),
@@ -177,13 +217,19 @@ impl App {
         matches!(self.mode, Mode::Composing { .. })
     }
 
-    /// The changed file under the cursor when the cursor is on a file row; `None` on a
-    /// directory row (or an empty list).
-    pub fn current_file(&self) -> Option<&ChangedFile> {
-        self.file_under_cursor_index().map(|i| &self.files[i])
+    /// The entry under the cursor when the cursor is on a file row; `None` on a directory
+    /// row (or an empty list).
+    pub fn current_entry(&self) -> Option<&Entry> {
+        self.file_under_cursor_index().map(|i| &self.entries[i])
     }
 
-    /// The `files` index of the file row under the cursor, or `None` on a directory row.
+    /// A directory's resting state in the active tab: `Changes` opens expanded, `All files`
+    /// collapsed (specs/file-list.md).
+    fn default_expanded(&self) -> bool {
+        self.tab == Tab::Changes
+    }
+
+    /// The `entries` index of the file row under the cursor, or `None` on a directory row.
     fn file_under_cursor_index(&self) -> Option<usize> {
         self.file_rows.get(self.file_cursor).and_then(file_list::Row::file_index)
     }
@@ -192,7 +238,7 @@ impl App {
     fn file_row_of_path(&self, path: &str) -> Option<usize> {
         self.file_rows
             .iter()
-            .position(|r| r.file_index().is_some_and(|i| self.files[i].path == path))
+            .position(|r| r.file_index().is_some_and(|i| self.entries[i].path == path))
     }
 
     /// The visible-row index of the first file row, the initial selection so a diff shows
@@ -201,16 +247,17 @@ impl App {
         self.file_rows.iter().position(|r| r.file_index().is_some())
     }
 
-    /// Rebuild the flattened tree from `files` and the collapsed-directory set.
+    /// Rebuild the flattened tree from `entries` and the toggled-directory set.
     fn rebuild_file_rows(&mut self) {
-        self.file_rows = file_list::build(&self.files, &self.collapsed_dirs);
+        self.file_rows =
+            file_list::build(&self.entries, &self.toggled_dirs, self.default_expanded());
     }
 
     /// What the cursor currently points at — a file (by path) or a directory (by path) — so
     /// the cursor can be put back on the same target after the tree rebuilds.
     fn cursor_anchor(&self) -> Option<Anchor> {
         self.file_rows.get(self.file_cursor).map(|r| match &r.kind {
-            RowKind::File { index, .. } => Anchor::File(self.files[*index].path.clone()),
+            RowKind::File { index, .. } => Anchor::File(self.entries[*index].path.clone()),
             RowKind::Dir { path, .. } => Anchor::Dir(path.clone()),
         })
     }
@@ -218,7 +265,7 @@ impl App {
     /// The visible-row index matching `anchor`, for restoring the cursor after a rebuild.
     fn row_of_anchor(&self, anchor: &Anchor) -> Option<usize> {
         self.file_rows.iter().position(|r| match (anchor, &r.kind) {
-            (Anchor::File(p), RowKind::File { index, .. }) => &self.files[*index].path == p,
+            (Anchor::File(p), RowKind::File { index, .. }) => &self.entries[*index].path == p,
             (Anchor::Dir(p), RowKind::Dir { path, .. }) => path == p,
             _ => false,
         })
@@ -227,12 +274,12 @@ impl App {
     /// The file whose diff the pane shows: the file under the cursor, or — when the cursor
     /// rests on a directory — the already-open file (matched by `diff_path`), so scanning the
     /// tree never blanks the diff. `None` only when nothing is open.
-    fn shown_file(&self) -> Option<ChangedFile> {
-        if let Some(f) = self.current_file() {
-            return Some(f.clone());
+    fn shown_entry(&self) -> Option<Entry> {
+        if let Some(e) = self.current_entry() {
+            return Some(e.clone());
         }
         let open = self.diff_path.as_deref()?;
-        self.files.iter().find(|f| f.path == open).cloned()
+        self.entries.iter().find(|e| e.path == open).cloned()
     }
 
     /// Reload the changed-files list and (unless composing) the open diff.
@@ -242,7 +289,8 @@ impl App {
     pub fn reload(&mut self) -> Result<()> {
         // Outside a git repo, show an empty state rather than failing (herdr-host.md).
         if !git::is_repo(&self.repo) {
-            self.files.clear();
+            self.entries.clear();
+            self.changed_paths.clear();
             self.file_rows.clear();
             self.file_cursor = 0;
             self.file_scroll = 0;
@@ -258,14 +306,22 @@ impl App {
         // file, then the first file. The collapsed-directory set survives untouched.
         let anchor = self.cursor_anchor();
         let open = self.diff_path.clone();
-        self.files = match self.scope {
-            // last-turn diffs the captured baseline; with none yet, it is empty until a
-            // turn start is observed (specs/review-model.md).
+        // The active scope's changeset, computed regardless of tab so the changed-file count
+        // and comment staleness stay correct even while `All files` lists the whole worktree.
+        // last-turn diffs the captured baseline; with none yet, it is empty until a turn start
+        // is observed (specs/review-model.md).
+        let changed = match self.scope {
             Scope::LastTurn => match self.turn.baseline() {
                 Some(t) => git::changed_against_tree(&self.repo, t)?,
                 None => Vec::new(),
             },
             _ => git::changed_files(&self.repo, self.scope, self.base.as_deref())?,
+        };
+        self.changed_paths = changed.iter().map(|f| f.path.clone()).collect();
+        self.entries = match self.tab {
+            // The whole worktree, scope-independent; the scope shows only in the count (and M2 marks).
+            Tab::AllFiles => git::all_files(&self.repo)?.into_iter().map(Entry::plain).collect(),
+            Tab::Changes => changed.iter().map(Entry::from_changed).collect(),
         };
         self.rebuild_file_rows();
         self.file_cursor = anchor
@@ -282,56 +338,73 @@ impl App {
         if !self.composing() && self.mode != Mode::List {
             // A poll keeps the reader on the same file; only a different shown file resets
             // the diff view to the top.
-            if self.shown_file().map(|f| f.path) != self.diff_path {
+            if self.shown_entry().map(|e| e.path) != self.diff_path {
                 self.reset_diff_view();
             }
-            self.load_diff();
+            self.load_left();
         }
         Ok(())
     }
 
-    /// Build the shown file's diff (the file under the cursor, or the open file), flatten
-    /// folds into the visible rows, then clamp the cursor/scroll so a refresh keeps position.
-    fn load_diff(&mut self) {
-        if let Some(file) = self.shown_file() {
-            self.set_diff(file);
-        } else {
+    /// Load the left pane for the active tab: the scope diff in `Changes`, the whole-file
+    /// content in `All files`. Both flatten into `visible` and settle the cursor/scroll.
+    fn load_left(&mut self) {
+        let Some(entry) = self.shown_entry() else {
             self.diff = FileDiff::empty();
             self.diff_path = None;
             self.visible.clear();
             self.reset_diff_view();
+            return;
+        };
+        match self.tab {
+            Tab::Changes => self.set_diff(entry.path, entry.previous_path),
+            Tab::AllFiles => self.set_file_view(entry.path),
         }
     }
 
-    /// Build the diff for a specific `file` regardless of whether its row is visible in the
+    /// Build the diff for a specific `path` regardless of whether its row is visible in the
     /// tree — so editing a comment can surface its file even from a collapsed directory.
-    fn set_diff(&mut self, file: ChangedFile) {
+    fn set_diff(&mut self, path: String, previous_path: Option<String>) {
         // A different file opens with all folds collapsed. `expanded_folds` is keyed by line
         // number, so without this a fold in the new file whose first hidden line matches an
         // expanded one in the old file would render pre-expanded. A same-file poll keeps them.
-        if self.diff_path.as_deref() != Some(file.path.as_str()) {
+        if self.diff_path.as_deref() != Some(path.as_str()) {
             self.expanded_folds.clear();
         }
-        self.diff_path = Some(file.path.clone());
-        let (old, new) = self.content_sides(&file);
-        self.diff = self.cache.get(file.path, file.previous_path, &old, &new, &self.highlighter);
+        self.diff_path = Some(path.clone());
+        let (old, new) = self.content_sides(&path, previous_path.as_deref());
+        self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
         self.rebuild_visible();
+        self.settle_left();
+    }
 
+    /// Build the File view for `path`: its current worktree content as `Context` rows, no
+    /// folds. The `All files` left pane (specs/diff-view.md). Content is scope-independent.
+    fn set_file_view(&mut self, path: String) {
+        self.diff_path = Some(path.clone());
+        self.expanded_folds.clear(); // the File view has no folds
+        let content = worktree_content(&self.repo, &path);
+        self.diff = self.cache.get_file(path, &content, &self.highlighter);
+        self.rebuild_visible();
+        self.settle_left();
+    }
+
+    /// Clamp the cursor, scroll, and selection to the rebuilt `visible`, keeping the reader's
+    /// position. A shrunk view that forced the cursor to move reveals it; a poll that left it
+    /// in range does not, so a wheel scroll survives.
+    fn settle_left(&mut self) {
         if self.visible.is_empty() {
             self.reset_diff_view();
-        } else {
-            let last = self.visible.len() - 1;
-            let clamped = self.diff_cursor.min(last);
-            // A poll preserves the wheel scroll: only re-settle when a shrunk diff forced the
-            // cursor to move. Revealing unconditionally here would snap the viewport back to
-            // the cursor on every refresh, undoing a wheel scroll.
-            if clamped != self.diff_cursor {
-                self.reveal_diff = true;
-            }
-            self.diff_cursor = clamped;
-            self.diff_scroll = self.diff_scroll.min(last);
-            self.select_anchor = self.select_anchor.map(|a| a.min(last));
+            return;
         }
+        let last = self.visible.len() - 1;
+        let clamped = self.diff_cursor.min(last);
+        if clamped != self.diff_cursor {
+            self.reveal_diff = true;
+        }
+        self.diff_cursor = clamped;
+        self.diff_scroll = self.diff_scroll.min(last);
+        self.select_anchor = self.select_anchor.map(|a| a.min(last));
     }
 
     /// Flatten `diff.rows` into `visible`: an expanded fold becomes its lines, a
@@ -384,9 +457,9 @@ impl App {
     /// merge-base on the branch scope), new from the worktree (or `HEAD` on branch). A rename
     /// reads its old side from `previous_path`, so the diff shows real edits, not a wholesale
     /// delete-and-add.
-    fn content_sides(&self, file: &ChangedFile) -> (String, String) {
-        let new_path = file.path.as_str();
-        let old_path = file.previous_path.as_deref().unwrap_or(new_path);
+    fn content_sides(&self, path: &str, previous_path: Option<&str>) -> (String, String) {
+        let new_path = path;
+        let old_path = previous_path.unwrap_or(new_path);
         match self.scope {
             Scope::Uncommitted => {
                 let old = git::file_content(&self.repo, "HEAD", old_path);
@@ -569,6 +642,38 @@ impl App {
         Ok(())
     }
 
+    /// Switch to `tab`, saving the active tab's navigation and left-pane state and restoring
+    /// the target's, then reloading it against the current worktree. A no-op on the active tab
+    /// or while composing. Focus stays on the same side across the switch (specs/tui.md).
+    pub fn set_tab(&mut self, tab: Tab) -> Result<()> {
+        if self.tab == tab || self.composing() {
+            return Ok(());
+        }
+        self.swap_active_with_stash();
+        self.tab = tab;
+        self.reload()?;
+        self.reveal_files = true; // pull the restored cursor back into view
+        Ok(())
+    }
+
+    /// Exchange the active per-tab fields with the inactive tab's saved snapshot. Every
+    /// per-tab field is swapped, so neither tab's selection or scroll bleeds into the other.
+    fn swap_active_with_stash(&mut self) {
+        std::mem::swap(&mut self.entries, &mut self.stash.entries);
+        std::mem::swap(&mut self.file_rows, &mut self.stash.file_rows);
+        std::mem::swap(&mut self.file_cursor, &mut self.stash.file_cursor);
+        std::mem::swap(&mut self.file_scroll, &mut self.stash.file_scroll);
+        std::mem::swap(&mut self.toggled_dirs, &mut self.stash.toggled_dirs);
+        std::mem::swap(&mut self.diff, &mut self.stash.diff);
+        std::mem::swap(&mut self.visible, &mut self.stash.visible);
+        std::mem::swap(&mut self.expanded_folds, &mut self.stash.expanded_folds);
+        std::mem::swap(&mut self.diff_path, &mut self.stash.diff_path);
+        std::mem::swap(&mut self.diff_cursor, &mut self.stash.diff_cursor);
+        std::mem::swap(&mut self.diff_scroll, &mut self.stash.diff_scroll);
+        std::mem::swap(&mut self.h_scroll, &mut self.stash.h_scroll);
+        std::mem::swap(&mut self.select_anchor, &mut self.stash.select_anchor);
+    }
+
     pub fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::Files => Focus::Diff,
@@ -608,10 +713,10 @@ impl App {
     /// no-op on a directory row, so the current diff stays put.
     fn open_cursor_file(&mut self) {
         if let Some(i) = self.file_under_cursor_index()
-            && Some(self.files[i].path.as_str()) != self.diff_path.as_deref()
+            && Some(self.entries[i].path.as_str()) != self.diff_path.as_deref()
         {
             self.reset_diff_view();
-            self.load_diff();
+            self.load_left();
         }
     }
 
@@ -635,10 +740,27 @@ impl App {
     /// stays on the directory row (still present, now toggled).
     fn toggle_dir(&mut self) {
         let Some(path) = self.dir_under_cursor() else { return };
-        if !self.collapsed_dirs.remove(&path) {
-            self.collapsed_dirs.insert(path);
+        // Flip its membership in the toggled set (toggled = flipped from the tab's default).
+        if !self.toggled_dirs.remove(&path) {
+            self.toggled_dirs.insert(path);
         }
         self.apply_dir_change();
+    }
+
+    /// Whether directory `path` is currently expanded under the active tab's resting state.
+    fn dir_expanded(&self, path: &str) -> bool {
+        self.default_expanded() ^ self.toggled_dirs.contains(path)
+    }
+
+    /// Force directory `path` to `want` (expanded or collapsed); returns whether it changed.
+    fn set_dir_expanded(&mut self, path: &str, want: bool) -> bool {
+        if self.dir_expanded(path) == want {
+            return false;
+        }
+        if !self.toggled_dirs.remove(path) {
+            self.toggled_dirs.insert(path.to_string());
+        }
+        true
     }
 
     /// Whether the cursor is on a directory row in the focused file list — the rows `←`/`→`
@@ -658,7 +780,7 @@ impl App {
     /// Expand the directory under the cursor (`→`); a no-op if it is a file or already open.
     pub fn expand_dir(&mut self) {
         if let Some(path) = self.dir_under_cursor()
-            && self.collapsed_dirs.remove(&path)
+            && self.set_dir_expanded(&path, true)
         {
             self.apply_dir_change();
         }
@@ -667,7 +789,7 @@ impl App {
     /// Collapse the directory under the cursor (`←`); a no-op if it is a file or already shut.
     pub fn collapse_dir(&mut self) {
         if let Some(path) = self.dir_under_cursor()
-            && self.collapsed_dirs.insert(path)
+            && self.set_dir_expanded(&path, false)
         {
             self.apply_dir_change();
         }
@@ -796,10 +918,10 @@ impl App {
         // when the file's row is hidden inside a collapsed directory (load it by path, not by
         // tree row). Move the list cursor onto its row when one exists.
         if self.diff_path.as_deref() != Some(file.as_str())
-            && let Some(f) = self.files.iter().find(|f| f.path == file).cloned()
+            && let Some(e) = self.entries.iter().find(|e| e.path == file).cloned()
         {
             self.reset_diff_view();
-            self.set_diff(f);
+            self.set_diff(e.path, e.previous_path);
             if let Some(fi) = self.file_row_of_path(&file) {
                 self.file_cursor = fi;
             }
@@ -1173,13 +1295,19 @@ impl App {
         }
     }
 
+    /// The number of files changed in the active scope — the header count, the same on both
+    /// tabs (specs/tui.md), since `All files` lists the worktree but counts the changeset.
+    pub fn changed_count(&self) -> usize {
+        self.changed_paths.len()
+    }
+
     /// Files that carry comments but are no longer in the changeset (anchors may be stale).
+    /// Keyed on the scope's changeset, so the flag is correct from either tab.
     pub fn stale_files(&self) -> HashSet<String> {
-        let present: HashSet<&str> = self.files.iter().map(|f| f.path.as_str()).collect();
         self.store
             .iter()
             .map(|c| c.file.clone())
-            .filter(|f| !present.contains(f.as_str()))
+            .filter(|f| !self.changed_paths.contains(f))
             .collect()
     }
 

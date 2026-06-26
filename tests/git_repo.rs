@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use common::Repo;
 use herdr_review::git::{
-    changed_against_tree, changed_files, file_content, merge_base, read_baseline_ref,
+    all_files, changed_against_tree, changed_files, file_content, merge_base, read_baseline_ref,
     snapshot_worktree, worktree_key, write_baseline_ref,
 };
 use herdr_review::model::{ChangeKind, ChangedFile, Scope};
@@ -306,4 +306,23 @@ fn worktree_key_is_stable_and_path_specific() {
     let b = std::path::Path::new("/repo/two");
     assert_eq!(worktree_key(a), worktree_key(a), "deterministic for one path");
     assert_ne!(worktree_key(a), worktree_key(b), "distinct per worktree path");
+}
+
+#[test]
+fn all_files_lists_tracked_and_untracked_but_not_ignored() {
+    let r = Repo::init();
+    r.write("src/app.rs", "fn main() {}\n");
+    r.write("Cargo.toml", "[package]\n");
+    r.commit_all("init");
+    r.write("untracked.rs", "u\n"); // untracked, not ignored
+    r.write(".gitignore", "target/\n");
+    r.write("target/build.o", "binary\n"); // ignored
+    let files = all_files(r.path()).unwrap();
+    assert!(files.contains(&"src/app.rs".to_string()), "a tracked file is listed");
+    assert!(files.contains(&"Cargo.toml".to_string()), "a tracked file is listed");
+    assert!(files.contains(&"untracked.rs".to_string()), "an untracked-not-ignored file is listed");
+    assert!(!files.iter().any(|f| f.starts_with("target/")), "an ignored path is excluded");
+    let mut sorted = files.clone();
+    sorted.sort();
+    assert_eq!(files, sorted, "the listing is sorted");
 }

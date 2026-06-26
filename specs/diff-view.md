@@ -1,5 +1,5 @@
 ---
-Status: Current
+Status: Draft
 Created: 2026-06-24
 Last edited: 2026-06-25
 ---
@@ -10,7 +10,7 @@ The structured diff viewer: how a file's changes are modeled from its content an
 
 ## Overview
 
-The viewer renders a `FileDiff` — the selected file modeled as a list of rows, built from the file's old and new content (not from parsed `git diff` text). A row is the unit the diff pane paints and the cursor moves over.
+The viewer renders a `FileDiff` — the selected file modeled as a list of rows, built from the file's old and new content (not from parsed `git diff` text). A row is the unit the diff pane paints and the cursor moves over. The pane renders the same `FileDiff` in two views: the **Diff view** (`Changes`) shows old-versus-new with change rows and folds; the **File view** (`All files`) shows the whole current file as `context` rows.
 
 What the reviewer sees (unified view, a renamed TypeScript file):
 
@@ -38,6 +38,7 @@ What the reviewer sees (unified view, a renamed TypeScript file):
 | `path` | string | Repo-relative path; the new path for a rename. |
 | `previous_path` | string? | The old path when the file was renamed; absent otherwise. |
 | `state` | enum | `normal` shows rows; `binary` and `too_large` show a notice instead. |
+| `view` | enum | `diff` shows change rows and folds; `file` shows every line as `context`, no folds. |
 | `rows` | Row[] | The render-and-cursor units, in display order. |
 
 ### Row
@@ -63,6 +64,12 @@ A row is one of four kinds. Content rows (`context`, `deletion`, `insertion`) ar
 - `emphasis` comes from `similar`'s inline word-level diff over related lines within a change block (a run of deletions then a run of insertions). Lines are matched by **homolog search**, not position (after git-delta): each deletion claims the first not-yet-taken insertion similar enough to be the same line edited; skipped insertions and unmatched deletions stay plain. A pair below the similarity bar — a wholesale rewrite sharing only scraps like indentation or `///` — gets no emphasis at all, since the line-level red/green already carries it and full-line highlighting would be noise. Adjacent changed words separated only by whitespace coalesce into one span (the whitespace is swallowed), so a changed phrase highlights as one block, not fragments; gaps holding any non-space character keep the words separate. Each span is then trimmed to its tokens — leading and trailing whitespace is never highlighted, so a deepened indent or the space before an added trailing comment paints nothing.
 - Highlighting comes from `syntect` over the broad bat/`two-face` syntax and theme set, so most languages color out of the box: the language is detected from the path (absent when unknown, which renders plain), the full old and new content are highlighted once each, and every row reads its line's `spans`. Full-file highlighting is why a multi-line string or comment colors correctly inside a hunk.
 - The diff and the highlighting are both cached per file by content; a poll that finds the file unchanged reuses the prior rows and spans rather than recomputing.
+
+### File view
+
+- The `All files` tab renders a file in File view: the `FileDiff` is built from the current content alone, every line a `context` row, with no deletions, insertions, `emphasis`, or folds.
+- The gutter shows the single new-line number and a blank change bar; highlighting, wrapping, horizontal scroll, line selection, and comments behave exactly as in Diff view.
+- Folding is off, so the whole file is shown; a `binary` or `too_large` file degrades to its notice as in Diff view.
 
 ### Color
 
@@ -122,6 +129,8 @@ The viewer is read-only and recomputed on every refresh, so it never persists or
 - Truecolor syntax theme, current structural colors kept — the add/remove tint, change bars, and selection stay as they are; only syntax token colors come from the theme. Rejected: mapping syntax onto the terminal's 16 ANSI colors, which is less rich.
 - Change bar and tint, not `+`/`−` glyphs — the colored bar plus row tint already mark add versus remove, so the glyphs are redundant on screen. The export snippet keeps `+`/`−`/space markers for the agent. Rejected: showing both.
 - Catppuccin Mocha as the default theme — a cohesive dark palette that matches a Catppuccin terminal, so the diff blends with the shell instead of importing foreign colors. Rejected: a generic bundled theme that clashes with the terminal.
+- File view is an all-`context` `FileDiff`, not a separate pager — the whole-file browser reuses the diff model, gutter, highlighting, selection, and comment machinery by modeling the file as `context` rows with folding off. Rejected: a second viewer component.
+- Folding off in File view — an unchanged file would collapse to a single fold; `All files` exists to read the file, so it shows every line. Rejected: reusing the context-margin folding.
 
 ## Open decisions
 

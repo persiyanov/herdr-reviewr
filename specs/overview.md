@@ -1,5 +1,5 @@
 ---
-Status: Current
+Status: Draft
 Created: 2026-06-23
 Last edited: 2026-06-25
 ---
@@ -19,13 +19,14 @@ open the pane → pick a changed file → read its diff → comment on a range
 → Send all your comments to the agent → add a line and hit enter
 ```
 
-The end-state vision is a review cockpit: a file viewer (`All files`), a changes-and-diff reviewer (`Changes`), and a PR helper (`Checks`). This design covers the `Changes` tab and the review loop; the file viewer and PR helper are roadmap.
+The end-state vision is a review cockpit: a changes-and-diff reviewer (`Changes`), a whole-repo file browser (`All files`), and a PR helper (`Checks`). This design covers the `Changes` and `All files` tabs and the review loop; the PR helper is roadmap.
 
 ## Scope
 
 In scope for this design:
 
 - The `Changes` view: a changed-files list for a scope, plus a syntax-highlighted diff viewer (`diff-view.md`).
+- The `All files` tab: a whole-repo file tree with a read-and-comment content viewer, annotated with the active scope's changes (`file-list.md`, `diff-view.md`).
 - Three scopes — `uncommitted`, `branch`, and `last-turn` — defined in `review-model.md`.
 - Comments anchored to `path:start-end`, held in memory for the review pass.
 - Export of all comments to the agent (filling its input) or to the clipboard.
@@ -36,9 +37,9 @@ In scope for this design:
 
 Named so the architecture stays open to them. None is part of this design.
 
-- An `All files` tab that browses the whole repo tree, not only changed files.
 - A `Checks` tab showing PR status and CI via `gh`, plus an aggregated comment list.
 - Reviewed-file state — marking a file reviewed and greying it in the list.
+- Hopping between the agent's changed files while browsing `All files`.
 - A side-by-side split diff view, for wide panes.
 - Search within the diff, and live theme switching.
 
@@ -52,7 +53,9 @@ Named so the architecture stays open to them. None is part of this design.
 ## Decisions
 
 - Lightweight in-memory comments, sent to the agent — matches a few-comments-then-prompt loop; a durable, stateful comment store (Conductor-style) is more than this needs.
-- Core covers `Changes` only — the tree and `Checks` carry fuzzier, heavier requirements, so the review spine ships first.
+- `All files` is a content browser you can comment in, not a second diff — it renders whole-file content and overlays the active scope's change markers, reusing the diff viewer and the navigator rather than a separate stack. Rejected: a read-only browser with no commenting.
+- One comment set across tabs — a comment made in `All files` and one in `Changes` share the in-memory list and export together, so a review pass is one set, not one per tab. Rejected: per-tab comment lists.
+- `Checks` stays roadmap — the PR helper carries fuzzier, heavier requirements (`gh`, CI, an aggregated comment list) than the review spine and the file browser. Rejected: bundling it into this design.
 
 ## Open decisions
 

@@ -1,5 +1,5 @@
 ---
-Status: Current
+Status: Draft
 Created: 2026-06-23
 Last edited: 2026-06-25
 ---
@@ -26,13 +26,14 @@ The terminal interface: how the review is laid out, how you drive it by keyboard
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- The header shows the active tab, the scope, the file count, and a clickable `Send` button with the comment count.
+- The header shows the active tab, the scope, the count of files changed in the scope, and a clickable `Send` button with the comment count.
 - The left pane is the selected file's diff — syntax-highlighted, with line numbers, change bars, word-level emphasis, and foldable context, defined in `diff-view.md`.
 - The right pane is the changed-files navigator for the current scope — a directory tree, defined in `file-list.md`.
+- Comments are one set across both tabs and export together; per-tab selection and seeding are in **Tabs**.
 - The comment input opens **inline, directly under the last line of the selection**, pushing the diff below it down; it grows as you type more lines. It is not a footer band.
 - The footer is a key-hint and status line.
 
-The tab bar shows `Changes`, and leaves room for the roadmap `All files` and `Checks` tabs.
+The tab bar shows `Changes` and `All files`, with `Checks` roadmap. The active tab sets the right pane's tree and the left pane's content: a diff in `Changes`, file content in `All files`. The review loop — select, comment, send — is the same in both.
 
 ## Behavior
 
@@ -49,6 +50,7 @@ Every action has a keyboard binding. The mouse-relevant ones also work by click 
 | scroll a pane's viewport, leaving the selection put | — | wheel over the pane |
 | scroll the diff horizontally, when wrap is off and not on a fold | `←` / `→` | — |
 | switch scope | `u` uncommitted / `b` branch / `t` last-turn | click the scope in the header to cycle |
+| switch tab — `Changes` / `All files` | `1` / `2` (provisional) | click a tab name |
 | expand the fold under the cursor | `→` | click the `⋯` fold row |
 | toggle line wrap | `w` | — |
 | resize the panes — widen / narrow the file list | `]` / `[` | drag the divider between the panes |
@@ -66,6 +68,14 @@ Every action has a keyboard binding. The mouse-relevant ones also work by click 
 Writing a comment: select a range or land on a line, press `c`, and an input box opens **inline under the last selected line**, where you edit it (see **Comment editor**). `enter` saves, `esc` cancels.
 
 On save the input box closes and the comment stays visible: it renders as a **read-only card spliced inline under its line**, titled with its location, so written feedback is always on screen while reviewing rather than hidden behind a marker. `e` reopens the card under the cursor as an edit box in place (its card is hidden while editing); `d` deletes it. There is no single-vs-all choice: `s` / `S` (or the `Send` button) sends every written comment, and a successful send reports a transient status such as `sent 3 comments` that fades after a few seconds.
+
+### Tabs
+
+- Each tab keeps its own selected file and scroll, so switching away and back restores that tab exactly.
+- Switching into a tab with no selection yet seeds it from the file you were viewing, when that file exists in the target tab — `All files` then reveals and opens that file's content (`file-list.md`).
+- A seed carries the cursor's line, not just the file — `All files` opens the seeded file at the line you were reading and places it comfortably in view, so flipping to the full file lands on the same code.
+- A file that cannot be seeded — a `Changes` deletion absent from the worktree — leaves `All files` empty until you pick a file.
+- A tab switch keeps the focused side — content or tree — so keyboard navigation continues; an empty left pane focuses the tree.
 
 ### Comment editor
 
@@ -130,6 +140,8 @@ The inline box is a plain-text field that behaves like an ordinary editor: the c
 - A real caret, not an append buffer — the comment box keeps a character caret so text is edited where the caret is, not only at the end. The cost is one position to track; the payoff is that fixing a typo mid-comment no longer means deleting everything after it. Rejected: the end-only input it replaces.
 - Bracketed paste, not raw keystrokes — pastes are read as one bracketed-paste event and inserted whole, so a multi-line paste keeps its newlines. Rejected: the terminal's default raw paste, where an embedded newline arrives as `enter` and submits the comment early.
 - A plain text field, not a code editor — caret movement, edit-anywhere, word ops, and paste, but no selection, undo/redo, or markdown rendering. Review comments are short; that machinery is more than they need. Rejected: a fuller editor with selection and history.
+- The tab sets the view, not the file's state — `All files` shows a file's content even when it is changed; to read its diff you switch to `Changes`, so a tab renders one kind of thing. Rejected: showing the diff for changed files and content for unchanged ones in `All files`.
+- Click a tab to switch; the key is provisional — herdr is mouse-native, so the tab bar is clickable, and the keyboard binding is part of the open keymap. Rejected: locking a tab key now.
 
 ## Open decisions
 

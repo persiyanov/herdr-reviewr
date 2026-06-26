@@ -266,6 +266,28 @@ pub fn changed_against_tree(repo: &Path, tree: &str) -> Result<Vec<ChangedFile>>
     assemble(repo, &numstat, &name_status, false)
 }
 
+/// Every file in the worktree: tracked files (`git ls-files`) plus untracked-not-ignored
+/// ones, repo-relative, deduped, and sorted. Powers the `All files` tab (specs/file-list.md).
+/// Both `ls-files` and `--untracked-files=all` honor `.gitignore`, so ignored build output
+/// never appears. Both use `-z`, so a path with spaces or special characters survives verbatim.
+pub fn all_files(repo: &Path) -> Result<Vec<String>> {
+    let tracked = git(repo, &["ls-files", "-z"])?;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for path in tracked.split('\0').filter(|s| !s.is_empty()) {
+        if seen.insert(path.to_string()) {
+            out.push(path.to_string());
+        }
+    }
+    for path in untracked(repo)? {
+        if seen.insert(path.clone()) {
+            out.push(path);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// Build the sorted `ChangedFile` list from `git diff` numstat + name-status output,
 /// optionally appending untracked files (which a `git diff` never reports).
 fn assemble(

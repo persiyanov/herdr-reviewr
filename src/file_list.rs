@@ -21,13 +21,51 @@ pub struct Row {
     pub kind: RowKind,
 }
 
-/// What a [`Row`] is: a directory (togglable) or a file (opens a diff).
+/// What a [`Row`] is: a directory (togglable) or a file (opens the left pane).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RowKind {
     /// A directory: its full path keys its expansion state.
     Dir { path: String, expanded: bool },
-    /// A file: its index into the source `&[ChangedFile]`, plus the stats shown.
-    File { index: usize, change: ChangeKind, additions: u32, deletions: u32 },
+    /// A file: its index into the source `&[Entry]`, plus its annotation when changed.
+    File { index: usize, annotation: Option<Annotation> },
+}
+
+/// The change a file carries in the active scope, shown inline in the tree. Absent on an
+/// unchanged `All files` file (specs/file-list.md).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Annotation {
+    pub change: ChangeKind,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+/// The navigator's source row: a path, plus the rename source and the scope annotation when
+/// it has one. `Changes` annotates every entry; `All files` annotates only changed files.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Entry {
+    pub path: String,
+    pub previous_path: Option<String>,
+    pub annotation: Option<Annotation>,
+}
+
+impl Entry {
+    /// A `Changes` entry from a changed file: annotated and rename-aware.
+    pub fn from_changed(f: &ChangedFile) -> Self {
+        Self {
+            path: f.path.clone(),
+            previous_path: f.previous_path.clone(),
+            annotation: Some(Annotation {
+                change: f.kind,
+                additions: f.additions,
+                deletions: f.deletions,
+            }),
+        }
+    }
+
+    /// An `All files` entry from a bare path: no rename source, no annotation.
+    pub fn plain(path: String) -> Self {
+        Self { path, previous_path: None, annotation: None }
+    }
 }
 
 impl Row {
@@ -56,16 +94,22 @@ struct Dir {
     files: BTreeMap<String, usize>,
 }
 
-/// Flatten `files` into the visible tree rows, honoring which directories are `collapsed`
-/// (every other directory is expanded). Single-child directories fold into their child;
-/// directories sort before files, alphabetically within a parent.
-pub fn build<S: BuildHasher>(files: &[ChangedFile], collapsed: &HashSet<String, S>) -> Vec<Row> {
+/// Flatten `entries` into the visible tree rows. `default_expanded` sets a directory's
+/// resting state — `true` for `Changes` (expanded unless toggled), `false` for `All files`
+/// (collapsed unless toggled); `toggled` holds the paths flipped from that default.
+/// Single-child directories fold into their child; directories sort before files,
+/// alphabetically within a parent.
+pub fn build<S: BuildHasher>(
+    entries: &[Entry],
+    toggled: &HashSet<String, S>,
+    default_expanded: bool,
+) -> Vec<Row> {
     let mut root = Dir::default();
-    for (i, f) in files.iter().enumerate() {
-        insert(&mut root, &f.path, i);
+    for (i, e) in entries.iter().enumerate() {
+        insert(&mut root, &e.path, i);
     }
     let mut rows = Vec::new();
-    flatten(&mut rows, &root, "", 0, collapsed, files);
+    flatten(&mut rows, &root, "", 0, toggled, default_expanded, entries);
     rows
 }
 
@@ -86,28 +130,29 @@ fn flatten<S: BuildHasher>(
     dir: &Dir,
     prefix: &str,
     depth: usize,
-    collapsed: &HashSet<String, S>,
-    files: &[ChangedFile],
+    toggled: &HashSet<String, S>,
+    default_expanded: bool,
+    entries: &[Entry],
 ) {
     for (name, sub) in &dir.dirs {
         let (display, path, node) = compress(name, join(prefix, name), sub);
         if let Some((fname, &index)) = lone_file(node) {
             // A single-child chain ending in one file folds into a file row, e.g. `a/b/x.rs`.
-            rows.push(file_row(depth, format!("{display}/{fname}"), index, files));
+            rows.push(file_row(depth, format!("{display}/{fname}"), index, entries));
         } else {
-            let expanded = !collapsed.contains(&path);
+            let expanded = default_expanded ^ toggled.contains(&path);
             rows.push(Row {
                 depth,
                 name: display,
                 kind: RowKind::Dir { path: path.clone(), expanded },
             });
             if expanded {
-                flatten(rows, node, &path, depth + 1, collapsed, files);
+                flatten(rows, node, &path, depth + 1, toggled, default_expanded, entries);
             }
         }
     }
     for (fname, &index) in &dir.files {
-        rows.push(file_row(depth, fname.clone(), index, files));
+        rows.push(file_row(depth, fname.clone(), index, entries));
     }
 }
 
@@ -132,17 +177,11 @@ fn lone_file(node: &Dir) -> Option<(&String, &usize)> {
     (node.dirs.is_empty() && node.files.len() == 1).then(|| node.files.iter().next().unwrap())
 }
 
-fn file_row(depth: usize, name: String, index: usize, files: &[ChangedFile]) -> Row {
-    let f = &files[index];
+fn file_row(depth: usize, name: String, index: usize, entries: &[Entry]) -> Row {
     Row {
         depth,
         name,
-        kind: RowKind::File {
-            index,
-            change: f.kind,
-            additions: f.additions,
-            deletions: f.deletions,
-        },
+        kind: RowKind::File { index, annotation: entries[index].annotation.clone() },
     }
 }
 
@@ -152,7 +191,7 @@ fn join(prefix: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{RowKind, build};
+    use super::{Annotation, Entry, RowKind, build};
     use crate::model::{ChangeKind, ChangedFile};
     use std::collections::HashSet;
 
@@ -166,10 +205,18 @@ mod tests {
         }
     }
 
-    /// Render the rows as `<depth>:<dir|file>:<name>` lines, for compact assertions.
+    fn entries(files: &[ChangedFile]) -> Vec<Entry> {
+        files.iter().map(Entry::from_changed).collect()
+    }
+
+    /// Render the rows as `<depth>:<dir|file>:<name>` lines, for compact assertions. Uses the
+    /// `Changes` default (expanded unless toggled).
     fn shape(files: &[ChangedFile], collapsed: &HashSet<String>) -> Vec<String> {
-        build(files, collapsed)
-            .iter()
+        shape_rows(&build(&entries(files), collapsed, true))
+    }
+
+    fn shape_rows(rows: &[super::Row]) -> Vec<String> {
+        rows.iter()
             .map(|r| {
                 let kind = if r.file_index().is_some() { "file" } else { "dir" };
                 format!("{}:{}:{}", r.depth, kind, r.name)
@@ -213,10 +260,33 @@ mod tests {
     #[test]
     fn a_file_row_carries_its_source_index_and_stats() {
         let files = [file("z.rs"), file("a.rs")];
-        let rows = build(&files, &HashSet::new());
+        let rows = build(&entries(&files), &HashSet::new(), true);
         // Sorted alphabetically: a.rs first → source index 1, then z.rs → index 0.
         assert_eq!(rows[0].file_index(), Some(1));
         assert_eq!(rows[1].file_index(), Some(0));
-        assert!(matches!(rows[0].kind, RowKind::File { change: ChangeKind::Modified, .. }));
+        assert!(matches!(
+            &rows[0].kind,
+            RowKind::File { annotation: Some(Annotation { change: ChangeKind::Modified, .. }), .. }
+        ));
+    }
+
+    #[test]
+    fn all_files_collapses_directories_by_default() {
+        // default_expanded = false: src/ is collapsed unless toggled, so its children hide.
+        let files = [file("src/app.rs"), file("src/ui.rs")];
+        assert_eq!(shape_rows(&build(&entries(&files), &HashSet::new(), false)), ["0:dir:src"]);
+        // Toggling src/ into the set expands it under the collapse-default policy.
+        let toggled: HashSet<String> = ["src".to_string()].into_iter().collect();
+        assert_eq!(
+            shape_rows(&build(&entries(&files), &toggled, false)),
+            ["0:dir:src", "1:file:app.rs", "1:file:ui.rs"]
+        );
+    }
+
+    #[test]
+    fn a_plain_entry_carries_no_annotation() {
+        // An `All files` entry from a bare path renders without a marker or stats.
+        let rows = build(&[Entry::plain("a.rs".into())], &HashSet::new(), false);
+        assert!(matches!(rows[0].kind, RowKind::File { annotation: None, .. }));
     }
 }
