@@ -1,7 +1,7 @@
 ---
-Status: Draft
+Status: Current
 Created: 2026-06-23
-Last edited: 2026-06-25
+Last edited: 2026-06-26
 ---
 
 # Review model
@@ -81,6 +81,8 @@ For the selected file in the current scope, a structured diff built from the fil
 ### File content
 
 In the `All files` tab a comment anchors to plain file content instead of a diff (`diff-view.md`). Its `side` is always `new`, its `start`/`end` are line numbers in the current file, and its `lines` snippet is those content lines, each space-prefixed like a context line. So an `All files` comment and a context-only diff comment carry the same shape and export identically; the header is `path:start-end`, never with ` (removed)`.
+
+A comment renders and is acted on only in the view it belongs to — a content comment in the `All files` File view, a diff comment in the `Changes` diff — so it never lands on an unrelated line in the other tab's view of the same file (their line numberings differ). The shared `Send`/`Copy` and the comments list still carry the whole set across both tabs.
 
 ## Behavior
 
