@@ -211,14 +211,14 @@ fn page_keys_move_the_cursor_in_both_panes() {
     app.focus = Focus::Files;
     app.file_cursor = 0;
     app.reveal_files = false;
-    app.page_files(5);
+    app.move_cursor(5).unwrap();
     assert_eq!(app.file_cursor, 5usize.min(app.file_rows.len() - 1));
     assert!(app.reveal_files);
     // Diff pane: page moves the cursor.
     app.focus = Focus::Diff;
     app.diff_cursor = 0;
     app.reveal_diff = false;
-    app.page_diff(5);
+    app.move_cursor(5).unwrap();
     assert_eq!(app.diff_cursor, 5);
     assert!(app.reveal_diff);
 }
@@ -490,7 +490,7 @@ fn paging_the_diff_cannot_cross_a_fold() {
     let tail = app.visible.iter().rposition(|row| row.hidden() > 0).unwrap();
     app.diff_cursor = tail - 1;
     app.toggle_select();
-    app.page_diff(50); // a big page that would jump well past the trailing fold
+    app.move_cursor(50).unwrap(); // a big page that would jump well past the trailing fold
     assert_eq!(app.diff_cursor, tail - 1, "page stops shy of the fold while selecting");
 }
 

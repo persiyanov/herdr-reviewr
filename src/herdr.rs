@@ -24,16 +24,28 @@ fn herdr(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The (tab, workspace, pane) id trio identifying this sidebar in the herdr environment.
+fn agent_env() -> (Option<String>, Option<String>, Option<String>) {
+    (
+        env::var("HERDR_TAB_ID").ok(),
+        env::var("HERDR_WORKSPACE_ID").ok(),
+        env::var("HERDR_PANE_ID").ok(),
+    )
+}
+
+/// The agents herdr currently lists. The one place the `agent list` call and its envelope
+/// parsing live, shared by pane and status resolution.
+fn agent_list() -> Result<Vec<Value>> {
+    parse_agents(&herdr(&["agent", "list"])?)
+}
+
 /// The agent pane to send to: the agent in this tab, else the sole workspace agent.
 ///
 /// Returns an error when no agent resolves, or when the choice is ambiguous
 /// (two agents and none shares the tab).
 pub fn resolve_agent_pane() -> Result<String> {
-    let tab = env::var("HERDR_TAB_ID").ok();
-    let ws = env::var("HERDR_WORKSPACE_ID").ok();
-    let me = env::var("HERDR_PANE_ID").ok();
-    let agents = parse_agents(&herdr(&["agent", "list"])?)?;
-    pick_agent_pane(&agents, tab.as_deref(), ws.as_deref(), me.as_deref())
+    let (tab, ws, me) = agent_env();
+    pick_agent_pane(&agent_list()?, tab.as_deref(), ws.as_deref(), me.as_deref())
         .context("no unambiguous agent in this tab or workspace")
 }
 
@@ -57,11 +69,8 @@ fn parse_agents(json: &str) -> Result<Vec<Value>> {
 /// turn tracking (`specs/herdr-host.md`). `Ok(None)` when no agent resolves, so the caller
 /// treats an absent or ambiguous agent the same as a missing herdr — turn tracking pauses.
 pub fn resolved_agent_status() -> Result<Option<String>> {
-    let tab = env::var("HERDR_TAB_ID").ok();
-    let ws = env::var("HERDR_WORKSPACE_ID").ok();
-    let me = env::var("HERDR_PANE_ID").ok();
-    let agents = parse_agents(&herdr(&["agent", "list"])?)?;
-    Ok(pick_agent(&agents, tab.as_deref(), ws.as_deref(), me.as_deref())
+    let (tab, ws, me) = agent_env();
+    Ok(pick_agent(&agent_list()?, tab.as_deref(), ws.as_deref(), me.as_deref())
         .and_then(|a| a.get("agent_status").and_then(Value::as_str).map(String::from)))
 }
 

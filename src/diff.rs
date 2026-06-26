@@ -189,7 +189,7 @@ impl FileDiff {
         if old.contains('\0') || new.contains('\0') {
             return notice(FileState::Binary);
         }
-        if old.len() + new.len() > MAX_BYTES
+        if over_byte_budget(old.len() + new.len())
             || old.lines().count() + new.lines().count() > MAX_LINES
         {
             return notice(FileState::TooLarge);
@@ -253,7 +253,7 @@ impl FileDiff {
         if content.contains('\0') {
             return notice(FileState::Binary);
         }
-        if content.len() > MAX_BYTES || content.lines().count() > MAX_LINES {
+        if over_byte_budget(content.len()) || content.lines().count() > MAX_LINES {
             return notice(FileState::TooLarge);
         }
         let spans = hl.highlight(content, language_of(&path).as_deref());
@@ -505,35 +505,36 @@ impl DiffCache {
         hl: &Highlighter,
     ) -> FileDiff {
         let key = content_hash(previous_path.as_deref(), old, new);
-        if let Some((cached, diff)) = self.entries.get(&path)
-            && *cached == key
-        {
-            return diff.clone();
-        }
-        let diff = FileDiff::build(path.clone(), previous_path, old, new, hl);
-        if self.entries.len() >= CACHE_CAP {
-            self.entries.clear();
-        }
-        self.entries.insert(path, (key, diff.clone()));
-        diff
+        self.get_or_build(path.clone(), key, || FileDiff::build(path, previous_path, old, new, hl))
     }
 
     /// Return the cached File view when `content` is unchanged for `path`, else build it.
     /// File-view entries are namespaced under a `file:` key so a path's File view and Diff
     /// view coexist in the cache instead of evicting each other on a tab switch.
     pub fn get_file(&mut self, path: String, content: &str, hl: &Highlighter) -> FileDiff {
-        let cache_key = format!("file:{path}");
         let key = content_hash(None, content, content);
+        self.get_or_build(format!("file:{path}"), key, || FileDiff::build_file(path, content, hl))
+    }
+
+    /// Shared cache body: return the entry under `cache_key` when its stored hash still equals
+    /// `content_key`, else `build` it, evict-on-cap, and insert. Both [`get`](Self::get) and
+    /// [`get_file`](Self::get_file) differ only in the key and the build call.
+    fn get_or_build(
+        &mut self,
+        cache_key: String,
+        content_key: u64,
+        build: impl FnOnce() -> FileDiff,
+    ) -> FileDiff {
         if let Some((cached, diff)) = self.entries.get(&cache_key)
-            && *cached == key
+            && *cached == content_key
         {
             return diff.clone();
         }
-        let diff = FileDiff::build_file(path, content, hl);
+        let diff = build();
         if self.entries.len() >= CACHE_CAP {
             self.entries.clear();
         }
-        self.entries.insert(cache_key, (key, diff.clone()));
+        self.entries.insert(cache_key, (content_key, diff.clone()));
         diff
     }
 }

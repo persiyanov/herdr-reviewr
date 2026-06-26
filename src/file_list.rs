@@ -39,6 +39,14 @@ pub struct Annotation {
     pub deletions: u32,
 }
 
+impl From<&ChangedFile> for Annotation {
+    /// The scope annotation a changed file carries — the one mapping, shared by the `Changes`
+    /// entry build and `app.rs`'s changeset map so a new field can't be wired in one and missed.
+    fn from(f: &ChangedFile) -> Self {
+        Self { change: f.kind, additions: f.additions, deletions: f.deletions }
+    }
+}
+
 /// The navigator's source row: a path, plus the rename source and the scope annotation when
 /// it has one. `Changes` annotates every entry; `All files` annotates only changed files.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -54,11 +62,7 @@ impl Entry {
         Self {
             path: f.path.clone(),
             previous_path: f.previous_path.clone(),
-            annotation: Some(Annotation {
-                change: f.kind,
-                additions: f.additions,
-                deletions: f.deletions,
-            }),
+            annotation: Some(Annotation::from(f)),
         }
     }
 }

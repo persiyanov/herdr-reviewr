@@ -38,39 +38,35 @@ fn git_lenient(repo: &Path, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
+/// Run `git -C <repo> <args>` and return its trimmed stdout, or `None` if the command fails to
+/// spawn, exits non-zero, or prints nothing. The one-line query workhorse for `rev-parse`/`merge-base`.
+fn git_line(repo: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git").arg("-C").arg(repo).args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!line.is_empty()).then_some(line)
+}
+
+/// Whether `git -C <repo> <args>` spawns and exits zero. The predicate workhorse for existence checks.
+fn git_ok(repo: &Path, args: &[&str]) -> bool {
+    Command::new("git").arg("-C").arg(repo).args(args).output().is_ok_and(|o| o.status.success())
+}
+
 /// Whether `path` is inside a git work tree.
 pub fn is_repo(path: &Path) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .is_ok_and(|o| o.status.success())
+    git_ok(path, &["rev-parse", "--is-inside-work-tree"])
 }
 
 /// The git top-level of `path`, or `None` if it is not a repo.
 pub fn toplevel(path: &Path) -> Option<PathBuf> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!top.is_empty()).then(|| PathBuf::from(top))
+    git_line(path, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
 /// Whether `git_ref` resolves in `repo`.
 fn ref_exists(repo: &Path, git_ref: &str) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["rev-parse", "--verify", "--quiet", git_ref])
-        .output()
-        .is_ok_and(|o| o.status.success())
+    git_ok(repo, &["rev-parse", "--verify", "--quiet", git_ref])
 }
 
 /// The base ref for branch scope: `base` if it resolves, otherwise the first of
@@ -102,17 +98,7 @@ fn range(repo: &Path, scope: Scope, base: Option<&str>) -> Option<String> {
 /// The merge-base commit of `base` and `HEAD`, the old side of a branch-scope diff.
 pub fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
     let base = base_ref(repo, base)?;
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["merge-base", &base, "HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let mb = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!mb.is_empty()).then_some(mb)
+    git_line(repo, &["merge-base", &base, "HEAD"])
 }
 
 /// The content of `path` at `rev` (`git show <rev>:<path>`). Empty when the path does
@@ -196,17 +182,7 @@ fn baseline_ref(key: &str) -> String {
 
 /// The persisted turn baseline tree for this worktree, if a baseline exists.
 pub fn read_baseline_ref(repo: &Path, key: &str) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["rev-parse", "--verify", "--quiet", &baseline_ref(key)])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!sha.is_empty()).then_some(sha)
+    git_line(repo, &["rev-parse", "--verify", "--quiet", &baseline_ref(key)])
 }
 
 /// Persist the turn baseline tree under the worktree's private ref. `update-ref` is

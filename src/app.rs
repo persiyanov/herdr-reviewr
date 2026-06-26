@@ -318,14 +318,7 @@ impl App {
             },
             _ => git::changed_files(&self.repo, self.scope, self.base.as_deref())?,
         };
-        self.changed = changed
-            .iter()
-            .map(|f| {
-                let annotation =
-                    Annotation { change: f.kind, additions: f.additions, deletions: f.deletions };
-                (f.path.clone(), annotation)
-            })
-            .collect();
+        self.changed = changed.iter().map(|f| (f.path.clone(), Annotation::from(f))).collect();
         self.entries = match self.tab {
             // The whole worktree; a changed file carries its scope annotation, the rest none.
             Tab::AllFiles => git::all_files(&self.repo)?
@@ -370,9 +363,16 @@ impl App {
             self.reset_diff_view();
             return;
         };
+        self.open_path_in_tab(entry.path, entry.previous_path);
+    }
+
+    /// Open `path` in the active tab's left pane: the scope diff in `Changes` (rename-aware via
+    /// `previous_path`), the whole-file content in `All files`. The one place this dispatch lives,
+    /// so opening a file from the tree and from a comment edit can't drift apart.
+    fn open_path_in_tab(&mut self, path: String, previous_path: Option<String>) {
         match self.tab {
-            Tab::Changes => self.set_diff(entry.path, entry.previous_path),
-            Tab::AllFiles => self.set_file_view(entry.path),
+            Tab::Changes => self.set_diff(path, previous_path),
+            Tab::AllFiles => self.set_file_view(path),
         }
     }
 
@@ -724,9 +724,10 @@ impl App {
         };
     }
 
-    /// Move the cursor in the focused pane. In the files pane the cursor steps over the
-    /// tree's visible rows; landing on a file row opens its diff, while a directory row
-    /// keeps the current diff so scanning the tree never blanks the pane.
+    /// Move the cursor in the focused pane by `delta` rows. In the files pane the cursor steps
+    /// over the tree's visible rows; landing on a file row opens its diff, while a directory row
+    /// keeps the current diff so scanning the tree never blanks the pane. The page/half-page keys
+    /// reuse this with a larger `delta`, since paging is just a bigger cursor move in the focus.
     pub fn move_cursor(&mut self, delta: isize) -> Result<()> {
         match self.focus {
             Focus::Files => {
@@ -850,29 +851,6 @@ impl App {
         self.reveal_files = true; // the row may have moved off-screen; pull it back
     }
 
-    /// Page the diff: move `diff_cursor` by `delta` lines and reveal it. The page/half-page
-    /// keys when the diff is focused; the view follows the cursor like `j`/`k`.
-    pub fn page_diff(&mut self, delta: isize) {
-        if !self.visible.is_empty() {
-            let mut target = step(self.diff_cursor, delta, self.visible.len());
-            if let Some(a) = self.select_anchor {
-                target = self.fold_clamped(a, target); // a selection cannot cross a fold
-            }
-            self.diff_cursor = target;
-            self.reveal_diff = true;
-        }
-    }
-
-    /// Page the file list: move `file_cursor` by `delta`, open the file it lands on, and
-    /// reveal it. The page/half-page keys when the file list is focused.
-    pub fn page_files(&mut self, delta: isize) {
-        if !self.file_rows.is_empty() {
-            self.file_cursor = step(self.file_cursor, delta, self.file_rows.len());
-            self.open_cursor_file();
-            self.reveal_files = true;
-        }
-    }
-
     /// Wheel-scroll the diff's viewport, leaving `diff_cursor` (the comment anchor) put —
     /// so wheeling to read context never moves what a comment will attach to. The upper
     /// bound is applied each frame by `bound_diff_scroll`.
@@ -966,10 +944,7 @@ impl App {
             self.reset_diff_view();
             // Open it in the active tab's view — the File view on `All files`, not a diff — so
             // the pane and the comment's anchor kind stay consistent with the tab.
-            match self.tab {
-                Tab::Changes => self.set_diff(e.path, e.previous_path),
-                Tab::AllFiles => self.set_file_view(e.path),
-            }
+            self.open_path_in_tab(e.path, e.previous_path);
             if let Some(fi) = self.file_row_of_path(&file) {
                 self.file_cursor = fi;
             }
@@ -1001,136 +976,116 @@ impl App {
     // `caret` is a char index in `0..=input.chars().count()`. Edits round-trip through a
     // `Vec<char>` (comments are short), so every op is character-wise and multi-byte safe.
 
-    /// Insert `ch` at the caret.
-    pub fn input_push(&mut self, ch: char) {
+    /// Run a character-wise edit on the comment input: collect `input` into a `Vec<char>` with
+    /// the caret as an in-range index, hand both to `f`, then reassemble and re-clamp the caret.
+    /// A no-op when not composing. Every mutating `input_*` op routes through here, so the
+    /// guard / collect / reassemble lives once instead of seven times.
+    fn edit_input(&mut self, f: impl FnOnce(&mut Vec<char>, &mut usize)) {
         if !self.composing() {
             return;
         }
         let mut v: Vec<char> = self.input.chars().collect();
-        let at = self.caret.min(v.len());
-        v.insert(at, ch);
-        self.caret = at + 1;
+        let mut caret = self.caret.min(v.len());
+        f(&mut v, &mut caret);
+        self.caret = caret.min(v.len());
         self.input = v.into_iter().collect();
+    }
+
+    /// Move the caret with a function of the current `Vec<char>` view; a no-op when not composing.
+    /// The read-only sibling of [`edit_input`](Self::edit_input) for the `caret_*` motions.
+    fn move_caret(&mut self, f: impl FnOnce(&[char], usize) -> usize) {
+        if self.composing() {
+            let v: Vec<char> = self.input.chars().collect();
+            self.caret = f(&v, self.caret.min(v.len()));
+        }
+    }
+
+    /// Insert `ch` at the caret.
+    pub fn input_push(&mut self, ch: char) {
+        self.edit_input(|v, caret| {
+            v.insert(*caret, ch);
+            *caret += 1;
+        });
     }
 
     /// Insert pasted `text` at the caret as one unit, normalizing `\r\n`/`\r` to `\n`.
     pub fn input_paste(&mut self, text: &str) {
-        if !self.composing() {
-            return;
-        }
         let norm: Vec<char> = text.replace("\r\n", "\n").replace('\r', "\n").chars().collect();
-        let mut v: Vec<char> = self.input.chars().collect();
-        let at = self.caret.min(v.len());
-        let n = norm.len();
-        v.splice(at..at, norm);
-        self.caret = at + n;
-        self.input = v.into_iter().collect();
+        self.edit_input(|v, caret| {
+            let n = norm.len();
+            v.splice(*caret..*caret, norm);
+            *caret += n;
+        });
     }
 
     /// Delete the character before the caret.
     pub fn input_backspace(&mut self) {
-        if !self.composing() || self.caret == 0 {
-            return;
-        }
-        let mut v: Vec<char> = self.input.chars().collect();
-        let at = self.caret.min(v.len());
-        if at == 0 {
-            return;
-        }
-        v.remove(at - 1);
-        self.caret = at - 1;
-        self.input = v.into_iter().collect();
+        self.edit_input(|v, caret| {
+            if *caret > 0 {
+                v.remove(*caret - 1);
+                *caret -= 1;
+            }
+        });
     }
 
     /// Delete the character at the caret (`Delete`).
     pub fn input_delete_forward(&mut self) {
-        if !self.composing() {
-            return;
-        }
-        let mut v: Vec<char> = self.input.chars().collect();
-        if self.caret < v.len() {
-            v.remove(self.caret);
-            self.input = v.into_iter().collect();
-        }
+        self.edit_input(|v, caret| {
+            if *caret < v.len() {
+                v.remove(*caret);
+            }
+        });
     }
 
     /// Delete the word before the caret (`Ctrl+W`): the trailing whitespace, then the run of
     /// non-whitespace before it, so one press clears one word.
     pub fn input_delete_word(&mut self) {
-        if !self.composing() {
-            return;
-        }
-        let mut v: Vec<char> = self.input.chars().collect();
-        let end = self.caret.min(v.len());
-        let start = word_start(&v, end);
-        v.drain(start..end);
-        self.caret = start;
-        self.input = v.into_iter().collect();
+        self.edit_input(|v, caret| {
+            let start = word_start(v, *caret);
+            v.drain(start..*caret);
+            *caret = start;
+        });
     }
 
     /// Delete from the start of the logical line to the caret (`Ctrl+U`).
     pub fn input_kill_to_start(&mut self) {
-        if !self.composing() {
-            return;
-        }
-        let mut v: Vec<char> = self.input.chars().collect();
-        let end = self.caret.min(v.len());
-        let start = line_start(&v, end);
-        v.drain(start..end);
-        self.caret = start;
-        self.input = v.into_iter().collect();
+        self.edit_input(|v, caret| {
+            let start = line_start(v, *caret);
+            v.drain(start..*caret);
+            *caret = start;
+        });
     }
 
     /// Delete from the caret to the end of the logical line (`Ctrl+K`).
     pub fn input_kill_to_end(&mut self) {
-        if !self.composing() {
-            return;
-        }
-        let mut v: Vec<char> = self.input.chars().collect();
-        let start = self.caret.min(v.len());
-        let end = line_end(&v, start);
-        v.drain(start..end);
-        self.input = v.into_iter().collect();
+        self.edit_input(|v, caret| {
+            let end = line_end(v, *caret);
+            v.drain(*caret..end);
+        });
     }
 
     /// Move the caret one character left / right.
     pub fn caret_left(&mut self) {
-        if self.composing() {
-            self.caret = self.caret.saturating_sub(1);
-        }
+        self.move_caret(|_, caret| caret.saturating_sub(1));
     }
     pub fn caret_right(&mut self) {
-        if self.composing() {
-            self.caret = (self.caret + 1).min(self.input.chars().count());
-        }
+        self.move_caret(|v, caret| (caret + 1).min(v.len()));
     }
 
     /// Move the caret to the start / end of the logical line (between newlines).
     pub fn caret_home(&mut self) {
-        if self.composing() {
-            let v: Vec<char> = self.input.chars().collect();
-            self.caret = line_start(&v, self.caret.min(v.len()));
-        }
+        self.move_caret(line_start);
     }
     pub fn caret_end(&mut self) {
-        if self.composing() {
-            let v: Vec<char> = self.input.chars().collect();
-            self.caret = line_end(&v, self.caret.min(v.len()));
-        }
+        self.move_caret(line_end);
     }
 
     /// Move the caret one word left / right.
     pub fn caret_word_left(&mut self) {
-        if self.composing() {
-            let v: Vec<char> = self.input.chars().collect();
-            self.caret = word_start(&v, self.caret.min(v.len()));
-        }
+        self.move_caret(word_start);
     }
     pub fn caret_word_right(&mut self) {
-        if self.composing() {
-            let v: Vec<char> = self.input.chars().collect();
-            self.caret = word_end(&v, self.caret.min(v.len()));
-        }
+        self.move_caret(word_end);
     }
 
     pub fn cancel_comment(&mut self) {

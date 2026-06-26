@@ -271,10 +271,8 @@ fn handle_key(app: &mut App, key: KeyEvent, area: Rect) -> Result<()> {
     match (key.code, ctrl) {
         // ctrl combos first, so they win over the plain `u`/`d` bindings below. Half-page
         // keys move the focused pane's cursor (the view follows), like `j`/`k`.
-        (Char('u'), true) if app.focus == Focus::Files => app.page_files(-HALF_PAGE),
-        (Char('d'), true) if app.focus == Focus::Files => app.page_files(HALF_PAGE),
-        (Char('u'), true) => app.page_diff(-HALF_PAGE),
-        (Char('d'), true) => app.page_diff(HALF_PAGE),
+        (Char('u'), true) => app.move_cursor(-HALF_PAGE)?,
+        (Char('d'), true) => app.move_cursor(HALF_PAGE)?,
         (Char('q'), _) => app.should_quit = true,
         (Char('r'), _) => app.reload()?,
         // `1` / `2` switch tabs (provisional; the keymap is an Open Decision in tui.md).
@@ -284,10 +282,8 @@ fn handle_key(app: &mut App, key: KeyEvent, area: Rect) -> Result<()> {
         (Char('j') | Down, _) => app.move_cursor(1)?,
         (Char('k') | Up, _) => app.move_cursor(-1)?,
         // Page keys move the focused pane's cursor.
-        (PageDown, _) if app.focus == Focus::Files => app.page_files(PAGE),
-        (PageUp, _) if app.focus == Focus::Files => app.page_files(-PAGE),
-        (PageDown, _) => app.page_diff(PAGE),
-        (PageUp, _) => app.page_diff(-PAGE),
+        (PageDown, _) => app.move_cursor(PAGE)?,
+        (PageUp, _) => app.move_cursor(-PAGE)?,
         (Char('w'), _) => app.toggle_wrap(),
         // `]` widens the file list, `[` narrows it (widening the diff).
         (Char(']'), _) => app.resize_list(4),
