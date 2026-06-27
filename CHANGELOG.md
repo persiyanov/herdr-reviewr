@@ -13,6 +13,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one line. `u/b/t scope` stays available everywhere while reviewing, and `s send N` appears once
   a comment is written. Replaces the static key-hint line.
 
+- **Simpler PR merge status** — the footer's merge state now shows only the actionable blockers,
+  `conflicts` and `blocked`; GitHub's `behind`, `unstable`, and still-computing states (jargon a
+  reviewer can't act on) fold into nothing.
+- **PR tab panes named distinctly** — the right navigator is now `Checks & comments` instead of a
+  second `PR`, so it no longer repeats the left reader's title.
+
 ### Fixed
 - **PR empty state renders once** — "no PR for this branch yet…" (and the other PR loading and
   degraded messages) showed in the header, the navigator, and the read pane at the same time; it

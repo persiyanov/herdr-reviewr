@@ -24,7 +24,7 @@ The snapshot:
 - `number`, `title`, `url` (int, string, string) — identity; `number` is `null` when the branch has no PR.
 - `state` (enum, `open`/`merged`/`closed`) and `is_draft` (bool) — lifecycle; only `open` is the live case.
 - `base_ref` (string) — the merge target; the PR head commit is read for `sync` (below) but not stored.
-- `merge` (enum, `clean`/`conflicting`/`behind`/`blocked`/`unstable`/`checking`) — derived from GitHub's `mergeable` and `mergeStateStatus`.
+- `merge` (enum, `clean`/`conflicting`/`blocked`) — the actionable merge blockers, derived from GitHub's `mergeable` and `mergeStateStatus`.
 - `sync` (enum, `in_sync`/`unpushed`/`behind`, with a count) — local `HEAD` vs `head_oid`.
 - `checks` (list) — one row per latest check: `name` and `status` (the conclusion folded in).
 - `comments` (list) — one row per comment, newest first: `kind`, `author`, `author_is_bot`, `anchor`, `body`, `snippet`, `created_at`, `is_resolved`, `is_outdated`, `reply_count`.
@@ -52,8 +52,8 @@ A `comments` row:
 
 ### Derived state
 
-- `merge` folds GitHub's `mergeable` and `mergeStateStatus`: `CONFLICTING`/`DIRTY` → `conflicting`, `BEHIND` → `behind`, `BLOCKED` → `blocked`, `UNSTABLE` → `unstable`, `CLEAN` → `clean`.
-- `mergeable=UNKNOWN` is GitHub computing lazily — it shows `checking`, never asserted as a conflict.
+- `merge` folds GitHub's `mergeable` and `mergeStateStatus` to the blockers worth surfacing: `CONFLICTING`/`DIRTY` → `conflicting`, `BLOCKED` → `blocked`; everything else (`CLEAN`, `BEHIND`, `UNSTABLE`, and still-computing `UNKNOWN`) → `clean`, which the footer shows as nothing.
+- `mergeable=UNKNOWN` is GitHub computing lazily — it folds to `clean`, never asserted as a conflict unless `mergeStateStatus` is `DIRTY`.
 - `sync` compares local `HEAD` to `head_oid` — equal is `in_sync`, `HEAD` ahead is `unpushed` (count via `git rev-list --count <head_oid>..HEAD`), `head_oid` ahead is `behind`.
 - `unpushed` means the checks and comments on screen describe an older commit than your local tree.
 

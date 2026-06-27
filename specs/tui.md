@@ -115,7 +115,7 @@ The `PR` tab is a read-only mirror of the pull request, in the same two-pane fra
 
 ```
  1 Changes  2 All files  3 PR              Deep research: GPT-5.5/5.4-mini upgrade…  merged #226 ↗
-╭─ @codex · manager.py:115 ────────────────────────────╮╭─ PR ─────────────────────────╮
+╭─ @codex · manager.py:115 ──────────────────────────╮╭─ Checks & comments ──────────╮
 │ -    if primary_result.status == PERM_FAILURE:        ││ checks  ✗ 1 failing          │
 │ -        return primary_result                        ││  ✓ build-main-image          │
 │                                                       ││  ✓ review                    │
@@ -133,7 +133,7 @@ The `PR` tab is a read-only mirror of the pull request, in the same two-pane fra
 
 - The header right-anchors a clickable `status #226 ↗` chip — status colored by lifecycle (`open` green, `draft` yellow, `merged` mauve, `closed` red), the `↗` in the number's colour — with the PR title right-aligned to its left, truncated to fit. Clicking the chip (or `o`) opens the PR.
 - The footer is the action bar (see **Footer**): on this read-only tab it leads with the PR's merge, sync, and checks state and the comment count (`⚠ conflicts with main · ⇡ 2 unpushed · ✗ 1 failing · 5 comments`), with merge and sync shown only while the PR is open, then `o open ↗` and the dim orientation cluster. When a capped surface has more rows than fetched, a trailing `+more on GitHub ↗` marker is appended (`forge-host.md`).
-- The right pane is the navigator: a status-only `checks` section (each check as `icon name`) above the `comments` list, which is what the cursor walks.
+- The right pane (titled `Checks & comments`, so it doesn't repeat the left pane's `PR`) is the navigator: a status-only `checks` section (each check as `icon name`) above the `comments` list, which is what the cursor walks.
 - The `comments` list is newest first, each row `@author anchor age`, with an `outdated` or `resolved` marker where GitHub has receded the thread.
 - The left pane reads the selected comment: a finding shows its `diff_hunk` as text then the body, a review or plain comment shows its prose.
 - A human author is emphasised over the bots, so a person's comment stands out in a bot-heavy list.

@@ -1367,10 +1367,7 @@ fn pr_state_line(s: &forge::PrSnapshot) -> String {
     if s.state == forge::PrState::Open {
         match s.merge {
             forge::Merge::Conflicting => parts.push(format!("⚠ conflicts with {}", s.base_ref)),
-            forge::Merge::Behind => parts.push(format!("behind {}", s.base_ref)),
             forge::Merge::Blocked => parts.push("blocked".into()),
-            forge::Merge::Unstable => parts.push("unstable".into()),
-            forge::Merge::Checking => parts.push("merge: checking…".into()),
             forge::Merge::Clean => {}
         }
         match s.sync {
@@ -1402,8 +1399,9 @@ fn checks_summary(s: &forge::PrSnapshot) -> String {
 /// The right navigator: the checks list above the newest-first comments list, with the cursor
 /// row filled and the view windowed to keep it on screen.
 fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
-    // Identity (number + title) lives in the header; this pane is just "PR".
-    let block = bordered("PR", true);
+    // The navigator over the PR's checks and comments. Identity lives in the header; the left
+    // pane reads the selected comment — so this pane names its contents, not "PR" again.
+    let block = bordered("Checks & comments", true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(s) = app.pr_snapshot() else {

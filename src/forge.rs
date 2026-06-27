@@ -58,16 +58,14 @@ pub enum PrState {
     Closed,
 }
 
-/// The mergeability, folded from GitHub's `mergeable` and `mergeStateStatus`.
+/// Whether the PR has a merge blocker worth surfacing, folded from GitHub's `mergeable` and
+/// `mergeStateStatus`. Only the actionable blockers are modelled; GitHub's `behind` / `unstable`
+/// / still-`checking` states carry nothing a reviewer acts on, so they fold into `Clean`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Merge {
     Clean,
     Conflicting,
-    Behind,
     Blocked,
-    Unstable,
-    /// GitHub is still computing mergeability (`UNKNOWN`).
-    Checking,
 }
 
 /// The local branch's position relative to the PR head (`head_oid`).
@@ -377,20 +375,14 @@ fn parse_state(s: &str) -> PrState {
     }
 }
 
-/// Fold GitHub's `mergeable` and `mergeStateStatus` into one [`Merge`]; `UNKNOWN` is `Checking`.
+/// Fold GitHub's `mergeable` and `mergeStateStatus` into a [`Merge`]. Only the actionable
+/// blockers are surfaced: conflicts and a `blocked` required gate. Everything else — `clean`,
+/// `behind`, `unstable`, and still-`unknown` (computing) — folds into `Clean` (shows nothing).
 fn derive_merge(mergeable: Option<&str>, state: Option<&str>) -> Merge {
-    match mergeable {
-        Some("CONFLICTING") => Merge::Conflicting,
-        Some("UNKNOWN") | None => match state {
-            Some("DIRTY") => Merge::Conflicting,
-            _ => Merge::Checking,
-        },
-        _ => match state {
-            Some("BEHIND") => Merge::Behind,
-            Some("BLOCKED") => Merge::Blocked,
-            Some("UNSTABLE") => Merge::Unstable,
-            _ => Merge::Clean,
-        },
+    match (mergeable, state) {
+        (Some("CONFLICTING"), _) | (_, Some("DIRTY")) => Merge::Conflicting,
+        (_, Some("BLOCKED")) => Merge::Blocked,
+        _ => Merge::Clean,
     }
 }
 
@@ -589,18 +581,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn merge_folds_the_two_github_fields() {
+    fn merge_surfaces_only_conflicts_and_blocked() {
         assert_eq!(derive_merge(Some("CONFLICTING"), Some("DIRTY")), Merge::Conflicting);
-        assert_eq!(derive_merge(Some("MERGEABLE"), Some("CLEAN")), Merge::Clean);
-        assert_eq!(derive_merge(Some("MERGEABLE"), Some("BEHIND")), Merge::Behind);
         assert_eq!(derive_merge(Some("MERGEABLE"), Some("BLOCKED")), Merge::Blocked);
-        assert_eq!(derive_merge(Some("MERGEABLE"), Some("UNSTABLE")), Merge::Unstable);
-        // UNKNOWN is GitHub computing lazily — never asserted as a conflict unless DIRTY.
-        assert_eq!(derive_merge(Some("UNKNOWN"), Some("UNKNOWN")), Merge::Checking);
+        // Everything non-actionable folds into Clean: clean, behind, unstable, still-computing.
+        assert_eq!(derive_merge(Some("MERGEABLE"), Some("CLEAN")), Merge::Clean);
+        assert_eq!(derive_merge(Some("MERGEABLE"), Some("BEHIND")), Merge::Clean);
+        assert_eq!(derive_merge(Some("MERGEABLE"), Some("UNSTABLE")), Merge::Clean);
+        assert_eq!(derive_merge(Some("UNKNOWN"), Some("UNKNOWN")), Merge::Clean);
+        // DIRTY means conflicts even while mergeability is still UNKNOWN or the field is missing.
         assert_eq!(derive_merge(Some("UNKNOWN"), Some("DIRTY")), Merge::Conflicting);
-        // `mergeable: null` (a missing field, not "UNKNOWN") folds the same as UNKNOWN.
-        assert_eq!(derive_merge(None, None), Merge::Checking);
         assert_eq!(derive_merge(None, Some("DIRTY")), Merge::Conflicting);
+        assert_eq!(derive_merge(None, None), Merge::Clean);
     }
 
     #[test]
