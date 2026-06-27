@@ -88,6 +88,44 @@ pub enum Mode {
     List,
 }
 
+/// A footer action — what the bar offers for the current context. Semantic only: the renderer
+/// maps each to its key glyph and label and styles it by [`Tier`] (`specs/tui.md`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FooterAction {
+    Comment,
+    Select,
+    ClearSelection,
+    EditComment,
+    DeleteComment,
+    JumpComment,
+    ExpandFold,
+    ExpandDir,
+    CollapseDir,
+    /// Switch focus between the file list and the diff; the label names the destination pane.
+    TogglePane,
+    Scope,
+    Send,
+    List,
+    Copy,
+    Save,
+    Newline,
+    Cancel,
+    CloseList,
+    OpenPr,
+    Refresh,
+    Tabs,
+    Quit,
+}
+
+/// A footer action's visual weight, and its survival priority when the line is too narrow:
+/// `Orient` is dropped first, then trailing `Normal` actions; `Primary` is never dropped.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tier {
+    Primary,
+    Normal,
+    Orient,
+}
+
 /// The full state of the review session.
 // The several bools (wrap, reveal_files, reveal_diff, resizing, should_quit) are independent
 // toggles, not a state machine in disguise, so the excessive-bools lint does not apply.
@@ -1073,6 +1111,14 @@ impl App {
         }
     }
 
+    /// Drop the range-selection anchor (the `esc` clear in the diff); a no-op when none is set.
+    pub fn clear_selection(&mut self) {
+        if self.select_anchor.is_some() {
+            self.select_anchor = None;
+            self.reveal_diff = true;
+        }
+    }
+
     /// The inclusive `[lo, hi]` diff-line range currently selected.
     pub fn selection_range(&self) -> (usize, usize) {
         match self.select_anchor {
@@ -1453,6 +1499,100 @@ impl App {
         if self.mode == Mode::List {
             self.mode = Mode::Normal;
         }
+    }
+
+    /// The actions the footer offers for the current context, most-relevant first, each tagged
+    /// with its visual tier. Pure — a context → action mapping, unit-tested without a terminal.
+    /// The renderer maps each to a key+label, styles it by tier, and drops the least relevant
+    /// (orientation first) to fit one line (`specs/tui.md`).
+    #[must_use]
+    pub fn footer_actions(&self) -> Vec<(FooterAction, Tier)> {
+        use FooterAction as A;
+        use Tier::{Normal, Orient, Primary};
+
+        // A modal sub-task owns the whole bar — no tab/quit orientation while you're in one.
+        match self.mode {
+            Mode::Composing { .. } => {
+                return vec![(A::Save, Primary), (A::Newline, Normal), (A::Cancel, Normal)];
+            }
+            Mode::List => {
+                return vec![
+                    (A::Send, Primary),
+                    (A::Copy, Normal),
+                    (A::EditComment, Normal),
+                    (A::DeleteComment, Normal),
+                    (A::CloseList, Normal),
+                ];
+            }
+            Mode::Normal => {}
+        }
+
+        // The read-only PR tab: the state summary leads (rendered separately); `o open` is the act.
+        if self.tab == Tab::Pr {
+            let mut out = Vec::new();
+            if self.pr_selected_comment().is_some() {
+                out.push((A::OpenPr, Primary));
+            }
+            out.push((A::Tabs, Orient));
+            out.push((A::Refresh, Orient));
+            out.push((A::Quit, Orient));
+            return out;
+        }
+
+        let mut out: Vec<(FooterAction, Tier)> = Vec::new();
+        // Whether the diff-jump is already the primary, so orientation doesn't repeat the toggle.
+        let mut pane_is_primary = false;
+
+        if self.file_rows.is_empty() {
+            // Nothing in scope to review: only switching scope or refreshing is useful.
+            out.push((A::Scope, Primary));
+            out.push((A::Refresh, Normal));
+        } else if self.focus == Focus::Files {
+            match self.file_rows.get(self.file_cursor).map(|r| &r.kind) {
+                Some(RowKind::Dir { expanded: true, .. }) => out.push((A::CollapseDir, Primary)),
+                Some(RowKind::Dir { expanded: false, .. }) => out.push((A::ExpandDir, Primary)),
+                _ => {
+                    out.push((A::TogglePane, Primary)); // ⇥ into the diff to review
+                    pane_is_primary = true;
+                }
+            }
+        } else if self.visible.is_empty() {
+            // Diff focused but nothing to show (e.g. a binary): only the scope switch helps.
+            out.push((A::Scope, Primary));
+        } else if self.on_fold() {
+            out.push((A::ExpandFold, Primary));
+        } else if self.select_anchor.is_some() {
+            out.push((A::Comment, Primary));
+            out.push((A::ClearSelection, Normal));
+        } else if self.commented_lines().contains(&self.diff_cursor) {
+            out.push((A::EditComment, Primary));
+            out.push((A::DeleteComment, Normal));
+            out.push((A::JumpComment, Normal));
+        } else {
+            out.push((A::Comment, Primary));
+            out.push((A::Select, Normal));
+        }
+
+        // Switching scope is always available while reviewing, so it shows in every context on
+        // the file tabs — unless it's already the primary (the empty / no-diff states above).
+        if !out.iter().any(|&(a, _)| a == A::Scope) {
+            out.push((A::Scope, Normal));
+        }
+
+        // Once a comment is written, sending is the next relevant move — just below the primary.
+        if !self.store.is_empty() {
+            out.insert(1.min(out.len()), (A::Send, Normal));
+            out.push((A::List, Normal));
+        }
+
+        // The dim, stable orientation cluster: the pane toggle (unless it is already the
+        // primary), the tabs, quit.
+        if !pane_is_primary && !self.file_rows.is_empty() {
+            out.push((A::TogglePane, Orient));
+        }
+        out.push((A::Tabs, Orient));
+        out.push((A::Quit, Orient));
+        out
     }
 
     pub fn list_move(&mut self, delta: isize) {

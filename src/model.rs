@@ -22,7 +22,7 @@ impl Scope {
 
     /// Cycle to the next scope, for the header chip click: uncommitted → branch → last turn.
     #[must_use]
-    pub fn toggled(self) -> Self {
+    pub fn cycle(self) -> Self {
         match self {
             Scope::Uncommitted => Scope::Branch,
             Scope::Branch => Scope::LastTurn,
@@ -173,11 +173,11 @@ mod tests {
     }
 
     #[test]
-    fn scope_toggles_and_labels() {
+    fn scope_cycles_and_labels() {
         // The chip click cycles through all three scopes and wraps.
-        assert_eq!(Scope::Uncommitted.toggled(), Scope::Branch);
-        assert_eq!(Scope::Branch.toggled(), Scope::LastTurn);
-        assert_eq!(Scope::LastTurn.toggled(), Scope::Uncommitted);
+        assert_eq!(Scope::Uncommitted.cycle(), Scope::Branch);
+        assert_eq!(Scope::Branch.cycle(), Scope::LastTurn);
+        assert_eq!(Scope::LastTurn.cycle(), Scope::Uncommitted);
         assert_eq!(Scope::Uncommitted.label(), "uncommitted");
         assert_eq!(Scope::LastTurn.label(), "last turn");
     }

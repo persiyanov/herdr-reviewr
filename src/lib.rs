@@ -378,6 +378,8 @@ fn handle_key(app: &mut App, key: KeyEvent, area: Rect) -> Result<()> {
         (Char('n'), _) => app.jump_comment(1),
         (Char('N'), _) => app.jump_comment(-1),
         (Char('l'), _) => app.open_list(),
+        // `esc` clears an in-progress line selection (the footer's `esc clear`).
+        (Esc, _) => app.clear_selection(),
         _ => {}
     }
     Ok(())
@@ -425,7 +427,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect, heights: &[usize]) -> 
             } else if let Some(hit) = ui::hit_header(area, app, m.column, m.row) {
                 match hit {
                     ui::HeaderHit::Tab(tab) => app.set_tab(tab)?,
-                    ui::HeaderHit::Scope => app.set_scope(app.scope.toggled())?,
+                    ui::HeaderHit::Scope => app.set_scope(app.scope.cycle())?,
                     ui::HeaderHit::Send => app.export(&Agent),
                 }
             } else if let Some(i) = ui::hit_file(

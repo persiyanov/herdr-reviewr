@@ -1,5 +1,5 @@
 ---
-Status: Draft
+Status: Current
 Created: 2026-06-23
 Last edited: 2026-06-27
 ---
@@ -11,7 +11,7 @@ The terminal interface: how the review is laid out, how you drive it by keyboard
 ## Overview
 
 ```
-┌ 1 Changes  2 All files  [uncommitted]  9 changed ───────── [ Send (3) ] ┐
+┌ 1 Changes  2 All files  3 PR  [uncommitted]  9 changed ──── [ Send (3) ] ┐
 │ ⋯  11 unmodified lines                       │ M llm_registry.py  +18 -8  │
 │ 40    def resolve(self, name):               │ M deep_research.py +155-62 │
 │ 41 ▌  from .z import w                         │ D old_runner.py    -47     │
@@ -22,16 +22,16 @@ The terminal interface: how the review is laid out, how you drive it by keyboard
 │  └─────────────────────────────────────────┘ │                            │
 │ 42    return registry[name]                   │                            │
 ├───────────────────────────────────────────────┴──────────────────────────┤
-│ 9 changed · 3 comment(s)  1/2 tab · ⇥ pane · c comment · s send · l list │
+│ enter save · ⇧⏎ newline · esc cancel                                       │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- The header shows both tabs with the active one highlighted, the scope, the count of files changed in the scope, and a clickable `Send` button with the comment count.
+- The header shows the three tabs with the active one highlighted, the scope, the count of files changed in the scope, and a clickable `Send` button with the comment count.
 - The left pane is the selected file's diff — syntax-highlighted, with line numbers, change bars, word-level emphasis, and foldable context, defined in `diff-view.md`.
 - The right pane is the changed-files navigator for the current scope — a directory tree, defined in `file-list.md`.
 - Comments are one set across both tabs and export together; each tab otherwise owns its state (see **Tabs**).
 - The comment input opens **inline, directly under the last line of the selection**, pushing the diff below it down; it grows as you type more lines. It is not a footer band.
-- The footer is a key-hint and status line.
+- The footer is a live action bar — the actions available for what you're doing now, the most likely one highlighted, the rest dropped to fit one line (see **Footer**).
 
 The tab bar shows `Changes`, `All files`, and `PR`. The active tab sets the two panes' content: a diff and changed-files tree in `Changes`, file content and a whole-repo tree in `All files`, and the PR's checks and comments in `PR` (see **PR tab**). The review loop — select, comment, send — is the same in `Changes` and `All files`; `PR` is a read-only mirror of the pull request, with no authoring.
 
@@ -69,6 +69,39 @@ Writing a comment: select a range or land on a line, press `c`, and an input box
 
 On save the input box closes and the comment stays visible: it renders as a **read-only card spliced inline under its line**, titled with its location, so written feedback is always on screen while reviewing rather than hidden behind a marker. `e` reopens the card under the cursor as an edit box in place (its card is hidden while editing); `d` deletes it. There is no single-vs-all choice: `s` / `S` (or the `Send` button) sends every written comment, and a successful send reports a transient status such as `sent 3 comments` that fades after a few seconds.
 
+### Footer
+
+The footer is a live action bar: it shows the actions available for what you are doing right now, the most likely one highlighted, and drops the least relevant when the line is full. It never lists a key that wouldn't work in the current state, so it teaches by showing rather than by a memorized map.
+
+```
+ c comment · v select lines                          │ ⇥ files · 1·2·3 · q
+```
+
+- **Primary action** — the most likely next step, in a bright accent, always shown.
+- **Other available actions** — what else works here, in normal text.
+- **Send** — `s send N`, with the comment count riding the action; it rises to just below the primary once any comment is written, and is absent when none are.
+- **Orientation** — a dim, stable cluster at the right (`⇥ pane · 1·2·3 tab · q quit`, less the pane toggle on `PR`); the only fixed part, dropped first when space is tight.
+- **Transient status** — a message like `comment added` shows briefly among the actions and fades; it never replaces them.
+
+The bar is one line, filled by priority — primary, then send, then the other actions, then orientation — until the width runs out; a trailing `…` marks anything clipped. Movement keys aren't shown: moving the cursor is obvious. The comment editor and the comments list show their own actions (see those sections).
+
+The actions follow the cursor:
+
+| Where the cursor is | Primary | Also |
+| --- | --- | --- |
+| A diff line | `c comment` | `v select` |
+| A live selection | `c comment` | `esc clear` |
+| A commented line | `e edit` | `d delete · n/N jump` |
+| A fold | `→ expand fold` | — |
+| A file (file list) | `⇥ review diff` | — |
+| A collapsed directory | `→ expand` | — |
+| An expanded directory | `← collapse` | — |
+| Nothing to review (awaiting a turn) | `u/b/t scope` | `r refresh` |
+
+`u/b/t scope` is always available while reviewing, so it shows in every context on the `Changes` and `All files` tabs alongside the context's own actions (except where switching scope is itself the primary — the empty and no-diff states). Whenever a comment is written, `s send N · l list` joins the bar wherever the cursor is. The changed-file count stays in the header (scope summary + `Send` button); the footer carries only the comment count, folded into `s send N`.
+
+On the read-only `PR` tab the bar leads with the PR's state — its merge, sync, checks, and comment counts — since that is the relevant thing to show, not authoring actions; `o open ↗` follows, then the orientation cluster (see **PR tab**).
+
 ### Tabs
 
 - Each tab owns its state: its opened file or card, the scroll, the cursor, and which directories are expanded or cards are sent. Nothing carries between the tabs.
@@ -95,11 +128,11 @@ The `PR` tab is a read-only mirror of the pull request, in the same two-pane fra
 │                                                       ││ @claude manager.py:39    2h  │
 │                                                       ││ @claude parse.py:187  outdated│
 ╰───────────────────────────────────────────────────────╯╰─────────────────────────────╯
- ⚠ conflicts with main · ⇡ 2 unpushed · ✗ 1 failing · 5 comments    j/k move · PgUp/PgDn scroll · o open ↗ · r refresh
+ ⚠ conflicts with main · ⇡ 2 unpushed · ✗ 1 failing · 5 comments   o open ↗   │ 1·2·3 · r · q
 ```
 
 - The header right-anchors a clickable `status #226 ↗` chip — status colored by lifecycle (`open` green, `draft` yellow, `merged` mauve, `closed` red), the `↗` in the number's colour — with the PR title right-aligned to its left, truncated to fit. Clicking the chip (or `o`) opens the PR.
-- The footer carries the merge, sync, and checks state and the comment count (`⚠ conflicts with main · ⇡ 2 unpushed · ✗ 1 failing · 5 comments`); merge and sync show only while the PR is open. When a capped surface has more rows than fetched, a trailing `+more on GitHub ↗` marker is appended (`forge-host.md`).
+- The footer is the action bar (see **Footer**): on this read-only tab it leads with the PR's merge, sync, and checks state and the comment count (`⚠ conflicts with main · ⇡ 2 unpushed · ✗ 1 failing · 5 comments`), with merge and sync shown only while the PR is open, then `o open ↗` and the dim orientation cluster. When a capped surface has more rows than fetched, a trailing `+more on GitHub ↗` marker is appended (`forge-host.md`).
 - The right pane is the navigator: a status-only `checks` section (each check as `icon name`) above the `comments` list, which is what the cursor walks.
 - The `comments` list is newest first, each row `@author anchor age`, with an `outdated` or `resolved` marker where GitHub has receded the thread.
 - The left pane reads the selected comment: a finding shows its `diff_hunk` as text then the body, a review or plain comment shows its prose.
@@ -176,6 +209,9 @@ The inline box is a plain-text field that behaves like an ordinary editor: the c
 - A plain text field, not a code editor — caret movement, edit-anywhere, word ops, and paste, but no selection, undo/redo, or markdown rendering. Review comments are short; that machinery is more than they need. Rejected: a fuller editor with selection and history.
 - The tab sets the view, not the file's state — `All files` shows a file's content even when it is changed; to read its diff you switch to `Changes`, so a tab renders one kind of thing. Rejected: showing the diff for changed files and content for unchanged ones in `All files`.
 - Click a tab to switch; the key is provisional — herdr is mouse-native, so the tab bar is clickable, and the keyboard binding is part of the open keymap. Rejected: locking a tab key now.
+- A context-aware action bar, not a static hint line — the footer shows only the actions that work for what the cursor is on, the most likely one highlighted, dropping the least relevant to fit one line. It teaches by surfacing the next move in place, so nothing has to be memorized. Rejected: a static dump of every binding (unscannable, grows with each key); and a lean footer plus a `?` keys overlay (still a map to open and learn, the opposite of teaching in place).
+- One footer painter across all tabs — a single band renders on every tab; only its contents differ (actions on the authoring tabs, the PR's state plus `o open` on `PR`). Rejected: the `PR` tab's separate, dimmer footer.
+- Changed count in the header, comment count in the footer's `Send` — the changed-file count stays in the header (scope summary + `Send` button); the footer carries only the comment count, folded into `s send N` so the tally rides the action it feeds. Rejected: a standalone count segment, or repeating `N changed` in the footer.
 
 ## Open decisions
 

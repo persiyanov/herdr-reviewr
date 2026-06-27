@@ -69,7 +69,24 @@ herdr plugin link .
 `just install` (re)places the binary with a fresh file and ad-hoc re-signs it. On Apple Silicon
 that matters: overwriting a code-signed binary in place invalidates its signature, and macOS then
 SIGKILLs it at launch — so a plain `cp target/release/herdr-reviewr bin/` makes the sidebar pane
-open and close instantly. Re-run `just install` after each rebuild to refresh the linked binary.
+open and close instantly.
+
+**Iterating on changes.** The dev loop after the first link is:
+
+1. Edit the code.
+2. `just install` — rebuilds the binary and re-signs it under `bin/`.
+3. **Relaunch the sidebar** — toggle it off and back on with your keybind. The open pane keeps
+   running the *old* process until it is relaunched, so a rebuild alone changes nothing on screen.
+
+This only works while the plugin is **linked**, not installed from the marketplace. Check with
+`herdr plugin list`: a `github:…` source means the pane runs a *downloaded* binary under
+`~/.config/herdr/plugins/github/`, so your local rebuilds never appear no matter how often you
+`just install`. Switch a GitHub install to a dev link with:
+
+```bash
+herdr plugin uninstall persiyanov.reviewr   # config is keyed by id and survives
+herdr plugin link .
+```
 
 ## Configuration
 

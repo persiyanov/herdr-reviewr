@@ -12,10 +12,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Focus, Mode, Tab};
+use crate::app::{App, Focus, FooterAction, Mode, Tab, Tier};
 use crate::diff::{FileDiff, FileState, Row};
 use crate::file_list::{Annotation, RowKind};
 use crate::forge;
@@ -29,34 +29,25 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_pr_header(frame, app, p.tab);
         render_pr_read(frame, app, p.diff);
         render_pr_nav(frame, app, p.files);
-        render_pr_status(frame, app, p.status);
-        return;
+    } else {
+        render_tab_bar(frame, app, p.tab);
+        render_diff_view(frame, app, p.diff);
+        render_file_list(frame, app, p.files);
     }
-
-    render_tab_bar(frame, app, p.tab);
-    render_diff_view(frame, app, p.diff);
-    render_file_list(frame, app, p.files);
-    render_status_bar(frame, app, p.status);
+    // One footer band on every tab, then any modal overlay on top (the keys overlay can open
+    // from the PR tab too, so it is drawn here, past the per-tab base).
+    render_footer(frame, app, p.status);
 
     if app.mode == Mode::List {
         render_comments_list(frame, app, area);
     }
 }
 
-/// The vertical bands: tab bar, body, status. The comment input is inline in the
-/// diff, not a band of its own. The status band grows so its hints wrap rather than
-/// truncate at narrow widths.
+/// The vertical bands: tab bar, body, footer. The comment input is inline in the diff, not a
+/// band of its own. The footer action bar is one row — it fits by dropping the least-relevant
+/// actions, not by wrapping.
 fn vrows(area: Rect) -> Rc<[Rect]> {
-    let footer = footer_height(area.width);
-    Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(footer)])
-        .split(area)
-}
-
-/// Rows the status band needs for the longest hint line to wrap at `width` (1–3).
-fn footer_height(width: u16) -> u16 {
-    // Widest footer (counts + status + the Normal-mode hints) is ~150 columns.
-    const FOOTER_COLS: u16 = 150;
-    FOOTER_COLS.div_ceil(width.max(1)).clamp(1, 3)
+    Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).split(area)
 }
 
 /// The frame's layout rects: the diff pane, the file pane, and the whole body band. One
@@ -436,6 +427,27 @@ fn send_button_col(app: &App, width: usize) -> usize {
     before + width.saturating_sub(before + send_button(app).len())
 }
 
+/// The header's shared left side, painted by both tab bars: the lead pad, the three tab labels
+/// (the active one bright + underlined, the inactive ones at `SUBTEXT0`), and the trailing gap
+/// before each header's own suffix. One source so the two headers can't drift.
+fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
+    let bar = Style::default().bg(cat::SURFACE0);
+    let mut spans = vec![Span::styled(HEADER_LEAD, bar)];
+    for (i, (tab, label)) in TABS.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(TAB_GAP, bar));
+        }
+        let style = if *tab == app.tab {
+            bar.fg(cat::LAVENDER).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            bar.fg(cat::SUBTEXT0)
+        };
+        spans.push(Span::styled(*label, style));
+    }
+    spans.push(Span::styled(HEADER_GAP, bar));
+    spans
+}
+
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let chip = scope_chip(app);
     let suffix = header_suffix(app);
@@ -446,21 +458,7 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     // A quiet surface bar: the active tab in bright lavender, the inactive one dimmed, the
     // clickable scope and Send controls accented so they read as buttons.
     let bar = Style::default().bg(cat::SURFACE0);
-    let mut spans = vec![Span::styled(HEADER_LEAD, bar)];
-    for (i, (tab, label)) in TABS.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(TAB_GAP, bar));
-        }
-        // The active tab is bright + underlined so the bar reads as tabs; the inactive one sits
-        // at `SUBTEXT0` (available), not the `OVERLAY0` disabled tone.
-        let style = if *tab == app.tab {
-            bar.fg(cat::LAVENDER).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-        } else {
-            bar.fg(cat::SUBTEXT0)
-        };
-        spans.push(Span::styled(*label, style));
-    }
-    spans.push(Span::styled(HEADER_GAP, bar));
+    let mut spans = tab_bar_spans(app);
     spans.push(Span::styled(chip, bar.fg(cat::YELLOW).add_modifier(Modifier::BOLD)));
     spans.push(Span::styled(suffix, bar.fg(cat::OVERLAY0)));
 
@@ -1116,24 +1114,135 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(body, area);
 }
 
-fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let left = format!(" {} changed · {} comment(s) ", app.changed_count(), app.store.len());
-    let mid = if app.status.is_empty() { String::new() } else { format!("· {} ", app.status) };
-    let hints = match app.mode {
-        Mode::Composing { .. } => "enter save · alt/shift+enter newline · esc cancel",
-        Mode::List => "↑↓ move · s send · y copy · e edit · d delete · esc close",
-        Mode::Normal => {
-            "1/2 tab · ⇥ pane · u/b/t scope · v select · c comment · s send · y copy · n/N jump · l list · r refresh · q quit"
+/// The key glyph and label for a footer action; an empty label renders the glyph alone. The
+/// `TogglePane` and `Send` labels depend on `app` (the destination pane, the comment count).
+fn action_kl(app: &App, action: FooterAction) -> (String, String) {
+    use FooterAction as A;
+    let (k, l): (&str, &str) = match action {
+        A::Comment => ("c", "comment"),
+        A::Select => ("v", "select"),
+        A::ClearSelection => ("esc", "clear"),
+        A::EditComment => ("e", "edit"),
+        A::DeleteComment => ("d", "delete"),
+        A::JumpComment => ("n/N", "jump"),
+        A::ExpandFold => ("→", "expand fold"),
+        A::ExpandDir => ("→", "expand"),
+        A::CollapseDir => ("←", "collapse"),
+        A::TogglePane => {
+            return ("⇥".into(), if app.focus == Focus::Files { "diff" } else { "files" }.into());
         }
+        A::Scope => ("u/b/t", "scope"),
+        A::Send => return ("s".into(), format!("send {}", app.store.len())),
+        A::List => ("l", "list"),
+        A::Copy => ("y", "copy"),
+        A::Save => ("enter", "save"),
+        A::Newline => ("⇧⏎", "newline"),
+        A::Cancel => ("esc", "cancel"),
+        A::CloseList => ("esc", "close"),
+        A::OpenPr => ("o", "open ↗"),
+        A::Refresh => ("r", "refresh"),
+        A::Tabs => ("1·2·3", ""),
+        A::Quit => ("q", ""),
     };
-    let line = Line::from(vec![
-        Span::styled(left, Style::default().fg(cat::TEXT)),
-        Span::styled(format!(" {mid}"), Style::default().fg(cat::PEACH)),
-        Span::styled(format!("  {hints}"), Style::default().fg(cat::OVERLAY0)),
-    ]);
-    // Fill the whole footer with the surface bar, matching the header band.
+    (k.into(), l.into())
+}
+
+/// A tier's `(key, label)` styles: the primary bright and bold, normal actions readable, the
+/// orientation cluster dim so the eye lands on what to do, not on the always-there anchors.
+fn tier_styles(tier: Tier) -> (Style, Style) {
+    match tier {
+        Tier::Primary => {
+            (Style::default().fg(cat::PEACH).add_modifier(Modifier::BOLD), text_style())
+        }
+        Tier::Normal => (Style::default().fg(cat::LAVENDER), Style::default().fg(cat::SUBTEXT0)),
+        Tier::Orient => (Style::default().fg(cat::OVERLAY0), Style::default().fg(cat::OVERLAY0)),
+    }
+}
+
+/// Render a run of actions as ` · `-separated `key label` spans, styled per tier.
+fn action_spans(app: &App, acts: &[(FooterAction, Tier)]) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (i, &(action, tier)) in acts.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", Style::default().fg(cat::OVERLAY0)));
+        }
+        let (key, label) = action_kl(app, action);
+        let (key_style, label_style) = tier_styles(tier);
+        spans.push(Span::styled(key, key_style));
+        if !label.is_empty() {
+            spans.push(Span::styled(format!(" {label}"), label_style));
+        }
+    }
+    spans
+}
+
+/// The footer action bar: the context's actions (primary highlighted) packed left, the dim
+/// orientation cluster packed right, fitting one line — orientation dropped first, then trailing
+/// `Normal` actions, with a trailing `…` marking anything clipped (`specs/tui.md`).
+fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let w = area.width as usize;
+    let all = app.footer_actions();
+    let (mut left_acts, orient_acts): (Vec<_>, Vec<_>) =
+        all.into_iter().partition(|&(_, t)| t != Tier::Orient);
+
+    // The read-only PR tab leads with the PR's state summary; the transient status sits among
+    // the actions and never displaces them.
+    let pr_info = (app.tab == Tab::Pr).then(|| app.pr_snapshot()).flatten().map(|s| {
+        Span::styled(format!("{}   ", pr_state_line(s)), Style::default().fg(cat::SUBTEXT0))
+    });
+    let status = (!app.status.is_empty())
+        .then(|| Span::styled(format!("  · {} ", app.status), Style::default().fg(cat::PEACH)));
+
+    let build_left = |acts: &[(FooterAction, Tier)]| -> Vec<Span<'static>> {
+        let mut spans = vec![Span::raw(" ")];
+        if let Some(info) = &pr_info {
+            spans.push(info.clone());
+        }
+        spans.extend(action_spans(app, acts));
+        if let Some(st) = &status {
+            spans.push(st.clone());
+        }
+        spans
+    };
+    let orient: Vec<Span> = if orient_acts.is_empty() {
+        Vec::new()
+    } else {
+        let mut spans = vec![Span::styled("│ ", Style::default().fg(cat::OVERLAY0))];
+        spans.extend(action_spans(app, &orient_acts));
+        spans
+    };
+    let orient_w: usize = orient.iter().map(Span::width).sum();
+
+    let mut left = build_left(&left_acts);
+    let line_width = |s: &[Span]| -> usize { s.iter().map(Span::width).sum() };
+    let fits_with_orient = !orient.is_empty() && line_width(&left) + 1 + orient_w <= w;
+
+    let spans = if fits_with_orient {
+        // Leave one trailing cell so the last hint (`q`) doesn't butt against the edge.
+        let pad = w.saturating_sub(line_width(&left) + orient_w + 1);
+        left.push(Span::raw(" ".repeat(pad)));
+        left.extend(orient);
+        left
+    } else {
+        // Orientation is dropped; trim trailing `Normal` actions until the line fits, leaving
+        // room for the `…` that marks the drop. The primary action is never trimmed.
+        let dropped_orient = !orient.is_empty();
+        while line_width(&left) + 2 > w
+            && left_acts.len() > 1
+            && left_acts.last().is_some_and(|&(_, t)| t == Tier::Normal)
+        {
+            left_acts.pop();
+            left = build_left(&left_acts);
+        }
+        let trimmed = dropped_orient || line_width(&left) + 2 > w || left_acts.is_empty();
+        if trimmed {
+            left.push(Span::styled(" …", Style::default().fg(cat::OVERLAY0)));
+        }
+        left
+    };
+
     frame.render_widget(
-        Paragraph::new(line).style(Style::default().bg(cat::SURFACE0)).wrap(Wrap { trim: false }),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(cat::SURFACE0)),
         area,
     );
 }
@@ -1204,44 +1313,27 @@ fn selectable_row(
 /// with the PR title right-aligned to its left. Merge/sync/checks live in the footer.
 fn render_pr_header(frame: &mut Frame, app: &App, area: Rect) {
     let bar = Style::default().bg(cat::SURFACE0);
-    let mut spans = vec![Span::styled(HEADER_LEAD, bar)];
-    for (i, (tab, label)) in TABS.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(TAB_GAP, bar));
-        }
-        let style = if *tab == app.tab {
-            bar.fg(cat::LAVENDER).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-        } else {
-            bar.fg(cat::SUBTEXT0)
-        };
-        spans.push(Span::styled(*label, style));
-    }
-    spans.push(Span::styled(HEADER_GAP, bar));
+    let mut spans = tab_bar_spans(app);
     let lead_tabs: usize = spans.iter().map(Span::width).sum();
     let w = area.width as usize;
 
-    match &app.pr {
-        forge::PrView::Pr(s) => {
-            let number = format!("#{}", s.number);
-            let (status, color) = pr_status_chip(s);
-            let chip_w = pr_chip_width(s);
-            // The title fills the gap left of the chip, right-aligned against it (a leading pad).
-            let name = truncate_width(&s.title, w.saturating_sub(lead_tabs + chip_w + 2).max(4));
-            let pad = w.saturating_sub(lead_tabs + name.width() + 2 + chip_w);
-            spans.push(Span::styled(" ".repeat(pad), bar));
-            spans.push(Span::styled(name, bar.fg(cat::SUBTEXT0)));
-            spans.push(Span::styled("  ", bar));
-            spans.push(Span::styled(status, bar.fg(color).add_modifier(Modifier::BOLD)));
-            spans.push(Span::styled(" ", bar));
-            spans.push(Span::styled(number, bar.fg(cat::YELLOW).add_modifier(Modifier::BOLD)));
-            // The arrow shares the PR number's colour, reading as part of the clickable chip.
-            spans.push(Span::styled(" ↗", bar.fg(cat::YELLOW)));
-        }
-        forge::PrView::Ambiguous(n) => spans.push(Span::styled(
-            format!("{n} open PRs for this branch — open one on GitHub"),
-            bar.fg(cat::OVERLAY0),
-        )),
-        view => spans.push(Span::styled(pr_empty_msg(view), bar.fg(cat::OVERLAY0))),
+    // A resolved PR shows its identity chip; with no PR the header carries nothing — the read
+    // pane is the single home for the empty/degraded message, not repeated across all regions.
+    if let forge::PrView::Pr(s) = &app.pr {
+        let number = format!("#{}", s.number);
+        let (status, color) = pr_status_chip(s);
+        let chip_w = pr_chip_width(s);
+        // The title fills the gap left of the chip, right-aligned against it (a leading pad).
+        let name = truncate_width(&s.title, w.saturating_sub(lead_tabs + chip_w + 2).max(4));
+        let pad = w.saturating_sub(lead_tabs + name.width() + 2 + chip_w);
+        spans.push(Span::styled(" ".repeat(pad), bar));
+        spans.push(Span::styled(name, bar.fg(cat::SUBTEXT0)));
+        spans.push(Span::styled("  ", bar));
+        spans.push(Span::styled(status, bar.fg(color).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(" ", bar));
+        spans.push(Span::styled(number, bar.fg(cat::YELLOW).add_modifier(Modifier::BOLD)));
+        // The arrow shares the PR number's colour, reading as part of the clickable chip.
+        spans.push(Span::styled(" ↗", bar.fg(cat::YELLOW)));
     }
 
     // Fill the rest of the bar (the Pr arm already reaches the right edge).
@@ -1315,7 +1407,7 @@ fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(s) = app.pr_snapshot() else {
-        frame.render_widget(dim_paragraph(pr_empty_msg(&app.pr)), inner);
+        // The empty/degraded message lives once, in the read pane; this navigator stays blank.
         return;
     };
     let width = inner.width as usize;
@@ -1438,18 +1530,6 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
     // so casting first could wrap a large value below the clamp.
     let scroll = app.pr_read_scroll.min(lines.len().saturating_sub(1)) as u16;
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
-}
-
-/// The PR tab's footer: counts and the read-only key hints.
-fn render_pr_status(frame: &mut Frame, app: &App, area: Rect) {
-    let line = if !app.status.is_empty() {
-        app.status.clone()
-    } else if let Some(s) = app.pr_snapshot() {
-        format!(" {}    j/k move · PgUp/PgDn scroll · o open ↗ · r refresh", pr_state_line(s))
-    } else {
-        " PR    r refresh · q quit".to_string()
-    };
-    frame.render_widget(Paragraph::new(line).style(Style::default().fg(cat::SUBTEXT0)), area);
 }
 
 /// The one-line message for a loading or degraded PR view, each naming what unblocks it.

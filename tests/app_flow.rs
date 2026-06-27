@@ -7,7 +7,7 @@ use std::cell::RefCell;
 
 use anyhow::{Result, bail};
 use common::Repo;
-use herdr_reviewr::app::{App, Focus, Mode};
+use herdr_reviewr::app::{App, Focus, FooterAction, Mode};
 use herdr_reviewr::export::ExportTarget;
 use herdr_reviewr::model::{Scope, Side};
 
@@ -419,6 +419,69 @@ fn a_paste_outside_the_editor_is_ignored() {
     let mut app = app_on(&r); // Normal mode, not composing
     app.input_paste("ignored");
     assert!(app.input.is_empty(), "paste does nothing outside the comment editor");
+}
+
+/// The primary (first) footer action for the current context.
+fn primary(app: &App) -> FooterAction {
+    app.footer_actions().first().expect("a footer action").0
+}
+
+#[test]
+fn the_footer_offers_the_action_for_what_the_cursor_is_on() {
+    let mut app = composing_app(); // diff focus, on a changed line, composer open
+    app.cancel_comment(); // back to Normal, still on the changed line
+    assert_eq!(primary(&app), FooterAction::Comment, "a diff line offers comment");
+
+    app.toggle_select();
+    assert_eq!(primary(&app), FooterAction::Comment, "a live selection still leads with comment");
+    assert!(
+        app.footer_actions().iter().any(|&(a, _)| a == FooterAction::ClearSelection),
+        "and offers to clear the selection"
+    );
+    app.toggle_select();
+
+    comment_on(&mut app, '+', "note");
+    // The cursor now sits on the line it just commented.
+    assert_eq!(primary(&app), FooterAction::EditComment, "a commented line offers edit");
+    assert!(
+        app.footer_actions().iter().any(|&(a, _)| a == FooterAction::Send),
+        "a written comment surfaces send wherever the cursor is"
+    );
+}
+
+#[test]
+fn esc_clears_a_live_selection() {
+    let mut app = composing_app();
+    app.cancel_comment();
+    app.toggle_select();
+    assert!(app.select_anchor.is_some(), "v starts a selection");
+    app.clear_selection();
+    assert!(app.select_anchor.is_none(), "esc clears the selection");
+}
+
+#[test]
+fn the_footer_offers_scope_everywhere_on_a_file_tab() {
+    let mut app = composing_app();
+    app.cancel_comment(); // diff focus, on a content line
+    let has_scope = |a: &App| a.footer_actions().iter().any(|&(x, _)| x == FooterAction::Scope);
+    assert!(has_scope(&app), "scope shows while reviewing a diff line");
+    app.focus = Focus::Files;
+    assert!(has_scope(&app), "scope shows in the file list too");
+}
+
+#[test]
+fn the_footer_offers_send_only_once_a_comment_exists() {
+    let mut app = composing_app();
+    app.cancel_comment();
+    assert!(
+        !app.footer_actions().iter().any(|&(a, _)| a == FooterAction::Send),
+        "no comments yet → no send action"
+    );
+    comment_on(&mut app, '+', "note");
+    assert!(
+        app.footer_actions().iter().any(|&(a, _)| a == FooterAction::Send),
+        "a comment written → send appears"
+    );
 }
 
 /// A repo whose `big.rs` has 40 lines with one change in the middle, so the head and

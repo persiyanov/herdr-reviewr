@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Context-aware footer** — the footer is now a live action bar: it shows the actions available
+  for what the cursor is on (comment a line, edit/delete the comment under the cursor, expand a
+  fold or directory, send), the most likely one highlighted, dropping the least relevant to fit
+  one line. `u/b/t scope` stays available everywhere while reviewing, and `s send N` appears once
+  a comment is written. Replaces the static key-hint line.
+
+### Fixed
+- **PR empty state renders once** — "no PR for this branch yet…" (and the other PR loading and
+  degraded messages) showed in the header, the navigator, and the read pane at the same time; it
+  now shows only in the read pane.
+
 ## [0.3.0] — 2026-06-27
 
 ### Added
