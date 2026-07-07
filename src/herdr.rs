@@ -96,8 +96,13 @@ fn pick_agent<'a>(
     sole_agent(agents, "tab_id", tab, me).or_else(|| sole_agent(agents, "workspace_id", ws, me))
 }
 
-/// The unique agent whose `key` equals `want`, ignoring our own pane `me`; `None` if zero
-/// or many remain.
+/// The unique agent whose `key` equals `want`, ignoring our own pane `me` and non-agent
+/// panes; `None` if zero or many remain.
+///
+/// `herdr agent list` also returns non-agent panes — plugin sidebars and plain shells —
+/// as entries with `agent_status: unknown` and no `agent` field (see `specs/herdr-host.md`).
+/// Only entries carrying an `agent` field are real agents; counting the rest made a
+/// one-agent tab look ambiguous whenever any other plugin pane or shell shared it.
 fn sole_agent<'a>(
     agents: &'a [Value],
     key: &str,
@@ -107,6 +112,7 @@ fn sole_agent<'a>(
     let want = want?;
     let mut matches = agents
         .iter()
+        .filter(|a| a.get("agent").and_then(Value::as_str).is_some())
         .filter(|a| a.get(key).and_then(Value::as_str) == Some(want))
         .filter(|a| pane_id(a).as_deref() != me);
     let first = matches.next()?;
@@ -180,6 +186,41 @@ mod tests {
             pick_agent_pane(&agents, Some("w8:t1"), Some("w8"), Some("w8:p5")),
             Some("w8:p1".to_string())
         );
+    }
+
+    #[test]
+    fn non_agent_panes_do_not_make_the_tab_ambiguous() {
+        // herdr lists non-agent panes (another plugin's sidebar, a plain shell) with
+        // `agent_status: unknown` and no `agent` field. They must not count as candidates:
+        // a tab with one real agent plus a file-viewer pane resolves, not errors.
+        let real = agent("w3:p1", "w3:t1", "w3");
+        let file_viewer = json!({
+            "agent_status": "unknown",
+            "cwd": "/plugins/file-viewer",
+            "pane_id": "w3:p4",
+            "tab_id": "w3:t1",
+            "workspace_id": "w3",
+            "focused": false
+        });
+        let agents = vec![real, file_viewer];
+        assert_eq!(
+            pick_agent_pane(&agents, Some("w3:t1"), Some("w3"), Some("w3:p5")),
+            Some("w3:p1".to_string())
+        );
+    }
+
+    #[test]
+    fn only_non_agent_panes_resolve_to_none() {
+        // A tab holding nothing but non-agent panes still refuses to send.
+        let shell = json!({
+            "agent_status": "unknown",
+            "cwd": "/repo",
+            "pane_id": "w3:p2",
+            "tab_id": "w3:t1",
+            "workspace_id": "w3",
+            "focused": false
+        });
+        assert_eq!(pick_agent_pane(&[shell], Some("w3:t1"), Some("w3"), None), None);
     }
 
     #[test]
