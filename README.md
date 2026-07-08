@@ -79,6 +79,7 @@ below are the full reference.
 | `1` `2` `3` | Switch tab — Changes / All files / PR |
 | `u` `b` `t` | Switch scope — uncommitted / branch / last turn |
 | `j` `k` · `↑` `↓` | Move the cursor in the focused pane |
+| `f` `F` | Jump to the next / previous file (from either pane) |
 | `PageUp` `PageDown` | Move a page · `Ctrl+U` `Ctrl+D` move a half-page |
 | `Tab` | Switch focus between the file list and the diff |
 | `→` `←` | Expand / collapse a directory or expand a fold; otherwise scroll the diff sideways |
