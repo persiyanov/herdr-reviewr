@@ -205,6 +205,57 @@ fn toggling_a_directory_requests_a_reveal() {
 }
 
 #[test]
+fn jump_between_files_skipping_directories() {
+    let r = Repo::init();
+    // Two files in `src/` so it stays a real directory row rather than folding into a
+    // single-child `src/b.rs` chain.
+    r.write("src/b.rs", "x\n");
+    r.write("src/c.rs", "w\n");
+    r.write("a.rs", "y\n");
+    r.write("z.rs", "z\n");
+    r.commit_all("init");
+    r.write("src/b.rs", "x2\n");
+    r.write("src/c.rs", "w2\n");
+    r.write("a.rs", "y2\n");
+    r.write("z.rs", "z2\n");
+    let mut app = app_on(&r);
+
+    // Directories sort before files, so the tree is [Dir(src), src/b.rs, src/c.rs, a.rs,
+    // z.rs] — the initial cursor lands on the first *file* row, not the leading directory.
+    assert_eq!(app.diff_path.as_deref(), Some("src/b.rs"));
+
+    app.next_file();
+    assert_eq!(app.diff_path.as_deref(), Some("src/c.rs"));
+    app.next_file();
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+    app.next_file();
+    assert_eq!(app.diff_path.as_deref(), Some("z.rs"));
+    // Clamps at the last file rather than wrapping.
+    app.next_file();
+    assert_eq!(app.diff_path.as_deref(), Some("z.rs"));
+
+    app.prev_file();
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+    app.prev_file();
+    assert_eq!(app.diff_path.as_deref(), Some("src/c.rs"));
+    app.prev_file();
+    assert_eq!(app.diff_path.as_deref(), Some("src/b.rs"));
+    // Clamps at the first file — the directory row above it is never landed on.
+    app.prev_file();
+    assert_eq!(app.diff_path.as_deref(), Some("src/b.rs"));
+
+    // Starting from a directory row, `f` finds the nearest file forward.
+    app.file_cursor = app.file_rows.iter().position(|row| row.dir_path() == Some("src")).unwrap();
+    app.next_file();
+    assert_eq!(app.diff_path.as_deref(), Some("src/b.rs"));
+
+    // Works from the diff pane too, not just the file list.
+    app.focus = Focus::Diff;
+    app.next_file();
+    assert_eq!(app.diff_path.as_deref(), Some("src/c.rs"));
+}
+
+#[test]
 fn page_keys_move_the_cursor_in_both_panes() {
     let mut app = long_diff_app(40);
     // File pane: page moves the selection (not just the viewport).
