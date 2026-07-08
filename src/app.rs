@@ -1024,6 +1024,50 @@ impl App {
         Ok(())
     }
 
+    /// Jump the cursor to the next file in the tree, skipping directories. Works from either
+    /// pane, chiefly the diff, so paging through files needn't detour through the list, and
+    /// clamps at the last file rather than wrapping, like the other cursor moves.
+    pub fn next_file(&mut self) {
+        self.step_file(true);
+    }
+
+    /// Jump the cursor to the previous file in the tree; see [`Self::next_file`].
+    pub fn prev_file(&mut self) {
+        self.step_file(false);
+    }
+
+    fn step_file(&mut self, forward: bool) {
+        if let Some(row) = self.nearest_file_row(forward) {
+            self.file_cursor = row;
+            self.open_cursor_file();
+            self.reveal_files = true;
+        }
+    }
+
+    /// The row index of the next/previous file from `file_cursor`, or the far end's file when
+    /// the cursor is already past it (a directory row past the last file counts as past it),
+    /// clamping rather than wrapping.
+    fn nearest_file_row(&self, forward: bool) -> Option<usize> {
+        if forward {
+            self.file_rows
+                .iter()
+                .enumerate()
+                .skip(self.file_cursor + 1)
+                .find(|(_, r)| r.file_index().is_some())
+                .map(|(i, _)| i)
+                .or_else(|| self.file_rows.iter().rposition(|r| r.file_index().is_some()))
+        } else {
+            self.file_rows
+                .get(..self.file_cursor)?
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, r)| r.file_index().is_some())
+                .map(|(i, _)| i)
+                .or_else(|| self.file_rows.iter().position(|r| r.file_index().is_some()))
+        }
+    }
+
     /// Collapse or expand the directory under the cursor, then rebuild the tree. The cursor
     /// stays on the directory row (still present, now toggled).
     fn toggle_dir(&mut self) {

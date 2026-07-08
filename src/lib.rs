@@ -379,6 +379,8 @@ fn handle_key(app: &mut App, key: KeyEvent, area: Rect) -> Result<()> {
         (Char('n'), _) => app.jump_comment(1),
         (Char('N'), _) => app.jump_comment(-1),
         (Char('l'), _) => app.open_list(),
+        (Char('f'), _) => app.next_file(),
+        (Char('F'), _) => app.prev_file(),
         // `esc` clears an in-progress line selection (the footer's `esc clear`).
         (Esc, _) => app.clear_selection(),
         _ => {}
