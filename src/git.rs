@@ -177,10 +177,12 @@ pub fn snapshot_worktree(repo: &Path) -> Result<String> {
     let git_dir = PathBuf::from(git(repo, &["rev-parse", "--absolute-git-dir"])?.trim());
     let tmp_index = git_dir.join("reviewr-turn-index");
     let real_index = git_dir.join("index");
-    // Clear any temp index a prior hard crash left, then drop it on every exit path via the
-    // guard, so even a failed snapshot leaves nothing behind in the git dir.
-    let _ = std::fs::remove_file(&tmp_index);
-    let _guard = TempIndex(&tmp_index);
+    // Clear whatever a prior hard crash left — the temp index and the `.lock` git holds
+    // while writing it (a leftover lock fails every later `add` with "File exists") — then
+    // drop both on every exit path via the guard, so even a failed snapshot leaves nothing
+    // behind in the git dir.
+    let guard = TempIndex(&tmp_index);
+    guard.clear();
     // Seed from the real index so git's stat cache lets unchanged files skip hashing;
     // a fresh repo may have no index yet, so start empty in that case.
     if real_index.exists() {
@@ -191,12 +193,25 @@ pub fn snapshot_worktree(repo: &Path) -> Result<String> {
     Ok(tree.trim().to_string())
 }
 
-/// Removes a temporary index on drop, so a snapshot that fails midway never leaves one behind.
+/// Removes a temporary index and its git lock file on drop, so a snapshot that fails midway
+/// never leaves either behind.
 struct TempIndex<'a>(&'a Path);
+
+impl TempIndex<'_> {
+    /// Removes the index and the `<index>.lock` git creates beside it while writing. Safe at
+    /// any point we run: the lock's only legitimate holder is a live `git add` this process
+    /// spawned and has already waited on.
+    fn clear(&self) {
+        let _ = std::fs::remove_file(self.0);
+        let mut lock = self.0.as_os_str().to_owned();
+        lock.push(".lock");
+        let _ = std::fs::remove_file(Path::new(&lock));
+    }
+}
 
 impl Drop for TempIndex<'_> {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(self.0);
+        self.clear();
     }
 }
 

@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-07-09
+
+### Fixed
+- **A hard kill mid-snapshot no longer wedges the sidebar's refresh for that worktree.** A crash
+  during the turn snapshot's `git add` could leave a stale `reviewr-turn-index.lock` in the
+  worktree's git dir, and every refresh after that failed with `refresh failed: git ["add", "-A"]
+  failed: fatal: Unable to create … File exists` until the lock was deleted by hand. The snapshot
+  now clears any leftover temp index and its lock — both private to reviewr — before running and
+  on every exit path. See `specs/herdr-host.md`.
+- **`herdr plugin install` now delivers the current release again.** v0.8.1 shipped with
+  `herdr-plugin.toml` still saying `0.8.0`, and `install.sh` reads the manifest to pick the
+  download tag, so installs were silently getting the v0.8.0 binary — without the Send resolver
+  fix from #6. Both version files now carry 0.8.2.
+
 ## [0.8.1] — 2026-07-08
 
 ### Fixed

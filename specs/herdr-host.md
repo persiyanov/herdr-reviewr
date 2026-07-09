@@ -129,6 +129,7 @@ The snapshot is non-disruptive. reviewr writes a tree from the worktree through 
 - Turn tracking needs the agent status from the herdr CLI; without it the `last-turn` scope stays empty, while `uncommitted` and `branch` are unaffected. It resolves the agent under the same S1–S3 rules, so a plugin sidebar or shell in the tab never pauses tracking.
 - A turn that starts and ends within one poll interval — or whose start is masked by a transient `unknown` status — is never seen entering `working`, so its start is not snapshotted; `last-turn` then shows the changes accumulated since the last observed turn start, more than one turn, never lines the agent did not write.
 - A crash between the snapshot and the ref update leaves an orphaned tree object, which git garbage-collects; `git update-ref` is atomic, so the baseline ref is never half-written.
+- A hard kill mid-snapshot can leave the temporary index and the `.lock` git holds while writing it. Both are private to reviewr — the lock's only legitimate holder is a `git add` the snapshot itself spawned and waited on — so every snapshot clears any leftover pair before running and on every exit path. A stale lock therefore costs at most the one failed refresh that follows the crash, never a permanently wedged worktree.
 - The sidebar assumes one instance per worktree; two instances on the same worktree write the same per-worktree ref under last-writer-wins, which is harmless since both compute the same baseline.
 
 ## Non-goals

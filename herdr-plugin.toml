@@ -1,6 +1,6 @@
 id = "persiyanov.reviewr"
 name = "reviewr"
-version = "0.8.0"
+version = "0.8.2"
 min_herdr_version = "0.7.0"
 platforms = ["macos", "linux"]
 description = "Native terminal code-review sidebar for herdr."

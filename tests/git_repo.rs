@@ -356,6 +356,23 @@ fn snapshot_worktree_never_mutates_the_repo() {
 }
 
 #[test]
+fn snapshot_worktree_recovers_from_a_stale_index_lock() {
+    let r = Repo::init();
+    r.write("a.rs", "x\n");
+    r.commit_all("init");
+
+    let git_dir = r.git(&["rev-parse", "--absolute-git-dir"]);
+    let git_dir = std::path::Path::new(git_dir.trim());
+    // A hard crash mid-`add` leaves git's lock on the temp index behind; a later snapshot
+    // must clear it instead of failing "Unable to create ... File exists" forever after.
+    std::fs::write(git_dir.join("reviewr-turn-index.lock"), "").unwrap();
+
+    let tree = snapshot_worktree(r.path()).unwrap();
+    assert_eq!(tree.len(), 40, "a tree object id");
+    assert!(!git_dir.join("reviewr-turn-index.lock").exists(), "the stale lock is cleared");
+}
+
+#[test]
 fn baseline_ref_round_trips_under_the_private_namespace() {
     let r = Repo::init();
     r.write("a.rs", "a\n");
