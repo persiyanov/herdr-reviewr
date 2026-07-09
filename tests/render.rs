@@ -384,6 +384,8 @@ fn the_pr_footer_keeps_the_open_action_when_the_state_line_is_long() {
         url: "u".into(),
         state: PrState::Open,
         is_draft: false,
+        head_ref: "feature".into(),
+        head_is_fork: false,
         base_ref: "main".into(),
         merge: Merge::Conflicting, // a long state line: conflicts · behind · failing · +more
         sync: Sync::Behind(3),
@@ -394,6 +396,75 @@ fn the_pr_footer_keeps_the_open_action_when_the_state_line_is_long() {
     // At narrow width the state line is capped so the primary `o open ↗` is never crowded off.
     let footer = footer_line(&render_at(&app, 60));
     assert!(footer.contains("o open"), "the open action survives a long state line:\n{footer}");
+}
+
+#[test]
+fn pr_header_names_the_resolved_branch_and_marks_a_fork() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{Merge, PrSnapshot, PrState, PrView, Sync};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.reload().unwrap();
+    app.set_tab(Tab::Pr).unwrap();
+    let snap = |fork: bool| {
+        PrView::Pr(Box::new(PrSnapshot {
+            number: 226,
+            title: "t".into(),
+            url: "u".into(),
+            state: PrState::Open,
+            is_draft: false,
+            head_ref: "persiyanov/feature".into(),
+            head_is_fork: fork,
+            base_ref: "main".into(),
+            merge: Merge::Clean,
+            sync: Sync::InSync,
+            checks: vec![],
+            comments: vec![],
+            truncated: false,
+        }))
+    };
+    // The header shows the branch that resolved — it can differ from the local branch —
+    // and marks a fork head, so a same-named fork PR is visible (specs/forge-host.md).
+    app.pr = snap(false);
+    let header = render(&app).lines().next().unwrap().to_string();
+    assert!(header.contains("persiyanov/feature"), "resolved branch in the header:\n{header}");
+    assert!(!header.contains('⑂'), "no fork marker on a same-repo head:\n{header}");
+    app.pr = snap(true);
+    let header = render(&app).lines().next().unwrap().to_string();
+    assert!(header.contains("⑂ persiyanov/feature"), "fork head is marked:\n{header}");
+    // Narrow bars drop the branch first; the chip's number stays.
+    app.pr = snap(false);
+    let narrow = render_at(&app, 44).lines().next().unwrap().to_string();
+    assert!(!narrow.contains("persiyanov/feature"), "branch drops when narrow:\n{narrow}");
+    assert!(narrow.contains("#226"), "the chip survives a narrow bar:\n{narrow}");
+}
+
+#[test]
+fn pr_empty_states_name_candidates_detachment_and_the_ambiguity_count() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::PrView;
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.reload().unwrap();
+    app.set_tab(Tab::Pr).unwrap();
+    // The empty state names what was queried, so resolution is inspectable, never silent.
+    let names = ["alpha", "beta", "gamma", "delta", "epsilon"];
+    app.pr = PrView::NoPr(names.iter().map(|s| (*s).to_string()).collect());
+    let out = render(&app);
+    assert!(
+        out.contains("no PR for alpha, beta, gamma +2 more yet"),
+        "candidates are named, capped at three:\n{out}"
+    );
+    app.pr = PrView::NoPr(Vec::new());
+    let out = render(&app);
+    assert!(out.contains("detached HEAD"), "detached wording for no candidates:\n{out}");
+    app.pr = PrView::Ambiguous(3);
+    let out = render(&app);
+    assert!(out.contains("3 open PRs"), "the ambiguity count shows:\n{out}");
 }
 
 #[test]

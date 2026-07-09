@@ -16,11 +16,13 @@ use serde_json::Value;
 pub enum PrView {
     /// Not yet fetched — the tab shows a loading placeholder until the first poll lands.
     Loading,
-    /// An open (or merged/closed) PR resolved for the branch.
+    /// An open (or merged/closed) PR resolved for one of the worktree's candidate branches.
     Pr(Box<PrSnapshot>),
-    /// The branch has no PR; push and open one.
-    NoPr,
-    /// Two or more open PRs back the branch; the count, so the user knows to pick on GitHub.
+    /// No candidate branch has a PR; the queried candidate names, so the empty state can
+    /// say what was looked for. Empty on a detached `HEAD` (nothing was queried).
+    NoPr(Vec<String>),
+    /// Two or more open PRs back the winning candidate branch and not exactly one matches
+    /// the pinned `HEAD`; the count, so the user knows to pick on GitHub.
     Ambiguous(usize),
     /// `gh` is not on `PATH`.
     NoGh,
@@ -40,6 +42,12 @@ pub struct PrSnapshot {
     pub url: String,
     pub state: PrState,
     pub is_draft: bool,
+    /// The PR's head branch name — the candidate that resolved, which may differ from the
+    /// worktree's local branch name (`specs/forge-host.md`).
+    pub head_ref: String,
+    /// The head branch lives in another repository (GitHub's `isCrossRepository`); shown
+    /// as a marker so a same-named fork PR is visible.
+    pub head_is_fork: bool,
     pub base_ref: String,
     pub merge: Merge,
     pub sync: Sync,
@@ -197,43 +205,68 @@ impl From<GhError> for PrView {
     }
 }
 
-/// Read the PR for the worktree's branch, or a degraded view. Never errors — degradation is
-/// in-band so the `PR` tab always has something to render (`specs/forge-host.md`).
+/// Read the PR for the worktree's candidate branches, or a degraded view. Never errors —
+/// degradation is in-band so the `PR` tab always has something to render
+/// (`specs/forge-host.md`). `base` is the `--base` flag, joining the base-branch exclusions.
 #[must_use]
-pub fn fetch(repo: &Path) -> PrView {
-    match fetch_inner(repo) {
+pub fn fetch(repo: &Path, base: Option<&str>) -> PrView {
+    match fetch_inner(repo, base) {
         Ok(view) => view,
         Err(e) => e.into(),
     }
 }
 
-fn fetch_inner(repo: &Path) -> Result<PrView, GhError> {
-    let Some((owner, name)) = crate::git::github_slug(repo) else {
+fn fetch_inner(repo: &Path, base: Option<&str>) -> Result<PrView, GhError> {
+    // One failure-aware local pass pins HEAD and derives the candidate branches; a git
+    // *failure* is a transient error (frozen last-good view), never read as absence.
+    let local = crate::git::pr_local(repo, base).map_err(|e| GhError::Other(e.0))?;
+    let Some((owner, name)) = local.slug else {
         return Ok(PrView::NotGitHub);
     };
-    let Some(branch) = crate::git::current_branch(repo) else {
-        // A detached HEAD (e.g. after `gh pr merge --delete-branch`) has no branch to resolve a
-        // PR against. Show the empty state rather than querying `headRefName:""`, which GitHub
-        // treats as unfiltered and would mis-resolve to an unrelated PR.
-        return Ok(PrView::NoPr);
-    };
-    // Resolve the branch's PR number, then read all its detail directly. Two GraphQL calls, not
-    // the six `gh` calls this replaced — and `mergeable` only populates on direct access, never
-    // through the list connection (`specs/forge-host.md`).
-    let number = match resolve(repo, &owner, &name, &branch)? {
-        Resolution::One(n) => n,
-        Resolution::None => return Ok(PrView::NoPr),
-        Resolution::Many(count) => return Ok(PrView::Ambiguous(count)),
+    if local.candidates.is_empty() {
+        // A detached HEAD (e.g. after `gh pr merge --delete-branch`) has no branch identity
+        // to publish, so nothing was derived. Show the empty state rather than querying
+        // `headRefName:""`, which GitHub treats as unfiltered and would mis-resolve to an
+        // unrelated PR.
+        return Ok(PrView::NoPr(Vec::new()));
+    }
+    // Resolve the open PR across all candidates in one aliased call, then read its detail
+    // directly — `mergeable` only populates on direct access, never through the list
+    // connection (`specs/forge-host.md`).
+    let open = resolve_candidates(repo, &owner, &name, &local.candidates, OPEN, "headRefOid")?;
+    let number = match select_open(&open, local.head_oid.as_deref()) {
+        Pick::One(n) => n,
+        Pick::Ambiguous(count) => return Ok(PrView::Ambiguous(count)),
+        Pick::None => {
+            // No open PR anywhere: fall back to the newest-created merged/closed PR.
+            let hist = resolve_candidates(
+                repo,
+                &owner,
+                &name,
+                &local.candidates,
+                HISTORICAL,
+                "createdAt",
+            )?;
+            match select_historical(&hist) {
+                Some(n) => n,
+                None => return Ok(PrView::NoPr(local.candidates)),
+            }
+        }
     };
     let detail = pr_detail(repo, &owner, &name, number)?;
     let node = &detail["data"]["repository"]["pullRequest"];
     if node.is_null() {
-        return Ok(PrView::NoPr);
+        return Ok(PrView::NoPr(local.candidates));
     }
-    let sync = derive_sync(crate::git::ahead_behind(
-        repo,
-        node["headRefOid"].as_str().unwrap_or_default(),
-    ));
+    // Sync compares the fetch's pinned HEAD to the PR head, so a checkout or commit landing
+    // mid-fetch never pairs one branch's PR with another branch's count.
+    let pr_head = node["headRefOid"].as_str().unwrap_or_default();
+    let sync = match local.head_oid.as_deref() {
+        Some(pin) if !pr_head.is_empty() => derive_sync(
+            crate::git::ahead_behind_oids(repo, pin, pr_head).map_err(|e| GhError::Other(e.0))?,
+        ),
+        _ => Sync::InSync,
+    };
     Ok(PrView::Pr(Box::new(build_snapshot(node, sync))))
 }
 
@@ -248,41 +281,78 @@ fn derive_sync(ahead_behind: Option<(u32, u32)>) -> Sync {
     }
 }
 
-/// The branch's open PR number, none, or several. A merged/closed PR is consulted only when no
-/// open PR exists (`specs/forge-host.md`).
-enum Resolution {
-    One(u64),
-    None,
-    Many(usize),
+/// The list filter for the open-PR resolve call. `first:100` keeps the surfaced ambiguity
+/// count the real number of open PRs, not a cap.
+const OPEN: &str = "states:OPEN, first:100";
+/// The list filter for the historical fallback: the newest-created merged/closed PR per name.
+const HISTORICAL: &str =
+    "states:[MERGED,CLOSED], first:1, orderBy:{field:CREATED_AT, direction:DESC}";
+
+/// The PRs for every candidate name in one aliased GraphQL call — alias `c{i}` ↔ candidate
+/// `i`, names passed as variables (never interpolated into the query text). Each returned
+/// entry is `(number, extra)` where `extra` is `headRefOid` (open) or `createdAt` (historical).
+fn resolve_candidates(
+    repo: &Path,
+    owner: &str,
+    name: &str,
+    candidates: &[String],
+    filter: &str,
+    extra: &str,
+) -> Result<Vec<Vec<(u64, String)>>, GhError> {
+    let query = build_resolve_query(candidates.len(), filter, extra);
+    let mut vars: Vec<(String, String)> =
+        vec![("o".to_string(), owner.to_string()), ("n".to_string(), name.to_string())];
+    for (i, cand) in candidates.iter().enumerate() {
+        vars.push((format!("b{i}"), cand.clone()));
+    }
+    let v = graphql(repo, &query, &vars)?;
+    Ok(parse_resolve(&v, candidates.len(), extra))
 }
 
-/// Resolve the branch's PR number via the list connection (cheap, number-only). Prefers an open
-/// PR; falls back to the latest of any state.
-fn resolve(repo: &Path, owner: &str, name: &str, branch: &str) -> Result<Resolution, GhError> {
-    let nums = |filter: &str| -> Result<Vec<u64>, GhError> {
-        let q = format!(
-            "query($o:String!,$n:String!,$b:String!){{repository(owner:$o,name:$n){{\
-             pullRequests(headRefName:$b, {filter}){{nodes{{number}}}}}}}}"
-        );
-        let v = graphql(repo, &q, owner, name, branch)?;
-        Ok(v["data"]["repository"]["pullRequests"]["nodes"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|p| p["number"].as_u64())
-            .collect())
-    };
-    // first:100 so the surfaced ambiguity count is the real number of open PRs, not a cap.
-    let open = nums("states:OPEN, first:100")?;
-    match open.as_slice() {
-        [n] => return Ok(Resolution::One(*n)),
-        [_, ..] => return Ok(Resolution::Many(open.len())),
-        [] => {}
+/// The winner among the candidates' open PRs (`specs/forge-host.md` "Resolution").
+#[derive(Debug, PartialEq, Eq)]
+enum Pick {
+    One(u64),
+    Ambiguous(usize),
+    None,
+}
+
+/// Pick the open PR: the earliest candidate in derivation order holding any wins — the
+/// recorded upstream outranks an inferred branch, which outranks the bare local name. On
+/// one name backing several open PRs, exactly one head at the pinned `HEAD` wins; else the
+/// ambiguity count is surfaced rather than a silent guess.
+fn select_open(per_candidate: &[Vec<(u64, String)>], pinned_head: Option<&str>) -> Pick {
+    for prs in per_candidate {
+        match prs.as_slice() {
+            [] => {}
+            [(number, _)] => return Pick::One(*number),
+            many => {
+                if let Some(pin) = pinned_head {
+                    let mut hits = many.iter().filter(|(_, oid)| oid == pin);
+                    if let (Some((number, _)), None) = (hits.next(), hits.next()) {
+                        return Pick::One(*number);
+                    }
+                }
+                return Pick::Ambiguous(many.len());
+            }
+        }
     }
-    match nums("first:1, orderBy:{field:CREATED_AT, direction:DESC}")?.first() {
-        Some(n) => Ok(Resolution::One(*n)),
-        None => Ok(Resolution::None),
+    Pick::None
+}
+
+/// The historical fallback: the newest-created merged/closed PR across all candidates.
+/// ISO-8601 `…Z` strings compare lexically; a strict `>` keeps the earlier candidate on a
+/// timestamp tie, so the pick is deterministic.
+fn select_historical(per_candidate: &[Vec<(u64, String)>]) -> Option<u64> {
+    let mut best: Option<(u64, &str)> = None;
+    for prs in per_candidate {
+        for (number, created) in prs {
+            if best.is_none_or(|(_, b)| created.as_str() > b) {
+                best = Some((*number, created));
+            }
+        }
     }
+    best.map(|(number, _)| number)
 }
 
 /// All of one PR's state in a single direct GraphQL call — identity, mergeability, checks,
@@ -294,7 +364,8 @@ fn pr_detail(repo: &Path, owner: &str, name: &str, number: u64) -> Result<Value,
     let q = format!(
         "query($o:String!,$n:String!){{repository(owner:$o,name:$n){{\
          pullRequest(number:{number}){{\
-         number title url isDraft state mergeable mergeStateStatus baseRefName headRefOid \
+         number title url isDraft state mergeable mergeStateStatus baseRefName headRefName \
+         headRefOid isCrossRepository \
          commits(last:1){{nodes{{commit{{statusCheckRollup{{contexts(first:100){{pageInfo{{hasNextPage}} nodes{{__typename \
          ... on CheckRun{{name status conclusion}} ... on StatusContext{{context state}}}}}}}}}}}}}} \
          reviews(last:100){{pageInfo{{hasPreviousPage}} nodes{{author{{login}} body state submittedAt}}}} \
@@ -302,36 +373,60 @@ fn pr_detail(repo: &Path, owner: &str, name: &str, number: u64) -> Result<Value,
          reviewThreads(first:100){{pageInfo{{hasNextPage}} nodes{{isResolved isOutdated path line \
          comments(first:1){{totalCount nodes{{author{{login}} body createdAt diffHunk}}}}}}}}}}}}}}"
     );
-    graphql(repo, &q, owner, name, number.to_string().as_str())
+    let vars = [("o".to_string(), owner.to_string()), ("n".to_string(), name.to_string())];
+    graphql(repo, &q, &vars)
 }
 
-/// Run a GraphQL `query` with the `$o`/`$n`/`$b` variables and parse the response.
-fn graphql(
-    repo: &Path,
-    query: &str,
-    owner: &str,
-    name: &str,
-    branch: &str,
-) -> Result<Value, GhError> {
-    let out = gh(
-        repo,
-        &[
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={query}"),
-            "-F",
-            &format!("o={owner}"),
-            "-F",
-            &format!("n={name}"),
-            "-F",
-            &format!("b={branch}"),
-        ],
-    )?;
+/// Run a GraphQL `query` with `vars` and parse the response. Every variable is passed with
+/// `-f` (raw string) — `-F` type-coerces, so a branch literally named `123` would arrive
+/// as an Int and fail its `String!` declaration.
+fn graphql(repo: &Path, query: &str, vars: &[(String, String)]) -> Result<Value, GhError> {
+    let mut args: Vec<String> =
+        vec!["api".to_string(), "graphql".to_string(), "-f".to_string(), format!("query={query}")];
+    for (key, value) in vars {
+        args.push("-f".to_string());
+        args.push(format!("{key}={value}"));
+    }
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = gh(repo, &arg_refs)?;
     serde_json::from_str(&out).map_err(|e| GhError::Other(e.to_string()))
 }
 
 // ---- Pure normalization (unit-tested) --------------------------------------------------
+
+/// The aliased resolve query for `n` candidates: `c{i}: pullRequests(headRefName:$b{i}, …)`.
+/// Branch names ride as `$b{i}` variables, never in the query text.
+fn build_resolve_query(n: usize, filter: &str, extra: &str) -> String {
+    use std::fmt::Write;
+    let mut q = String::from("query($o:String!,$n:String!");
+    for i in 0..n {
+        let _ = write!(q, ",$b{i}:String!");
+    }
+    q.push_str("){repository(owner:$o,name:$n){");
+    for i in 0..n {
+        let _ =
+            write!(q, "c{i}:pullRequests(headRefName:$b{i}, {filter}){{nodes{{number {extra}}}}} ");
+    }
+    q.push_str("}}");
+    q
+}
+
+/// Per-candidate `(number, extra)` lists from the aliased response, index `i` ↔ alias
+/// `c{i}`. A missing or null alias parses as an empty list.
+fn parse_resolve(v: &Value, n: usize, extra: &str) -> Vec<Vec<(u64, String)>> {
+    (0..n)
+        .map(|i| {
+            v["data"]["repository"][format!("c{i}").as_str()]["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|p| {
+                    Some((p["number"].as_u64()?, p[extra].as_str().unwrap_or_default().to_string()))
+                })
+                .collect()
+        })
+        .collect()
+}
 
 /// Assemble the snapshot from the `gh pr view` JSON, the computed `sync`, and the merged comments.
 fn build_snapshot(node: &Value, sync: Sync) -> PrSnapshot {
@@ -354,6 +449,8 @@ fn build_snapshot(node: &Value, sync: Sync) -> PrSnapshot {
         url: node["url"].as_str().unwrap_or_default().to_string(),
         state: parse_state(node["state"].as_str().unwrap_or("OPEN")),
         is_draft: node["isDraft"].as_bool().unwrap_or(false),
+        head_ref: node["headRefName"].as_str().unwrap_or_default().to_string(),
+        head_is_fork: node["isCrossRepository"].as_bool().unwrap_or(false),
         base_ref: node["baseRefName"].as_str().unwrap_or_default().to_string(),
         merge: derive_merge(node["mergeable"].as_str(), node["mergeStateStatus"].as_str()),
         sync,
@@ -674,6 +771,8 @@ mod tests {
             url: String::new(),
             state: PrState::Open,
             is_draft: false,
+            head_ref: String::new(),
+            head_is_fork: false,
             base_ref: String::new(),
             merge: Merge::Clean,
             sync: Sync::InSync,
@@ -694,6 +793,89 @@ mod tests {
             snap(&[CheckStatus::Running, CheckStatus::Failure]).checks_rollup(),
             Some(CheckStatus::Failure)
         );
+    }
+
+    #[test]
+    fn resolve_query_aliases_candidates_and_never_inlines_names() {
+        let q = build_resolve_query(2, OPEN, "headRefOid");
+        assert_eq!(
+            q,
+            "query($o:String!,$n:String!,$b0:String!,$b1:String!)\
+             {repository(owner:$o,name:$n){\
+             c0:pullRequests(headRefName:$b0, states:OPEN, first:100){nodes{number headRefOid}} \
+             c1:pullRequests(headRefName:$b1, states:OPEN, first:100){nodes{number headRefOid}} }}"
+        );
+        let h = build_resolve_query(1, HISTORICAL, "createdAt");
+        assert!(h.contains(
+            "states:[MERGED,CLOSED], first:1, orderBy:{field:CREATED_AT, direction:DESC}"
+        ));
+        assert!(h.contains("nodes{number createdAt}"));
+    }
+
+    #[test]
+    fn parse_resolve_maps_aliases_in_order_and_null_to_empty() {
+        let v = serde_json::json!({"data": {"repository": {
+            "c0": {"nodes": [{"number": 7, "headRefOid": "abc"}]},
+            "c1": null,
+            "c2": {"nodes": [{"number": 9, "headRefOid": "def"}, {"number": 10, "headRefOid": "ghi"}]}
+        }}});
+        let per = parse_resolve(&v, 3, "headRefOid");
+        assert_eq!(per[0], [(7, "abc".to_string())]);
+        assert!(per[1].is_empty());
+        assert_eq!(per[2], [(9, "def".to_string()), (10, "ghi".to_string())]);
+    }
+
+    #[test]
+    fn select_open_takes_the_earliest_candidate_with_any_open_pr() {
+        let per = vec![
+            vec![],
+            vec![(12, "aaa".to_string())],
+            vec![(99, "bbb".to_string())], // a later candidate never preempts an earlier one
+        ];
+        assert_eq!(select_open(&per, Some("zzz")), Pick::One(12));
+        assert_eq!(select_open(&[vec![], vec![]], Some("zzz")), Pick::None);
+        assert_eq!(select_open(&[], None), Pick::None);
+    }
+
+    #[test]
+    fn select_open_disambiguates_one_name_by_the_pinned_head_else_surfaces_the_count() {
+        let two = vec![vec![(1, "aaa".to_string()), (2, "bbb".to_string())]];
+        assert_eq!(select_open(&two, Some("bbb")), Pick::One(2));
+        // No pinned HEAD, no exact match, or several exact matches: ambiguous, count shown.
+        assert_eq!(select_open(&two, None), Pick::Ambiguous(2));
+        assert_eq!(select_open(&two, Some("zzz")), Pick::Ambiguous(2));
+        let dup = vec![vec![(1, "aaa".to_string()), (2, "aaa".to_string())]];
+        assert_eq!(select_open(&dup, Some("aaa")), Pick::Ambiguous(2));
+    }
+
+    #[test]
+    fn select_historical_takes_the_newest_created_and_ties_to_the_earlier_candidate() {
+        let per = vec![
+            vec![(1, "2026-06-01T00:00:00Z".to_string())],
+            vec![(2, "2026-06-03T00:00:00Z".to_string())],
+            vec![(3, "2026-06-03T00:00:00Z".to_string())], // tie → the earlier candidate keeps
+        ];
+        assert_eq!(select_historical(&per), Some(2));
+        assert_eq!(select_historical(&[vec![], vec![]]), None);
+    }
+
+    #[test]
+    fn snapshot_carries_the_head_ref_and_fork_marker() {
+        let node = serde_json::json!({
+            "number": 5, "title": "t", "url": "u", "state": "OPEN", "isDraft": false,
+            "headRefName": "persiyanov/feature", "isCrossRepository": true, "baseRefName": "main",
+            "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+            "commits": {"nodes": []}, "reviews": {"nodes": []},
+            "comments": {"nodes": []}, "reviewThreads": {"nodes": []}
+        });
+        let s = build_snapshot(&node, Sync::InSync);
+        assert_eq!(s.head_ref, "persiyanov/feature");
+        assert!(s.head_is_fork);
+        // Absent fields default rather than fail — a mid-rollout API response degrades soft.
+        let bare = serde_json::json!({"number": 5});
+        let s = build_snapshot(&bare, Sync::InSync);
+        assert_eq!(s.head_ref, "");
+        assert!(!s.head_is_fork);
     }
 
     #[test]

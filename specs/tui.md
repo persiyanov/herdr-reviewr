@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-06-27
+Last edited: 2026-07-09
 ---
 
 # TUI
@@ -115,7 +115,7 @@ On the read-only `PR` tab the bar leads with the PR's state — its merge, sync,
 The `PR` tab is a read-only mirror of the pull request, in the same two-pane frame as Changes: the right pane navigates the PR's checks and comments, the left pane reads the selected comment, and the header carries the PR's identity and state. It reads GitHub through `forge-host.md` and writes nothing — its only outward action is opening a link in the browser.
 
 ```
- 1 Changes  2 All files  3 PR              Deep research: GPT-5.5/5.4-mini upgrade…  merged #226 ↗
+ 1 Changes  2 All files  3 PR    Deep research: GPT-5.5/5.4-mini upgrade…  deep-research  merged #226 ↗
 ╭─ @codex · manager.py:115 ──────────────────────────╮╭─ Checks & comments ──────────╮
 │ -    if primary_result.status == PERM_FAILURE:        ││ checks  ✗ 1 failing          │
 │ -        return primary_result                        ││  ✓ build-main-image          │
@@ -133,6 +133,7 @@ The `PR` tab is a read-only mirror of the pull request, in the same two-pane fra
 ```
 
 - The header right-anchors a clickable `status #226 ↗` chip — status colored by lifecycle (`open` green, `draft` yellow, `merged` mauve, `closed` red), the `↗` in the number's colour — with the PR title right-aligned to its left, truncated to fit. Clicking the chip (or `o`) opens the PR.
+- Between the title and the chip sits the PR's resolved head branch (`head_ref`, `forge-host.md`), dim, prefixed `⑂ ` when the head lives in a fork — the name that resolved can differ from the worktree's local branch, so the header names it. On a narrow bar the branch drops first, before the title or chip.
 - The footer is the action bar (see **Footer**): on this read-only tab it leads with the PR's merge, sync, and checks state and the comment count (`⚠ conflicts with main · ⇡ 2 unpushed · ✗ 1 failing · 5 comments`), with merge and sync shown only while the PR is open, then `o open ↗` and the dim orientation cluster. When a capped surface has more rows than fetched, a trailing `+more on GitHub ↗` marker is appended (`forge-host.md`).
 - The right pane (titled `Checks & comments`, so it doesn't repeat the left pane's `PR`) is the navigator: a status-only `checks` section (each check as `icon name`) above the `comments` list, which is what the cursor walks.
 - The `comments` list is newest first, each row `@author anchor age`, with an `outdated` or `resolved` marker where GitHub has receded the thread.

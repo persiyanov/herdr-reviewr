@@ -1310,11 +1310,28 @@ fn render_pr_header(frame: &mut Frame, app: &App, area: Rect) {
         let number = format!("#{}", s.number);
         let (status, color) = pr_status_chip(p, s);
         let chip_w = pr_chip_width(s);
-        // The title fills the gap left of the chip, right-aligned against it (a leading pad).
-        let name = truncate_width(&s.title, w.saturating_sub(lead_tabs + chip_w + 2).max(4));
-        let pad = w.saturating_sub(lead_tabs + name.width() + 2 + chip_w);
+        // The resolved head branch, dim left of the chip — the name that resolved, which can
+        // differ from the worktree's local branch; `⑂` marks a fork head so a same-named
+        // fork PR is visible (specs/forge-host.md). Dropped first when the bar is narrow.
+        let head = match (s.head_ref.is_empty(), s.head_is_fork) {
+            (true, _) => String::new(),
+            (false, true) => format!("⑂ {}", s.head_ref),
+            (false, false) => s.head_ref.clone(),
+        };
+        let head_w = if head.is_empty() { 0 } else { head.width() + 2 };
+        // Keep the branch only while the title still gets a readable minimum beside it.
+        let head_w =
+            if w.saturating_sub(lead_tabs + chip_w + 2 + head_w) >= 8 { head_w } else { 0 };
+        // The title fills the gap left of the branch + chip, right-aligned (a leading pad).
+        let name =
+            truncate_width(&s.title, w.saturating_sub(lead_tabs + chip_w + 2 + head_w).max(4));
+        let pad = w.saturating_sub(lead_tabs + name.width() + head_w + 2 + chip_w);
         spans.push(Span::styled(" ".repeat(pad), bar));
         spans.push(Span::styled(name, bar.fg(p.subtext0)));
+        if head_w > 0 {
+            spans.push(Span::styled("  ", bar));
+            spans.push(Span::styled(head, bar.fg(p.overlay0)));
+        }
         spans.push(Span::styled("  ", bar));
         spans.push(Span::styled(status, bar.fg(color).add_modifier(Modifier::BOLD)));
         spans.push(Span::styled(" ", bar));
@@ -1530,16 +1547,36 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// The one-line message for a loading or degraded PR view, each naming what unblocks it.
-fn pr_empty_msg(view: &forge::PrView) -> &'static str {
+/// The no-PR state names the candidate branches it queried, so a resolution that surprises
+/// is inspectable rather than silent (specs/forge-host.md).
+fn pr_empty_msg(view: &forge::PrView) -> String {
     match view {
-        forge::PrView::Loading => "loading…",
-        forge::PrView::Pr(_) => "",
-        forge::PrView::NoPr => "no PR for this branch yet — push and open one, then press r",
-        forge::PrView::Ambiguous(_) => "this branch backs several open PRs — open one on GitHub",
-        forge::PrView::NoGh => "gh not found — install gh, then press r",
-        forge::PrView::NotAuthed => "not signed in — run `gh auth login`, then press r",
-        forge::PrView::NotGitHub => "not a GitHub remote — the PR tab needs a github.com origin",
-        forge::PrView::Error(_) => "github unavailable — retrying; press r to retry now",
+        forge::PrView::Loading => "loading…".into(),
+        forge::PrView::Pr(_) => String::new(),
+        forge::PrView::NoPr(candidates) if candidates.is_empty() => {
+            "detached HEAD — check out a branch to resolve its PR".into()
+        }
+        forge::PrView::NoPr(candidates) => {
+            format!("no PR for {} yet — push and open one, then press r", name_a_few(candidates))
+        }
+        forge::PrView::Ambiguous(n) => {
+            format!("{n} open PRs back this branch — open one on GitHub")
+        }
+        forge::PrView::NoGh => "gh not found — install gh, then press r".into(),
+        forge::PrView::NotAuthed => "not signed in — run `gh auth login`, then press r".into(),
+        forge::PrView::NotGitHub => {
+            "not a GitHub remote — the PR tab needs a github.com origin".into()
+        }
+        forge::PrView::Error(_) => "github unavailable — retrying; press r to retry now".into(),
+    }
+}
+
+/// Up to three names, then `+N more` — the queried candidates stay one readable line.
+fn name_a_few(names: &[String]) -> String {
+    let shown = names.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    match names.len() {
+        0..=3 => shown,
+        n => format!("{shown} +{} more", n - 3),
     }
 }
 

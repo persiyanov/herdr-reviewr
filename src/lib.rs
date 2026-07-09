@@ -164,9 +164,11 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, poll: Duration) -> 
             app.pr_pending = false;
             last_pr_poll = Instant::now();
             pr_inflight = true;
-            let (tx, repo) = (pr_tx.clone(), app.repo.clone());
+            // The base flag joins candidate derivation's base exclusions; captured at spawn
+            // time so one fetch reads one consistent config (specs/forge-host.md).
+            let (tx, repo, base) = (pr_tx.clone(), app.repo.clone(), app.base.clone());
             thread::spawn(move || {
-                let _ = tx.send(crate::forge::fetch(&repo));
+                let _ = tx.send(crate::forge::fetch(&repo, base.as_deref()));
             });
         }
         // Wake at the status-expiry boundary too, so it clears on time when idle.

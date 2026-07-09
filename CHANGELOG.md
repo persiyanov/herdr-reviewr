@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-07-09
+
+### Fixed
+- **The PR tab now finds your PR even when the local branch name differs from the pushed
+  name.** Agent worktrees often push with `git push origin HEAD:<name>` and no `-u`, which left
+  the tab stuck on "no PR for this branch yet" while the PR sat open on GitHub. reviewr now
+  derives every branch name the worktree's work could be published under — the recorded
+  upstream, remote branches that carry the worktree's commits, and the local name — and asks
+  GitHub about all of them in one call. GitHub decides which name holds the PR, so a stale
+  upstream or a checkpoint push can never hide it. See `specs/forge-host.md`. (#10)
+- **A git hiccup no longer reads as "no PR".** A failing git command during the fetch (a lock
+  held by `git gc`, a ref pruned mid-read) now freezes the last good view with the retry marker
+  instead of blanking the tab or showing a wrong empty state. Git errors are also read with a
+  pinned locale, so a non-English git classifies the same way.
+
+### Added
+- **The header names the branch that resolved.** The resolved head branch shows dim next to the
+  status chip, marked `⑂` when the head lives in a fork, and drops first on a narrow pane. The
+  local branch can differ from the PR's branch now, so the header tells you which one you are
+  looking at.
+- **Empty states that explain themselves.** With no PR the tab names the branch names it
+  queried. Several matching open PRs show the count. A detached HEAD gets its own wording.
+
 ## [0.8.2] — 2026-07-09
 
 ### Fixed
