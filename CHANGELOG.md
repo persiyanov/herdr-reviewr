@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-07-11
+
+First release of the `dcieslak19973/herdr-reviewr` fork (upstream: `persiyanov/herdr-reviewr`).
+
+### Added
+- **GitLab merge-request support in the PR tab.** Self-hosted instances via a bare `gitlab_host`
+  in reviewr's `config.toml`; GitLab.com works out of the box. MRs resolve across the same
+  candidate branches, pipelines render as checks, discussions as comments and inline findings,
+  and the tab reads **MR**. Requires an authenticated `glab` CLI.
+- **Bitbucket Data Center pull-request support in the PR tab.** Set `bitbucket_host`; both
+  `/scm/`-prefixed HTTPS and SSH origins resolve to the project key and repo slug. Auth is an
+  HTTP access token from `BITBUCKET_TOKEN` or git's credential store, passed to `curl` on stdin —
+  never on a command line. Merge conflicts and vetoes, build statuses, and comment threads all
+  surface. Bitbucket Cloud (bitbucket.org) is not supported.
+- **Per-forge degraded states.** A missing tool, an unauthenticated host, or a missing Bitbucket
+  token each show their own remedy; credential lookups never prompt on the terminal.
+
+### Changed
+- **Linux binaries are static musl builds.** They run on any glibc (or none); CI asserts
+  staticness on every build. macOS binaries are unchanged.
+- **Plugin identity is `dcieslak19973.reviewr`.** Keybindings and config paths use the new id;
+  install from `dcieslak19973/herdr-reviewr`.
+
 ## [0.11.0] — 2026-07-10
 
 ### Added
