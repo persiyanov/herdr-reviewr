@@ -60,8 +60,16 @@ impl Config {
 /// sets no `base_branches` (`specs/review-model.md`).
 pub const DEFAULT_BASE_BRANCHES: [&str; 4] = ["origin/main", "origin/master", "main", "master"];
 
-const PLUGIN_CONFIG_KEYS: [&str; 6] =
-    ["theme", "base_branches", "toggle_placement", "toggle_direction", "auto_open", "github_host"];
+const PLUGIN_CONFIG_KEYS: [&str; 8] = [
+    "theme",
+    "base_branches",
+    "toggle_placement",
+    "toggle_direction",
+    "auto_open",
+    "github_host",
+    "gitlab_host",
+    "bitbucket_host",
+];
 
 /// Where the toggle action opens the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +116,8 @@ pub struct PluginConfig {
     toggle_direction: ToggleDirection,
     auto_open: bool,
     github_host: Option<String>,
+    gitlab_host: Option<String>,
+    bitbucket_host: Option<String>,
 }
 
 impl Default for PluginConfig {
@@ -119,6 +129,8 @@ impl Default for PluginConfig {
             toggle_direction: ToggleDirection::Right,
             auto_open: true,
             github_host: None,
+            gitlab_host: None,
+            bitbucket_host: None,
         }
     }
 }
@@ -148,6 +160,14 @@ impl PluginConfig {
         self.github_host.as_deref()
     }
 
+    pub fn gitlab_host(&self) -> Option<&str> {
+        self.gitlab_host.as_deref()
+    }
+
+    pub fn bitbucket_host(&self) -> Option<&str> {
+        self.bitbucket_host.as_deref()
+    }
+
     /// Stable machine-readable output consumed by the shell entry points.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
@@ -157,6 +177,8 @@ impl PluginConfig {
             "toggle_direction": self.toggle_direction.as_str(),
             "auto_open": self.auto_open,
             "github_host": self.github_host,
+            "gitlab_host": self.gitlab_host,
+            "bitbucket_host": self.bitbucket_host,
         })
     }
 }
@@ -304,6 +326,20 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         }
         config.github_host = Some(host.to_ascii_lowercase());
     }
+    if let Some(value) = table.get("gitlab_host") {
+        let host = string_value(path, "gitlab_host", value, "a bare hostname")?;
+        if !valid_bare_host(host) {
+            return Err(value_error(path, "gitlab_host", "a bare hostname"));
+        }
+        config.gitlab_host = Some(host.to_ascii_lowercase());
+    }
+    if let Some(value) = table.get("bitbucket_host") {
+        let host = string_value(path, "bitbucket_host", value, "a bare hostname")?;
+        if !valid_bare_host(host) {
+            return Err(value_error(path, "bitbucket_host", "a bare hostname"));
+        }
+        config.bitbucket_host = Some(host.to_ascii_lowercase());
+    }
     Ok(config)
 }
 
@@ -322,7 +358,16 @@ fn value_error(path: &Path, key: &str, expected: &str) -> PluginConfigError {
 
 fn valid_enterprise_host(host: &str) -> bool {
     let lower = host.to_ascii_lowercase();
-    if lower == "github.com" || lower.starts_with("github.com-") || host.len() > 253 {
+    if lower == "github.com" || lower.starts_with("github.com-") {
+        return false;
+    }
+    valid_bare_host(host)
+}
+
+/// A bare hostname: no scheme, no path, no port, dot-separated DNS labels only. Used to reject
+/// URLs (`https://…`) and paths (`host/path`) supplied where a plain host is expected.
+fn valid_bare_host(host: &str) -> bool {
+    if host.len() > 253 {
         return false;
     }
     let mut labels = host.split('.').peekable();
@@ -413,6 +458,8 @@ mod tests {
         assert_eq!(config.toggle_direction(), ToggleDirection::Right);
         assert!(config.auto_open());
         assert_eq!(config.github_host(), None);
+        assert_eq!(config.gitlab_host(), None);
+        assert_eq!(config.bitbucket_host(), None);
     }
 
     #[test]
@@ -437,6 +484,30 @@ mod tests {
         assert_eq!(config.toggle_direction(), ToggleDirection::Down);
         assert!(!config.auto_open());
         assert_eq!(config.github_host(), Some("github.example.com"));
+    }
+
+    #[test]
+    fn gitlab_and_bitbucket_hosts_parse_and_lowercase() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            concat!(
+                "gitlab_host = \"GitLab.Corp.COM\"\n",
+                "bitbucket_host = \"bitbucket.corp.com\"\n",
+            ),
+        )
+        .unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.gitlab_host(), Some("gitlab.corp.com"));
+        assert_eq!(config.bitbucket_host(), Some("bitbucket.corp.com"));
+    }
+
+    #[test]
+    fn forge_hosts_default_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.gitlab_host(), None);
+        assert_eq!(config.bitbucket_host(), None);
     }
 
     #[test]
@@ -470,6 +541,8 @@ mod tests {
             ("github_host = \"https://github.example.com\"\n", "`github_host`"),
             ("github_host = \"github.com\"\n", "`github_host`"),
             ("github_host = \"github.com-work\"\n", "`github_host`"),
+            ("gitlab_host = \"https://gitlab.corp.com\"\n", "`gitlab_host`"),
+            ("bitbucket_host = \"host/path\"\n", "`bitbucket_host`"),
         ];
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -495,10 +568,12 @@ mod tests {
     fn normalized_json_contains_every_key() {
         let value = PluginConfig::default().to_json();
         let object = value.as_object().unwrap();
-        assert_eq!(object.len(), 6);
+        assert_eq!(object.len(), 8);
         assert_eq!(object["toggle_placement"], "split");
         assert_eq!(object["toggle_direction"], "right");
         assert_eq!(object["auto_open"], true);
         assert!(object["github_host"].is_null());
+        assert!(object["gitlab_host"].is_null());
+        assert!(object["bitbucket_host"].is_null());
     }
 }
