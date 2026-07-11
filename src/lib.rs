@@ -451,6 +451,9 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                         pr.wait_started = None;
                     }
                     Ok(input) => {
+                        // Record the origin regardless of the effect below, so the PR/MR noun
+                        // (`app.rs`) tracks the worktree even on a same-input reobserve.
+                        app.set_fetch_input(input.clone());
                         match pr.refresh.observed(
                             input,
                             config_epoch,

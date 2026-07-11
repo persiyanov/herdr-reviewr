@@ -9,7 +9,7 @@ use common::Repo;
 use herdr_reviewr::config::{PluginConfig, plugin_config_in};
 use herdr_reviewr::forge::fetch_input;
 use herdr_reviewr::git::{
-    GitFail, OriginIdentity, PrLocal, RepoTarget, ahead_behind_oids,
+    Forge, ForgeHosts, GitFail, OriginIdentity, PrLocal, RepoTarget, ahead_behind_oids,
     pr_local as pr_local_with_config,
 };
 use std::path::Path;
@@ -36,9 +36,11 @@ fn defaults() -> PluginConfig {
     PluginConfig::default()
 }
 
+const NO_HOSTS: ForgeHosts<'static> = ForgeHosts { github: None, gitlab: None, bitbucket: None };
+
 fn pr_local(repo: &Path, base: Option<&str>) -> Result<PrLocal, GitFail> {
     let config = defaults();
-    pr_local_with_config(repo, base, config.base_branches(), None)
+    pr_local_with_config(repo, base, config.base_branches(), &NO_HOSTS)
 }
 
 #[test]
@@ -51,6 +53,7 @@ fn push_head_other_name_yields_the_remote_branch_before_the_local_name() {
     assert_eq!(
         local.origin,
         OriginIdentity::Repository(RepoTarget {
+            forge: Forge::GitHub,
             host: "github.com".to_string(),
             owner: "owner".to_string(),
             name: "repo".to_string(),
@@ -193,17 +196,19 @@ fn origin_identity_uses_instead_of_rewrite_and_ignores_pushurl() {
     repo.git(&["config", "url.https://github.company.com/.insteadOf", "corp:"]);
     repo.git(&["remote", "set-url", "--push", "origin", "git@gitlab.com:owner/repo.git"]);
 
+    let hosts = ForgeHosts { github: Some("github.company.com"), ..NO_HOSTS };
     let local = pr_local_with_config(
         repo.path(),
         None,
         &["origin/main".to_string(), "main".to_string()],
-        Some("github.company.com"),
+        &hosts,
     )
     .expect("pr_local");
 
     assert_eq!(
         local.origin,
         OriginIdentity::Repository(RepoTarget {
+            forge: Forge::GitHub,
             host: "github.company.com".to_string(),
             owner: "owner".to_string(),
             name: "repo".to_string(),

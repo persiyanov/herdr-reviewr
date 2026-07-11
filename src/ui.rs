@@ -391,7 +391,10 @@ pub fn hit_header(area: Rect, app: &App, col: u16, row: u16) -> Option<HeaderHit
 }
 
 /// The two tabs and their labels, left to right. All-ASCII labels keep the byte length equal
-/// to the display width, so the header column math stays simple.
+/// to the display width, so the header column math stays simple. The third label is a
+/// placeholder for column math only: [`tab_bar_spans`] repaints it as `3 {noun}` from
+/// [`App::forge_noun`], and "PR"/"MR" are equal width so the placeholder's width stays correct
+/// for [`tab_spans`] and [`header_prefix_len`], which have no `App` to ask.
 const TABS: [(Tab, &str); 3] =
     [(Tab::Changes, "1 Changes"), (Tab::AllFiles, "2 All files"), (Tab::Pr, "3 PR")];
 const HEADER_LEAD: &str = " ";
@@ -457,7 +460,11 @@ fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
         } else {
             bar.fg(p.subtext0)
         };
-        spans.push(Span::styled(*label, style));
+        // The `PR` tab's label names the current origin's artifact ("PR"/"MR"); the other two
+        // labels are fixed, so only this one needs the owned/computed form.
+        let text =
+            if *tab == Tab::Pr { format!("3 {}", app.forge_noun()) } else { (*label).to_string() };
+        spans.push(Span::styled(text, style));
     }
     spans.push(Span::styled(HEADER_GAP, bar));
     spans
@@ -1401,10 +1408,10 @@ fn pr_state_line(s: &forge::PrSnapshot) -> String {
     }
     parts.push(checks_summary(s));
     parts.push(format!("{} comments", s.comments.len()));
-    // A capped surface means the lists are a prefix; point at GitHub for the rest rather than
-    // showing the partial counts as if complete (specs/forge-host.md).
+    // A capped surface means the lists are a prefix; point at the browser for the rest rather
+    // than showing the partial counts as if complete (specs/forge-host.md).
     if s.truncated {
-        parts.push("+more on GitHub ↗".into());
+        parts.push("+more ↗".into());
     }
     parts.join(" · ")
 }
@@ -1510,7 +1517,7 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
     let selected = app.pr_selected_comment();
     let title = match selected {
         Some(cm) => format!("@{} · {}", cm.author, cm.anchor),
-        None => "PR".to_string(),
+        None => app.forge_noun().to_string(),
     };
     let block = bordered(&title, false, p);
     let inner = block.inner(area);
@@ -1547,13 +1554,15 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
             let plural = if cm.reply_count == 1 { "reply" } else { "replies" };
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
-                format!("↳ {} {plural} — open on GitHub to read", cm.reply_count),
+                format!("↳ {} {plural} — open in the browser to read", cm.reply_count),
                 Style::default().fg(p.overlay0),
             )));
         }
     } else {
-        lines
-            .push(Line::from(Span::styled(pr_empty_msg(&app.pr), Style::default().fg(p.overlay0))));
+        lines.push(Line::from(Span::styled(
+            pr_empty_msg(&app.pr, app.forge_noun()),
+            Style::default().fg(p.overlay0),
+        )));
     }
 
     // Clamp in `usize` before the `u16` cast — `pr_read_scroll` grows unbounded via the wheel,
@@ -1562,10 +1571,12 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
 }
 
-/// The one-line message for a loading or degraded PR view, each naming what unblocks it.
-/// The no-PR state names the candidate branches it queried, so a resolution that surprises
-/// is inspectable rather than silent (specs/forge-host.md).
-fn pr_empty_msg(view: &forge::PrView) -> String {
+/// The one-line message for a loading or degraded PR view, each naming what unblocks it. The
+/// no-PR state names the candidate branches it queried, so a resolution that surprises is
+/// inspectable rather than silent (`specs/forge-host.md`). `noun` is [`App::forge_noun`]'s
+/// "PR"/"MR", so the message names the artifact the way the current origin does; the
+/// `retry_remedy` passthrough is untouched — it already carries its own per-forge wording.
+fn pr_empty_msg(view: &forge::PrView, noun: &str) -> String {
     if let Some(message) = view.retry_remedy() {
         return message;
     }
@@ -1573,23 +1584,34 @@ fn pr_empty_msg(view: &forge::PrView) -> String {
         forge::PrView::Loading => "loading…".into(),
         forge::PrView::Pending | forge::PrView::Pr(_) => String::new(),
         forge::PrView::NoPr(candidates) if candidates.is_empty() => {
-            "detached HEAD — check out a branch to resolve its PR".into()
+            format!("detached HEAD — check out a branch to resolve its {noun}")
         }
         forge::PrView::NoPr(candidates) => {
-            format!("no PR for {} yet — push and open one, then press r", name_a_few(candidates))
+            format!(
+                "no {noun} for {} yet — push and open one, then press r",
+                name_a_few(candidates)
+            )
         }
         forge::PrView::Ambiguous(n) => {
-            format!("{n} open PRs back this branch — open one on GitHub")
+            format!("{n} open {noun}s back this branch — open one in the browser")
         }
-        forge::PrView::NoGh | forge::PrView::NotAuthed(_) | forge::PrView::Error(_) => {
+        forge::PrView::NoCli(_)
+        | forge::PrView::NotAuthed { .. }
+        | forge::PrView::NoToken(_)
+        | forge::PrView::Error(_) => {
             unreachable!("retry failures returned above")
         }
-        forge::PrView::NeedsGitHubOrigin => "the PR tab needs a supported GitHub origin".into(),
+        forge::PrView::NeedsSupportedOrigin => {
+            "the PR tab needs a supported forge origin (GitHub, GitLab, or Bitbucket Data Center)"
+                .into()
+        }
         forge::PrView::UnsupportedHost(host) => {
-            format!("unsupported host {host} — Enterprise users can set `github_host`")
+            format!(
+                "unsupported host {host} — set `github_host`, `gitlab_host`, or `bitbucket_host`"
+            )
         }
         forge::PrView::MalformedOrigin(host) => {
-            format!("malformed GitHub origin for {host} — expected owner/repository")
+            format!("malformed origin for {host} — expected owner/repository")
         }
     }
 }

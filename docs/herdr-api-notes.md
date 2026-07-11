@@ -65,7 +65,7 @@ herdr runs plugin commands with a minimal `PATH`; prepend common bin dirs for `j
 [[keys.command]]
 key = "cmd+r"
 type = "plugin_action"
-command = "persiyanov.reviewr.toggle"   # <plugin_id>.<action_id> — plugin_id is the manifest `id`, not `name`
+command = "dcieslak19973.reviewr.toggle"   # <plugin_id>.<action_id> — plugin_id is the manifest `id`, not `name`
 ```
 `cmd+…` chords reach herdr; `alt+…` chords are composed into characters by macOS and don't register.
 

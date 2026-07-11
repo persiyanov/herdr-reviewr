@@ -64,12 +64,33 @@ pub fn toplevel(path: &Path) -> Option<PathBuf> {
     git_line(path, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
-/// A canonical GitHub API and repository target.
+/// Which forge a classified origin belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Forge {
+    GitHub,
+    GitLab,
+    Bitbucket,
+}
+
+/// A canonical forge API and repository target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoTarget {
+    pub forge: Forge,
     pub host: String,
+    /// GitHub/GitLab: owner (GitLab may nest: `"group/subgroup"`). Bitbucket DC: project key.
     pub owner: String,
+    /// Repository name (GitHub/GitLab) or repo slug (Bitbucket DC).
     pub name: String,
+}
+
+/// The configured host for each supported forge, consulted by [`classify_remote`] after
+/// the `github.com`/`gitlab.com` built-ins. `bitbucket.org` (Cloud) has no built-in: only
+/// Bitbucket Data Center, reached through a configured host, is supported.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ForgeHosts<'a> {
+    pub github: Option<&'a str>,
+    pub gitlab: Option<&'a str>,
+    pub bitbucket: Option<&'a str>,
 }
 
 /// Host classification for origin's rewritten primary fetch URL.
@@ -89,8 +110,10 @@ enum RemoteTransport {
     Unsupported,
 }
 
-/// Classify one remote URL against GitHub.com and the optional configured Enterprise host.
-fn classify_remote(url: &str, enterprise: Option<&str>) -> OriginIdentity {
+/// Classify one remote URL against the built-in and configured hosts of every supported
+/// forge (`specs/forge-host.md` "Config"). `github.com` and `gitlab.com` are always
+/// recognised; `bitbucket.org` is not, since only Bitbucket Data Center is supported.
+fn classify_remote(url: &str, hosts: &ForgeHosts<'_>) -> OriginIdentity {
     let Some((transport, host, path, has_port)) = split_remote(url) else {
         return OriginIdentity::Hostless;
     };
@@ -103,23 +126,58 @@ fn classify_remote(url: &str, enterprise: Option<&str>) -> OriginIdentity {
     {
         return OriginIdentity::Unsupported(host_lower);
     }
-    let canonical = if host_lower == "github.com"
-        || (transport == RemoteTransport::Ssh && is_alias(&host_lower, "github.com"))
-    {
-        Some("github.com")
-    } else if let Some(enterprise) = enterprise
-        && (host_lower == enterprise
-            || (transport == RemoteTransport::Ssh && is_alias(&host_lower, enterprise)))
-    {
-        Some(enterprise)
-    } else {
-        None
+    let matches_host = |canonical: &str| {
+        host_lower == canonical
+            || (transport == RemoteTransport::Ssh && is_alias(&host_lower, canonical))
     };
-    let Some(canonical) = canonical else {
+    let hit: Option<(&str, Forge)> = [
+        (Some("github.com"), Forge::GitHub),
+        (hosts.github, Forge::GitHub),
+        (Some("gitlab.com"), Forge::GitLab),
+        (hosts.gitlab, Forge::GitLab),
+        (hosts.bitbucket, Forge::Bitbucket),
+    ]
+    .into_iter()
+    .filter_map(|(h, f)| h.map(|h| (h, f)))
+    .find(|(h, _)| matches_host(h));
+    let Some((canonical, forge)) = hit else {
         return OriginIdentity::Unsupported(host_lower);
     };
     let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
+    match forge {
+        Forge::GitHub => split_owner_name(path, forge, canonical),
+        Forge::GitLab => {
+            let Some((owner, name)) = path.rsplit_once('/') else {
+                return OriginIdentity::Malformed(canonical.to_owned());
+            };
+            if owner.is_empty() || name.is_empty() {
+                return OriginIdentity::Malformed(canonical.to_owned());
+            }
+            OriginIdentity::Repository(RepoTarget {
+                forge,
+                host: canonical.to_owned(),
+                owner: owner.to_owned(),
+                name: name.to_owned(),
+            })
+        }
+        Forge::Bitbucket => {
+            let path = if transport == RemoteTransport::Ssh {
+                Some(path)
+            } else {
+                path.strip_prefix("scm/")
+            };
+            let Some(path) = path else {
+                return OriginIdentity::Malformed(canonical.to_owned());
+            };
+            split_owner_name(path, forge, canonical)
+        }
+    }
+}
+
+/// Split `owner/name` — exactly two non-empty segments — for GitHub and Bitbucket DC
+/// paths (Bitbucket having already stripped its transport-specific prefix).
+fn split_owner_name(path: &str, forge: Forge, canonical: &str) -> OriginIdentity {
     let mut parts = path.split('/');
     let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
         return OriginIdentity::Malformed(canonical.to_owned());
@@ -128,6 +186,7 @@ fn classify_remote(url: &str, enterprise: Option<&str>) -> OriginIdentity {
         return OriginIdentity::Malformed(canonical.to_owned());
     }
     OriginIdentity::Repository(RepoTarget {
+        forge,
         host: canonical.to_owned(),
         owner: owner.to_owned(),
         name: name.to_owned(),
@@ -229,9 +288,9 @@ pub fn pr_local(
     repo: &Path,
     base_flag: Option<&str>,
     config_bases: &[String],
-    github_host: Option<&str>,
+    hosts: &ForgeHosts<'_>,
 ) -> Result<PrLocal, GitFail> {
-    let origin = origin_identity(repo, github_host)?;
+    let origin = origin_identity(repo, hosts)?;
     let Some(branch) = git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])? else {
         // Detached HEAD — post-merge cleanup, not a review seat; nothing to publish.
         return Ok(PrLocal { origin, branch: None, head_oid: None, candidates: Vec::new() });
@@ -256,11 +315,11 @@ pub fn pr_local(
 /// `url.<base>.insteadOf` rewrites, which can be what maps a shorthand to github.com. Its
 /// missing-remote exit code (2) is also git's generic usage-error code, so absence is told
 /// apart by the message text — stable English under [`run_git`]'s `LC_ALL=C`.
-fn origin_identity(repo: &Path, github_host: Option<&str>) -> Result<OriginIdentity, GitFail> {
+fn origin_identity(repo: &Path, hosts: &ForgeHosts<'_>) -> Result<OriginIdentity, GitFail> {
     let args = ["remote", "get-url", "origin"];
     let out = run_git(repo, &args)?;
     if out.status.success() {
-        return Ok(classify_remote(String::from_utf8_lossy(&out.stdout).trim(), github_host));
+        return Ok(classify_remote(String::from_utf8_lossy(&out.stdout).trim(), hosts));
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.to_lowercase().contains("no such remote") {
@@ -842,9 +901,11 @@ fn parse_name_status(out: &str) -> Vec<(ChangeKind, String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeKind, OriginIdentity, RepoTarget, candidate_order, classify_remote,
-        parse_name_status, parse_numstat,
+        ChangeKind, Forge, ForgeHosts, OriginIdentity, RepoTarget, candidate_order,
+        classify_remote, parse_name_status, parse_numstat,
     };
+
+    const NONE: ForgeHosts<'static> = ForgeHosts { github: None, gitlab: None, bitbucket: None };
 
     #[test]
     fn candidates_order_push_dest_then_nearest_tips_then_local() {
@@ -889,107 +950,171 @@ mod tests {
     fn origin_identity_parses_github_and_enterprise_remote_forms() {
         let repo = |host: &str, owner: &str, name: &str| {
             OriginIdentity::Repository(RepoTarget {
+                forge: Forge::GitHub,
                 host: host.to_string(),
                 owner: owner.to_string(),
                 name: name.to_string(),
             })
         };
+        let enterprise = ForgeHosts { github: Some("github.company.com"), ..NONE };
         // HTTPS, with and without `.git` and a trailing slash.
         assert_eq!(
-            classify_remote("https://github.com/owner/repo.git", None),
+            classify_remote("https://github.com/owner/repo.git", &NONE),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("https://github.com/owner/repo", None),
+            classify_remote("https://github.com/owner/repo", &NONE),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("https://github.com/owner/repo/", None),
+            classify_remote("https://github.com/owner/repo/", &NONE),
             repo("github.com", "owner", "repo")
         );
         // scp-like SSH, and the `ssh://` scheme form with a port.
         assert_eq!(
-            classify_remote("git@github.com:owner/repo.git", None),
+            classify_remote("git@github.com:owner/repo.git", &NONE),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("ssh://git@github.com/owner/repo.git", None),
+            classify_remote("ssh://git@github.com/owner/repo.git", &NONE),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("ssh://git@github.com:22/owner/repo.git", None),
+            classify_remote("ssh://git@github.com:22/owner/repo.git", &NONE),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("git://github.com/owner/repo", None),
+            classify_remote("git://github.com/owner/repo", &NONE),
             repo("github.com", "owner", "repo")
         );
         // Multi-account SSH host alias (`~/.ssh/config` `Host github.com-work`).
         assert_eq!(
-            classify_remote("git@github.com-work:owner/repo.git", None),
+            classify_remote("git@github.com-work:owner/repo.git", &NONE),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote(
-                "git@github.company.com-work:owner/repo.git",
-                Some("github.company.com")
-            ),
+            classify_remote("git@github.company.com-work:owner/repo.git", &enterprise),
             repo("github.company.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote(
-                "https://github.company.com/owner/repo.git",
-                Some("github.company.com")
-            ),
+            classify_remote("https://github.company.com/owner/repo.git", &enterprise),
             repo("github.company.com", "owner", "repo")
         );
     }
 
     #[test]
     fn origin_identity_keeps_alias_and_failure_states_distinct() {
+        let enterprise = ForgeHosts { github: Some("github.company.com"), ..NONE };
         assert_eq!(
-            classify_remote("https://github.com-attacker/owner/repo", None),
+            classify_remote("https://github.com-attacker/owner/repo", &NONE),
             OriginIdentity::Unsupported("github.com-attacker".to_string())
         );
         assert_eq!(
-            classify_remote(
-                "https://github.company.com-work/owner/repo",
-                Some("github.company.com")
-            ),
+            classify_remote("https://github.company.com-work/owner/repo", &enterprise),
             OriginIdentity::Unsupported("github.company.com-work".to_string())
         );
+        // gitlab.com is a built-in GitLab host regardless of the configured Enterprise
+        // GitHub host — it is no longer unsupported now that GitLab is classified.
         assert_eq!(
-            classify_remote("git@gitlab.com:owner/repo.git", Some("github.company.com")),
-            OriginIdentity::Unsupported("gitlab.com".to_string())
+            classify_remote("git@gitlab.com:owner/repo.git", &enterprise),
+            OriginIdentity::Repository(RepoTarget {
+                forge: Forge::GitLab,
+                host: "gitlab.com".to_string(),
+                owner: "owner".to_string(),
+                name: "repo".to_string(),
+            })
         );
         assert_eq!(
-            classify_remote("https://github.com/owner", None),
+            classify_remote("https://github.com/owner", &NONE),
             OriginIdentity::Malformed("github.com".to_string())
         );
         assert_eq!(
-            classify_remote("https://github.com", None),
+            classify_remote("https://github.com", &NONE),
             OriginIdentity::Malformed("github.com".to_string())
         );
+        // No path at all is malformed for GitLab too — an owner-less repo, not an
+        // unsupported host, now that gitlab.com is recognised.
         assert_eq!(
-            classify_remote("https://gitlab.com", None),
-            OriginIdentity::Unsupported("gitlab.com".to_string())
+            classify_remote("https://gitlab.com", &NONE),
+            OriginIdentity::Malformed("gitlab.com".to_string())
         );
         assert_eq!(
-            classify_remote(
-                "https://github.company.com:8443/owner/repo.git",
-                Some("github.company.com")
-            ),
+            classify_remote("https://github.company.com:8443/owner/repo.git", &enterprise),
             OriginIdentity::Unsupported("github.company.com".to_string())
         );
-        assert_eq!(classify_remote("/tmp/repo", None), OriginIdentity::Hostless);
-        assert_eq!(classify_remote("file:///tmp/repo", None), OriginIdentity::Hostless);
+        assert_eq!(classify_remote("/tmp/repo", &NONE), OriginIdentity::Hostless);
+        assert_eq!(classify_remote("file:///tmp/repo", &NONE), OriginIdentity::Hostless);
         assert_eq!(
-            classify_remote("file://github.com/owner/repo", None),
+            classify_remote("file://github.com/owner/repo", &NONE),
             OriginIdentity::Unsupported("github.com".to_string())
         );
         assert_eq!(
-            classify_remote("ftp://github.com/owner/repo", None),
+            classify_remote("ftp://github.com/owner/repo", &NONE),
             OriginIdentity::Unsupported("github.com".to_string())
+        );
+    }
+
+    #[test]
+    fn classifies_gitlab_hosts() {
+        let h = ForgeHosts { gitlab: Some("gitlab.corp.com"), ..NONE };
+        assert_eq!(
+            classify_remote("git@gitlab.com:group/repo.git", &h),
+            OriginIdentity::Repository(RepoTarget {
+                forge: Forge::GitLab,
+                host: "gitlab.com".into(),
+                owner: "group".into(),
+                name: "repo".into(),
+            })
+        );
+        // nested groups keep their full path as owner
+        assert_eq!(
+            classify_remote("https://gitlab.corp.com/group/sub/repo.git", &h),
+            OriginIdentity::Repository(RepoTarget {
+                forge: Forge::GitLab,
+                host: "gitlab.corp.com".into(),
+                owner: "group/sub".into(),
+                name: "repo".into(),
+            })
+        );
+        // one segment is malformed, not owner-less
+        assert_eq!(
+            classify_remote("https://gitlab.com/repo.git", &h),
+            OriginIdentity::Malformed("gitlab.com".into())
+        );
+    }
+
+    #[test]
+    fn classifies_bitbucket_dc_hosts() {
+        let h = ForgeHosts { bitbucket: Some("bitbucket.corp.com"), ..NONE };
+        // HTTPS clone URLs carry /scm/
+        assert_eq!(
+            classify_remote("https://bitbucket.corp.com/scm/PROJ/repo.git", &h),
+            OriginIdentity::Repository(RepoTarget {
+                forge: Forge::Bitbucket,
+                host: "bitbucket.corp.com".into(),
+                owner: "PROJ".into(),
+                name: "repo".into(),
+            })
+        );
+        // SSH clone URLs do not
+        assert_eq!(
+            classify_remote("ssh://git@bitbucket.corp.com:7999/PROJ/repo.git", &h),
+            OriginIdentity::Repository(RepoTarget {
+                forge: Forge::Bitbucket,
+                host: "bitbucket.corp.com".into(),
+                owner: "PROJ".into(),
+                name: "repo".into(),
+            })
+        );
+        // an https path without the /scm/ prefix is malformed for Bitbucket
+        assert_eq!(
+            classify_remote("https://bitbucket.corp.com/PROJ/repo.git", &h),
+            OriginIdentity::Malformed("bitbucket.corp.com".into())
+        );
+        // bitbucket.org (Cloud) stays unsupported — different API family
+        assert_eq!(
+            classify_remote("git@bitbucket.org:owner/repo.git", &h),
+            OriginIdentity::Unsupported("bitbucket.org".into())
         );
     }
 

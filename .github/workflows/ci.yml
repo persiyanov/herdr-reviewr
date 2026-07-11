@@ -34,3 +34,17 @@ jobs:
 
       - name: Build (release)
         run: cargo build --release
+
+  static-linux:
+    name: musl binary is static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup target add x86_64-unknown-linux-musl && sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: Assert no dynamic glibc linkage
+        run: |
+          out="$(ldd target/x86_64-unknown-linux-musl/release/herdr-reviewr 2>&1 || true)"
+          echo "$out"
+          echo "$out" | grep -q "not a dynamic executable\|statically linked" \
+            || { echo "binary is dynamically linked"; exit 1; }

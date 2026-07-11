@@ -2052,7 +2052,10 @@ fn same_input_failure_preserves_any_visible_pr_snapshot_and_remedy() {
     let mut app = app_on(&repo);
     app.apply_pr(PrView::NoPr(vec!["feature".to_string()]));
 
-    app.apply_pr(PrView::NotAuthed("github.example.com".to_string()));
+    app.apply_pr(PrView::NotAuthed {
+        forge: herdr_reviewr::git::Forge::GitHub,
+        host: "github.example.com".to_string(),
+    });
 
     assert_eq!(app.pr, PrView::NoPr(vec!["feature".to_string()]));
     assert_eq!(

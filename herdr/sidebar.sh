@@ -155,7 +155,7 @@ overlay)
   ;;
 esac
 
-new=$("$H" plugin pane open --plugin "${HERDR_PLUGIN_ID:-persiyanov.reviewr}" --entrypoint sidebar \
+new=$("$H" plugin pane open --plugin "${HERDR_PLUGIN_ID:-dcieslak19973.reviewr}" --entrypoint sidebar \
   "$@" --cwd "$cwd" "$focus" 2>/dev/null |
   jq -r '.result.plugin_pane.pane.pane_id // empty' 2>/dev/null)
 [ -n "$new" ] || refuse "herdr plugin pane open failed"

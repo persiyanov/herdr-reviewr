@@ -1,5 +1,10 @@
 # herdr-reviewr
 
+> **Fork.** This is a fork of [persiyanov/herdr-reviewr](https://github.com/persiyanov/herdr-reviewr),
+> maintained at [dcieslak19973/herdr-reviewr](https://github.com/dcieslak19973/herdr-reviewr). Changes
+> from upstream: static `musl` builds for Linux releases, and GitLab + Bitbucket Data Center support
+> alongside GitHub.
+
 A code-review sidebar for [herdr](https://herdr.dev). Your agent writes the code. You read its
 diff in a pane beside the chat, comment on the lines, and send the notes back. You never leave
 the terminal.
@@ -21,7 +26,8 @@ What you get, in one persistent pane pointed at a git worktree:
   Nord, Gruvbox, Tokyo Night, Rosé Pine, Solarized, and more.
 
 It **never edits your worktree** and sends nothing on its own. Its only write to git is a private
-`last-turn` baseline ref under `refs/reviewr/`. The **PR** tab reads GitHub but never posts there.
+`last-turn` baseline ref under `refs/reviewr/`. The **PR** tab reads your forge — GitHub, GitLab,
+or Bitbucket Data Center — but never posts there.
 
 ## Requirements
 
@@ -30,15 +36,19 @@ It **never edits your worktree** and sends nothing on its own. Its only write to
 - A **truecolor (24-bit)** terminal with Unicode box-drawing support. Pick a theme that matches
   its light or dark background (see [Theme](#theme)).
 - **macOS or Linux.**
-- **`gh`** (the GitHub CLI), authenticated. Optional, only the **PR** tab needs it. Everything
-  else works without it.
+- A forge CLI or token for the **PR** tab, only for the forge(s) you use — everything else
+  works without any of them:
+  - **`gh`** (the GitHub CLI), authenticated, for a GitHub origin.
+  - **`glab`** (the GitLab CLI), authenticated, for a GitLab origin.
+  - **`curl`** on `PATH`, plus a `BITBUCKET_TOKEN` or a `git credential`-stored password, for a
+    Bitbucket Data Center origin (see [Bitbucket tokens](#bitbucket-tokens)).
 
 ## Install
 
 From the herdr marketplace. You get a prebuilt binary, no Rust toolchain:
 
 ```bash
-herdr plugin install persiyanov/herdr-reviewr
+herdr plugin install dcieslak19973/herdr-reviewr
 ```
 
 The sidebar **auto-opens for a newly created worktree**, so installing the plugin is enough. Set
@@ -50,15 +60,15 @@ Keybindings live in user config, not in the plugin manifest:
 [[keys.command]]
 key = "cmd+r"
 type = "plugin_action"
-command = "persiyanov.reviewr.toggle"   # <plugin_id>.<action_id> — note the id, not the name
+command = "dcieslak19973.reviewr.toggle"   # <plugin_id>.<action_id> — note the id, not the name
 ```
 
 `cmd+…` chords reach herdr. macOS swallows `alt+…`. With no key bound, run the action once with
-`herdr plugin action invoke toggle --plugin persiyanov.reviewr`.
+`herdr plugin action invoke toggle --plugin dcieslak19973.reviewr`.
 
 Beside `toggle` there are two explicit actions, made for scripts and layout plugins. `open` opens
 the sidebar and does nothing when one is already open. `close` closes it and does nothing when none
-is. Bind or invoke them the same way, as `persiyanov.reviewr.open` and `persiyanov.reviewr.close`.
+is. Bind or invoke them the same way, as `dcieslak19973.reviewr.open` and `dcieslak19973.reviewr.close`.
 See [Auto-open and layout plugins](#auto-open-and-layout-plugins) for the layout recipe.
 
 ## Quick start
@@ -139,11 +149,13 @@ button, and the scroll wheel all work too.
   file's current content. Git-ignored paths show too, dimmed. A directory ignored as a whole
   (`target/`, `node_modules/`) is one collapsed row that loads its contents only when you expand
   it. You can comment here as well.
-- **PR** — a read-only mirror of the branch's open pull request, read from GitHub via `gh`. It
-  shows the PR's state (draft, open, merged, or closed, plus mergeability and unpushed-commit
-  sync), its checks with a pass/fail rollup, and its comments. Comments cover reviews, inline
-  findings, and plain comments, newest first, with `resolved` and `outdated` markers. `o` opens
-  the PR in the browser. The tab only reads GitHub. It never posts, resolves, re-runs, or merges.
+- **PR** — a read-only mirror of the branch's open pull (or merge) request, read from the
+  origin's forge: GitHub via `gh`, GitLab via `glab` (shown as **MR**), Bitbucket Data Center via
+  `curl`. It shows its state (draft, open, merged, or closed, plus mergeability and
+  unpushed-commit sync), its checks with a pass/fail rollup, and its comments. Comments cover
+  reviews (GitHub/GitLab), inline findings, and plain comments, newest first, with `resolved` and
+  `outdated` markers. `o` opens it in the browser. The tab only reads its forge. It never posts,
+  resolves, re-runs, or merges.
 
 ## Diff scopes
 
@@ -173,7 +185,7 @@ CLI flags on the pane command:
 Everything else is set in reviewr's own config file:
 
 ```text
-~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
+~/.config/herdr/plugins/config/dcieslak19973.reviewr/config.toml
 ```
 
 Create the file if it does not exist yet. herdr hands this directory to the plugin as
@@ -181,7 +193,7 @@ Create the file if it does not exist yet. herdr hands this directory to the plug
 reviewr's file, not herdr's. Settings added to herdr's own `~/.config/herdr/config.toml` never
 reach reviewr.
 
-The file accepts these six keys:
+The file accepts these eight keys:
 
 ```toml
 theme = "tokyo-night"
@@ -190,6 +202,8 @@ toggle_placement = "overlay"
 toggle_direction = "down"
 auto_open = false
 github_host = "github.example.com"
+gitlab_host = "gitlab.corp.com"
+bitbucket_host = "bitbucket.corp.com"
 ```
 
 A missing file or omitted key uses its default. Any unknown key, wrong type, or invalid value
@@ -204,7 +218,7 @@ One theme colors the whole UI, chrome and syntax together. Set it in reviewr's c
 reviewr re-reads the file on refresh, so editing it and refreshing re-themes without a relaunch:
 
 ```toml
-# ~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
+# ~/.config/herdr/plugins/config/dcieslak19973.reviewr/config.toml
 theme = "tokyo-night"
 ```
 
@@ -231,7 +245,7 @@ config file. reviewr re-reads it on refresh, so editing it and pressing `r` re-b
 relaunch:
 
 ```toml
-# ~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
+# ~/.config/herdr/plugins/config/dcieslak19973.reviewr/config.toml
 base_branches = ["origin/develop", "origin/main", "main", "master"]
 ```
 
@@ -239,24 +253,48 @@ reviewr picks the first entry that exists in the repo. A `--base <ref>` flag sti
 names an existing ref. A missing file or omitted key uses the default list. A malformed value
 blocks the plugin like any other invalid config.
 
-### GitHub hosts
+### Forge hosts
 
-GitHub.com works without configuration. To read pull requests from one GitHub Enterprise host,
-set its bare hostname:
+GitHub.com and GitLab.com work without configuration. To read pull/merge requests from an
+Enterprise or self-hosted instance instead, set that forge's bare hostname:
 
 ```toml
 github_host = "github.example.com"
+gitlab_host = "gitlab.corp.com"
+bitbucket_host = "bitbucket.corp.com"
 ```
 
-reviewr matches either that exact origin host or a trusted SSH alias beginning
-`github.example.com-`, such as `git@github.example.com-work:owner/repo.git`. The alias convention
-applies only to scp-style and `ssh://` origins. HTTPS hosts must match exactly. GitHub.com and
-its SSH aliases continue to work when Enterprise is configured.
+reviewr matches either that exact origin host or a trusted SSH alias beginning `<host>-`, such as
+`git@github.example.com-work:owner/repo.git`. The alias convention applies only to scp-style and
+`ssh://` origins. HTTPS hosts must match exactly. GitHub.com and GitLab.com and their SSH aliases
+continue to work when an Enterprise host is configured.
 
 Host identity comes from origin's fetch URL after Git's `url.*.insteadOf` rewrite. A separate
 push URL does not change it. API calls name the canonical host on every request, so `GH_HOST`
-cannot redirect a fetch. Authenticate the Enterprise host with
-`gh auth login --hostname github.example.com`.
+cannot redirect a fetch. Authenticate the Enterprise or self-hosted host with:
+
+- **GitHub**: `gh auth login --hostname github.example.com`.
+- **GitLab**: `glab auth login --hostname gitlab.corp.com`.
+- **Bitbucket Data Center**: see [Bitbucket tokens](#bitbucket-tokens) below — there is no CLI
+  login step.
+
+There is no `bitbucket_host` default: Bitbucket Cloud (`bitbucket.org`) uses a different API than
+Data Center and is not supported. An unconfigured or unrecognized host degrades the same way,
+naming the host and the config key that would enable it.
+
+#### Bitbucket tokens
+
+Bitbucket Data Center has no official CLI, so reviewr authenticates with an HTTP access token
+instead of a signed-in tool. It resolves the token in order, on every fetch:
+
+1. the `BITBUCKET_TOKEN` environment variable, read fresh each poll so a rotated token takes
+   effect without a restart;
+2. failing that, `git credential fill` for the origin host, reusing whatever credential helper
+   git already has configured.
+
+With neither set, the PR tab shows a remedy naming both options. The token is passed to `curl`
+through a config file on stdin, never as a command-line argument, so it never appears in `ps` or
+`/proc`.
 
 ### Sidebar placement
 
@@ -265,7 +303,7 @@ opens by setting `toggle_placement` in the same config file. reviewr re-reads th
 toggle, so a change takes effect the next time you press the key.
 
 ```toml
-# ~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
+# ~/.config/herdr/plugins/config/dcieslak19973.reviewr/config.toml
 toggle_placement = "overlay"   # split | overlay | zoomed | tab   (default: split)
 toggle_direction = "down"      # right | down — split only        (default: right)
 ```
@@ -287,7 +325,7 @@ reviewr auto-opens for every new worktree by default. To make it wait for the to
 set `auto_open = false` in the same config file:
 
 ```toml
-# ~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
+# ~/.config/herdr/plugins/config/dcieslak19973.reviewr/config.toml
 auto_open = false   # default: true
 ```
 
@@ -301,7 +339,7 @@ it in whatever placement you configured.
 A layout can also open reviewr itself, once its panes are in place:
 
 ```
-herdr plugin action invoke open --plugin persiyanov.reviewr
+herdr plugin action invoke open --plugin dcieslak19973.reviewr
 ```
 
 `open` ignores `auto_open`, because an explicit call is you asking. It opens with your configured
@@ -338,11 +376,12 @@ This is a focused, young tool. The known constraints:
   never gets its own snapshot. The scope then shows everything since the last *observed* turn
   start. That is never lines the agent didn't write, but possibly more than one turn.
 
-**PR tab (GitHub)**
-- **GitHub-only and read-only** — needs an authenticated `gh` and a GitHub remote. Without either
-  it shows one line telling you what to fix, and Changes and All files keep working.
-- **Mirrors only the branch's *open* PR** — a merged or closed PR shows as history. Each comment
-  surface caps at one page (100 rows), with a `+more on GitHub ↗` marker when there is more.
+**PR tab (GitHub, GitLab, Bitbucket Data Center)**
+- **Read-only, one forge per origin** — needs an authenticated `gh`/`glab`, or a Bitbucket token,
+  matching the origin's remote. Without it, it shows one line telling you what to fix, and
+  Changes and All files keep working.
+- **Mirrors only the branch's *open* PR/MR** — a merged or closed one shows as history. Each
+  comment surface caps at one page (100 rows), with a `+more ↗` marker when there is more.
 
 **Review model**
 - **Comments are in-memory and single-session** — closing the pane loses any you haven't sent or
@@ -365,7 +404,7 @@ For contributors. `herdr plugin link` skips the download build step, so place a 
 binary where the pane command looks for it, at `$HERDR_PLUGIN_ROOT/bin/herdr-reviewr`:
 
 ```bash
-git clone https://github.com/persiyanov/herdr-reviewr
+git clone https://github.com/dcieslak19973/herdr-reviewr
 cd herdr-reviewr
 just install   # build release → bin/herdr-reviewr, ad-hoc re-signed on macOS
 herdr plugin link .
@@ -389,7 +428,7 @@ with `herdr plugin list`. A `github:…` source means the pane runs a *downloade
 run `just install`. Switch a GitHub install to a dev link:
 
 ```bash
-herdr plugin uninstall persiyanov.reviewr   # config is keyed by id and survives
+herdr plugin uninstall dcieslak19973.reviewr   # config is keyed by id and survives
 herdr plugin link .
 ```
 

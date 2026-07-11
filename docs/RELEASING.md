@@ -48,7 +48,8 @@ Pick the new version with semver: a behavior change or new feature is a minor bu
 
 - creates the Release for the tag if absent (`gh release create --verify-tag --generate-notes`);
 - builds `herdr-reviewr` for `aarch64-apple-darwin`, `x86_64-apple-darwin`,
-  `x86_64-unknown-linux-gnu`, and `aarch64-unknown-linux-gnu`;
+  `x86_64-unknown-linux-musl`, and `aarch64-unknown-linux-musl` (statically linked, so the
+  binary runs on any glibc);
 - uploads each as `herdr-reviewr-<target>.tar.gz` with a `.sha256` sidecar.
 
 The toolchain is pinned by `rust-toolchain.toml`, so CI and local builds match.
@@ -59,20 +60,20 @@ Switch your own machine from the dev link to the published release. This is also
 end-to-end test: it exercises the exact `herdr plugin install` path a user hits.
 
 1. **Swap the link for the release.** Your config survives — `config.toml` lives in
-   `~/.config/herdr/plugins/config/persiyanov.reviewr/`, keyed by plugin id, untouched by a reinstall.
+   `~/.config/herdr/plugins/config/dcieslak19973.reviewr/`, keyed by plugin id, untouched by a reinstall.
 
    ```bash
-   herdr plugin unlink persiyanov.reviewr
-   herdr plugin install persiyanov/herdr-reviewr --yes   # install.sh downloads the vX.Y.Z binary
-   herdr plugin list --plugin persiyanov.reviewr          # confirm: github source + version X.Y.Z
+   herdr plugin unlink dcieslak19973.reviewr
+   herdr plugin install dcieslak19973/herdr-reviewr --yes   # install.sh downloads the vX.Y.Z binary
+   herdr plugin list --plugin dcieslak19973.reviewr          # confirm: github source + version X.Y.Z
    ```
 
 2. **Relaunch the sidebar** so the open pane runs the new binary instead of the old process.
    The `close` and `open` actions own the pane lifecycle — there is no state file to sync:
 
    ```bash
-   herdr plugin action invoke close --plugin persiyanov.reviewr   # closes every reviewr pane
-   herdr plugin action invoke open  --plugin persiyanov.reviewr   # opens the new binary
+   herdr plugin action invoke close --plugin dcieslak19973.reviewr   # closes every reviewr pane
+   herdr plugin action invoke open  --plugin dcieslak19973.reviewr   # opens the new binary
    ```
 
 **Gotchas**
