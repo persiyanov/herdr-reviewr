@@ -7,6 +7,7 @@
 //! otherwise writes to the forge. The `PR` tab renders the [`PrSnapshot`] a backend produces;
 //! degradation is in-band as [`PrView`].
 
+mod bitbucket;
 mod github;
 mod gitlab;
 mod proc;
@@ -206,7 +207,6 @@ pub(crate) enum ForgeError {
     /// The tool is present but not authenticated for this host.
     NotAuthed { forge: crate::git::Forge, host: String },
     /// Bitbucket only: no token in `BITBUCKET_TOKEN` or git-credential for this host.
-    #[allow(dead_code, reason = "constructed by the Bitbucket backend, added in Task 7")]
     NoToken(String),
     Other(String),
 }
@@ -242,9 +242,7 @@ pub(crate) fn backend_fetch(
     match forge {
         crate::git::Forge::GitHub => github::fetch(target, input),
         crate::git::Forge::GitLab => gitlab::fetch(target, input),
-        crate::git::Forge::Bitbucket => {
-            Err(ForgeError::Other("Bitbucket support is not built yet".to_string()))
-        }
+        crate::git::Forge::Bitbucket => bitbucket::fetch(target, input),
     }
 }
 
@@ -400,6 +398,19 @@ pub fn relative_age(created_at: &str, now: SystemTime) -> String {
         s if s < 604_800 => format!("{}d", s / 86_400),
         s => format!("{}w", s / 604_800),
     }
+}
+
+/// Percent-encode for a URL path segment or query value: unreserved chars pass, all else %XX.
+/// Shared by every backend that builds REST paths by hand (`gitlab`, `bitbucket`).
+pub(crate) fn enc(s: &str) -> String {
+    s.bytes()
+        .flat_map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                vec![b as char]
+            }
+            _ => format!("%{b:02X}").chars().collect(),
+        })
+        .collect()
 }
 
 /// Parse a fixed `YYYY-MM-DDTHH:MM:SSZ` timestamp to a Unix epoch second. `None` on any

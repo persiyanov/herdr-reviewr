@@ -6,7 +6,7 @@
 use serde_json::Value;
 
 use super::{
-    Check, CheckStatus, Comment, CommentKind, FetchTarget, Merge, PrFetchInput, PrSnapshot,
+    enc, Check, CheckStatus, Comment, CommentKind, FetchTarget, Merge, PrFetchInput, PrSnapshot,
     PrState, PrView, Sync,
 };
 
@@ -202,18 +202,6 @@ fn fetch_comments(target: &FetchTarget<'_>, iid: u64) -> Result<(Vec<Comment>, b
 }
 
 // ---- Pure normalization (unit-tested) --------------------------------------------------
-
-/// Percent-encode for a URL path segment or query value: unreserved chars pass, all else %XX.
-fn enc(s: &str) -> String {
-    s.bytes()
-        .flat_map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                vec![b as char]
-            }
-            _ => format!("%{b:02X}").chars().collect(),
-        })
-        .collect()
-}
 
 /// opened → Open, merged → Merged, closed → Closed (default Open, like GitHub's `parse_state`,
 /// so `locked` — an active MR frozen from further discussion — still reads as live).
