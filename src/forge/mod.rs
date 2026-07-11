@@ -54,9 +54,9 @@ impl PrView {
     pub fn retry_remedy(&self) -> Option<String> {
         match self {
             Self::NoCli(tool) => Some(format!("{tool} not found — install `{tool}`, then press r")),
-            Self::NotAuthed { forge: crate::git::Forge::GitHub, host } => Some(format!(
-                "not signed in — run `gh auth login --hostname {host}`, then press r"
-            )),
+            Self::NotAuthed { forge: crate::git::Forge::GitHub, host } => {
+                Some(format!("not signed in — run `gh auth login --hostname {host}`, then press r"))
+            }
             Self::NotAuthed { forge: crate::git::Forge::GitLab, host } => Some(format!(
                 "not signed in — run `glab auth login --hostname {host}`, then press r"
             )),
@@ -205,7 +205,10 @@ pub(crate) enum ForgeError {
     /// The forge's CLI tool is not on `PATH` ("gh", "glab", "curl").
     NoCli(&'static str),
     /// The tool is present but not authenticated for this host.
-    NotAuthed { forge: crate::git::Forge, host: String },
+    NotAuthed {
+        forge: crate::git::Forge,
+        host: String,
+    },
     /// Bitbucket only: no token in `BITBUCKET_TOKEN` or git-credential for this host.
     NoToken(String),
     Other(String),
@@ -316,8 +319,7 @@ fn fetch_inner(repo: &Path, input: &PrFetchInput, cancelled: &AtomicBool) -> PrV
         // unrelated PR.
         return PrView::NoPr(Vec::new());
     }
-    let target =
-        FetchTarget { repo, host: &t.host, owner: &t.owner, name: &t.name, cancelled };
+    let target = FetchTarget { repo, host: &t.host, owner: &t.owner, name: &t.name, cancelled };
     match backend_fetch(t.forge, &target, input) {
         Ok(view) => view,
         Err(e) => e.into(),

@@ -8,8 +8,8 @@
 use serde_json::Value;
 
 use super::{
-    enc, Check, CheckStatus, Comment, CommentKind, FetchTarget, ForgeError, Merge, PrFetchInput,
-    PrSnapshot, PrState, PrView, Sync,
+    Check, CheckStatus, Comment, CommentKind, FetchTarget, ForgeError, Merge, PrFetchInput,
+    PrSnapshot, PrState, PrView, Sync, enc,
 };
 
 /// Read Bitbucket for one already-derived input, dispatched from [`super::backend_fetch`]. The
@@ -216,7 +216,10 @@ fn resolve_one_open(
         .into_iter()
         .flatten()
         .filter_map(|p| {
-            Some((p["id"].as_u64()?, p["fromRef"]["latestCommit"].as_str().unwrap_or_default().to_string()))
+            Some((
+                p["id"].as_u64()?,
+                p["fromRef"]["latestCommit"].as_str().unwrap_or_default().to_string(),
+            ))
         })
         .collect();
     Ok((entries, is_truncated(&v)))
@@ -278,7 +281,11 @@ fn fetch_merge(target: &FetchTarget<'_>, token: &str, id: u64) -> Result<Merge, 
 
 /// The head commit's build statuses, normalised to [`Check`]s. This endpoint lives outside the
 /// project/repo path — it is keyed by commit hash alone, shared across every repo on the host.
-fn fetch_checks(target: &FetchTarget<'_>, token: &str, sha: &str) -> Result<(Vec<Check>, bool), ForgeError> {
+fn fetch_checks(
+    target: &FetchTarget<'_>,
+    token: &str,
+    sha: &str,
+) -> Result<(Vec<Check>, bool), ForgeError> {
     let url = format!("https://{}/rest/build-status/latest/commits/{sha}?limit=100", target.host);
     let v = curl_get(target, token, &url)?;
     let checks = v["values"]
@@ -294,7 +301,11 @@ fn fetch_checks(target: &FetchTarget<'_>, token: &str, sha: &str) -> Result<(Vec
 }
 
 /// The PR's activity feed, filtered to comments and normalised to [`Comment`]s.
-fn fetch_comments(target: &FetchTarget<'_>, token: &str, id: u64) -> Result<(Vec<Comment>, bool), ForgeError> {
+fn fetch_comments(
+    target: &FetchTarget<'_>,
+    token: &str,
+    id: u64,
+) -> Result<(Vec<Comment>, bool), ForgeError> {
     let url = format!("{}/pull-requests/{id}/activities?limit=100", base(target));
     let v = curl_get(target, token, &url)?;
     Ok((map_activities(&v["values"]), is_truncated(&v)))
@@ -514,7 +525,9 @@ mod tests {
         );
         // canMerge:false with no vetoes (e.g. still computing) is not actionable → Clean.
         assert_eq!(
-            derive_merge(&serde_json::json!({"canMerge": false, "conflicted": false, "vetoes": []})),
+            derive_merge(
+                &serde_json::json!({"canMerge": false, "conflicted": false, "vetoes": []})
+            ),
             Merge::Clean
         );
     }
@@ -633,7 +646,9 @@ mod tests {
 
         let mut forked = detail.clone();
         forked["fromRef"]["repository"]["project"]["key"] = serde_json::json!("OTHER");
-        assert!(build_snapshot(&forked, Merge::Clean, vec![], vec![], Sync::InSync, false).head_is_fork);
+        assert!(
+            build_snapshot(&forked, Merge::Clean, vec![], vec![], Sync::InSync, false).head_is_fork
+        );
 
         // Absent fields default rather than fail — a mid-rollout API response degrades soft.
         let bare = serde_json::json!({"id": 7});
@@ -671,17 +686,35 @@ mod tests {
 
     #[test]
     fn classify_maps_curl_failures() {
-        assert_eq!(classify(super::super::proc::RunFail::NotFound, "bb.example.com"), ForgeError::NoCli("curl"));
         assert_eq!(
-            classify(super::super::proc::RunFail::Failed { stderr: "HTTP 401 Unauthorized".to_string() }, "bb.example.com"),
-            ForgeError::NotAuthed { forge: crate::git::Forge::Bitbucket, host: "bb.example.com".to_string() }
+            classify(super::super::proc::RunFail::NotFound, "bb.example.com"),
+            ForgeError::NoCli("curl")
         );
         assert_eq!(
-            classify(super::super::proc::RunFail::Failed { stderr: "HTTP 403 Forbidden".to_string() }, "bb.example.com"),
-            ForgeError::NotAuthed { forge: crate::git::Forge::Bitbucket, host: "bb.example.com".to_string() }
+            classify(
+                super::super::proc::RunFail::Failed { stderr: "HTTP 401 Unauthorized".to_string() },
+                "bb.example.com"
+            ),
+            ForgeError::NotAuthed {
+                forge: crate::git::Forge::Bitbucket,
+                host: "bb.example.com".to_string()
+            }
         );
         assert_eq!(
-            classify(super::super::proc::RunFail::Failed { stderr: "HTTP 500".to_string() }, "bb.example.com"),
+            classify(
+                super::super::proc::RunFail::Failed { stderr: "HTTP 403 Forbidden".to_string() },
+                "bb.example.com"
+            ),
+            ForgeError::NotAuthed {
+                forge: crate::git::Forge::Bitbucket,
+                host: "bb.example.com".to_string()
+            }
+        );
+        assert_eq!(
+            classify(
+                super::super::proc::RunFail::Failed { stderr: "HTTP 500".to_string() },
+                "bb.example.com"
+            ),
             ForgeError::Other("HTTP 500".to_string())
         );
     }

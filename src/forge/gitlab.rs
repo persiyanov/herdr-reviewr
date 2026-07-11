@@ -6,8 +6,8 @@
 use serde_json::Value;
 
 use super::{
-    enc, Check, CheckStatus, Comment, CommentKind, FetchTarget, Merge, PrFetchInput, PrSnapshot,
-    PrState, PrView, Sync,
+    Check, CheckStatus, Comment, CommentKind, FetchTarget, Merge, PrFetchInput, PrSnapshot,
+    PrState, PrView, Sync, enc,
 };
 
 /// Read GitLab for one already-derived input, dispatched from [`super::backend_fetch`]. The
@@ -69,7 +69,9 @@ fn glab(
     match super::proc::run_tool("glab", repo, args, None, cancelled) {
         Ok(stdout) => Ok(stdout),
         Err(super::proc::RunFail::NotFound) => Err(GlError::NoGlab),
-        Err(super::proc::RunFail::Cancelled) => Err(GlError::Other("request cancelled".to_string())),
+        Err(super::proc::RunFail::Cancelled) => {
+            Err(GlError::Other("request cancelled".to_string()))
+        }
         Err(super::proc::RunFail::Failed { stderr }) => Err(classify_failure(&stderr, host)),
         Err(super::proc::RunFail::Io(message)) => Err(GlError::Other(message)),
     }
@@ -113,7 +115,12 @@ fn proj(target: &FetchTarget<'_>) -> String {
 
 /// Run one `glab api --hostname <host> <path>` call and parse its JSON body.
 fn api_get(target: &FetchTarget<'_>, path: &str) -> Result<Value, GlError> {
-    let out = glab(target.repo, target.host, &["api", "--hostname", target.host, path], target.cancelled)?;
+    let out = glab(
+        target.repo,
+        target.host,
+        &["api", "--hostname", target.host, path],
+        target.cancelled,
+    )?;
     serde_json::from_str(&out).map_err(|e| GlError::Other(e.to_string()))
 }
 
@@ -136,7 +143,9 @@ fn resolve_one_open(target: &FetchTarget<'_>, branch: &str) -> Result<Vec<(u64, 
     Ok(v.as_array()
         .into_iter()
         .flatten()
-        .filter_map(|m| Some((m["iid"].as_u64()?, m["sha"].as_str().unwrap_or_default().to_string())))
+        .filter_map(|m| {
+            Some((m["iid"].as_u64()?, m["sha"].as_str().unwrap_or_default().to_string()))
+        })
         .collect())
 }
 
@@ -165,7 +174,9 @@ fn resolve_one_historical(
         .flatten()
         .find(|m| matches!(m["state"].as_str(), Some("merged" | "closed")));
     Ok(hit
-        .and_then(|m| Some((m["iid"].as_u64()?, m["created_at"].as_str().unwrap_or_default().to_string())))
+        .and_then(|m| {
+            Some((m["iid"].as_u64()?, m["created_at"].as_str().unwrap_or_default().to_string()))
+        })
         .into_iter()
         .collect())
 }
@@ -272,8 +283,7 @@ fn map_discussions(discussions: &Value) -> Vec<Comment> {
 
         let position = root.get("position").filter(|p| !p.is_null());
         let comment = if let Some(pos) = position {
-            let (anchor, is_outdated) = match (pos["new_path"].as_str(), pos["new_line"].as_u64())
-            {
+            let (anchor, is_outdated) = match (pos["new_path"].as_str(), pos["new_line"].as_u64()) {
                 (Some(p), Some(l)) if !p.is_empty() => (format!("{p}:{l}"), false),
                 _ => {
                     let old_path = pos["old_path"].as_str().unwrap_or("");
@@ -324,11 +334,11 @@ fn build_snapshot(
     truncated: bool,
 ) -> PrSnapshot {
     let is_draft = detail["draft"].as_bool().unwrap_or(false);
-    let head_is_fork = match (detail["source_project_id"].as_u64(), detail["target_project_id"].as_u64())
-    {
-        (Some(source), Some(target)) => source != target,
-        _ => false,
-    };
+    let head_is_fork =
+        match (detail["source_project_id"].as_u64(), detail["target_project_id"].as_u64()) {
+            (Some(source), Some(target)) => source != target,
+            _ => false,
+        };
     PrSnapshot {
         number: detail["iid"].as_u64().unwrap_or_default(),
         title: detail["title"].as_str().unwrap_or_default().to_string(),

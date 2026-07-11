@@ -62,7 +62,9 @@ fn gh(
     match super::proc::run_tool("gh", repo, args, None, cancelled) {
         Ok(stdout) => Ok(stdout),
         Err(super::proc::RunFail::NotFound) => Err(GhError::NoGh),
-        Err(super::proc::RunFail::Cancelled) => Err(GhError::Other("request cancelled".to_string())),
+        Err(super::proc::RunFail::Cancelled) => {
+            Err(GhError::Other("request cancelled".to_string()))
+        }
         Err(super::proc::RunFail::Failed { stderr }) => Err(classify_failure(&stderr, host)),
         Err(super::proc::RunFail::Io(message)) => Err(GhError::Other(message)),
     }
