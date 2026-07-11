@@ -32,7 +32,7 @@ bitbucket_host = "bitbucket.corp.com"
 | `auto_open`            | boolean                                                                  |
 | `github_host`          | bare hostname outside the `github.com` and `github.com-*` namespace       |
 | `gitlab_host`          | bare hostname (`gitlab.com` is always supported and needs no entry here)  |
-| `bitbucket_host`       | bare hostname naming a Bitbucket Data Center instance (no default; Bitbucket Cloud's `bitbucket.org` is a different API and is not supported through this key) |
+| `bitbucket_host`       | bare hostname naming a Bitbucket Data Center instance (no default; the key is meant for Data Center hosts — setting it to Bitbucket Cloud's `bitbucket.org` passes validation and is not rejected, but Cloud's API differs from Data Center's, so fetches against it fail) |
 
 ## Behavior
 

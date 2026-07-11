@@ -60,7 +60,7 @@ gitlab_host    = "gitlab.corp.com"
 bitbucket_host = "bitbucket.corp.com"
 ```
 
-`github.com` and `gitlab.com` are built in and always supported, whether or not their Enterprise siblings are configured. There is no `bitbucket.org` built-in: Bitbucket Cloud is a different API than Bitbucket Data Center and is not supported, so it degrades the same as any other unconfigured host, naming `bitbucket_host`.
+`github.com` and `gitlab.com` are built in and always supported, whether or not their Enterprise siblings are configured. There is no `bitbucket.org` built-in, so an unconfigured origin on it degrades the same as any other unconfigured host, naming `bitbucket_host`. `bitbucket_host` is meant for a Bitbucket Data Center instance; pointing it at `bitbucket.org` is not rejected by validation or origin classification, but Bitbucket Cloud's API differs from Data Center's, so every fetch against it still fails.
 
 Host matching is case-insensitive. Host identity comes from `origin`'s primary fetch URL after Git's `url.*.insteadOf` rewrite. A separate push URL does not affect PR/MR reads.
 
@@ -153,7 +153,7 @@ What a user observes:
 - A refetch fires on entering the tab, on `r`, and on the agent's turn-end (a `working` → `idle`/`done` edge) while the tab is active. A turn may have pushed or merged, changing forge state with no other local signal.
 - A fallback poll refetches every 60 seconds while the tab is active. Off the tab there is no polling.
 - A fetch-input change observed on refresh clears the current PR/MR. It starts a fetch while the tab is active; otherwise the next tab entry starts it.
-- A GitHub fetch with an open PR is two GraphQL calls; one that checks historical PRs is three. A GitLab or Bitbucket fetch is one list call per candidate (≤8) to resolve, plus a detail call, a checks call, and a comments call — more calls than GitHub's aliased query, but on the same 60 s cadence. All run on a worker thread, so no forge CLI ever blocks input or scrolling.
+- A GitHub fetch with an open PR is two GraphQL calls; one that checks historical PRs is three. A GitLab fetch is one list call per candidate (≤8) to resolve, plus a detail call, a checks call, and a comments call — three follow-ups. A Bitbucket fetch is the same one list call per candidate to resolve, plus a detail call, a `/merge` call, a build-status call, and an activities call — four follow-ups, since mergeability is its own endpoint there. Both cost more calls than GitHub's aliased query, but run on the same 60 s cadence. All run on a worker thread, so no forge CLI ever blocks input or scrolling.
 - One fetch is in flight at a time. A trigger arriving mid-flight supersedes its result and starts a fresh fetch when it completes.
 - Each fetch uses one snapshot of reviewr's config for host and base selection. A later fetch sees a config edit without restarting reviewr.
 - A completed fetch updates the PR tab only when the current worktree and config still derive the same input.
@@ -165,7 +165,7 @@ reviewr reads its forge and never writes it, so every failure degrades to a clea
 
 - A missing CLI tool (`gh` or `glab` not on `PATH`; Bitbucket's `curl` absent) preserves a same-input snapshot and shows the install remedy, naming the missing tool. With no same-input snapshot, the remedy fills the tab.
 - An unauthenticated fetch preserves a same-input snapshot and shows the forge's login remedy: `gh auth login --hostname <host>` for GitHub, `glab auth login --hostname <host>` for GitLab. With no same-input snapshot, the remedy fills the tab.
-- Bitbucket has no CLI login: a missing or rejected token shows `NoToken`, naming `BITBUCKET_TOKEN` and git credentials as the two ways to supply one. A `401`/`403` from `curl` also reads as `NotAuthed` for Bitbucket, with the same remedy wording.
+- Bitbucket has no CLI login: a missing or rejected token shows `NoToken`, naming `BITBUCKET_TOKEN` and git credentials as the two ways to supply one. A `401`/`403` from `curl` instead reads as `NotAuthed` for Bitbucket, whose remedy points at `BITBUCKET_TOKEN` for the host without repeating the git-credentials alternative — a narrower nudge for a token that was presented but rejected, rather than one that's simply absent.
 - An unsupported origin names the host and points to the matching `*_host` key.
 - Any other fetch failure preserves a same-input snapshot and shows the retry error, naming the forge. With no same-input snapshot, the error fills the tab.
 - A missing `origin` is a clean absence. Any other git command failure is transient and never read as absence, a detached `HEAD`, or an unsupported remote.
@@ -178,7 +178,7 @@ reviewr reads its forge and never writes it, so every failure degrades to a clea
 - No writes to any forge. reviewr never posts, resolves a thread, re-runs a check, or merges, on GitHub, GitLab, or Bitbucket. It never routes PR/MR feedback to the agent.
 - No event subscription. The snapshot polls its forge's CLI or `curl`, no webhook or socket.
 - No server-version compatibility layer. An Enterprise/Data Center schema that lacks the snapshot's fields fails like any unavailable forge API.
-- No Bitbucket Cloud (`bitbucket.org`) support. Its API differs from Data Center's and is out of scope; it degrades like any other unsupported host.
+- No Bitbucket Cloud (`bitbucket.org`) support. `bitbucket_host` is meant for Data Center; pointing it at `bitbucket.org` is not rejected, but Cloud's API differs from Data Center's, so every fetch against it fails. An unconfigured origin on it degrades like any other unsupported host.
 - No native HTTP client in the binary. GitHub and GitLab access shells out to `gh`/`glab`; Bitbucket shells out to `curl`. Networking and its proxy/CA/auth concerns stay in subprocesses.
 
 ## Related specs

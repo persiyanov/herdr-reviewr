@@ -26,7 +26,8 @@ What you get, in one persistent pane pointed at a git worktree:
   Nord, Gruvbox, Tokyo Night, Rosé Pine, Solarized, and more.
 
 It **never edits your worktree** and sends nothing on its own. Its only write to git is a private
-`last-turn` baseline ref under `refs/reviewr/`. The **PR** tab reads GitHub but never posts there.
+`last-turn` baseline ref under `refs/reviewr/`. The **PR** tab reads your forge — GitHub, GitLab,
+or Bitbucket Data Center — but never posts there.
 
 ## Requirements
 
