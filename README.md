@@ -1,5 +1,10 @@
 # herdr-reviewr
 
+> **Fork.** This is a fork of [persiyanov/herdr-reviewr](https://github.com/persiyanov/herdr-reviewr),
+> maintained at [dcieslak19973/herdr-reviewr](https://github.com/dcieslak19973/herdr-reviewr). Changes
+> from upstream: static `musl` builds for Linux releases, and GitLab + Bitbucket Data Center support
+> alongside GitHub.
+
 A code-review sidebar for [herdr](https://herdr.dev). Your agent writes the code. You read its
 diff in a pane beside the chat, comment on the lines, and send the notes back. You never leave
 the terminal.
@@ -38,7 +43,7 @@ It **never edits your worktree** and sends nothing on its own. Its only write to
 From the herdr marketplace. You get a prebuilt binary, no Rust toolchain:
 
 ```bash
-herdr plugin install persiyanov/herdr-reviewr
+herdr plugin install dcieslak19973/herdr-reviewr
 ```
 
 The sidebar **auto-opens for a newly created worktree**, so installing the plugin is enough. Set
@@ -50,15 +55,15 @@ Keybindings live in user config, not in the plugin manifest:
 [[keys.command]]
 key = "cmd+r"
 type = "plugin_action"
-command = "persiyanov.reviewr.toggle"   # <plugin_id>.<action_id> — note the id, not the name
+command = "dcieslak19973.reviewr.toggle"   # <plugin_id>.<action_id> — note the id, not the name
 ```
 
 `cmd+…` chords reach herdr. macOS swallows `alt+…`. With no key bound, run the action once with
-`herdr plugin action invoke toggle --plugin persiyanov.reviewr`.
+`herdr plugin action invoke toggle --plugin dcieslak19973.reviewr`.
 
 Beside `toggle` there are two explicit actions, made for scripts and layout plugins. `open` opens
 the sidebar and does nothing when one is already open. `close` closes it and does nothing when none
-is. Bind or invoke them the same way, as `persiyanov.reviewr.open` and `persiyanov.reviewr.close`.
+is. Bind or invoke them the same way, as `dcieslak19973.reviewr.open` and `dcieslak19973.reviewr.close`.
 See [Auto-open and layout plugins](#auto-open-and-layout-plugins) for the layout recipe.
 
 ## Quick start
@@ -173,7 +178,7 @@ CLI flags on the pane command:
 Everything else is set in reviewr's own config file:
 
 ```text
-~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
+~/.config/herdr/plugins/config/dcieslak19973.reviewr/config.toml
 ```
 
 Create the file if it does not exist yet. herdr hands this directory to the plugin as
@@ -204,7 +209,7 @@ One theme colors the whole UI, chrome and syntax together. Set it in reviewr's c
 reviewr re-reads the file on refresh, so editing it and refreshing re-themes without a relaunch:
 
 ```toml
-# ~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
+# ~/.config/herdr/plugins/config/dcieslak19973.reviewr/config.toml
 theme = "tokyo-night"
 ```
 
@@ -231,7 +236,7 @@ config file. reviewr re-reads it on refresh, so editing it and pressing `r` re-b
 relaunch:
 
 ```toml
-# ~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
+# ~/.config/herdr/plugins/config/dcieslak19973.reviewr/config.toml
 base_branches = ["origin/develop", "origin/main", "main", "master"]
 ```
 
@@ -265,7 +270,7 @@ opens by setting `toggle_placement` in the same config file. reviewr re-reads th
 toggle, so a change takes effect the next time you press the key.
 
 ```toml
-# ~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
+# ~/.config/herdr/plugins/config/dcieslak19973.reviewr/config.toml
 toggle_placement = "overlay"   # split | overlay | zoomed | tab   (default: split)
 toggle_direction = "down"      # right | down — split only        (default: right)
 ```
@@ -287,7 +292,7 @@ reviewr auto-opens for every new worktree by default. To make it wait for the to
 set `auto_open = false` in the same config file:
 
 ```toml
-# ~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
+# ~/.config/herdr/plugins/config/dcieslak19973.reviewr/config.toml
 auto_open = false   # default: true
 ```
 
@@ -301,7 +306,7 @@ it in whatever placement you configured.
 A layout can also open reviewr itself, once its panes are in place:
 
 ```
-herdr plugin action invoke open --plugin persiyanov.reviewr
+herdr plugin action invoke open --plugin dcieslak19973.reviewr
 ```
 
 `open` ignores `auto_open`, because an explicit call is you asking. It opens with your configured
@@ -365,7 +370,7 @@ For contributors. `herdr plugin link` skips the download build step, so place a 
 binary where the pane command looks for it, at `$HERDR_PLUGIN_ROOT/bin/herdr-reviewr`:
 
 ```bash
-git clone https://github.com/persiyanov/herdr-reviewr
+git clone https://github.com/dcieslak19973/herdr-reviewr
 cd herdr-reviewr
 just install   # build release → bin/herdr-reviewr, ad-hoc re-signed on macOS
 herdr plugin link .
@@ -389,7 +394,7 @@ with `herdr plugin list`. A `github:…` source means the pane runs a *downloade
 run `just install`. Switch a GitHub install to a dev link:
 
 ```bash
-herdr plugin uninstall persiyanov.reviewr   # config is keyed by id and survives
+herdr plugin uninstall dcieslak19973.reviewr   # config is keyed by id and survives
 herdr plugin link .
 ```
 

@@ -10,7 +10,7 @@
 set -euo pipefail
 
 NAME="herdr-reviewr"
-REPO="persiyanov/herdr-reviewr"
+REPO="dcieslak19973/herdr-reviewr"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN_DIR="$ROOT/bin"
