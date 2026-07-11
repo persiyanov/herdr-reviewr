@@ -111,13 +111,22 @@ fn token_from(
 /// Ask `git credential fill` for the password it has stored for `target.host` over HTTPS, or
 /// `None` on any failure (tool missing, cancelled, no matching credential). Thin and untested —
 /// the decision logic lives in [`token_from`].
+///
+/// Runs with `GIT_TERMINAL_PROMPT=0` and `GIT_ASKPASS` cleared (set to empty): without a helper
+/// that already has the credential, `git credential fill` otherwise falls back to prompting
+/// `Password for ...` directly on `/dev/tty`, bypassing stdio entirely. This pane owns the
+/// terminal — a prompt racing the ratatui redraw loop would corrupt the UI and block this fetch
+/// worker on input nobody can supply. Suppressing the prompt makes the call fail cleanly instead,
+/// so a missing credential degrades to [`ForgeError::NoToken`] (`specs/forge-host.md`) rather
+/// than hanging.
 fn credential_password(target: &FetchTarget<'_>) -> Option<String> {
     let input = format!("protocol=https\nhost={}\n\n", target.host);
-    let out = super::proc::run_tool(
+    let out = super::proc::run_tool_with_env(
         "git",
         target.repo,
         &["credential", "fill"],
         Some(&input),
+        &[("GIT_TERMINAL_PROMPT", "0"), ("GIT_ASKPASS", "")],
         target.cancelled,
     )
     .ok()?;

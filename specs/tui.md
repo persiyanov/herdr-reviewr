@@ -134,7 +134,7 @@ A read-only mirror of the pull request in the same two-pane frame: the right pan
 
 - The header right-anchors a clickable `status #226 ↗` chip, status colored by lifecycle: `open` green, `draft` yellow, `merged` mauve, `closed` red. The PR title sits to its left, truncated to fit.
 - Between title and chip sits the resolved head branch (`head_ref`, `forge-host.md`), dim, prefixed `⑂ ` when the head lives in a fork. On a narrow bar the branch drops first.
-- The footer leads with merge, sync, checks, and comment counts. Merge and sync show only while the PR is open. A capped surface appends `+more on GitHub ↗` (`forge-host.md`).
+- The footer leads with merge, sync, checks, and comment counts. Merge and sync show only while the PR is open. A capped surface appends `+more ↗` (`forge-host.md`).
 - The right pane, titled `Checks & comments`, shows a status-only checks section above the comments list. The cursor walks the comments.
 - Comments list newest first, each row `@author anchor age`, with `outdated` or `resolved` markers where GitHub receded the thread.
 - The left pane reads the selected comment: a finding shows its `diff_hunk` then the body, a review or plain comment shows its prose.

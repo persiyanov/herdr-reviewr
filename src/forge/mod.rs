@@ -94,7 +94,8 @@ pub struct PrSnapshot {
     pub checks: Vec<Check>,
     pub comments: Vec<Comment>,
     /// A capped surface (reviews/comments/threads/checks) had more rows than the 100-row fetch
-    /// returned — the lists shown are a prefix, not the whole set. Drives a "more on GitHub" marker.
+    /// returned — the lists shown are a prefix, not the whole set. Drives a "+more ↗" marker
+    /// pointing at the browser, regardless of which forge produced the snapshot.
     pub truncated: bool,
 }
 

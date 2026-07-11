@@ -33,8 +33,26 @@ pub(crate) fn run_tool(
     stdin: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Result<String, RunFail> {
+    run_tool_with_env(tool, repo, args, stdin, &[], cancelled)
+}
+
+/// As [`run_tool`], but with `envs` applied to the child's environment on top of the inherited
+/// one (each `(key, value)` set via [`Command::env`]). Exists so a caller that needs to change
+/// how a specific subprocess behaves — e.g. suppressing `git credential fill`'s terminal
+/// prompt — can do so without changing every other `run_tool` call site.
+pub(crate) fn run_tool_with_env(
+    tool: &str,
+    repo: &Path,
+    args: &[&str],
+    stdin: Option<&str>,
+    envs: &[(&str, &str)],
+    cancelled: &AtomicBool,
+) -> Result<String, RunFail> {
     let mut cmd = Command::new(tool);
     cmd.current_dir(repo).args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
     if stdin.is_some() {
         cmd.stdin(Stdio::piped());
     }

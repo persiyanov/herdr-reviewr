@@ -1408,10 +1408,10 @@ fn pr_state_line(s: &forge::PrSnapshot) -> String {
     }
     parts.push(checks_summary(s));
     parts.push(format!("{} comments", s.comments.len()));
-    // A capped surface means the lists are a prefix; point at GitHub for the rest rather than
-    // showing the partial counts as if complete (specs/forge-host.md).
+    // A capped surface means the lists are a prefix; point at the browser for the rest rather
+    // than showing the partial counts as if complete (specs/forge-host.md).
     if s.truncated {
-        parts.push("+more on GitHub ↗".into());
+        parts.push("+more ↗".into());
     }
     parts.join(" · ")
 }
@@ -1554,7 +1554,7 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
             let plural = if cm.reply_count == 1 { "reply" } else { "replies" };
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
-                format!("↳ {} {plural} — open on GitHub to read", cm.reply_count),
+                format!("↳ {} {plural} — open in the browser to read", cm.reply_count),
                 Style::default().fg(p.overlay0),
             )));
         }
@@ -1593,7 +1593,7 @@ fn pr_empty_msg(view: &forge::PrView, noun: &str) -> String {
             )
         }
         forge::PrView::Ambiguous(n) => {
-            format!("{n} open {noun}s back this branch — open one on GitHub")
+            format!("{n} open {noun}s back this branch — open one in the browser")
         }
         forge::PrView::NoCli(_)
         | forge::PrView::NotAuthed { .. }
