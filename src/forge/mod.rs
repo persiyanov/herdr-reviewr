@@ -8,6 +8,7 @@
 //! degradation is in-band as [`PrView`].
 
 mod github;
+mod gitlab;
 mod proc;
 
 use std::path::Path;
@@ -240,9 +241,7 @@ pub(crate) fn backend_fetch(
 ) -> Result<PrView, ForgeError> {
     match forge {
         crate::git::Forge::GitHub => github::fetch(target, input),
-        crate::git::Forge::GitLab => {
-            Err(ForgeError::Other("GitLab support is not built yet".to_string()))
-        }
+        crate::git::Forge::GitLab => gitlab::fetch(target, input),
         crate::git::Forge::Bitbucket => {
             Err(ForgeError::Other("Bitbucket support is not built yet".to_string()))
         }
