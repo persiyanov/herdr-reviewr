@@ -80,22 +80,29 @@ fn fetch_inner(target: &FetchTarget<'_>, input: &PrFetchInput) -> Result<PrView,
 
 /// Resolve the bearer token for `target.host`: `BITBUCKET_TOKEN` first, else `git credential
 /// fill`, else [`ForgeError::NoToken`]. The env var is read fresh on every fetch — never cached
-/// globally — so a rotated token takes effect on the next poll without a restart.
+/// globally — so a rotated token takes effect on the next poll without a restart. The credential
+/// helper is only spawned when the env var is absent/empty, so a poll with `BITBUCKET_TOKEN` set
+/// never pays for a `git credential fill` subprocess.
 fn resolve_token(target: &FetchTarget<'_>) -> Result<String, ForgeError> {
     let env = std::env::var("BITBUCKET_TOKEN").ok();
-    let credential = credential_password(target);
-    token_from(env, credential).map_err(|_| ForgeError::NoToken(target.host.to_string()))
+    token_from(env, || credential_password(target))
+        .map_err(|_| ForgeError::NoToken(target.host.to_string()))
 }
 
 /// The pure auth decision, independent of how `env`/`credential_password` were obtained: a
-/// non-empty env var wins, then a non-empty credential-helper password, else no token. The
+/// non-empty env var wins, then a non-empty credential-helper password, else no token.
+/// `credential_password` is only invoked when `env` is absent/empty, so callers can pass a
+/// closure that spawns a subprocess without paying for it on the common env-var-set path. The
 /// `Err`'s host is a placeholder — [`resolve_token`] rebuilds it with the real host, since this
 /// function has no host to report.
-fn token_from(env: Option<String>, credential_password: Option<String>) -> Result<String, ForgeError> {
+fn token_from(
+    env: Option<String>,
+    credential_password: impl FnOnce() -> Option<String>,
+) -> Result<String, ForgeError> {
     if let Some(t) = env.filter(|s| !s.is_empty()) {
         return Ok(t);
     }
-    if let Some(p) = credential_password.filter(|s| !s.is_empty()) {
+    if let Some(p) = credential_password().filter(|s| !s.is_empty()) {
         return Ok(p);
     }
     Err(ForgeError::NoToken(String::new()))
@@ -364,7 +371,7 @@ fn epoch_ms_to_iso(ms: i64) -> String {
 /// `reply_count` is the total nested `comment.comments[]` entries, counted recursively (a reply
 /// can itself carry replies). Without an anchor → [`CommentKind::Comment`]. Bitbucket has no
 /// review-body surface, so there is no `Review` kind here. `author` is `comment.author.name`;
-/// `author_is_bot` is `comment.author.user.type == "SERVICE"` when present, else the name
+/// `author_is_bot` is `comment.author.type == "SERVICE"` when present, else the name
 /// ending in `-bot`/`_bot`. Non-`COMMENTED` activities (opened, approved, rescoped, …) are
 /// dropped.
 fn map_activities(activities: &Value) -> Vec<Comment> {
@@ -379,7 +386,7 @@ fn map_activities(activities: &Value) -> Vec<Comment> {
         }
         let author = &comment["author"];
         let author_name = author["name"].as_str().unwrap_or("").to_string();
-        let author_is_bot = match author["user"]["type"].as_str() {
+        let author_is_bot = match author["type"].as_str() {
             Some(t) => t == "SERVICE",
             None => author_name.ends_with("-bot") || author_name.ends_with("_bot"),
         };
@@ -564,7 +571,7 @@ mod tests {
                 "action": "COMMENTED",
                 "comment": {
                     "text": "automated note", "createdDate": 1_752_192_500_000i64,
-                    "author": {"name": "ci-runner", "user": {"type": "SERVICE"}}
+                    "author": {"name": "ci-runner", "type": "SERVICE"}
                 }
             },
             {
@@ -638,11 +645,28 @@ mod tests {
 
     #[test]
     fn token_from_prefers_the_env_var_over_the_credential_helper() {
-        assert_eq!(token_from(Some("env-token".to_string()), Some("cred-pw".to_string())), Ok("env-token".to_string()));
-        assert_eq!(token_from(None, Some("cred-pw".to_string())), Ok("cred-pw".to_string()));
-        assert_eq!(token_from(Some(String::new()), Some("cred-pw".to_string())), Ok("cred-pw".to_string()));
-        assert!(token_from(None, None).is_err());
-        assert!(token_from(Some(String::new()), Some(String::new())).is_err());
+        assert_eq!(
+            token_from(Some("env-token".to_string()), || Some("cred-pw".to_string())),
+            Ok("env-token".to_string())
+        );
+        assert_eq!(token_from(None, || Some("cred-pw".to_string())), Ok("cred-pw".to_string()));
+        assert_eq!(
+            token_from(Some(String::new()), || Some("cred-pw".to_string())),
+            Ok("cred-pw".to_string())
+        );
+        assert!(token_from(None, || None).is_err());
+        assert!(token_from(Some(String::new()), || Some(String::new())).is_err());
+    }
+
+    #[test]
+    fn token_from_never_calls_the_credential_helper_when_env_is_set() {
+        let calls = std::cell::Cell::new(0);
+        let result = token_from(Some("env-token".to_string()), || {
+            calls.set(calls.get() + 1);
+            Some("cred-pw".to_string())
+        });
+        assert_eq!(result, Ok("env-token".to_string()));
+        assert_eq!(calls.get(), 0, "credential helper closure must not run when env wins");
     }
 
     #[test]
