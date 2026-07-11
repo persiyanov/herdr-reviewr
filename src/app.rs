@@ -1860,6 +1860,14 @@ impl App {
         self.changed.len()
     }
 
+    /// Aggregate line additions and deletions for the active scope. Use wider counters than the
+    /// per-file model so a large changeset cannot overflow while the header totals it.
+    pub fn changed_totals(&self) -> (u64, u64) {
+        self.changed.values().fold((0, 0), |(additions, deletions), change| {
+            (additions + u64::from(change.additions), deletions + u64::from(change.deletions))
+        })
+    }
+
     /// Whether a comment's anchor may have moved. A diff comment is stale once its file leaves
     /// the changeset; a File-view (content) comment only once its file is gone from the
     /// worktree, since it was never tied to the changeset (specs/review-model.md).

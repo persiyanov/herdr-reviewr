@@ -133,8 +133,9 @@ button, and the scroll wheel all work too.
 
 ## The three tabs
 
-- **Changes** — the changed files for the active scope, with `+/-` stats. Pick a file to read its
-  syntax-highlighted diff. This is where you review and comment.
+- **Changes** — the changed files for the active scope, with per-file `+/-` stats and totals in
+  the header. Pick a file to read its syntax-highlighted diff. This is where you review and
+  comment.
 - **All files** — the whole worktree tree, not only what changed. The diff pane renders any
   file's current content. Git-ignored paths show too, dimmed. A directory ignored as a whole
   (`target/`, `node_modules/`) is one collapsed row that loads its contents only when you expand

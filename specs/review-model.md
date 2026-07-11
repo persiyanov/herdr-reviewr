@@ -111,6 +111,9 @@ scripts/old_runner.py                 D   -47
 | `additions`     | integer | lines added in the scope, all lines for an untracked file         |
 | `deletions`     | integer | lines removed in the scope                                        |
 
+The header sums `additions` and `deletions` across the active scope. A refresh or scope switch
+replaces both totals with the new changeset's sums.
+
 ### Diff
 
 The selected file's structured diff, built from its old and new content (`diff-view.md`). Comment anchors and snippets come from it. An untracked file diffs against empty old content. A binary file lists, and its pane reads `binary — no line comments`.

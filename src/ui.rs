@@ -426,10 +426,20 @@ fn send_button(app: &App) -> String {
     format!("[ Send ({}) ]", app.store.len())
 }
 
-/// The header suffix: the active scope's changed-file count. Shared so the painter and the
-/// hit-test place the right-aligned `Send` button at the same column.
+fn header_summary(app: &App) -> (String, String, String) {
+    let (additions, deletions) = app.changed_totals();
+    (
+        format!("  {} changed  ", app.changed_count()),
+        format!("+{additions}"),
+        format!("-{deletions}"),
+    )
+}
+
+/// The header suffix: the active scope's changed-file count and aggregate line stats. Shared so
+/// the painter and the hit-test place the right-aligned `Send` button at the same column.
 fn header_suffix(app: &App) -> String {
-    format!("  {} changed", app.changed_count())
+    let (count, additions, deletions) = header_summary(app);
+    format!("{count}{additions} {deletions}")
 }
 
 /// The column the `Send` button paints at, matching `render_tab_bar`'s layout: right-aligned
@@ -476,7 +486,11 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let bar = Style::default().bg(p.surface0);
     let mut spans = tab_bar_spans(app);
     spans.push(Span::styled(chip, bar.fg(p.yellow).add_modifier(Modifier::BOLD)));
-    spans.push(Span::styled(suffix, bar.fg(p.overlay0)));
+    let (count, additions, deletions) = header_summary(app);
+    spans.push(Span::styled(count, bar.fg(p.overlay0)));
+    spans.push(Span::styled(additions, bar.fg(p.green)));
+    spans.push(Span::styled(" ", bar));
+    spans.push(Span::styled(deletions, bar.fg(p.red)));
 
     let send_fg = if app.store.is_empty() { p.overlay0 } else { p.green };
     spans.push(Span::styled(" ".repeat(pad), bar));

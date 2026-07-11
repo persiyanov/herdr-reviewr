@@ -1117,6 +1117,36 @@ fn switching_scope_swaps_the_changeset() {
 }
 
 #[test]
+fn aggregate_stats_follow_the_active_scope_and_refresh_every_change_kind() {
+    let r = Repo::init();
+    r.write("edited.rs", "one\ntwo\nthree\n");
+    r.write("deleted.rs", "gone one\ngone two\n");
+    r.write("old_name.rs", "stable rename contents\n");
+    r.commit_all("base");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("committed.rs", "branch one\nbranch two\n");
+    r.commit_all("feature work");
+
+    r.write("edited.rs", "one\nTWO\nthree\n");
+    r.remove("deleted.rs");
+    r.git(&["mv", "old_name.rs", "new_name.rs"]);
+    r.write("untracked.rs", "new one\nnew two\nnew three\n");
+
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, Some("main".to_string()));
+    app.reload().unwrap();
+    assert_eq!(app.changed_count(), 4, "edit, deletion, rename, and untracked file");
+    assert_eq!(app.changed_totals(), (4, 3));
+
+    app.set_scope(Scope::Branch).unwrap();
+    assert_eq!(app.changed_count(), 5, "branch adds the committed file");
+    assert_eq!(app.changed_totals(), (6, 3));
+
+    r.write("untracked.rs", "new one\nnew two\nnew three\nnew four\n");
+    app.reload().unwrap();
+    assert_eq!(app.changed_totals(), (7, 3), "refresh replaces the aggregate snapshot");
+}
+
+#[test]
 fn a_multi_line_range_comment_spans_lines_and_keeps_the_whole_snippet() {
     let r = edited_repo();
     let mut app = app_on(&r);

@@ -11,7 +11,7 @@ The terminal interface: the layout, the keyboard and mouse, and how the view sta
 ## Overview
 
 ```
-┌ 1 Changes  2 All files  3 PR  [uncommitted]  9 changed ──── [ Send (3) ] ┐
+┌ 1 Changes  2 All files  3 PR  [uncommitted]  9 changed  +42 -18 ── [ Send (3) ] ┐
 │ ⋯  11 unmodified lines                       │ M llm_registry.py  +18 -8  │
 │ 40    def resolve(self, name):               │ M deep_research.py +155-62 │
 │ 41 ▌  from .z import w                         │ D old_runner.py    -47     │
@@ -26,7 +26,7 @@ The terminal interface: the layout, the keyboard and mouse, and how the view sta
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- The header shows the three tabs with the active one highlighted, the active scope, the changed-file count, and a clickable `Send` button with the comment count.
+- The header shows the three tabs with the active one highlighted, the active scope, its changed-file count and aggregate `+additions -deletions`, and a clickable `Send` button with the comment count.
 - The left pane is the selected file's diff (`diff-view.md`). The right pane is the file navigator (`file-list.md`).
 - The comment input opens inline, directly under the last line of the selection. It pushes the diff below it down and grows as you type. It is never a footer band.
 - The footer is a live action bar.
@@ -100,7 +100,7 @@ The actions follow the cursor:
 - `u/b/t scope` shows in every `Changes` and `All files` context, except where it is itself the primary.
 - Movement keys are never shown.
 - The comment editor and the comments list show their own actions.
-- The changed-file count lives in the header. The footer carries only the comment count, inside `s send N`.
+- The changed-file count and line totals live in the header. The footer carries only the comment count, inside `s send N`.
 - On `PR` the bar leads with the PR's state, then `o open ↗`, then orientation.
 
 ### Tabs

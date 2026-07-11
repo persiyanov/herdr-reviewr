@@ -357,6 +357,20 @@ fn on_changed_line(app: &mut App) {
 }
 
 #[test]
+fn the_header_shows_scope_totals_at_constrained_width() {
+    let r = Repo::init();
+    r.write("edited.rs", "old\n");
+    r.commit_all("init");
+    r.write("edited.rs", "new\n");
+    r.write("untracked.rs", "one\ntwo\n");
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.reload().unwrap();
+
+    let header = render_at(&app, 62).lines().next().unwrap().to_string();
+    assert!(header.contains("2 changed  +3 -1"), "aggregate stats fit exactly:\n{header}");
+}
+
+#[test]
 fn the_footer_shows_the_action_for_the_context() {
     let mut app = edited_app();
     on_changed_line(&mut app);
