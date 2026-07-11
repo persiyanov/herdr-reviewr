@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-10
+Last edited: 2026-07-11
 ---
 
 # herdr host
@@ -27,7 +27,7 @@ The pane never shows herdr's blank grid. The binary paints its empty frame befor
 Users bind actions to keys with `[[keys.command]] type = "plugin_action"`. Scripts invoke them directly:
 
 ```
-herdr plugin action invoke open --plugin persiyanov.reviewr
+herdr plugin action invoke open --plugin dcieslak19973.reviewr
 ```
 
 What each action does:

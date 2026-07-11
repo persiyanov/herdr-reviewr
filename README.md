@@ -35,8 +35,12 @@ It **never edits your worktree** and sends nothing on its own. Its only write to
 - A **truecolor (24-bit)** terminal with Unicode box-drawing support. Pick a theme that matches
   its light or dark background (see [Theme](#theme)).
 - **macOS or Linux.**
-- **`gh`** (the GitHub CLI), authenticated. Optional, only the **PR** tab needs it. Everything
-  else works without it.
+- A forge CLI or token for the **PR** tab, only for the forge(s) you use — everything else
+  works without any of them:
+  - **`gh`** (the GitHub CLI), authenticated, for a GitHub origin.
+  - **`glab`** (the GitLab CLI), authenticated, for a GitLab origin.
+  - **`curl`** on `PATH`, plus a `BITBUCKET_TOKEN` or a `git credential`-stored password, for a
+    Bitbucket Data Center origin (see [Bitbucket tokens](#bitbucket-tokens)).
 
 ## Install
 
@@ -144,11 +148,13 @@ button, and the scroll wheel all work too.
   file's current content. Git-ignored paths show too, dimmed. A directory ignored as a whole
   (`target/`, `node_modules/`) is one collapsed row that loads its contents only when you expand
   it. You can comment here as well.
-- **PR** — a read-only mirror of the branch's open pull request, read from GitHub via `gh`. It
-  shows the PR's state (draft, open, merged, or closed, plus mergeability and unpushed-commit
-  sync), its checks with a pass/fail rollup, and its comments. Comments cover reviews, inline
-  findings, and plain comments, newest first, with `resolved` and `outdated` markers. `o` opens
-  the PR in the browser. The tab only reads GitHub. It never posts, resolves, re-runs, or merges.
+- **PR** — a read-only mirror of the branch's open pull (or merge) request, read from the
+  origin's forge: GitHub via `gh`, GitLab via `glab` (shown as **MR**), Bitbucket Data Center via
+  `curl`. It shows its state (draft, open, merged, or closed, plus mergeability and
+  unpushed-commit sync), its checks with a pass/fail rollup, and its comments. Comments cover
+  reviews (GitHub/GitLab), inline findings, and plain comments, newest first, with `resolved` and
+  `outdated` markers. `o` opens it in the browser. The tab only reads its forge. It never posts,
+  resolves, re-runs, or merges.
 
 ## Diff scopes
 
@@ -186,7 +192,7 @@ Create the file if it does not exist yet. herdr hands this directory to the plug
 reviewr's file, not herdr's. Settings added to herdr's own `~/.config/herdr/config.toml` never
 reach reviewr.
 
-The file accepts these six keys:
+The file accepts these eight keys:
 
 ```toml
 theme = "tokyo-night"
@@ -195,6 +201,8 @@ toggle_placement = "overlay"
 toggle_direction = "down"
 auto_open = false
 github_host = "github.example.com"
+gitlab_host = "gitlab.corp.com"
+bitbucket_host = "bitbucket.corp.com"
 ```
 
 A missing file or omitted key uses its default. Any unknown key, wrong type, or invalid value
@@ -244,24 +252,48 @@ reviewr picks the first entry that exists in the repo. A `--base <ref>` flag sti
 names an existing ref. A missing file or omitted key uses the default list. A malformed value
 blocks the plugin like any other invalid config.
 
-### GitHub hosts
+### Forge hosts
 
-GitHub.com works without configuration. To read pull requests from one GitHub Enterprise host,
-set its bare hostname:
+GitHub.com and GitLab.com work without configuration. To read pull/merge requests from an
+Enterprise or self-hosted instance instead, set that forge's bare hostname:
 
 ```toml
 github_host = "github.example.com"
+gitlab_host = "gitlab.corp.com"
+bitbucket_host = "bitbucket.corp.com"
 ```
 
-reviewr matches either that exact origin host or a trusted SSH alias beginning
-`github.example.com-`, such as `git@github.example.com-work:owner/repo.git`. The alias convention
-applies only to scp-style and `ssh://` origins. HTTPS hosts must match exactly. GitHub.com and
-its SSH aliases continue to work when Enterprise is configured.
+reviewr matches either that exact origin host or a trusted SSH alias beginning `<host>-`, such as
+`git@github.example.com-work:owner/repo.git`. The alias convention applies only to scp-style and
+`ssh://` origins. HTTPS hosts must match exactly. GitHub.com and GitLab.com and their SSH aliases
+continue to work when an Enterprise host is configured.
 
 Host identity comes from origin's fetch URL after Git's `url.*.insteadOf` rewrite. A separate
 push URL does not change it. API calls name the canonical host on every request, so `GH_HOST`
-cannot redirect a fetch. Authenticate the Enterprise host with
-`gh auth login --hostname github.example.com`.
+cannot redirect a fetch. Authenticate the Enterprise or self-hosted host with:
+
+- **GitHub**: `gh auth login --hostname github.example.com`.
+- **GitLab**: `glab auth login --hostname gitlab.corp.com`.
+- **Bitbucket Data Center**: see [Bitbucket tokens](#bitbucket-tokens) below — there is no CLI
+  login step.
+
+There is no `bitbucket_host` default: Bitbucket Cloud (`bitbucket.org`) uses a different API than
+Data Center and is not supported. An unconfigured or unrecognized host degrades the same way,
+naming the host and the config key that would enable it.
+
+#### Bitbucket tokens
+
+Bitbucket Data Center has no official CLI, so reviewr authenticates with an HTTP access token
+instead of a signed-in tool. It resolves the token in order, on every fetch:
+
+1. the `BITBUCKET_TOKEN` environment variable, read fresh each poll so a rotated token takes
+   effect without a restart;
+2. failing that, `git credential fill` for the origin host, reusing whatever credential helper
+   git already has configured.
+
+With neither set, the PR tab shows a remedy naming both options. The token is passed to `curl`
+through a config file on stdin, never as a command-line argument, so it never appears in `ps` or
+`/proc`.
 
 ### Sidebar placement
 
@@ -343,11 +375,12 @@ This is a focused, young tool. The known constraints:
   never gets its own snapshot. The scope then shows everything since the last *observed* turn
   start. That is never lines the agent didn't write, but possibly more than one turn.
 
-**PR tab (GitHub)**
-- **GitHub-only and read-only** — needs an authenticated `gh` and a GitHub remote. Without either
-  it shows one line telling you what to fix, and Changes and All files keep working.
-- **Mirrors only the branch's *open* PR** — a merged or closed PR shows as history. Each comment
-  surface caps at one page (100 rows), with a `+more on GitHub ↗` marker when there is more.
+**PR tab (GitHub, GitLab, Bitbucket Data Center)**
+- **Read-only, one forge per origin** — needs an authenticated `gh`/`glab`, or a Bitbucket token,
+  matching the origin's remote. Without it, it shows one line telling you what to fix, and
+  Changes and All files keep working.
+- **Mirrors only the branch's *open* PR/MR** — a merged or closed one shows as history. Each
+  comment surface caps at one page (100 rows), with a `+more ↗` marker when there is more.
 
 **Review model**
 - **Comments are in-memory and single-session** — closing the pane loses any you haven't sent or

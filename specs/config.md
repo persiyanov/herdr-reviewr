@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-10
-Last edited: 2026-07-10
+Last edited: 2026-07-11
 ---
 
 # Configuration
@@ -19,6 +19,8 @@ toggle_placement = "overlay"
 toggle_direction = "down"
 auto_open = false
 github_host = "github.example.com"
+gitlab_host = "gitlab.corp.com"
+bitbucket_host = "bitbucket.corp.com"
 ```
 
 | key                    | value                                                                    |
@@ -29,6 +31,8 @@ github_host = "github.example.com"
 | `toggle_direction`     | `right` or `down`                                                         |
 | `auto_open`            | boolean                                                                  |
 | `github_host`          | bare hostname outside the `github.com` and `github.com-*` namespace       |
+| `gitlab_host`          | bare hostname (`gitlab.com` is always supported and needs no entry here)  |
+| `bitbucket_host`       | bare hostname naming a Bitbucket Data Center instance (no default; Bitbucket Cloud's `bitbucket.org` is a different API and is not supported through this key) |
 
 ## Behavior
 
