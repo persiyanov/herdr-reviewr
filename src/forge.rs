@@ -289,7 +289,12 @@ pub fn fetch_input(
     base: Option<&str>,
     config: &crate::config::PluginConfig,
 ) -> Result<PrFetchInput, String> {
-    let local = crate::git::pr_local(repo, base, config.base_branches(), config.github_host())
+    let hosts = crate::git::ForgeHosts {
+        github: config.github_host(),
+        gitlab: config.gitlab_host(),
+        bitbucket: config.bitbucket_host(),
+    };
+    let local = crate::git::pr_local(repo, base, config.base_branches(), &hosts)
         .map_err(|error| error.0)?;
     Ok(PrFetchInput {
         origin: local.origin,
