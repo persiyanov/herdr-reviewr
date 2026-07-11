@@ -15,6 +15,7 @@ The plugin config is one typed value. A valid file may set any subset of the sup
 ```toml
 theme = "tokyo-night"
 base_branches = ["origin/develop", "origin/main", "main", "master"]
+default_scope = "branch"
 toggle_placement = "overlay"
 toggle_direction = "down"
 auto_open = false
@@ -25,6 +26,7 @@ github_host = "github.example.com"
 | ---------------------- | ------------------------------------------------------------------------ |
 | `theme`                | one name from the theme set in `theme.md`                                 |
 | `base_branches`        | non-empty array of non-empty ref names                                    |
+| `default_scope`        | `uncommitted`, `branch`, or `last-turn`                                   |
 | `toggle_placement`     | `split`, `overlay`, `zoomed`, or `tab`                                    |
 | `toggle_direction`     | `right` or `down`                                                         |
 | `auto_open`            | boolean                                                                  |

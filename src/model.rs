@@ -20,6 +20,15 @@ impl Scope {
         }
     }
 
+    /// Stable spelling used in plugin configuration and normalized JSON output.
+    pub fn config_value(self) -> &'static str {
+        match self {
+            Scope::Uncommitted => "uncommitted",
+            Scope::Branch => "branch",
+            Scope::LastTurn => "last-turn",
+        }
+    }
+
     /// Cycle to the next scope, for the header chip click: uncommitted → branch → last turn.
     #[must_use]
     pub fn cycle(self) -> Self {

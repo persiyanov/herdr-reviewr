@@ -42,7 +42,7 @@ The anchor rules:
 
 ### Scopes
 
-A scope selects which changes `Changes` shows and which files `All files` annotates. The two tabs share one active scope. The default is `uncommitted`.
+A scope selects which changes `Changes` shows and which files `All files` annotates. The two tabs share one active scope. Sessions start in `default_scope` from `config.toml`, or `uncommitted` when the key is omitted. Scope keys and the header chip change it for the rest of that session.
 
 | scope         | shows                                                          | source                                                       |
 | ------------- | --------------------------------------------------------------- | ------------------------------------------------------------ |

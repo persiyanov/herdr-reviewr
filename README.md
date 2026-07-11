@@ -181,11 +181,12 @@ Create the file if it does not exist yet. herdr hands this directory to the plug
 reviewr's file, not herdr's. Settings added to herdr's own `~/.config/herdr/config.toml` never
 reach reviewr.
 
-The file accepts these six keys:
+The file accepts these seven keys:
 
 ```toml
 theme = "tokyo-night"
 base_branches = ["origin/develop", "origin/main", "main", "master"]
+default_scope = "branch"
 toggle_placement = "overlay"
 toggle_direction = "down"
 auto_open = false
@@ -219,6 +220,16 @@ on a dark terminal reads poorly, and so does the reverse. Available:
 
 Names match herdr's where both ship a palette. An unknown config name is an error. The standalone
 `--theme` development flag retains its older fallback to `catppuccin`.
+
+### Default scope
+
+Set the scope that reviewr selects when the sidebar starts. The default is `uncommitted`.
+Changing this key does not replace a scope you selected in a running session.
+
+```toml
+# ~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
+default_scope = "branch" # or "uncommitted" / "last-turn"
+```
 
 ### Base branch
 

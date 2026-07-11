@@ -102,8 +102,14 @@ fn ready_app(cfg: &Config, plugin_config: PluginConfig) -> App {
     // A non-repo path is not an error — the sidebar opens to an empty state and starts showing
     // changes if the directory becomes a repo (specs/herdr-host.md).
     let repo = git::toplevel(&cfg.repo).unwrap_or_else(|| cfg.repo.clone());
-    logln!("start repo={} poll={:?} base={:?}", repo.display(), cfg.poll, cfg.base);
-    let mut app = App::new(repo, Scope::Uncommitted, cfg.base.clone());
+    logln!(
+        "start repo={} poll={:?} base={:?} scope={:?}",
+        repo.display(),
+        cfg.poll,
+        cfg.base,
+        plugin_config.default_scope()
+    );
+    let mut app = App::new(repo, plugin_config.default_scope(), cfg.base.clone());
     app.set_plugin_config(plugin_config);
     app.set_cli_theme(cfg.theme.clone());
     if let Some(wrap) = cfg.wrap {
@@ -999,6 +1005,7 @@ fn handle_mouse(app: &mut App, m: MouseEvent, area: Rect, heights: &[usize]) -> 
 mod refresh_tests {
     use super::{
         ActiveFetch, PrCoordinator, PrEffect, PrRefresh, TaggedPr, apply_plugin_config_observation,
+        ready_app,
     };
     use crate::app::App;
     use crate::config::{Config, plugin_config_in};
@@ -1136,6 +1143,32 @@ mod refresh_tests {
 
         assert!(cancelled.load(Ordering::Acquire));
         assert_eq!(coordinator.active_fetch_tag(), Some((7, 3)));
+    }
+
+    #[test]
+    fn configured_default_scope_selects_startup_scope_without_overriding_later_selection() {
+        let repo = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let path = config_dir.path().join("config.toml");
+        std::fs::write(&path, "default_scope = \"branch\"\n").unwrap();
+        let cfg = Config::parse([repo.path().display().to_string()]);
+        let mut app = ready_app(&cfg, plugin_config_in(config_dir.path()).unwrap());
+        assert_eq!(app.scope, Scope::Branch);
+
+        app.scope = Scope::LastTurn;
+        std::fs::write(&path, "default_scope = \"uncommitted\"\n").unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let mut epoch = 0;
+        let mut recovery_inflight = false;
+        assert!(apply_plugin_config_observation(
+            &mut app,
+            &cfg,
+            &mut epoch,
+            &tx,
+            &mut recovery_inflight,
+            plugin_config_in(config_dir.path()),
+        ));
+        assert_eq!(app.scope, Scope::LastTurn, "a live config reread preserves user navigation");
     }
 
     #[test]
