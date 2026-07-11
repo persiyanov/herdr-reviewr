@@ -217,6 +217,10 @@ pub struct App {
     /// Set when the PR view needs a (re)fetch; the event loop services it after drawing, so a
     /// `loading` frame shows before the blocking `gh` calls run.
     pub pr_pending: bool,
+    /// The most recently observed complete fetch input, kept only for its classified origin —
+    /// drives [`Self::forge_noun`] so the `PR`/`MR` copy tracks the current worktree's forge
+    /// even while a fetch is in flight or degraded (`specs/forge-host.md`).
+    fetch_input: Option<forge::PrFetchInput>,
     highlighter: Highlighter,
     /// The active palette every renderer paints from (`specs/theme.md`).
     palette: Palette,
@@ -302,6 +306,7 @@ impl App {
             pr_cursor: 0,
             pr_read_scroll: 0,
             pr_pending: false,
+            fetch_input: None,
             highlighter: Highlighter::new(theme.syntax),
             palette: theme.palette,
             theme_name: theme.name,
@@ -994,6 +999,30 @@ impl App {
         self.pr_refreshing = false;
         self.pr_cursor = 0;
         self.pr_read_scroll = 0;
+    }
+
+    /// Record the latest complete fetch input observed by the refresh coordinator (`lib.rs`),
+    /// so [`Self::forge_noun`] reflects the current worktree's origin even between fetches.
+    pub(crate) fn set_fetch_input(&mut self, input: forge::PrFetchInput) {
+        self.fetch_input = Some(input);
+    }
+
+    /// The forge-appropriate noun for the review artifact ("PR" or "MR"), used everywhere the
+    /// `PR` tab's copy names the artifact. `"PR"` is the default for an unclassified, missing,
+    /// or not-yet-observed origin, so GitHub and any degraded state read as they always have
+    /// (`specs/forge-host.md`).
+    #[must_use]
+    pub fn forge_noun(&self) -> &'static str {
+        match &self.fetch_input {
+            Some(forge::PrFetchInput {
+                origin:
+                    git::OriginIdentity::Repository(git::RepoTarget {
+                        forge: git::Forge::GitLab, ..
+                    }),
+                ..
+            }) => "MR",
+            _ => "PR",
+        }
     }
 
     /// Apply a snapshot fetched off-thread (`forge::fetch` runs on a worker so the UI never
@@ -2001,8 +2030,37 @@ fn anchor(selected: &[&Row]) -> Option<(Side, u32, u32, String)> {
 #[cfg(test)]
 mod tests {
     use super::{App, Mode};
+    use crate::forge::PrFetchInput;
+    use crate::git::{Forge, OriginIdentity, RepoTarget};
     use crate::model::{Comment, Scope, Side};
     use std::path::PathBuf;
+
+    /// An otherwise-empty `App` whose fetch input carries a `Repository` origin classified for
+    /// `forge` — enough for [`App::forge_noun`] without a subprocess or real remote.
+    fn app_with_origin(forge: Forge) -> App {
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        app.set_fetch_input(PrFetchInput {
+            origin: OriginIdentity::Repository(RepoTarget {
+                forge,
+                host: "example.test".to_string(),
+                owner: "acme".to_string(),
+                name: "widgets".to_string(),
+            }),
+            branch: None,
+            head_oid: None,
+            candidates: Vec::new(),
+            base: None,
+            base_branches: Vec::new(),
+        });
+        app
+    }
+
+    #[test]
+    fn forge_noun_says_mr_for_gitlab_origins() {
+        assert_eq!(app_with_origin(Forge::GitLab).forge_noun(), "MR");
+        assert_eq!(app_with_origin(Forge::GitHub).forge_noun(), "PR");
+        assert_eq!(app_with_origin(Forge::Bitbucket).forge_noun(), "PR");
+    }
 
     #[test]
     fn config_recovery_carries_saved_comments_and_the_live_draft() {
