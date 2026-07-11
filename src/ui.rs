@@ -1581,15 +1581,23 @@ fn pr_empty_msg(view: &forge::PrView) -> String {
         forge::PrView::Ambiguous(n) => {
             format!("{n} open PRs back this branch — open one on GitHub")
         }
-        forge::PrView::NoGh | forge::PrView::NotAuthed(_) | forge::PrView::Error(_) => {
+        forge::PrView::NoCli(_)
+        | forge::PrView::NotAuthed { .. }
+        | forge::PrView::NoToken(_)
+        | forge::PrView::Error(_) => {
             unreachable!("retry failures returned above")
         }
-        forge::PrView::NeedsGitHubOrigin => "the PR tab needs a supported GitHub origin".into(),
+        forge::PrView::NeedsSupportedOrigin => {
+            "the PR tab needs a supported forge origin (GitHub, GitLab, or Bitbucket Data Center)"
+                .into()
+        }
         forge::PrView::UnsupportedHost(host) => {
-            format!("unsupported host {host} — Enterprise users can set `github_host`")
+            format!(
+                "unsupported host {host} — set `github_host`, `gitlab_host`, or `bitbucket_host`"
+            )
         }
         forge::PrView::MalformedOrigin(host) => {
-            format!("malformed GitHub origin for {host} — expected owner/repository")
+            format!("malformed origin for {host} — expected owner/repository")
         }
     }
 }
