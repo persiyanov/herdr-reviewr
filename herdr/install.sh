@@ -84,3 +84,8 @@ if [ -n "${HOME:-}" ] && mkdir -p "$LOCAL_BIN" 2>/dev/null && ln -sf "$BIN_DIR/$
 else
   echo "$NAME: could not link $LOCAL_BIN/$NAME (non-fatal) — run via $BIN_DIR/$NAME instead" >&2
 fi
+
+# Post-install next steps: printed to stdout on success only, never affects exit status.
+echo "$NAME: next steps"
+echo "  1) install the agent skill:  npx skills add dcieslak19973/herdr-reviewr --skill reviewr-comments -g"
+echo "     (or: $NAME skill-install · or: herdr plugin action invoke skill-install --plugin dcieslak19973.reviewr)"
