@@ -9,7 +9,7 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
 
-    if matches!(args.get(1).map(String::as_str), Some("comment" | "skill-path")) {
+    if matches!(args.get(1).map(String::as_str), Some("comment" | "skill-path" | "skill-install")) {
         return herdr_reviewr::cli::run(args);
     }
 
