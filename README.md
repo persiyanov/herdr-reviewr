@@ -68,6 +68,8 @@ command = "dcieslak19973.reviewr.toggle"   # <plugin_id>.<action_id> — note th
 `cmd+…` chords reach herdr. macOS swallows `alt+…`. With no key bound, run the action once with
 `herdr plugin action invoke toggle --plugin dcieslak19973.reviewr`.
 
+`install.sh` also symlinks the binary onto `PATH` at `~/.local/bin/herdr-reviewr`, so the `herdr-reviewr` CLI (see [Working with agents](#working-with-agents)) works directly once that directory is on your `PATH`.
+
 Beside `toggle` there are two explicit actions, made for scripts and layout plugins. `open` opens
 the sidebar and does nothing when one is already open. `close` closes it and does nothing when none
 is. Bind or invoke them the same way, as `dcieslak19973.reviewr.open` and `dcieslak19973.reviewr.close`.
@@ -207,11 +209,20 @@ project-level directory in the current repo. Either way, once installed it's in 
 skill list: "address my review comments" works with no `skill-path`/`load that skill` preamble.
 
 If you'd rather not use `npx`, `herdr-reviewr` installs the skill itself, offline, from the
-already-installed plugin — no npm required:
+already-installed plugin — no npm required. After `herdr plugin install`, the binary is available
+as `herdr-reviewr` *if* `~/.local/bin` is on your `PATH` (`install.sh` links it there; see
+[Install](#install)):
 
 ```bash
 herdr-reviewr skill-install             # ~/.claude/skills/reviewr-comments (Claude Code, personal)
 herdr-reviewr skill-install --project   # ./.agents/skills/reviewr-comments (universal, project-level)
+```
+
+If `~/.local/bin` isn't on `PATH`, skip the bare command and invoke the plugin action instead,
+which runs the same binary by its plugin-root path and needs no `PATH` entry:
+
+```bash
+herdr plugin action invoke skill-install --plugin dcieslak19973.reviewr
 ```
 
 `--project` installs into `.agents/skills/`, the location read by Gemini CLI, GitHub Copilot,

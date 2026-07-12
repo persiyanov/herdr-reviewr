@@ -6,10 +6,10 @@ description: Read, act on, and leave line-anchored review comments shared with t
 # reviewr comments
 
 The reviewr sidebar and you share one comment store per worktree. Comments are anchored
-to `file:start[-end]` with a verbatim diff snippet. The binary is
-`$HERDR_PLUGIN_ROOT/bin/herdr-reviewr`; if that variable is unset, `herdr-reviewr` on
-PATH or the path printed by whoever gave you this skill. Run every command from the
-repo you are working in.
+to `file:start[-end]` with a verbatim diff snippet. Find the binary as `herdr-reviewr` on
+PATH (the plugin install links it into `~/.local/bin`); if not found, use
+`$HERDR_PLUGIN_ROOT/bin/herdr-reviewr` when that env var is set; otherwise ask the user
+for the plugin root. Run every command from the repo you are working in.
 
 ## Read the user's comments
 
