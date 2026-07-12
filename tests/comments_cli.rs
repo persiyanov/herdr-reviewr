@@ -203,6 +203,33 @@ fn add_with_an_unknown_flag_exits_2_with_usage_on_stderr() {
 }
 
 #[test]
+fn add_rejects_zero_start() {
+    let r = Repo::init();
+    let out = run(r.path(), &["comment", "add", "--file", "a.rs", "--start", "0", "--text", "t"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr(&out).contains("reviewr: --start must be >= 1"),
+        "stderr names the problem: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn add_rejects_end_before_start() {
+    let r = Repo::init();
+    let out = run(
+        r.path(),
+        &["comment", "add", "--file", "a.rs", "--start", "5", "--end", "3", "--text", "t"],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr(&out).contains("reviewr: --end must be >= --start"),
+        "stderr names the problem: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
 fn skill_path_finds_the_dev_checkout_from_the_repo_root() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let out = run(Path::new(manifest_dir), &["skill-path"]);

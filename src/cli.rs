@@ -119,6 +119,15 @@ fn comment_add(args: &[String]) -> ExitCode {
     let (Some(file), Some(start), Some(text)) = (file, start, text) else { return usage_error() };
     let end = end.unwrap_or(start);
 
+    if start == 0 {
+        eprintln!("reviewr: --start must be >= 1");
+        return ExitCode::from(2);
+    }
+    if end < start {
+        eprintln!("reviewr: --end must be >= --start");
+        return ExitCode::from(2);
+    }
+
     let store = match open_store() {
         Ok(s) => s,
         Err(code) => return code,
