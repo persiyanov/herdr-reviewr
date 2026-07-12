@@ -53,7 +53,7 @@ Named so the architecture stays open to them. None is part of this design.
 | -- | ----------------------------------------------------------------------------------------------------------------------------|
 | O1 | The sidebar never commits, stages, or mutates the worktree, the index, or any branch. It writes only under the repo's git dir — the `refs/reviewr/` baseline ref and the comment store — never the worktree. |
 | O2 | The sidebar never writes to GitHub. It reads the pull request through `gh` and opens links in the browser, nothing more.      |
-| O3 | A comment, saved or being typed, is never lost to a refresh, a merge with the on-disk store, or the agent's code edits. Only an explicit delete (TUI `d`) or CLI `rm` removes it. |
+| O3 | A comment, saved or being typed, is never lost to a refresh, a merge with the on-disk store, or the agent's code edits. Only an explicit delete (TUI `d`) or CLI `rm` removes it — or an unreadable store file, which is skipped, never deleted, but drops out of the merged view. |
 | O4 | A comment leaves the store only by delete or `rm` — send/export persists it but never consumes it.                           |
 | O5 | The crate forbids `unsafe`.                                                                                                   |
 
