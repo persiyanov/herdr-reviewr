@@ -638,6 +638,10 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 continue;
             }
             pr.probe_pending = true;
+            // Pick up an external comment-store write (the CLI, an agent) before this poll's
+            // reload, same reasoning as the turn baseline below: cheap to check every tick, and
+            // a stale comments list should never survive an extra frame past its signature change.
+            app.check_comment_store();
             // Advance the last-turn baseline before reloading, so a turn promoted this poll
             // is visible to this poll's changed-files build. When the agent just went idle, its
             // turn may have pushed or run `gh pr merge`; refetch the PR if the tab is showing it

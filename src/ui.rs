@@ -179,7 +179,7 @@ pub fn diff_row_heights(app: &App, area: Rect) -> Vec<usize> {
                 .iter()
                 .filter(|&&ci| Some(ci) != editing)
                 .filter_map(|&ci| app.store.get(ci))
-                .map(|c| comment_card_lines(c, width, p).len())
+                .map(|sc| comment_card_lines(&sc.comment, width, p).len())
                 .sum();
             base + card
         })
@@ -771,9 +771,9 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         let mut lines = render_row(&app.visible[i], layout, state);
         for &ci in &cards[i] {
             if Some(ci) != editing
-                && let Some(c) = app.store.get(ci)
+                && let Some(sc) = app.store.get(ci)
             {
-                lines.extend(comment_card_lines(c, width, p));
+                lines.extend(comment_card_lines(&sc.comment, width, p));
             }
         }
         lines
@@ -1262,15 +1262,16 @@ fn render_comments_list(frame: &mut Frame, app: &App, area: Rect) {
         .store
         .iter()
         .enumerate()
-        .map(|(i, c)| {
+        .map(|(i, sc)| {
             let loc = Span::styled(
-                c.location(),
+                sc.comment.location(),
                 Style::default().fg(p.mauve).add_modifier(Modifier::BOLD),
             );
-            let mut spans = vec![loc, Span::styled(format!("  {}", c.text), text_style(p))];
+            let mut spans =
+                vec![loc, Span::styled(format!("  {}", sc.comment.text), text_style(p))];
             // A comment whose anchor may have moved (file left the changeset, or a content
             // comment's file was deleted) is flagged but kept.
-            if app.is_stale(c) {
+            if app.is_stale(&sc.comment) {
                 spans.push(Span::styled("  (stale)", Style::default().fg(p.red)));
             }
             // The list overlay is the active modal, so its row reads at full brightness.
