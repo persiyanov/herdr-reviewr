@@ -21,6 +21,15 @@ placement = "split"
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-reviewr\""]
 
 [[actions]]
+id = "skill-install"
+title = "reviewr: install agent skill"
+contexts = ["pane", "workspace"]
+# install.sh links the binary onto PATH, but that link can be missing (a fresh shell that
+# hasn't re-sourced its profile, a non-standard $HOME). Actions receive $HERDR_PLUGIN_ROOT, so
+# this runs the binary by absolute path and works regardless of PATH.
+command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-reviewr\" skill-install"]
+
+[[actions]]
 id = "toggle"
 title = "reviewr: toggle sidebar"
 contexts = ["pane", "workspace"]
