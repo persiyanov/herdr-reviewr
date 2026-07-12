@@ -216,7 +216,8 @@ pub struct App {
     /// The last `comments::Store::signature()` this session observed; a poll tick
     /// (`Self::check_comment_store`) re-syncs only when it has moved.
     comments_signature: u64,
-    /// Whether the comments list and inline cards hide resolved comments (Task 5 renders this).
+    /// Whether the diff pane hides resolved comments' inline cards. The comments list always
+    /// shows every comment — it is the only surface where `x` can reopen a resolved one.
     pub hide_resolved: bool,
     pub list_cursor: usize,
     pub mode: Mode,
