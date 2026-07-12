@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.1] — 2026-07-12
+
+### Added
+- **`skill-install` subcommand.** One command wires the reviewr-comments skill into your
+  agent: `herdr-reviewr skill-install` symlinks it into Claude Code's personal skills
+  directory (`--copy` for a frozen copy, `--force` to replace, `--target` for anywhere
+  else), and `--project` installs into the repo's universal `.agents/skills/` directory,
+  which most skill-aware harnesses read. Idempotent; prints a CLAUDE.md snippet that makes
+  agents check comments proactively.
+- **Cross-harness install docs.** The README's "Working with agents" section now leads
+  with `npx skills add dcieslak19973/herdr-reviewr --skill reviewr-comments -g` — the
+  skills CLI installs into every supported harness at once — with `skill-install` as the
+  offline/no-Node path and an AGENTS.md pointer for harnesses without a skill system.
+
 ## [0.13.0] — 2026-07-12
 
 ### Added
