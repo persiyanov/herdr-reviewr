@@ -677,10 +677,10 @@ fn comment_card_lines(sc: &StoredComment, width: usize, p: &Palette) -> Vec<Line
     } else {
         format!(" comment · {} ", c.location())
     };
-    let label = truncate_width(&label_text, box_w.saturating_sub(3));
     let chip = " agent ";
     let is_agent = sc.author == Author::Agent;
     let chip_run = if is_agent { chip.width() + 1 } else { 0 }; // the chip plus its trailing dash
+    let label = truncate_width(&label_text, box_w.saturating_sub(3 + chip_run));
     let fill = box_w.saturating_sub(3 + chip_run + label.width());
     let mut top = vec![pad(), Span::styled("╭─", border)];
     if is_agent {

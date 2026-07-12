@@ -713,6 +713,50 @@ fn an_agent_comments_card_shows_the_mauve_agent_chip() {
 }
 
 #[test]
+fn an_agent_cards_top_border_stays_within_the_box_width_on_a_narrow_pane() {
+    // Regression: the ` agent ` chip's width wasn't reserved when truncating the location
+    // label, so on a narrow pane with a long file path the top border rendered wider than
+    // the body/bottom border. Force a long label (via a deeply nested file path, which the
+    // card's file must match to render at all) and a narrow terminal to reproduce it.
+    let long_path = "src/a/very/deeply/nested/module/path/for/testing/hello.rs";
+    let r = Repo::init();
+    r.write(long_path, "alpha\nbeta\n");
+    r.commit_all("init");
+    r.write(long_path, "alpha\nBETA\n");
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.reload().unwrap();
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|r| r.marker() == '+').unwrap();
+    app.start_comment();
+    for ch in "left by the agent".chars() {
+        app.input_push(ch);
+    }
+    app.submit_comment();
+    let mut sc = app.store.get(0).unwrap().clone();
+    sc.author = herdr_reviewr::comments::Author::Agent;
+    app.store.replace(vec![sc]);
+
+    let out = render_at(&app, 50);
+    let top = out.lines().find(|l| l.contains('╭')).expect("a top border line");
+    let bottom = out.lines().find(|l| l.contains('╰')).expect("a bottom border line");
+
+    let top_chars: Vec<char> = top.chars().collect();
+    let top_start = top_chars.iter().position(|&c| c == '╭').unwrap();
+    let top_end = top_chars.iter().position(|&c| c == '╮').unwrap();
+    let top_span = top_end - top_start + 1;
+
+    let bottom_chars: Vec<char> = bottom.chars().collect();
+    let bottom_start = bottom_chars.iter().position(|&c| c == '╰').unwrap();
+    let bottom_end = bottom_chars.iter().position(|&c| c == '╯').unwrap();
+    let bottom_span = bottom_end - bottom_start + 1;
+
+    assert_eq!(
+        top_span, bottom_span,
+        "the agent chip's width must be reserved so the top border doesn't outgrow the card:\n{out}"
+    );
+}
+
+#[test]
 fn a_resolved_comments_card_renders_dim_with_a_marker() {
     let mut app = edited_app();
     app.focus = Focus::Diff;
