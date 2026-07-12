@@ -191,31 +191,46 @@ agent, backed by one shared store per repo (`<git-dir>/reviewr/comments/`, one J
 comment; see [`specs/review-model.md`](specs/review-model.md)). Your agent reads and writes it
 through new subcommands on this same binary; you keep using the TUI exactly as above.
 
-### Install the skill (Claude Code)
+### Install the skill
+
+The universal path works across harnesses — Claude Code, Gemini CLI, GitHub Copilot, OpenCode,
+Amp, Codex and more — via the [skills CLI](https://github.com/skills-sh/skills), verified working
+against this repo:
 
 ```bash
-herdr-reviewr skill-install
+npx skills add dcieslak19973/herdr-reviewr --skill reviewr-comments -g
 ```
 
-This installs the bundled `SKILL.md` into `~/.claude/skills/reviewr-comments` — a symlink by
-default, so it stays current across plugin updates with nothing to re-run. Once installed, it's
-in every session's skill list: "address my review comments" works with no `skill-path`/`load
-that skill` preamble, in this repo or any other.
+`-g` installs globally (every harness's personal skills directory, e.g.
+`~/.claude/skills` for Claude Code); omit it to install per-project instead, into each harness's
+project-level directory in the current repo. Either way, once installed it's in every session's
+skill list: "address my review comments" works with no `skill-path`/`load that skill` preamble.
 
-Variants:
+If you'd rather not use `npx`, `herdr-reviewr` installs the skill itself, offline, from the
+already-installed plugin — no npm required:
+
+```bash
+herdr-reviewr skill-install             # ~/.claude/skills/reviewr-comments (Claude Code, personal)
+herdr-reviewr skill-install --project   # ./.agents/skills/reviewr-comments (universal, project-level)
+```
+
+`--project` installs into `.agents/skills/`, the location read by Gemini CLI, GitHub Copilot,
+OpenCode, Amp, Antigravity and others (Claude Code reads it too, via the skills ecosystem
+tooling; Codex and Cursor also read `.claude/skills/`). Commit that path and every agent session
+opened in the repo picks it up, no per-user install step at all. `--project` and `--target` are
+mutually exclusive.
+
+Variants, either mode:
 
 - `--copy` installs a real file instead of a symlink (e.g. if your platform or setup makes
   symlinks awkward). Windows falls back to `--copy` behavior automatically, with a note on
   stderr, since it can't always create symlinks.
-- `--target <dir>` installs somewhere other than the default, e.g. **project-level** so the
-  skill ships with the repo instead of depending on a per-machine install:
+- `--target <dir>` installs somewhere else entirely, e.g. a specific harness's project-level
+  directory:
 
   ```bash
   herdr-reviewr skill-install --target .claude/skills/reviewr-comments
   ```
-
-  Commit that path and every agent session opened in the repo picks it up, no per-user install
-  step at all.
 - Re-running is idempotent: an unchanged install prints `already installed at <path>` and exits
   0. A conflicting file at the target exits 1 naming it; add `--force` to replace it.
 

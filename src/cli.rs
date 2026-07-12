@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use crate::comments::{Author, Status, Store, StoredComment};
 use crate::model::{Comment, Side};
 
-const USAGE: &str = "usage: herdr-reviewr comment add --file <path> --start <n> [--end <n>] [--side new|old] [--lines <snippet>] [--author user|agent] --text <text>\n       herdr-reviewr comment list [--json] [--all]\n       herdr-reviewr comment resolve <id>\n       herdr-reviewr comment rm <id>\n       herdr-reviewr skill-path\n       herdr-reviewr skill-install [--target <dir>] [--copy] [--force]\n";
+const USAGE: &str = "usage: herdr-reviewr comment add --file <path> --start <n> [--end <n>] [--side new|old] [--lines <snippet>] [--author user|agent] --text <text>\n       herdr-reviewr comment list [--json] [--all]\n       herdr-reviewr comment resolve <id>\n       herdr-reviewr comment rm <id>\n       herdr-reviewr skill-path\n       herdr-reviewr skill-install [--target <dir> | --project] [--copy] [--force]\n";
 
 /// Entry point called from `main` with the full process argv (`args[0]` is the program
 /// name, `args[1]` the subcommand). Only reached when `main` has already confirmed
@@ -365,6 +365,7 @@ fn install_skill(source: &Path, dest: &Path, copy: bool) -> ExitCode {
 /// `README.md`'s "Working with agents" section for the full contract.
 fn skill_install(args: &[String]) -> ExitCode {
     let mut target: Option<PathBuf> = None;
+    let mut project = false;
     let mut copy = false;
     let mut force = false;
 
@@ -375,10 +376,25 @@ fn skill_install(args: &[String]) -> ExitCode {
                 let Some(value) = it.next() else { return usage_error() };
                 target = Some(PathBuf::from(value));
             }
+            "--project" => project = true,
             "--copy" => copy = true,
             "--force" => force = true,
             _ => return usage_error(),
         }
+    }
+
+    if project && target.is_some() {
+        return usage_error();
+    }
+    if project {
+        let cwd = match std::env::current_dir() {
+            Ok(cwd) => cwd,
+            Err(error) => {
+                eprintln!("reviewr: cannot read current directory: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        target = Some(cwd.join(".agents").join("skills").join("reviewr-comments"));
     }
 
     let Some(target_dir) = target.or_else(default_skill_install_target) else {

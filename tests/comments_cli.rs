@@ -367,3 +367,46 @@ fn skill_install_with_an_unknown_flag_exits_2_with_usage_on_stderr() {
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("usage:"), "usage printed on stderr: {}", stderr(&out));
 }
+
+/// A self-contained dev checkout: a tempdir with `skills/reviewr-comments/SKILL.md` copied in,
+/// so `resolve_skill_source`'s cwd-relative fallback finds it without touching the real repo.
+/// Used as the cwd for `--project`, whose destination is also cwd-relative — this way the test
+/// never writes into this repo's own `.agents/`.
+fn fake_checkout() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let skill_dir = dir.path().join("skills/reviewr-comments");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::copy(
+        manifest_dir().join("skills/reviewr-comments/SKILL.md"),
+        skill_dir.join("SKILL.md"),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn project_flag_installs_into_dot_agents_skills_in_the_cwd() {
+    let checkout = fake_checkout();
+    let out = run(checkout.path(), &["skill-install", "--project"]);
+    assert!(out.status.success(), "skill-install --project failed: {}", stderr(&out));
+
+    let dest = checkout.path().join(".agents/skills/reviewr-comments/SKILL.md");
+    assert!(dest.exists(), "installed at {}", dest.display());
+    let out_stdout = stdout(&out);
+    assert!(out_stdout.contains("installed:"), "prints installed path: {out_stdout}");
+    assert!(
+        out_stdout.replace('\\', "/").contains(".agents/skills/reviewr-comments/SKILL.md"),
+        "prints the project-relative install path: {out_stdout}"
+    );
+}
+
+#[test]
+fn project_and_target_together_exit_2() {
+    let checkout = fake_checkout();
+    let target = tempfile::tempdir().unwrap();
+    let target_str = target.path().display().to_string();
+    let out =
+        run(checkout.path(), &["skill-install", "--project", "--target", target_str.as_str()]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr(&out).contains("usage:"), "usage printed on stderr: {}", stderr(&out));
+}
