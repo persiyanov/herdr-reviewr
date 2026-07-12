@@ -271,6 +271,10 @@ Run `herdr-reviewr skill-path`, load that skill, then review this code and leave
 comments in reviewr.
 ```
 
+Every bare `herdr-reviewr` in these snippets assumes the install-time PATH link (see
+[Install](#install)); if the shell can't find it, use the plugin-root path or
+`herdr plugin action invoke skill-install --plugin dcieslak19973.reviewr`.
+
 `skill-path` prints the bundled skill's location. The agent loads it, lists your open comments
 (`herdr-reviewr comment list`), acts on them, and leaves its own findings as cards in your diff —
 you'll see an `agent`-chipped card within a poll tick, no notification needed.

@@ -71,8 +71,8 @@ echo "$NAME: installed $BIN_DIR/$NAME"
 # and actions never need this — they invoke $HERDR_PLUGIN_ROOT/bin/herdr-reviewr by absolute
 # path — but users and agents following the docs expect the bare command to work). This step
 # never fails the install; a broken $HOME or a read-only ~/.local/bin just means no symlink.
-LOCAL_BIN="$HOME/.local/bin"
-if mkdir -p "$LOCAL_BIN" 2>/dev/null && ln -sf "$BIN_DIR/$NAME" "$LOCAL_BIN/$NAME" 2>/dev/null; then
+LOCAL_BIN="${HOME:-}/.local/bin"
+if [ -n "${HOME:-}" ] && mkdir -p "$LOCAL_BIN" 2>/dev/null && ln -sf "$BIN_DIR/$NAME" "$LOCAL_BIN/$NAME" 2>/dev/null; then
   echo "$NAME: linked $LOCAL_BIN/$NAME -> $BIN_DIR/$NAME"
   case ":$PATH:" in
     *":$LOCAL_BIN:"*) ;;
