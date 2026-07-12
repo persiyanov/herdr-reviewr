@@ -1,8 +1,9 @@
 //! Formatting comments and exporting them to the agent or clipboard.
 //!
 //! See `specs/review-model.md`. A comment becomes a block of `location`, the
-//! diff snippet, then the text. Export is consume-on-success: the caller removes
-//! a comment only after `export` returns `Ok`.
+//! diff snippet, then the text. Sending never consumes a comment — `App::export`
+//! persists every open, user-authored comment and leaves it in place, so a comment
+//! stays visible (and resolvable) after being sent.
 
 use std::io::Write;
 use std::process::{Command, Stdio};

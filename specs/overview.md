@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-09
+Last edited: 2026-07-12
 ---
 
 # herdr-reviewr
@@ -51,10 +51,10 @@ Named so the architecture stays open to them. None is part of this design.
 
 | #  | Always true                                                                                                                  |
 | -- | ----------------------------------------------------------------------------------------------------------------------------|
-| O1 | The sidebar never commits, stages, or mutates the worktree, the index, or any branch. Its one git write is the private baseline ref under `refs/reviewr/`. |
+| O1 | The sidebar never commits, stages, or mutates the worktree, the index, or any branch. It writes only under the repo's git dir — the `refs/reviewr/` baseline ref and the comment store — never the worktree. |
 | O2 | The sidebar never writes to GitHub. It reads the pull request through `gh` and opens links in the browser, nothing more.      |
-| O3 | A comment, saved or being typed, is never lost to a refresh or the agent's edits. Only the user removes it.                   |
-| O4 | Comments leave only by an explicit export, to the agent pane or the clipboard.                                                |
+| O3 | A comment, saved or being typed, is never lost to a refresh, a merge with the on-disk store, or the agent's code edits. Only an explicit delete (TUI `d`) or CLI `rm` removes it — or an unreadable store file, which is skipped, never deleted, but drops out of the merged view. |
+| O4 | A comment leaves the store only by delete or `rm` — send/export persists it but never consumes it.                           |
 | O5 | The crate forbids `unsafe`.                                                                                                   |
 
 ## Related specs

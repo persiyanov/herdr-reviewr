@@ -1,7 +1,11 @@
 //! In-memory review model: scopes, changed files, and comments.
 //!
-//! See `specs/review-model.md`. Comments live only for the session and are
-//! removed by export or delete — never by a refresh.
+//! See `specs/review-model.md`. A comment's lifecycle (id, author, status) lives in
+//! [`crate::comments::StoredComment`]; `CommentStore` is the TUI-session view over a `Vec` of
+//! them. A refresh never drops a comment — only delete, or an external agent removing its
+//! file, does (`crate::app::App::sync_comments_from_disk`).
+
+use crate::comments::{Author, Status, StoredComment, new_id, now_iso};
 
 /// Which set of changes the Changes view shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -102,10 +106,12 @@ impl Comment {
     }
 }
 
-/// The in-memory comment list for one worktree review session.
+/// The in-memory comment list for one worktree review session: every entry carries its
+/// lifecycle metadata (id/author/status) from the moment it is written, so a TUI-authored
+/// comment is indistinguishable in shape from one synced in from the on-disk store.
 #[derive(Default, Debug)]
 pub struct CommentStore {
-    items: Vec<Comment>,
+    items: Vec<StoredComment>,
 }
 
 impl CommentStore {
@@ -121,44 +127,72 @@ impl CommentStore {
         self.items.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Comment> {
+    pub fn iter(&self) -> impl Iterator<Item = &StoredComment> {
         self.items.iter()
     }
 
-    pub fn get(&self, index: usize) -> Option<&Comment> {
+    pub fn get(&self, index: usize) -> Option<&StoredComment> {
         self.items.get(index)
     }
 
-    /// Append a comment; returns its index.
+    /// The current index of the comment with id `id`, or `None` if it no longer exists. Every
+    /// action held across a poll tick (an edit in progress, an overlay keystroke) must re-resolve
+    /// through this rather than trust a previously-read index — `sync_comments_from_disk` can
+    /// replace and re-sort the whole set between the moment an index was read and the moment it
+    /// is used, so a stale index can silently name a different (or no) comment.
+    pub fn index_of(&self, id: &str) -> Option<usize> {
+        self.items.iter().position(|sc| sc.id == id)
+    }
+
+    /// Append a comment written just now in the TUI, wrapping it with fresh lifecycle
+    /// metadata (a new id, `Author::User`, `Status::Open`) — every comment a reviewer writes
+    /// starts here (`specs/review-model.md`). Returns its index.
     pub fn add(&mut self, comment: Comment) -> usize {
-        self.items.push(comment);
+        self.items.push(StoredComment {
+            id: new_id(),
+            author: Author::User,
+            status: Status::Open,
+            created_at: now_iso(),
+            comment,
+        });
         self.items.len() - 1
     }
 
     /// Replace the text of the comment at `index`. Returns `false` if out of range.
     pub fn edit(&mut self, index: usize, text: String) -> bool {
         if let Some(c) = self.items.get_mut(index) {
-            c.text = text;
+            c.comment.text = text;
             true
         } else {
             false
         }
     }
 
-    /// Remove and return the comment at `index` (delete, or consume one on export).
-    pub fn take(&mut self, index: usize) -> Option<Comment> {
+    /// Flip the status of the comment at `index`. Returns `false` if out of range.
+    pub fn set_status(&mut self, index: usize, status: Status) -> bool {
+        if let Some(c) = self.items.get_mut(index) {
+            c.status = status;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove and return the comment at `index` (the only way a comment leaves the set from
+    /// the TUI side — sending no longer consumes; `specs/review-model.md`).
+    pub fn take(&mut self, index: usize) -> Option<StoredComment> {
         if index < self.items.len() { Some(self.items.remove(index)) } else { None }
     }
 
-    /// Remove and return every comment (consume-all on a successful export).
-    pub fn take_all(&mut self) -> Vec<Comment> {
-        std::mem::take(&mut self.items)
+    /// Replace the whole set — the result of `App::sync_comments_from_disk`'s merge.
+    pub fn replace(&mut self, items: Vec<StoredComment>) {
+        self.items = items;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Comment, CommentStore, Scope, Side};
+    use super::{Author, Comment, CommentStore, Scope, Side, Status};
 
     fn comment(file: &str, start: u32, end: u32, text: &str) -> Comment {
         Comment {
@@ -197,23 +231,41 @@ mod tests {
         let mut s = CommentStore::new();
         let i = s.add(comment("a.rs", 1, 1, "first"));
         assert_eq!(s.len(), 1);
-        assert_eq!(s.get(i).unwrap().text, "first");
+        assert_eq!(s.get(i).unwrap().comment.text, "first");
         assert!(s.edit(i, "second".into()));
-        assert_eq!(s.get(i).unwrap().text, "second");
+        assert_eq!(s.get(i).unwrap().comment.text, "second");
         assert!(!s.edit(99, "nope".into()));
     }
 
     #[test]
-    fn take_one_and_take_all_consume() {
+    fn add_wraps_fresh_lifecycle_metadata() {
+        let mut s = CommentStore::new();
+        let i = s.add(comment("a.rs", 1, 1, "first"));
+        let sc = s.get(i).unwrap();
+        assert!(sc.id.starts_with("c-"), "a fresh id: {}", sc.id);
+        assert_eq!(sc.author, Author::User);
+        assert_eq!(sc.status, Status::Open);
+    }
+
+    #[test]
+    fn set_status_flips_in_place_and_reports_out_of_range() {
+        let mut s = CommentStore::new();
+        let i = s.add(comment("a.rs", 1, 1, "one"));
+        assert!(s.set_status(i, Status::Resolved));
+        assert_eq!(s.get(i).unwrap().status, Status::Resolved);
+        assert!(!s.set_status(99, Status::Open));
+    }
+
+    #[test]
+    fn take_removes_one_and_replace_rebuilds_the_set() {
         let mut s = CommentStore::new();
         s.add(comment("a.rs", 1, 1, "one"));
         s.add(comment("b.rs", 2, 2, "two"));
         let taken = s.take(0).unwrap();
-        assert_eq!(taken.text, "one");
+        assert_eq!(taken.comment.text, "one");
         assert_eq!(s.len(), 1);
-        let rest = s.take_all();
-        assert_eq!(rest.len(), 1);
+        assert!(s.take(5).is_none());
+        s.replace(Vec::new());
         assert!(s.is_empty());
-        assert!(s.take(0).is_none());
     }
 }

@@ -60,7 +60,7 @@ impl Config {
 /// sets no `base_branches` (`specs/review-model.md`).
 pub const DEFAULT_BASE_BRANCHES: [&str; 4] = ["origin/main", "origin/master", "main", "master"];
 
-const PLUGIN_CONFIG_KEYS: [&str; 8] = [
+const PLUGIN_CONFIG_KEYS: [&str; 9] = [
     "theme",
     "base_branches",
     "toggle_placement",
@@ -69,6 +69,7 @@ const PLUGIN_CONFIG_KEYS: [&str; 8] = [
     "github_host",
     "gitlab_host",
     "bitbucket_host",
+    "comment_sync",
 ];
 
 /// Where the toggle action opens the sidebar.
@@ -107,6 +108,23 @@ impl ToggleDirection {
     }
 }
 
+/// When a user (reviewer) comment persists to the shared on-disk store, making it visible to
+/// the agent. Agent-authored comments are always store-resident regardless of this setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommentSync {
+    Immediate,
+    OnSend,
+}
+
+impl CommentSync {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Immediate => "immediate",
+            Self::OnSend => "on-send",
+        }
+    }
+}
+
 /// One validated snapshot of `$HERDR_PLUGIN_CONFIG_DIR/config.toml`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginConfig {
@@ -118,6 +136,7 @@ pub struct PluginConfig {
     github_host: Option<String>,
     gitlab_host: Option<String>,
     bitbucket_host: Option<String>,
+    comment_sync: CommentSync,
 }
 
 impl Default for PluginConfig {
@@ -131,6 +150,7 @@ impl Default for PluginConfig {
             github_host: None,
             gitlab_host: None,
             bitbucket_host: None,
+            comment_sync: CommentSync::Immediate,
         }
     }
 }
@@ -168,6 +188,10 @@ impl PluginConfig {
         self.bitbucket_host.as_deref()
     }
 
+    pub fn comment_sync(&self) -> CommentSync {
+        self.comment_sync
+    }
+
     /// Stable machine-readable output consumed by the shell entry points.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
@@ -179,6 +203,7 @@ impl PluginConfig {
             "github_host": self.github_host,
             "gitlab_host": self.gitlab_host,
             "bitbucket_host": self.bitbucket_host,
+            "comment_sync": self.comment_sync.as_str(),
         })
     }
 }
@@ -340,6 +365,14 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         }
         config.bitbucket_host = Some(host.to_ascii_lowercase());
     }
+    if let Some(value) = table.get("comment_sync") {
+        config.comment_sync =
+            match string_value(path, "comment_sync", value, "one of immediate, on-send")? {
+                "immediate" => CommentSync::Immediate,
+                "on-send" => CommentSync::OnSend,
+                _ => return Err(value_error(path, "comment_sync", "one of immediate, on-send")),
+            };
+    }
     Ok(config)
 }
 
@@ -413,7 +446,7 @@ pub fn print_plugin_config() -> Result<(), PluginConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, PluginConfig, ToggleDirection, TogglePlacement};
+    use super::{CommentSync, Config, PluginConfig, ToggleDirection, TogglePlacement};
     use std::time::Duration;
 
     fn parse(args: &[&str]) -> Config {
@@ -460,6 +493,7 @@ mod tests {
         assert_eq!(config.github_host(), None);
         assert_eq!(config.gitlab_host(), None);
         assert_eq!(config.bitbucket_host(), None);
+        assert_eq!(config.comment_sync(), CommentSync::Immediate);
     }
 
     #[test]
@@ -474,6 +508,7 @@ mod tests {
                 "toggle_direction = \"down\"\n",
                 "auto_open = false\n",
                 "github_host = \"GitHub.Example.COM\"\n",
+                "comment_sync = \"on-send\"\n",
             ),
         )
         .unwrap();
@@ -484,6 +519,7 @@ mod tests {
         assert_eq!(config.toggle_direction(), ToggleDirection::Down);
         assert!(!config.auto_open());
         assert_eq!(config.github_host(), Some("github.example.com"));
+        assert_eq!(config.comment_sync(), CommentSync::OnSend);
     }
 
     #[test]
@@ -508,6 +544,24 @@ mod tests {
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.gitlab_host(), None);
         assert_eq!(config.bitbucket_host(), None);
+    }
+
+    #[test]
+    fn comment_sync_parses_both_values_and_defaults_immediate() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            super::plugin_config_in(dir.path()).unwrap().comment_sync(),
+            CommentSync::Immediate
+        );
+
+        std::fs::write(dir.path().join("config.toml"), "comment_sync = \"on-send\"\n").unwrap();
+        assert_eq!(
+            super::plugin_config_in(dir.path()).unwrap().comment_sync(),
+            CommentSync::OnSend
+        );
+
+        std::fs::write(dir.path().join("config.toml"), "comment_sync = \"sometimes\"\n").unwrap();
+        assert!(super::plugin_config_in(dir.path()).is_err());
     }
 
     #[test]
@@ -543,6 +597,7 @@ mod tests {
             ("github_host = \"github.com-work\"\n", "`github_host`"),
             ("gitlab_host = \"https://gitlab.corp.com\"\n", "`gitlab_host`"),
             ("bitbucket_host = \"host/path\"\n", "`bitbucket_host`"),
+            ("comment_sync = \"sometimes\"\n", "`comment_sync`"),
         ];
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -568,12 +623,13 @@ mod tests {
     fn normalized_json_contains_every_key() {
         let value = PluginConfig::default().to_json();
         let object = value.as_object().unwrap();
-        assert_eq!(object.len(), 8);
+        assert_eq!(object.len(), 9);
         assert_eq!(object["toggle_placement"], "split");
         assert_eq!(object["toggle_direction"], "right");
         assert_eq!(object["auto_open"], true);
         assert!(object["github_host"].is_null());
         assert!(object["gitlab_host"].is_null());
         assert!(object["bitbucket_host"].is_null());
+        assert_eq!(object["comment_sync"], "immediate");
     }
 }

@@ -10,6 +10,8 @@
 
 pub mod app;
 pub mod browser;
+pub mod cli;
+pub mod comments;
 pub mod config;
 pub mod diff;
 pub mod export;
@@ -636,6 +638,10 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 continue;
             }
             pr.probe_pending = true;
+            // Pick up an external comment-store write (the CLI, an agent) before this poll's
+            // reload, same reasoning as the turn baseline below: cheap to check every tick, and
+            // a stale comments list should never survive an extra frame past its signature change.
+            app.check_comment_store();
             // Advance the last-turn baseline before reloading, so a turn promoted this poll
             // is visible to this poll's changed-files build. When the agent just went idle, its
             // turn may have pushed or run `gh pr merge`; refetch the PR if the tab is showing it
@@ -848,6 +854,8 @@ fn handle_key(app: &mut App, key: KeyEvent, area: Rect) -> Result<()> {
             Char('y') => app.export(&Clipboard),
             Char('e') => app.start_edit(),
             Char('d') => app.delete_comment(),
+            Char('x') => app.resolve_selected_comment(),
+            Char('h') => app.toggle_hide_resolved(),
             _ => {}
         }
         return Ok(());
@@ -1213,5 +1221,64 @@ mod refresh_tests {
         assert_eq!(recovery_epoch, epoch);
         assert_eq!(target.theme(), "gruvbox");
         assert_eq!(recovered.plugin_config().unwrap().theme(), "gruvbox");
+    }
+}
+
+/// The comments-list overlay's own keys (`x` resolve, `h` hide-resolved), exercised straight
+/// through `handle_key` rather than the exposed `App` methods, so a regression in the match
+/// arm itself (a typo'd `KeyCode`, a dropped guard) fails here even if `App`'s own unit tests
+/// still pass.
+#[cfg(test)]
+mod list_key_tests {
+    use super::handle_key;
+    use crate::app::{App, Mode};
+    use crate::comments::Status;
+    use crate::model::{Comment, Scope, Side};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::layout::Rect;
+    use std::path::PathBuf;
+
+    fn comment() -> Comment {
+        Comment {
+            file: "a.rs".to_string(),
+            side: Side::New,
+            start: 1,
+            end: 1,
+            lines: "+x".to_string(),
+            text: "hi".to_string(),
+            diff_anchored: true,
+        }
+    }
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn x_toggles_resolve_on_the_highlighted_row() {
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        app.store.add(comment());
+        app.mode = Mode::List;
+        app.list_cursor = 0;
+        let area = Rect::new(0, 0, 80, 24);
+
+        handle_key(&mut app, key('x'), area).unwrap();
+        assert_eq!(app.store.get(0).unwrap().status, Status::Resolved, "x resolves it");
+
+        handle_key(&mut app, key('x'), area).unwrap();
+        assert_eq!(app.store.get(0).unwrap().status, Status::Open, "x again reopens it");
+    }
+
+    #[test]
+    fn h_toggles_hide_resolved() {
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        app.mode = Mode::List;
+        let area = Rect::new(0, 0, 80, 24);
+
+        assert!(!app.hide_resolved);
+        handle_key(&mut app, key('h'), area).unwrap();
+        assert!(app.hide_resolved, "h hides resolved comments");
+        handle_key(&mut app, key('h'), area).unwrap();
+        assert!(!app.hide_resolved, "h again shows them");
     }
 }

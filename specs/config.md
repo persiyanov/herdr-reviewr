@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-10
-Last edited: 2026-07-11
+Last edited: 2026-07-12
 ---
 
 # Configuration
@@ -21,6 +21,7 @@ auto_open = false
 github_host = "github.example.com"
 gitlab_host = "gitlab.corp.com"
 bitbucket_host = "bitbucket.corp.com"
+comment_sync = "on-send"
 ```
 
 | key                    | value                                                                    |
@@ -33,6 +34,7 @@ bitbucket_host = "bitbucket.corp.com"
 | `github_host`          | bare hostname outside the `github.com` and `github.com-*` namespace       |
 | `gitlab_host`          | bare hostname (`gitlab.com` is always supported and needs no entry here)  |
 | `bitbucket_host`       | bare hostname naming a Bitbucket Data Center instance (no default; the key is meant for Data Center hosts — setting it to Bitbucket Cloud's `bitbucket.org` passes validation and is not rejected, but Cloud's API differs from Data Center's, so fetches against it fail) |
+| `comment_sync`         | `immediate` (default) or `on-send` — when a user comment written in the TUI persists to the shared comment store an agent's CLI reads (`review-model.md`) |
 
 ## Behavior
 

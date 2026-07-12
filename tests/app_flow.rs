@@ -311,7 +311,7 @@ fn editing_a_comment_surfaces_its_file_from_a_collapsed_directory() {
     // Open src/foo.rs and comment on its changed line.
     app.select_file(file_row(&app, "src/foo.rs")).unwrap();
     comment_on(&mut app, '+', "note on foo");
-    let commented_line = app.store.get(0).unwrap().start;
+    let commented_line = app.store.get(0).unwrap().comment.start;
 
     // Switch the open diff to root.rs, then collapse `src` so foo's row is hidden.
     app.select_file(file_row(&app, "root.rs")).unwrap();
@@ -663,7 +663,7 @@ fn a_comment_through_a_fold_anchors_to_gits_line_and_survives_a_poll() {
     }
     app.submit_comment();
     let c = app.store.iter().next().unwrap();
-    assert_eq!((c.side, c.start), (Side::New, 21));
+    assert_eq!((c.comment.side, c.comment.start), (Side::New, 21));
 
     // A fold expand plus a poll keeps the comment.
     app.diff_cursor = app.visible.iter().position(|row| row.hidden() > 0).unwrap();
@@ -695,10 +695,16 @@ fn comment_anchors_to_gits_real_line_numbers() {
     }
     app.submit_comment();
 
-    let appended = app.store.iter().find(|c| c.text == "appended").unwrap();
-    assert_eq!((appended.side, appended.start, appended.end), (Side::New, 5, 5));
-    let removed = app.store.iter().find(|c| c.text == "removed").unwrap();
-    assert_eq!((removed.side, removed.start, removed.end), (Side::Old, 2, 2));
+    let appended = app.store.iter().find(|sc| sc.comment.text == "appended").unwrap();
+    assert_eq!(
+        (appended.comment.side, appended.comment.start, appended.comment.end),
+        (Side::New, 5, 5)
+    );
+    let removed = app.store.iter().find(|sc| sc.comment.text == "removed").unwrap();
+    assert_eq!(
+        (removed.comment.side, removed.comment.start, removed.comment.end),
+        (Side::Old, 2, 2)
+    );
 }
 
 #[test]
@@ -714,16 +720,20 @@ fn comments_on_added_and_removed_lines_capture_the_snippet() {
     let removed = app
         .store
         .iter()
-        .find(|c| c.location().ends_with("(removed)"))
+        .find(|sc| sc.comment.location().ends_with("(removed)"))
         .expect("a removed-side comment");
-    assert!(removed.lines.starts_with('-'), "snippet keeps the diff marker: {:?}", removed.lines);
+    assert!(
+        removed.comment.lines.starts_with('-'),
+        "snippet keeps the diff marker: {:?}",
+        removed.comment.lines
+    );
 
     let added = app
         .store
         .iter()
-        .find(|c| !c.location().ends_with("(removed)"))
+        .find(|sc| !sc.comment.location().ends_with("(removed)"))
         .expect("a new-side comment");
-    assert!(added.lines.starts_with('+'));
+    assert!(added.comment.lines.starts_with('+'));
 }
 
 #[test]
@@ -737,7 +747,7 @@ fn a_saved_comment_survives_a_refresh() {
     app.reload().unwrap();
 
     assert_eq!(app.store.len(), 1, "refresh must not drop a saved comment");
-    assert_eq!(app.store.iter().next().unwrap().text, "keep me");
+    assert_eq!(app.store.iter().next().unwrap().comment.text, "keep me");
     assert!(app.entries.iter().any(|f| f.path == "b.rs"), "file list still refreshed");
 }
 
@@ -764,7 +774,7 @@ fn a_refresh_while_composing_freezes_input_and_diff() {
 }
 
 #[test]
-fn a_failed_export_keeps_comments_and_success_consumes_them() {
+fn a_failed_export_keeps_comments_and_success_leaves_them_open() {
     let r = edited_repo();
     let mut app = app_on(&r);
     comment_on(&mut app, '+', "one");
@@ -776,7 +786,11 @@ fn a_failed_export_keeps_comments_and_success_consumes_them() {
 
     let target = FakeTarget::ok();
     app.export(&target);
-    assert!(app.store.is_empty(), "a successful export consumes the comments");
+    assert_eq!(app.store.len(), 2, "a successful send no longer consumes the comments");
+    assert!(
+        app.store.iter().all(|sc| sc.status == herdr_reviewr::comments::Status::Open),
+        "sent comments stay Open, not removed"
+    );
 
     // The sent text is the real export block format, end to end through App::export.
     let sent = target.last();
@@ -790,14 +804,14 @@ fn a_failed_export_keeps_comments_and_success_consumes_them() {
 }
 
 #[test]
-fn send_consumes_the_whole_set() {
+fn send_no_longer_consumes_the_set() {
     let r = edited_repo();
     let mut app = app_on(&r);
     comment_on(&mut app, '+', "first");
     comment_on(&mut app, '-', "second");
 
     app.export(&FakeTarget::ok());
-    assert!(app.store.is_empty(), "send takes every comment, not just one");
+    assert_eq!(app.store.len(), 2, "send leaves every comment in place, not just one");
 }
 
 #[test]
@@ -868,7 +882,7 @@ fn a_comment_can_be_written_across_multiple_lines() {
     app.submit_comment();
 
     let c = app.store.iter().next().unwrap();
-    assert_eq!(c.text, "first line\nsecond line", "the body keeps its line break");
+    assert_eq!(c.comment.text, "first line\nsecond line", "the body keeps its line break");
 
     let target = FakeTarget::ok();
     app.export(&target);
@@ -993,7 +1007,7 @@ fn a_comment_can_be_edited_then_deleted() {
     let r = edited_repo();
     let mut app = app_on(&r);
     comment_on(&mut app, '+', "original");
-    let snippet_before = app.store.get(0).unwrap().lines.clone();
+    let snippet_before = app.store.get(0).unwrap().comment.lines.clone();
 
     app.open_list();
     app.start_edit();
@@ -1002,8 +1016,12 @@ fn a_comment_can_be_edited_then_deleted() {
         app.input_push(ch);
     }
     app.submit_comment();
-    assert_eq!(app.store.get(0).unwrap().text, "rewritten");
-    assert_eq!(app.store.get(0).unwrap().lines, snippet_before, "edit changes only the text");
+    assert_eq!(app.store.get(0).unwrap().comment.text, "rewritten");
+    assert_eq!(
+        app.store.get(0).unwrap().comment.lines,
+        snippet_before,
+        "edit changes only the text"
+    );
 
     app.open_list();
     app.delete_comment();
@@ -1092,7 +1110,7 @@ fn a_comment_on_a_reverted_file_is_flagged_stale() {
     assert!(app.entries.iter().all(|f| f.path != "a.rs"), "file left the changeset");
     assert_eq!(app.store.len(), 1, "the comment still exists");
     let c = app.store.get(0).unwrap();
-    assert!(app.is_stale(c), "a diff comment whose file left the changeset is stale");
+    assert!(app.is_stale(&c.comment), "a diff comment whose file left the changeset is stale");
 }
 
 #[test]
@@ -1139,13 +1157,18 @@ fn a_multi_line_range_comment_spans_lines_and_keeps_the_whole_snippet() {
 
     assert_eq!(app.store.len(), 1);
     let c = app.store.iter().next().unwrap();
-    assert!(c.end > c.start, "comment covers a line range: {}..{}", c.start, c.end);
-    let snippet: Vec<&str> = c.lines.lines().collect();
-    assert!(snippet.len() >= 2, "snippet keeps every selected line: {:?}", c.lines);
+    assert!(
+        c.comment.end > c.comment.start,
+        "comment covers a line range: {}..{}",
+        c.comment.start,
+        c.comment.end
+    );
+    let snippet: Vec<&str> = c.comment.lines.lines().collect();
+    assert!(snippet.len() >= 2, "snippet keeps every selected line: {:?}", c.comment.lines);
     assert!(
         snippet.iter().all(|l| l.starts_with(['+', '-', ' '])),
         "every snippet line keeps its diff marker: {:?}",
-        c.lines
+        c.comment.lines
     );
 }
 
@@ -1319,7 +1342,10 @@ fn a_comment_submitted_after_its_file_left_the_changeset_anchors_to_that_file() 
 
     app.submit_comment();
     let c = app.store.iter().next().unwrap();
-    assert_eq!(c.file, "a.rs", "comment anchors to its diff's file, not the drifted cursor");
+    assert_eq!(
+        c.comment.file, "a.rs",
+        "comment anchors to its diff's file, not the drifted cursor"
+    );
 }
 
 #[test]
@@ -1345,6 +1371,22 @@ fn a_non_repo_path_yields_an_empty_state_not_an_error() {
     assert!(app.reload().is_ok(), "a non-repo reload is graceful, not an error");
     assert!(app.entries.is_empty());
     assert!(app.diff.rows.is_empty());
+}
+
+#[test]
+fn an_unresolvable_comment_store_surfaces_a_status_notice() {
+    // A non-repo path can't resolve `git rev-parse --git-dir`, so `comments::Store::open`
+    // fails and comments must fall back to TUI-local for the session, with a one-line status
+    // notice explaining why (`specs/review-model.md`, "Error handling"; src/app.rs field doc
+    // on `comments_disk`).
+    let dir = tempfile::tempdir().unwrap();
+    let app = App::new(dir.path().to_path_buf(), Scope::Uncommitted, None);
+    assert!(app.comments_disk.is_none(), "the store could not be resolved");
+    assert!(
+        app.status.contains("comment store unavailable"),
+        "expected a store-unavailable notice, got: {:?}",
+        app.status
+    );
 }
 
 #[test]
@@ -1693,13 +1735,16 @@ fn content_comment_is_stale_only_when_its_file_is_deleted() {
     }
     app.submit_comment();
     let c = app.store.get(0).expect("a comment was made").clone();
-    assert!(!c.diff_anchored, "a File-view comment is content-anchored");
+    assert!(!c.comment.diff_anchored, "a File-view comment is content-anchored");
 
     app.reload().unwrap();
-    assert!(!app.is_stale(&c), "a content comment on an existing, unchanged file is not stale");
+    assert!(
+        !app.is_stale(&c.comment),
+        "a content comment on an existing, unchanged file is not stale"
+    );
     r.remove("a.rs");
     app.reload().unwrap();
-    assert!(app.is_stale(&c), "it becomes stale only once its file is deleted");
+    assert!(app.is_stale(&c.comment), "it becomes stale only once its file is deleted");
 }
 
 #[test]
@@ -1793,7 +1838,7 @@ fn a_diff_comment_does_not_render_in_the_file_view() {
     app.start_comment();
     app.input_push('x');
     app.submit_comment();
-    assert!(app.store.get(0).unwrap().diff_anchored, "made in the Changes diff");
+    assert!(app.store.get(0).unwrap().comment.diff_anchored, "made in the Changes diff");
     assert!(!app.commented_lines().is_empty(), "renders in its own diff view");
 
     // In All files, open a.rs as content: the diff-anchored comment must not bleed in.
@@ -2080,4 +2125,211 @@ fn theme_selection_swaps_the_palette_and_falls_back() {
     // An unknown name falls back to the default — never a half-applied palette.
     app.set_cli_theme(Some("nope".to_string()));
     assert_eq!(*app.palette(), theme::resolve(Some("catppuccin")).palette);
+}
+
+// --- persistent comment lifecycle (specs/review-model.md, Task 4) --------------------
+
+#[test]
+fn immediate_mode_persists_comments_to_the_store() {
+    // The default `comment_sync` is `immediate`, so a comment written in the TUI lands on
+    // disk as soon as it is saved — no send required.
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    comment_on(&mut app, '+', "note");
+
+    let store = herdr_reviewr::comments::Store::open(&r.path_buf()).unwrap();
+    let disk = store.load();
+    assert_eq!(disk.len(), 1, "the comment landed on disk immediately");
+    assert_eq!(disk[0].author, herdr_reviewr::comments::Author::User);
+    assert_eq!(disk[0].comment.text, "note");
+}
+
+#[test]
+fn on_send_mode_persists_only_on_send() {
+    let r = edited_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    std::fs::write(config_dir.path().join("config.toml"), "comment_sync = \"on-send\"\n").unwrap();
+    let config = herdr_reviewr::config::plugin_config_in(config_dir.path()).unwrap();
+
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.set_plugin_config(config);
+    app.reload().unwrap();
+    comment_on(&mut app, '+', "note");
+
+    let store = herdr_reviewr::comments::Store::open(&r.path_buf()).unwrap();
+    assert!(store.load().is_empty(), "on-send mode keeps a new comment memory-only until send");
+
+    app.export(&FakeTarget::ok());
+    let disk = store.load();
+    assert_eq!(disk.len(), 1, "sending persists it");
+    assert_eq!(disk[0].status, herdr_reviewr::comments::Status::Open, "still open after sending");
+    assert_eq!(app.store.len(), 1, "send does not remove it from the in-memory list either");
+}
+
+#[test]
+fn external_agent_comment_appears_after_tick() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    assert!(app.store.is_empty());
+
+    // The CLI (an agent) writes a comment straight to the store, bypassing the TUI.
+    let store = herdr_reviewr::comments::Store::open(&r.path_buf()).unwrap();
+    let agent_comment = herdr_reviewr::model::Comment {
+        file: "a.rs".into(),
+        side: Side::New,
+        start: 1,
+        end: 1,
+        lines: "+alpha".into(),
+        text: "looks fine".into(),
+        diff_anchored: true,
+    };
+    store.add(herdr_reviewr::comments::Author::Agent, &agent_comment).unwrap();
+
+    app.check_comment_store();
+    assert_eq!(app.store.len(), 1, "the tick-check hook picks up the external write");
+    assert_eq!(app.store.iter().next().unwrap().author, herdr_reviewr::comments::Author::Agent);
+}
+
+#[test]
+fn on_send_mode_persists_before_a_failing_export() {
+    // A failed send must never lose an on-send comment that was only ever memory-local: the
+    // persist has to happen before the export attempt, not after a successful one
+    // (specs/review-model.md, "Error handling").
+    let r = edited_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    std::fs::write(config_dir.path().join("config.toml"), "comment_sync = \"on-send\"\n").unwrap();
+    let config = herdr_reviewr::config::plugin_config_in(config_dir.path()).unwrap();
+
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.set_plugin_config(config);
+    app.reload().unwrap();
+    comment_on(&mut app, '+', "note");
+
+    let store = herdr_reviewr::comments::Store::open(&r.path_buf()).unwrap();
+    assert!(store.load().is_empty(), "on-send mode keeps a new comment memory-only until send");
+
+    app.export(&FakeTarget::failing());
+
+    let disk = store.load();
+    assert_eq!(disk.len(), 1, "the comment is on disk despite the export failing");
+    assert_eq!(
+        disk[0].status,
+        herdr_reviewr::comments::Status::Open,
+        "still open after the failed send"
+    );
+    assert_eq!(app.store.len(), 1, "still present in memory too");
+    assert!(app.status.contains("failed"), "the failure is surfaced on the status line");
+}
+
+#[test]
+fn resolve_toggles_status_in_memory_and_on_disk() {
+    let r = edited_repo();
+    let mut app = app_on(&r); // Immediate mode: the comment is already on disk.
+    comment_on(&mut app, '+', "note");
+    app.open_list();
+    app.list_cursor = 0;
+
+    app.resolve_selected_comment();
+    assert_eq!(
+        app.store.get(0).unwrap().status,
+        herdr_reviewr::comments::Status::Resolved,
+        "resolved in memory"
+    );
+    let store = herdr_reviewr::comments::Store::open(&r.path_buf()).unwrap();
+    let disk = store.load();
+    assert_eq!(disk.len(), 1);
+    assert_eq!(disk[0].status, herdr_reviewr::comments::Status::Resolved, "resolved on disk too");
+
+    app.resolve_selected_comment();
+    assert_eq!(
+        app.store.get(0).unwrap().status,
+        herdr_reviewr::comments::Status::Open,
+        "toggles back to open"
+    );
+}
+
+// --- id-based edit target survives a concurrent disk sync (must-fix: index-based editing
+// races `sync_comments_from_disk`, which replaces and re-sorts the whole store) -------------
+
+#[test]
+fn editing_survives_another_comments_removal_mid_edit() {
+    let r = edited_repo();
+    let mut app = app_on(&r); // Immediate mode: both comments land on disk right away.
+    comment_on(&mut app, '+', "first"); // comment A
+    comment_on(&mut app, ' ', "second"); // comment B
+    let a_id = app.store.get(0).unwrap().id.clone();
+    let b_id = app.store.get(1).unwrap().id.clone();
+    assert_ne!(a_id, b_id);
+
+    // Start editing B specifically, from the list overlay.
+    app.open_list();
+    app.list_cursor = 1;
+    app.start_edit();
+    assert_eq!(app.mode, Mode::Composing { editing: Some(b_id.clone()) });
+
+    // A is removed from disk (an agent, or another session, deleted it) and a poll tick
+    // re-syncs — this reorders/shrinks the store while B's edit box is still open.
+    let disk = herdr_reviewr::comments::Store::open(&r.path_buf()).unwrap();
+    assert!(disk.remove(&a_id).unwrap());
+    app.check_comment_store();
+    assert_eq!(app.store.len(), 1, "A is gone after the sync");
+
+    app.input.clear();
+    for ch in "second, revised".chars() {
+        app.input_push(ch);
+    }
+    app.submit_comment();
+
+    assert_eq!(app.store.len(), 1);
+    let sc = app.store.get(0).unwrap();
+    assert_eq!(sc.id, b_id, "the edit landed on B, not whatever now sits at the old index");
+    assert_eq!(sc.comment.text, "second, revised");
+}
+
+#[test]
+fn editing_a_comment_removed_mid_edit_recreates_it_instead_of_losing_the_text() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    comment_on(&mut app, '+', "first"); // comment A
+    comment_on(&mut app, ' ', "second"); // comment B
+    let a_id = app.store.get(0).unwrap().id.clone();
+    let b_id = app.store.get(1).unwrap().id.clone();
+    let b_before = app.store.get(1).unwrap().comment.clone();
+
+    app.open_list();
+    app.list_cursor = 1;
+    app.start_edit();
+    assert_eq!(app.mode, Mode::Composing { editing: Some(b_id.clone()) });
+
+    // B itself is removed from disk mid-edit (e.g. an agent resolved-then-deleted it) and a
+    // poll tick re-syncs before the reviewer's keystroke is submitted.
+    let disk = herdr_reviewr::comments::Store::open(&r.path_buf()).unwrap();
+    assert!(disk.remove(&b_id).unwrap());
+    app.check_comment_store();
+    assert_eq!(app.store.len(), 1, "B is gone after the sync; only A remains");
+    assert!(app.store.index_of(&a_id).is_some());
+
+    app.input.clear();
+    for ch in "rescued text".chars() {
+        app.input_push(ch);
+    }
+    app.submit_comment();
+
+    // The text is never silently lost: it comes back as a new comment at B's original anchor.
+    assert_eq!(app.store.len(), 2, "the edited text survives as a new comment");
+    assert!(
+        app.status.contains("saved as a new comment"),
+        "the status explains what happened: {}",
+        app.status
+    );
+    let a = app.store.get(app.store.index_of(&a_id).unwrap()).unwrap();
+    assert_eq!(a.comment.text, "first", "the unrelated comment A is untouched");
+    let recreated =
+        app.store.iter().find(|sc| sc.id != a_id).expect("the recreated comment besides A");
+    assert_eq!(recreated.comment.text, "rescued text");
+    assert_eq!(recreated.comment.file, b_before.file, "same file as the original");
+    assert_eq!(recreated.comment.side, b_before.side, "same side as the original");
+    assert_eq!(recreated.comment.start, b_before.start, "same anchor start as the original");
+    assert_eq!(recreated.comment.end, b_before.end, "same anchor end as the original");
+    assert_ne!(recreated.id, b_id, "it is a genuinely new comment, not the old id resurrected");
 }

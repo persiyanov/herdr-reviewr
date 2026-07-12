@@ -1,12 +1,23 @@
-fn main() -> anyhow::Result<()> {
-    if std::env::args_os().nth(1).as_deref()
-        == Some(std::ffi::OsStr::new("--resolve-plugin-config"))
-    {
+fn main() -> std::process::ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.get(1).map(String::as_str) == Some("--resolve-plugin-config") {
         if let Err(error) = herdr_reviewr::config::print_plugin_config() {
             eprintln!("reviewr: {error}");
-            std::process::exit(1);
+            return std::process::ExitCode::FAILURE;
         }
-        return Ok(());
+        return std::process::ExitCode::SUCCESS;
     }
-    herdr_reviewr::run()
+
+    if matches!(args.get(1).map(String::as_str), Some("comment" | "skill-path")) {
+        return herdr_reviewr::cli::run(args);
+    }
+
+    match herdr_reviewr::run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("reviewr: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
