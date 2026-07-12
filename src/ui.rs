@@ -16,10 +16,10 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Focus, FooterAction, Mode, Tab, Tier};
+use crate::comments::{Author, Status, StoredComment};
 use crate::diff::{FileDiff, FileState, Row};
 use crate::file_list::{Annotation, RowKind};
 use crate::forge;
-use crate::model::Comment;
 use crate::theme::Palette;
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -179,7 +179,8 @@ pub fn diff_row_heights(app: &App, area: Rect) -> Vec<usize> {
                 .iter()
                 .filter(|&&ci| Some(ci) != editing)
                 .filter_map(|&ci| app.store.get(ci))
-                .map(|sc| comment_card_lines(&sc.comment, width, p).len())
+                .filter(|sc| card_visible(sc, app))
+                .map(|sc| comment_card_lines(sc, width, p).len())
                 .sum();
             base + card
         })
@@ -644,26 +645,51 @@ fn elide_head(name: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
+/// Whether a comment's inline card (and its row height) should paint at all: hidden only when
+/// it is resolved and `App::hide_resolved` is set. [`diff_row_heights`] and [`render_diff_view`]
+/// both filter through this one predicate, so a hidden card is zero rows in the layout math and
+/// zero rows in the paint — never one without the other (a desync would break scrolling/hit
+/// testing, per the brief).
+fn card_visible(sc: &StoredComment, app: &App) -> bool {
+    !(app.hide_resolved && sc.status == Status::Resolved)
+}
+
 /// A saved comment as inline display lines: a quiet box titled with the comment's location
 /// (in the comment-yellow accent) holding its wrapped text. Spliced read-only under the
-/// commented line so a submitted comment stays visible while reviewing.
-fn comment_card_lines(c: &Comment, width: usize, p: &Palette) -> Vec<Line<'static>> {
+/// commented line so a submitted comment stays visible while reviewing. An agent's comment
+/// carries an ` agent ` chip (the `mauve` accent) ahead of the title; a resolved comment
+/// renders its whole card in the muted `overlay1` tone with a `resolved` marker in the title,
+/// so status reads at a glance without a legend.
+fn comment_card_lines(sc: &StoredComment, width: usize, p: &Palette) -> Vec<Line<'static>> {
     const INDENT: usize = 2;
+    let c = &sc.comment;
+    let resolved = sc.status == Status::Resolved;
     let box_w = width.saturating_sub(INDENT).max(10);
     let text_w = box_w.saturating_sub(4).max(1); // inside "│ " … " │"
-    let border = Style::default().fg(p.overlay0);
-    let title = Style::default().fg(p.peach).add_modifier(Modifier::BOLD);
-    let body_style = Style::default().fg(p.text);
+    let border = Style::default().fg(if resolved { p.overlay1 } else { p.overlay0 });
+    let title_fg = if resolved { p.overlay1 } else { p.peach };
+    let title = Style::default().fg(title_fg).add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(if resolved { p.overlay1 } else { p.text });
     let pad = || Span::raw(" ".repeat(INDENT));
 
-    let label = truncate_width(&format!(" comment · {} ", c.location()), box_w.saturating_sub(3));
-    let fill = box_w.saturating_sub(3 + label.width());
-    let mut lines = vec![Line::from(vec![
-        pad(),
-        Span::styled("╭─", border),
-        Span::styled(label, title),
-        Span::styled(format!("{}╮", "─".repeat(fill)), border),
-    ])];
+    let label_text = if resolved {
+        format!(" comment · {} · resolved ", c.location())
+    } else {
+        format!(" comment · {} ", c.location())
+    };
+    let label = truncate_width(&label_text, box_w.saturating_sub(3));
+    let chip = " agent ";
+    let is_agent = sc.author == Author::Agent;
+    let chip_run = if is_agent { chip.width() + 1 } else { 0 }; // the chip plus its trailing dash
+    let fill = box_w.saturating_sub(3 + chip_run + label.width());
+    let mut top = vec![pad(), Span::styled("╭─", border)];
+    if is_agent {
+        top.push(Span::styled(chip, Style::default().fg(p.mauve).add_modifier(Modifier::BOLD)));
+        top.push(Span::styled("─", border));
+    }
+    top.push(Span::styled(label, title));
+    top.push(Span::styled(format!("{}╮", "─".repeat(fill)), border));
+    let mut lines = vec![Line::from(top)];
 
     for logical in c.text.split('\n') {
         for piece in wrap_text(logical, text_w) {
@@ -772,8 +798,9 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         for &ci in &cards[i] {
             if Some(ci) != editing
                 && let Some(sc) = app.store.get(ci)
+                && card_visible(sc, app)
             {
-                lines.extend(comment_card_lines(&sc.comment, width, p));
+                lines.extend(comment_card_lines(sc, width, p));
             }
         }
         lines
@@ -1131,6 +1158,11 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::Newline => ("⇧⏎", "newline"),
         A::Cancel => ("esc", "cancel"),
         A::CloseList => ("esc", "close"),
+        A::ResolveComment => ("x", "resolve"),
+        A::ToggleHideResolved => {
+            let label = if app.hide_resolved { "show resolved" } else { "hide resolved" };
+            return ("h".into(), label.into());
+        }
         A::OpenPr => ("o", "open ↗"),
         A::Refresh => ("r", "refresh"),
         A::Tabs => ("1·2·3", ""),
@@ -1263,12 +1295,22 @@ fn render_comments_list(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, sc)| {
+            // Author column: `@agent` tinted mauve (mirroring the card's chip), `@you`
+            // otherwise — the same `@author` voice the PR tab's comment rows use.
+            let (author_text, author_fg) = match sc.author {
+                Author::Agent => ("@agent ", p.mauve),
+                Author::User => ("@you ", p.subtext0),
+            };
+            let author = Span::styled(author_text, Style::default().fg(author_fg));
             let loc = Span::styled(
                 sc.comment.location(),
                 Style::default().fg(p.mauve).add_modifier(Modifier::BOLD),
             );
             let mut spans =
-                vec![loc, Span::styled(format!("  {}", sc.comment.text), text_style(p))];
+                vec![author, loc, Span::styled(format!("  {}", sc.comment.text), text_style(p))];
+            if sc.status == Status::Resolved {
+                spans.push(Span::styled("  resolved", Style::default().fg(p.overlay1)));
+            }
             // A comment whose anchor may have moved (file left the changeset, or a content
             // comment's file was deleted) is flagged but kept.
             if app.is_stale(&sc.comment) {

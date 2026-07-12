@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-09
+Last edited: 2026-07-12
 ---
 
 # TUI
@@ -59,12 +59,16 @@ Every action has a key. The mouse-relevant ones also work by click or drag. The 
 | delete the comment under the cursor           | `d`                                 | —                           |
 | jump to next / previous comment               | `n` / `N`                           | —                           |
 | list and manage all comments                  | `l`                                 | —                           |
+| resolve / reopen the highlighted comment (comments list only) | `x`                 | —                           |
+| toggle hiding resolved comments (comments list only) | `h`                           | —                           |
 | send all comments to the agent                | `s` / `S`                           | click `Send`                |
 | copy all comments to the clipboard            | `y` / `Y`                           | —                           |
 | refresh now                                   | `r`                                 | —                           |
 | quit                                          | `q`                                 | —                           |
 
 Writing a comment: select a range or land on a line, press `c`, type into the inline box, `enter` saves and `esc` cancels. A saved comment renders as a read-only card spliced under its line, titled with its location, so written feedback stays on screen. `e` reopens the card as an edit box in place, hiding the card while editing. `d` deletes it. A successful send reports a transient `sent N comments` status that fades.
+
+An agent-authored comment (`review-model.md`) carries an ` agent ` chip in its card's border, tinted with the theme's `mauve` accent, and is read-only from the TUI — `e` on one shows `agent comments are read-only (x to resolve)` instead of opening it for edit. A resolved comment (either side's, `x` in the comments list) renders its whole card dimmed (the theme's `overlay1`) with a `resolved` marker in its title; `h` (comments list only) hides resolved cards and rows entirely rather than only dimming them. The comments list itself (`l`) adds an `@agent` / `@you` author column and a `resolved` marker per row, alongside the existing `(stale)` flag.
 
 ### Footer
 

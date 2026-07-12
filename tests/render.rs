@@ -683,6 +683,102 @@ fn open_list_renders_the_comments_overlay() {
     assert!(out.contains("overlay note"), "comment text listed");
 }
 
+/// Catppuccin mauve — the agent-comment chip and its list-overlay author label.
+const MAUVE: ratatui::style::Color = ratatui::style::Color::Rgb(0xcb, 0xa6, 0xf7);
+/// Catppuccin overlay1 — the dim/muted color a resolved card and its list row use.
+const OVERLAY1: ratatui::style::Color = ratatui::style::Color::Rgb(0x7f, 0x84, 0x9c);
+
+#[test]
+fn an_agent_comments_card_shows_the_mauve_agent_chip() {
+    let mut app = edited_app();
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|r| r.marker() == '+').unwrap();
+    app.start_comment();
+    for ch in "left by the agent".chars() {
+        app.input_push(ch);
+    }
+    app.submit_comment();
+    let mut sc = app.store.get(0).unwrap().clone();
+    sc.author = herdr_reviewr::comments::Author::Agent;
+    app.store.replace(vec![sc]);
+
+    let buf = render_buffer(&app);
+    let out = dump(&buf);
+    assert!(out.contains(" agent "), "the agent card shows the chip:\n{out}");
+    let row = out.lines().position(|l| l.contains(" agent ")).unwrap();
+    let tinted = (0..buf.area.width)
+        .filter(|&x| buf.cell((x, row as u16)).is_some_and(|c| c.fg == MAUVE))
+        .count();
+    assert!(tinted > 0, "the agent chip is tinted mauve");
+}
+
+#[test]
+fn a_resolved_comments_card_renders_dim_with_a_marker() {
+    let mut app = edited_app();
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|r| r.marker() == '+').unwrap();
+    app.start_comment();
+    for ch in "fix this".chars() {
+        app.input_push(ch);
+    }
+    app.submit_comment();
+    app.resolve_selected_comment();
+
+    let buf = render_buffer(&app);
+    let out = dump(&buf);
+    assert!(out.contains("resolved"), "the resolved card carries a marker:\n{out}");
+    let row = out.lines().position(|l| l.contains("fix this")).unwrap();
+    let dimmed = (0..buf.area.width)
+        .filter(|&x| buf.cell((x, row as u16)).is_some_and(|c| c.fg == OVERLAY1))
+        .count();
+    assert!(dimmed > 0, "the resolved card's body text is dimmed");
+}
+
+#[test]
+fn hide_resolved_hides_the_resolved_card_entirely() {
+    let mut app = edited_app();
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|r| r.marker() == '+').unwrap();
+    app.start_comment();
+    for ch in "fix this".chars() {
+        app.input_push(ch);
+    }
+    app.submit_comment();
+    app.resolve_selected_comment();
+    app.toggle_hide_resolved();
+
+    let out = render(&app);
+    assert!(!out.contains("fix this"), "a hidden resolved card renders nothing:\n{out}");
+    assert!(!out.contains("comment ·"), "no card border shows for the hidden card either:\n{out}");
+}
+
+#[test]
+fn the_comments_list_shows_author_and_status_columns() {
+    let mut app = edited_app();
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|r| r.marker() == '+').unwrap();
+    app.start_comment();
+    for ch in "user note".chars() {
+        app.input_push(ch);
+    }
+    app.submit_comment();
+    app.resolve_selected_comment();
+
+    let user_sc = app.store.get(0).unwrap().clone();
+    let mut agent_sc = user_sc.clone();
+    agent_sc.id = "agent-1".to_string();
+    agent_sc.author = herdr_reviewr::comments::Author::Agent;
+    agent_sc.status = herdr_reviewr::comments::Status::Open;
+    agent_sc.comment.text = "agent note".to_string();
+    app.store.replace(vec![user_sc, agent_sc]);
+    app.open_list();
+
+    let out = render(&app);
+    assert!(out.contains("@you"), "the user row is labeled @you:\n{out}");
+    assert!(out.contains("@agent"), "the agent row is labeled @agent:\n{out}");
+    assert!(out.contains("resolved"), "the resolved row is marked:\n{out}");
+}
+
 #[test]
 fn last_turn_without_a_baseline_renders_the_waiting_state() {
     let r = Repo::init();

@@ -113,6 +113,11 @@ pub enum FooterAction {
     Newline,
     Cancel,
     CloseList,
+    /// Flip the resolve/reopen status of the highlighted row (comments-list overlay only).
+    ResolveComment,
+    /// Toggle whether resolved comments are hidden — inline cards and list rows both
+    /// (comments-list overlay only).
+    ToggleHideResolved,
     OpenPr,
     Refresh,
     Tabs,
@@ -1438,9 +1443,10 @@ impl App {
         let from_list = self.mode == Mode::List;
         let Some(i) = self.target_comment() else { return };
         let Some(sc) = self.store.get(i) else { return };
-        // An agent's own comment is never editable from the TUI (specs/review-model.md).
+        // An agent's own comment is never editable from the TUI (specs/review-model.md) —
+        // `x` (resolve) is the one action the TUI still has over it.
         if sc.author == comments::Author::Agent {
-            self.status = "agent comments can't be edited".to_string();
+            self.status = "agent comments are read-only (x to resolve)".to_string();
             return;
         }
         let (file, side, start, end, text) = (
@@ -1879,6 +1885,8 @@ impl App {
                 return vec![
                     (A::Send, Primary),
                     (A::CloseList, Normal),
+                    (A::ResolveComment, Normal),
+                    (A::ToggleHideResolved, Normal),
                     (A::Copy, Normal),
                     (A::EditComment, Normal),
                     (A::DeleteComment, Normal),

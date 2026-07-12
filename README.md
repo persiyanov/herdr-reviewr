@@ -118,6 +118,17 @@ below are the full reference.
 | `y` | Copy all comments to the clipboard |
 | `esc` | Clear the selection |
 
+**In the comments list** (`l`)
+
+| Key | Action |
+| --- | --- |
+| `j` `k` | Move the highlighted row |
+| `e` `d` | Edit / delete the highlighted comment |
+| `x` | Resolve / reopen the highlighted comment |
+| `h` | Toggle hiding resolved comments |
+| `s` `y` | Send / copy, same as in the diff |
+| `esc` `l` `q` | Close the list |
+
 **In the comment box**
 
 | Key | Action |
