@@ -191,9 +191,54 @@ agent, backed by one shared store per repo (`<git-dir>/reviewr/comments/`, one J
 comment; see [`specs/review-model.md`](specs/review-model.md)). Your agent reads and writes it
 through new subcommands on this same binary; you keep using the TUI exactly as above.
 
-### Ask the agent to read reviewr
+### Install the skill (Claude Code)
 
-In any agent session in the same repo:
+```bash
+herdr-reviewr skill-install
+```
+
+This installs the bundled `SKILL.md` into `~/.claude/skills/reviewr-comments` — a symlink by
+default, so it stays current across plugin updates with nothing to re-run. Once installed, it's
+in every session's skill list: "address my review comments" works with no `skill-path`/`load
+that skill` preamble, in this repo or any other.
+
+Variants:
+
+- `--copy` installs a real file instead of a symlink (e.g. if your platform or setup makes
+  symlinks awkward). Windows falls back to `--copy` behavior automatically, with a note on
+  stderr, since it can't always create symlinks.
+- `--target <dir>` installs somewhere other than the default, e.g. **project-level** so the
+  skill ships with the repo instead of depending on a per-machine install:
+
+  ```bash
+  herdr-reviewr skill-install --target .claude/skills/reviewr-comments
+  ```
+
+  Commit that path and every agent session opened in the repo picks it up, no per-user install
+  step at all.
+- Re-running is idempotent: an unchanged install prints `already installed at <path>` and exits
+  0. A conflicting file at the target exits 1 naming it; add `--force` to replace it.
+
+### Make it proactive (CLAUDE.md)
+
+Installing the skill covers "the agent knows how, once asked." It doesn't make the agent check
+comments unprompted — for that, put this in your `CLAUDE.md` (loaded every session, unlike the
+skill list, which is only consulted when the agent decides it's relevant):
+
+```
+Reviews happen in the herdr-reviewr sidebar — when starting work or when review
+feedback is mentioned, run `herdr-reviewr comment list` and address open comments.
+```
+
+`skill-install` prints this same snippet after a fresh install, as a copy-pasteable reminder.
+Without it, the most common failure mode is the agent simply not knowing reviewr exists until
+you say so.
+
+### Other agents/harnesses
+
+For agents that read `AGENTS.md` instead of (or in addition to) `CLAUDE.md`, add the same
+pointer line there. For anything without a skill system at all, fall back to the generic prompt,
+which works in any agent session in the repo:
 
 ```
 Run `herdr-reviewr skill-path`, load that skill, then review this code and leave

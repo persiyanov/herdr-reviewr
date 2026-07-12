@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use crate::comments::{Author, Status, Store, StoredComment};
 use crate::model::{Comment, Side};
 
-const USAGE: &str = "usage: herdr-reviewr comment add --file <path> --start <n> [--end <n>] [--side new|old] [--lines <snippet>] [--author user|agent] --text <text>\n       herdr-reviewr comment list [--json] [--all]\n       herdr-reviewr comment resolve <id>\n       herdr-reviewr comment rm <id>\n       herdr-reviewr skill-path\n";
+const USAGE: &str = "usage: herdr-reviewr comment add --file <path> --start <n> [--end <n>] [--side new|old] [--lines <snippet>] [--author user|agent] --text <text>\n       herdr-reviewr comment list [--json] [--all]\n       herdr-reviewr comment resolve <id>\n       herdr-reviewr comment rm <id>\n       herdr-reviewr skill-path\n       herdr-reviewr skill-install [--target <dir>] [--copy] [--force]\n";
 
 /// Entry point called from `main` with the full process argv (`args[0]` is the program
 /// name, `args[1]` the subcommand). Only reached when `main` has already confirmed
@@ -25,6 +25,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
     match args.get(1).map(String::as_str) {
         Some("comment") => comment(&args[2..]),
         Some("skill-path") => skill_path(),
+        Some("skill-install") => skill_install(&args[2..]),
         _ => usage_error(),
     }
 }
@@ -264,9 +265,10 @@ fn stored_to_json(sc: &StoredComment) -> serde_json::Value {
 /// `<plugin-root>/skills/reviewr-comments/SKILL.md`, where `plugin-root` is the running
 /// executable's directory's parent (`bin/..`). Falls back to the cwd-relative dev-checkout
 /// path when the installed layout isn't found (running `cargo run`/`cargo test` from a
-/// checkout rather than the packaged plugin); exits 1 naming both candidates when neither
-/// exists.
-fn skill_path() -> ExitCode {
+/// checkout rather than the packaged plugin). Returns the message (without the `reviewr: `
+/// prefix) naming both candidates when neither exists; shared by `skill-path` and
+/// `skill-install` so both report source resolution identically.
+fn resolve_skill_source() -> Result<PathBuf, String> {
     const REL: &str = "skills/reviewr-comments/SKILL.md";
     let installed = std::env::current_exe()
         .ok()
@@ -276,18 +278,159 @@ fn skill_path() -> ExitCode {
     if let Some(path) = &installed
         && path.exists()
     {
-        println!("{}", path.display());
-        return ExitCode::SUCCESS;
+        return Ok(path.clone());
     }
 
     let dev_checkout = PathBuf::from(REL);
     if dev_checkout.exists() {
-        println!("{}", dev_checkout.display());
-        return ExitCode::SUCCESS;
+        return Ok(dev_checkout);
     }
 
     let installed_display =
         installed.as_ref().map_or_else(|| REL.to_string(), |p| p.display().to_string());
-    eprintln!("reviewr: SKILL.md not found at {installed_display} or {}", dev_checkout.display());
-    ExitCode::from(1)
+    Err(format!("SKILL.md not found at {installed_display} or {}", dev_checkout.display()))
+}
+
+fn skill_path() -> ExitCode {
+    match resolve_skill_source() {
+        Ok(path) => {
+            println!("{}", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("reviewr: {message}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `$HOME/.claude/skills/reviewr-comments` (`%USERPROFILE%` on Windows), the default
+/// `skill-install` target when `--target` isn't given. `None` when neither environment
+/// variable is set.
+fn default_skill_install_target() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| Path::new(&home).join(".claude").join("skills").join("reviewr-comments"))
+}
+
+/// The stdout hint printed after a fresh install (or a `--force` replace), reminding the user
+/// that a proactive agent needs the reminder in `CLAUDE.md` too — the skill list alone only
+/// covers the "user asks for it" path.
+fn print_installed(dest: &Path) {
+    println!("installed: {}", dest.display());
+    println!("To make agents check comments proactively, add to your CLAUDE.md:");
+    println!("  Reviews happen in the herdr-reviewr sidebar — when starting work or when review");
+    println!(
+        "  feedback is mentioned, run `herdr-reviewr comment list` and address open comments."
+    );
+}
+
+/// True when `a` and `b` refer to the same file, comparing canonicalized paths where possible
+/// and falling back to a literal comparison (e.g. a dangling symlink target) otherwise.
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Installs the bundled `SKILL.md` (resolved exactly as `skill-path` does) into `dest`,
+/// symlinking on Unix and falling back to a copy — with a one-line stderr note — on Windows or
+/// when symlink creation fails for any reason (typically privileges).
+fn install_skill(source: &Path, dest: &Path, copy: bool) -> ExitCode {
+    if !copy {
+        #[cfg(unix)]
+        {
+            if std::os::unix::fs::symlink(source, dest).is_ok() {
+                print_installed(dest);
+                return ExitCode::SUCCESS;
+            }
+        }
+        eprintln!("reviewr: symlink unavailable — copied; re-run after plugin updates");
+    }
+    match std::fs::copy(source, dest) {
+        Ok(_) => {
+            print_installed(dest);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("reviewr: cannot install to {}: {error}", dest.display());
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Installs the bundled skill into a Claude Code (or compatible) skills directory so
+/// `address my review comments` works with no per-session reminder. See the module doc and
+/// `README.md`'s "Working with agents" section for the full contract.
+fn skill_install(args: &[String]) -> ExitCode {
+    let mut target: Option<PathBuf> = None;
+    let mut copy = false;
+    let mut force = false;
+
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--target" => {
+                let Some(value) = it.next() else { return usage_error() };
+                target = Some(PathBuf::from(value));
+            }
+            "--copy" => copy = true,
+            "--force" => force = true,
+            _ => return usage_error(),
+        }
+    }
+
+    let Some(target_dir) = target.or_else(default_skill_install_target) else {
+        eprintln!(
+            "reviewr: cannot determine home directory (set HOME or USERPROFILE, or pass --target)"
+        );
+        return ExitCode::from(1);
+    };
+
+    let source = match resolve_skill_source() {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("reviewr: {message}");
+            return ExitCode::from(1);
+        }
+    };
+    let canonical_source = std::fs::canonicalize(&source).unwrap_or(source);
+
+    if let Err(error) = std::fs::create_dir_all(&target_dir) {
+        eprintln!("reviewr: cannot create {}: {error}", target_dir.display());
+        return ExitCode::from(1);
+    }
+    let dest = target_dir.join("SKILL.md");
+
+    if let Ok(meta) = std::fs::symlink_metadata(&dest) {
+        let already_installed = if meta.file_type().is_symlink() {
+            std::fs::read_link(&dest).is_ok_and(|link| {
+                let resolved = if link.is_absolute() { link } else { target_dir.join(link) };
+                paths_equal(&resolved, &canonical_source)
+            })
+        } else {
+            matches!(
+                (std::fs::read(&dest), std::fs::read(&canonical_source)),
+                (Ok(existing), Ok(wanted)) if existing == wanted
+            )
+        };
+        if already_installed {
+            println!("already installed at {}", dest.display());
+            return ExitCode::SUCCESS;
+        }
+        if !force {
+            eprintln!(
+                "reviewr: {} already exists and differs from the bundled skill; re-run with --force to replace",
+                dest.display()
+            );
+            return ExitCode::from(1);
+        }
+        if let Err(error) = std::fs::remove_file(&dest) {
+            eprintln!("reviewr: cannot remove existing {}: {error}", dest.display());
+            return ExitCode::from(1);
+        }
+    }
+
+    install_skill(&canonical_source, &dest, copy)
 }

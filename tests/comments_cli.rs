@@ -250,3 +250,120 @@ fn skill_path_exits_1_naming_both_candidates_when_neither_exists() {
     let err = stderr(&out);
     assert!(err.contains("SKILL.md"), "names the missing file: {err}");
 }
+
+/// `skill-path`'s dev-checkout fallback is cwd-relative, so `skill-install` must be driven
+/// with cwd = the repo root for the source to resolve; `--target` is the seam that redirects
+/// the destination into a tempdir instead of touching the real `~/.claude/skills`.
+fn manifest_dir() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn skill_install(target: &Path, extra: &[&str]) -> Output {
+    let target_str = target.display().to_string();
+    let mut args = vec!["skill-install", "--target", target_str.as_str()];
+    args.extend_from_slice(extra);
+    run(manifest_dir(), &args)
+}
+
+#[test]
+fn skill_install_creates_the_file_with_installed_hint() {
+    let target = tempfile::tempdir().unwrap();
+    let dest = target.path().join("SKILL.md");
+
+    let out = skill_install(target.path(), &[]);
+    assert!(out.status.success(), "skill-install failed: {}", stderr(&out));
+    let out_stdout = stdout(&out);
+    assert!(out_stdout.contains("installed:"), "prints installed path: {out_stdout}");
+    assert!(
+        out_stdout.contains("herdr-reviewr comment list"),
+        "prints the CLAUDE.md hint: {out_stdout}"
+    );
+
+    #[cfg(unix)]
+    {
+        let meta = std::fs::symlink_metadata(&dest).expect("dest exists");
+        assert!(meta.file_type().is_symlink(), "default install is a symlink");
+    }
+    #[cfg(windows)]
+    {
+        assert!(dest.exists(), "dest exists");
+        let source = stdout(&run(manifest_dir(), &["skill-path"])).trim().to_string();
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            std::fs::read(&source).unwrap(),
+            "copied content matches source"
+        );
+    }
+}
+
+#[test]
+fn skill_install_twice_is_idempotent() {
+    let target = tempfile::tempdir().unwrap();
+    let dest = target.path().join("SKILL.md");
+
+    let first = skill_install(target.path(), &[]);
+    assert!(first.status.success());
+    let before = std::fs::symlink_metadata(&dest).unwrap().modified().ok();
+
+    let second = skill_install(target.path(), &[]);
+    assert!(second.status.success());
+    assert!(
+        stdout(&second).contains("already installed"),
+        "second run reports already installed: {}",
+        stdout(&second)
+    );
+    let after = std::fs::symlink_metadata(&dest).unwrap().modified().ok();
+    assert_eq!(before, after, "file is unchanged by the second run");
+}
+
+#[test]
+fn skill_install_refuses_to_clobber_a_conflicting_file_without_force() {
+    let target = tempfile::tempdir().unwrap();
+    let dest = target.path().join("SKILL.md");
+    std::fs::create_dir_all(target.path()).unwrap();
+    std::fs::write(&dest, "not the skill").unwrap();
+
+    let out = skill_install(target.path(), &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).contains(&dest.display().to_string()),
+        "stderr names the conflicting path: {}",
+        stderr(&out)
+    );
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "not the skill", "file left untouched");
+
+    let forced = skill_install(target.path(), &["--force"]);
+    assert!(forced.status.success(), "--force replaces: {}", stderr(&forced));
+    assert_ne!(
+        std::fs::read_to_string(&dest).unwrap(),
+        "not the skill",
+        "file replaced by --force"
+    );
+}
+
+#[test]
+fn skill_install_copy_forces_a_regular_byte_identical_file() {
+    let target = tempfile::tempdir().unwrap();
+    let dest = target.path().join("SKILL.md");
+
+    let out = skill_install(target.path(), &["--copy"]);
+    assert!(out.status.success(), "skill-install --copy failed: {}", stderr(&out));
+
+    let meta = std::fs::symlink_metadata(&dest).expect("dest exists");
+    assert!(!meta.file_type().is_symlink(), "--copy installs a regular file");
+
+    let source = stdout(&run(manifest_dir(), &["skill-path"])).trim().to_string();
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        std::fs::read(&source).unwrap(),
+        "copy is byte-identical to source"
+    );
+}
+
+#[test]
+fn skill_install_with_an_unknown_flag_exits_2_with_usage_on_stderr() {
+    let target = tempfile::tempdir().unwrap();
+    let out = skill_install(target.path(), &["--bogus"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr(&out).contains("usage:"), "usage printed on stderr: {}", stderr(&out));
+}
