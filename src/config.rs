@@ -108,7 +108,8 @@ impl ToggleDirection {
     }
 }
 
-/// When agent-authored comments are synced to the review host.
+/// When a user (reviewer) comment persists to the shared on-disk store, making it visible to
+/// the agent. Agent-authored comments are always store-resident regardless of this setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommentSync {
     Immediate,

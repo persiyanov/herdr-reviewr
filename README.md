@@ -213,8 +213,9 @@ implement the comments I left in reviewr
 ```
 
 It runs `herdr-reviewr comment list`, addresses each one, and `comment resolve <id>`s what it
-handled. You'll see the card dim, and — with `h` — disappear from the list once you're done
-checking it.
+handled. You'll see the card dim in the diff, and — with `h` — disappear from the diff pane
+entirely; the comments list (`l`) still shows it, marked `resolved`, so you can reopen it with
+`x` if needed.
 
 ### `comment_sync`: when your comments become visible to the agent
 

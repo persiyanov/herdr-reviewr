@@ -824,6 +824,39 @@ fn the_comments_list_shows_author_and_status_columns() {
 }
 
 #[test]
+fn send_count_matches_what_export_would_actually_send() {
+    let mut app = edited_app();
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|r| r.marker() == '+').unwrap();
+    app.start_comment();
+    for ch in "open user note".chars() {
+        app.input_push(ch);
+    }
+    app.submit_comment();
+
+    let open_user = app.store.get(0).unwrap().clone();
+    let mut agent_sc = open_user.clone();
+    agent_sc.id = "agent-1".to_string();
+    agent_sc.author = herdr_reviewr::comments::Author::Agent;
+    agent_sc.comment.text = "agent note".to_string();
+    let mut resolved_user = open_user.clone();
+    resolved_user.id = "user-2".to_string();
+    resolved_user.status = herdr_reviewr::comments::Status::Resolved;
+    resolved_user.comment.text = "resolved note".to_string();
+    app.store.replace(vec![open_user, agent_sc, resolved_user]);
+
+    assert_eq!(app.sendable_comments(), 1, "only the open user comment is sendable");
+
+    let out = render(&app);
+    assert!(
+        out.contains("Send (1)"),
+        "the Send button shows the sendable count (1), not store.len() (3):\n{out}"
+    );
+    let footer = footer_line(&out);
+    assert!(footer.contains("send 1"), "the footer hint matches too:\n{footer}");
+}
+
+#[test]
 fn last_turn_without_a_baseline_renders_the_waiting_state() {
     let r = Repo::init();
     r.write("a.rs", "a\n");

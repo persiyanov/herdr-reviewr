@@ -135,6 +135,15 @@ impl CommentStore {
         self.items.get(index)
     }
 
+    /// The current index of the comment with id `id`, or `None` if it no longer exists. Every
+    /// action held across a poll tick (an edit in progress, an overlay keystroke) must re-resolve
+    /// through this rather than trust a previously-read index — `sync_comments_from_disk` can
+    /// replace and re-sort the whole set between the moment an index was read and the moment it
+    /// is used, so a stale index can silently name a different (or no) comment.
+    pub fn index_of(&self, id: &str) -> Option<usize> {
+        self.items.iter().position(|sc| sc.id == id)
+    }
+
     /// Append a comment written just now in the TUI, wrapping it with fresh lifecycle
     /// metadata (a new id, `Author::User`, `Status::Open`) — every comment a reviewer writes
     /// starts here (`specs/review-model.md`). Returns its index.

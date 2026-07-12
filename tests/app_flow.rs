@@ -2247,3 +2247,89 @@ fn resolve_toggles_status_in_memory_and_on_disk() {
         "toggles back to open"
     );
 }
+
+// --- id-based edit target survives a concurrent disk sync (must-fix: index-based editing
+// races `sync_comments_from_disk`, which replaces and re-sorts the whole store) -------------
+
+#[test]
+fn editing_survives_another_comments_removal_mid_edit() {
+    let r = edited_repo();
+    let mut app = app_on(&r); // Immediate mode: both comments land on disk right away.
+    comment_on(&mut app, '+', "first"); // comment A
+    comment_on(&mut app, ' ', "second"); // comment B
+    let a_id = app.store.get(0).unwrap().id.clone();
+    let b_id = app.store.get(1).unwrap().id.clone();
+    assert_ne!(a_id, b_id);
+
+    // Start editing B specifically, from the list overlay.
+    app.open_list();
+    app.list_cursor = 1;
+    app.start_edit();
+    assert_eq!(app.mode, Mode::Composing { editing: Some(b_id.clone()) });
+
+    // A is removed from disk (an agent, or another session, deleted it) and a poll tick
+    // re-syncs — this reorders/shrinks the store while B's edit box is still open.
+    let disk = herdr_reviewr::comments::Store::open(&r.path_buf()).unwrap();
+    assert!(disk.remove(&a_id).unwrap());
+    app.check_comment_store();
+    assert_eq!(app.store.len(), 1, "A is gone after the sync");
+
+    app.input.clear();
+    for ch in "second, revised".chars() {
+        app.input_push(ch);
+    }
+    app.submit_comment();
+
+    assert_eq!(app.store.len(), 1);
+    let sc = app.store.get(0).unwrap();
+    assert_eq!(sc.id, b_id, "the edit landed on B, not whatever now sits at the old index");
+    assert_eq!(sc.comment.text, "second, revised");
+}
+
+#[test]
+fn editing_a_comment_removed_mid_edit_recreates_it_instead_of_losing_the_text() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    comment_on(&mut app, '+', "first"); // comment A
+    comment_on(&mut app, ' ', "second"); // comment B
+    let a_id = app.store.get(0).unwrap().id.clone();
+    let b_id = app.store.get(1).unwrap().id.clone();
+    let b_before = app.store.get(1).unwrap().comment.clone();
+
+    app.open_list();
+    app.list_cursor = 1;
+    app.start_edit();
+    assert_eq!(app.mode, Mode::Composing { editing: Some(b_id.clone()) });
+
+    // B itself is removed from disk mid-edit (e.g. an agent resolved-then-deleted it) and a
+    // poll tick re-syncs before the reviewer's keystroke is submitted.
+    let disk = herdr_reviewr::comments::Store::open(&r.path_buf()).unwrap();
+    assert!(disk.remove(&b_id).unwrap());
+    app.check_comment_store();
+    assert_eq!(app.store.len(), 1, "B is gone after the sync; only A remains");
+    assert!(app.store.index_of(&a_id).is_some());
+
+    app.input.clear();
+    for ch in "rescued text".chars() {
+        app.input_push(ch);
+    }
+    app.submit_comment();
+
+    // The text is never silently lost: it comes back as a new comment at B's original anchor.
+    assert_eq!(app.store.len(), 2, "the edited text survives as a new comment");
+    assert!(
+        app.status.contains("saved as a new comment"),
+        "the status explains what happened: {}",
+        app.status
+    );
+    let a = app.store.get(app.store.index_of(&a_id).unwrap()).unwrap();
+    assert_eq!(a.comment.text, "first", "the unrelated comment A is untouched");
+    let recreated =
+        app.store.iter().find(|sc| sc.id != a_id).expect("the recreated comment besides A");
+    assert_eq!(recreated.comment.text, "rescued text");
+    assert_eq!(recreated.comment.file, b_before.file, "same file as the original");
+    assert_eq!(recreated.comment.side, b_before.side, "same side as the original");
+    assert_eq!(recreated.comment.start, b_before.start, "same anchor start as the original");
+    assert_eq!(recreated.comment.end, b_before.end, "same anchor end as the original");
+    assert_ne!(recreated.id, b_id, "it is a genuinely new comment, not the old id resurrected");
+}

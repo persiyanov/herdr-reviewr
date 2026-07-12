@@ -82,9 +82,11 @@ struct TabStash {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Mode {
     Normal,
-    /// Writing a comment; `editing` is the store index when editing an existing one.
+    /// Writing a comment; `editing` is the store id when editing an existing one — never an
+    /// index, since `sync_comments_from_disk` can replace and re-sort the store while a compose
+    /// is open, dangling any held index.
     Composing {
-        editing: Option<usize>,
+        editing: Option<String>,
     },
     /// Browsing the comments-list overlay.
     List,
@@ -221,6 +223,12 @@ pub struct App {
     pub input: String,
     /// The comment editor's caret: a char index into `input` (`0..=chars().count()`).
     pub caret: usize,
+    /// The full comment snapshotted at `start_edit`, kept only for the case where its id
+    /// vanishes from the store mid-edit (an agent resolved or removed it, or a disk sync raced
+    /// it away). `submit_comment` uses it to recreate the comment at its original anchor with
+    /// the reviewer's edited text rather than silently discard what they typed. `None` outside
+    /// an edit, and whenever `editing` is `None` (a fresh comment has no origin to fall back to).
+    edit_origin: Option<Comment>,
     pub status: String,
     pub should_quit: bool,
     /// The read-only `PR` tab's view of the pull request (`specs/forge-host.md`).
@@ -332,6 +340,7 @@ impl App {
             mode: Mode::Normal,
             input: String::new(),
             caret: 0,
+            edit_origin: None,
             status: String::new(),
             should_quit: false,
             pr: forge::PrView::Pending,
@@ -459,6 +468,7 @@ impl App {
                 self.mode = old.mode.clone();
                 self.input = std::mem::take(&mut old.input);
                 self.caret = old.caret;
+                self.edit_origin = old.edit_origin.take();
             }
         }
     }
@@ -1434,6 +1444,7 @@ impl App {
             self.input.clear();
             self.caret = 0;
             self.resume_list = false; // a fresh diff comment returns to the diff, not the list
+            self.edit_origin = None;
             self.mode = Mode::Composing { editing: None };
         }
     }
@@ -1441,7 +1452,8 @@ impl App {
     pub fn start_edit(&mut self) {
         // Editing from the comments-list overlay returns there on finish (else to the diff).
         let from_list = self.mode == Mode::List;
-        let Some(i) = self.target_comment() else { return };
+        let Some(id) = self.target_comment_id() else { return };
+        let Some(i) = self.store.index_of(&id) else { return };
         let Some(sc) = self.store.get(i) else { return };
         // An agent's own comment is never editable from the TUI (specs/review-model.md) —
         // `x` (resolve) is the one action the TUI still has over it.
@@ -1456,6 +1468,9 @@ impl App {
             sc.comment.end,
             sc.comment.text.clone(),
         );
+        // Snapshotted so `submit_comment` can recreate this comment at its original anchor if
+        // its id vanishes from the store mid-edit (an agent resolved/removed it concurrently).
+        self.edit_origin = Some(sc.comment.clone());
 
         // Bring the comment's file into the diff and land the cursor on its line, so the
         // inline edit box opens over the comment — even when editing from the list, and even
@@ -1492,7 +1507,7 @@ impl App {
         self.caret = text.chars().count(); // edit opens with the caret at the end
         self.input = text;
         self.resume_list = from_list;
-        self.mode = Mode::Composing { editing: Some(i) };
+        self.mode = Mode::Composing { editing: Some(id) };
     }
 
     // --- comment editor: a character caret into `input`; edits happen at the caret ---------
@@ -1620,6 +1635,7 @@ impl App {
     fn leave_compose(&mut self) {
         self.input.clear();
         self.caret = 0;
+        self.edit_origin = None;
         let resume = std::mem::take(&mut self.resume_list);
         if resume && !self.store.is_empty() {
             self.list_cursor = self.list_cursor.min(self.store.len() - 1);
@@ -1632,19 +1648,42 @@ impl App {
     /// Save the in-progress comment — editing the existing one or anchoring a new one
     /// to the selection — then leave compose mode. Blank text cancels instead.
     pub fn submit_comment(&mut self) {
-        let Mode::Composing { editing } = self.mode else { return };
+        let Mode::Composing { editing } = self.mode.clone() else { return };
         let text = self.input.trim().to_string();
         if text.is_empty() {
             self.cancel_comment();
             return;
         }
         match editing {
-            Some(i) => {
-                logln!("comment edit [{i}] :: {text}");
-                self.store.edit(i, text);
-                self.persist_if_immediate(i);
-                self.status = "comment updated".to_string();
-            }
+            Some(id) => match self.store.index_of(&id) {
+                Some(i) => {
+                    logln!("comment edit [{id}] :: {text}");
+                    self.store.edit(i, text);
+                    self.persist_if_immediate(i);
+                    self.status = "comment updated".to_string();
+                }
+                // The comment being edited vanished mid-edit — an agent resolved/removed it, or
+                // a disk sync raced it away, between `start_edit` and this keystroke. Never
+                // silently drop what the reviewer typed: recreate it as a new comment at the
+                // original's exact anchor (snapshotted in `edit_origin` at `start_edit`), so the
+                // words survive even though the original comment does not.
+                None => {
+                    if let Some(mut origin) = self.edit_origin.take() {
+                        origin.text = text;
+                        logln!(
+                            "comment recreated after concurrent removal {} :: {}",
+                            origin.location(),
+                            origin.text
+                        );
+                        let i = self.store.add(origin);
+                        self.persist_if_immediate(i);
+                        self.status =
+                            "original comment was removed; saved as a new comment".to_string();
+                    } else {
+                        self.status = "comment was removed; edit discarded".to_string();
+                    }
+                }
+            },
             None => {
                 if let Some(c) = self.build_comment(text) {
                     logln!("comment add {} :: {}", c.location(), c.text);
@@ -1686,8 +1725,11 @@ impl App {
     /// The `path:line` the composer is anchored to (selection for a new comment,
     /// the existing location when editing). `None` when not composing.
     pub fn pending_location(&self) -> Option<String> {
-        match self.mode {
-            Mode::Composing { editing: Some(i) } => {
+        match &self.mode {
+            Mode::Composing { editing: Some(id) } => {
+                // Falls through to `None` (no location shown) if the comment vanished mid-edit;
+                // `submit_comment` is the place that recovers the text via `edit_origin`.
+                let i = self.store.index_of(id)?;
                 self.store.get(i).map(|sc| sc.comment.location())
             }
             Mode::Composing { editing: None } => {
@@ -1762,6 +1804,16 @@ impl App {
         self.comment_under_cursor()
     }
 
+    /// The id of the comment [`Self::target_comment`] currently points at. Every action that
+    /// acts on "the targeted comment" (`x`, `d`, `e`) goes through this and then re-resolves the
+    /// id back to an index right before mutating, rather than holding the index itself — closing
+    /// the keystroke-window race where a poll tick's disk sync (`sync_comments_from_disk`)
+    /// replaces and re-sorts the store between when the target is picked and when it is used.
+    fn target_comment_id(&self) -> Option<String> {
+        let i = self.target_comment()?;
+        self.store.get(i).map(|sc| sc.id.clone())
+    }
+
     /// The store index of a comment whose range covers the current diff row, if any.
     fn comment_under_cursor(&self) -> Option<usize> {
         let file = self.diff_path.as_deref()?;
@@ -1777,13 +1829,13 @@ impl App {
     /// targets, in memory and — when it is already persisted, or `comment_sync` is `Immediate`
     /// — on disk too. A no-op with nothing targeted.
     pub fn resolve_selected_comment(&mut self) {
-        let Some(i) = self.target_comment() else { return };
+        let Some(id) = self.target_comment_id() else { return };
+        let Some(i) = self.store.index_of(&id) else { return };
         let Some(sc) = self.store.get(i) else { return };
         let next = match sc.status {
             comments::Status::Open => comments::Status::Resolved,
             comments::Status::Resolved => comments::Status::Open,
         };
-        let id = sc.id.clone();
         self.store.set_status(i, next);
         let immediate = self
             .plugin_config()
@@ -1808,17 +1860,15 @@ impl App {
     }
 
     pub fn delete_comment(&mut self) {
-        let Some(i) = self.target_comment() else { return };
-        logln!("comment delete [{i}]");
-        if let Some(sc) = self.store.get(i) {
-            let id = sc.id.clone();
-            if self.persisted_ids.remove(&id)
-                && let Some(store) = &self.comments_disk
-            {
-                match store.remove(&id) {
-                    Ok(_) => self.comments_signature = store.signature(),
-                    Err(e) => logln!("comment remove failed: {e}"),
-                }
+        let Some(id) = self.target_comment_id() else { return };
+        let Some(i) = self.store.index_of(&id) else { return };
+        logln!("comment delete [{id}]");
+        if self.persisted_ids.remove(&id)
+            && let Some(store) = &self.comments_disk
+        {
+            match store.remove(&id) {
+                Ok(_) => self.comments_signature = store.signature(),
+                Err(e) => logln!("comment remove failed: {e}"),
             }
         }
         self.store.take(i);
@@ -1979,6 +2029,17 @@ impl App {
     /// regardless of whether the export itself succeeds, so it stays visible and resolvable
     /// afterward (`specs/review-model.md`). An agent's own comments are never sent — the agent
     /// already has them.
+    /// The count `export` actually sends: open, user-authored comments. The `Send` button and
+    /// footer must show exactly this, not `self.store.len()` — an agent's comments and a
+    /// reviewer's already-resolved ones are never part of the payload.
+    #[must_use]
+    pub fn sendable_comments(&self) -> usize {
+        self.store
+            .iter()
+            .filter(|sc| sc.status == comments::Status::Open && sc.author == comments::Author::User)
+            .count()
+    }
+
     pub fn export(&mut self, target: &dyn ExportTarget) {
         let refs: Vec<&Comment> = self
             .store

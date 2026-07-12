@@ -304,6 +304,15 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (year, month, day)
 }
 
+/// Whether `id` has the shape [`new_id`] produces: a `c-` prefix over `[a-z0-9-]` only. `load`
+/// and `from_value` reject anything else — both `resolve`/`rm` (CLI) and `set_status`/`remove`
+/// (store) join the id straight into a filename, so a hostile id like `../../../evil` must never
+/// survive parsing far enough to be joined into a path.
+fn valid_id(id: &str) -> bool {
+    id.starts_with("c-")
+        && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 fn side_str(side: Side) -> &'static str {
     match side {
         Side::New => "new",
@@ -341,6 +350,9 @@ fn to_value(sc: &StoredComment) -> Value {
 /// `false` here; [`Store::load`] is the one place that sets it `true`.
 fn from_value(v: &Value) -> Option<StoredComment> {
     let id = v.get("id")?.as_str()?.to_string();
+    if !valid_id(&id) {
+        return None;
+    }
     let author = Author::parse(v.get("author")?.as_str()?)?;
     let status = Status::parse(v.get("status")?.as_str()?)?;
     let created_at = v.get("created_at")?.as_str()?.to_string();
@@ -433,6 +445,26 @@ mod tests {
         assert!(!back.comment.diff_anchored, "from_value never sets diff_anchored; load does");
 
         assert!(from_value(&serde_json::json!({"id": "c-1-aaaa"})).is_none());
+    }
+
+    #[test]
+    fn load_skips_a_file_with_a_path_traversal_id_instead_of_deleting_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::at(dir.path().join("comments"));
+        std::fs::create_dir_all(dir.path().join("comments")).unwrap();
+        let mut v = to_value(&super::StoredComment {
+            id: "c-1-aaaa".into(),
+            author: Author::User,
+            status: Status::Open,
+            created_at: super::now_iso(),
+            comment: sample_comment(),
+        });
+        v["id"] = serde_json::json!("../../../evil");
+        let bad = dir.path().join("comments").join("evil.json");
+        std::fs::write(&bad, v.to_string()).unwrap();
+
+        assert!(store.load().is_empty(), "a store file whose id fails validation is skipped");
+        assert!(bad.exists(), "the file is never deleted, only skipped");
     }
 
     fn sample_comment() -> crate::model::Comment {

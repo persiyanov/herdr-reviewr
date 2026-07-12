@@ -190,8 +190,8 @@ pub fn diff_row_heights(app: &App, area: Rect) -> Vec<usize> {
 /// The store index of the comment currently being edited, whose inline card is hidden in
 /// favor of its edit box; `None` when not editing.
 fn editing_comment(app: &App) -> Option<usize> {
-    match app.mode {
-        Mode::Composing { editing } => editing,
+    match &app.mode {
+        Mode::Composing { editing: Some(id) } => app.store.index_of(id),
         _ => None,
     }
 }
@@ -427,7 +427,7 @@ fn scope_chip(app: &App) -> String {
 }
 
 fn send_button(app: &App) -> String {
-    format!("[ Send ({}) ]", app.store.len())
+    format!("[ Send ({}) ]", app.sendable_comments())
 }
 
 /// The header suffix: the active scope's changed-file count. Shared so the painter and the
@@ -1151,7 +1151,7 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
             return ("⇥".into(), if app.focus == Focus::Files { "diff" } else { "files" }.into());
         }
         A::Scope => ("u/b/t", "scope"),
-        A::Send => return ("s".into(), format!("send {}", app.store.len())),
+        A::Send => return ("s".into(), format!("send {}", app.sendable_comments())),
         A::List => ("l", "list"),
         A::Copy => ("y", "copy"),
         A::Save => ("enter", "save"),

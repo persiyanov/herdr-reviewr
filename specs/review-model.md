@@ -186,7 +186,7 @@ herdr-reviewr skill-path
 
 - The TUI is where a reviewer authors, edits, and deletes `user` comments; the CLI's `comment add` defaults to `agent` and is the normal way an agent comment gets written. `--author` accepts either value for scripting completeness, not as the intended workflow.
 - A comment is removed from the store only by an explicit delete: `d` in the TUI (either author's comment) or `comment rm` from the CLI. A refresh, a disk-store merge, or the agent's code edits never remove one.
-- `x` (resolve/reopen) flips `status` in place; either side can flip either author's comment. A resolved comment stays present — dimmed, and with the hide-resolved toggle on, hidden — until it is deleted.
+- `x` (resolve/reopen) flips `status` in place; either side can flip either author's comment. A resolved comment stays present — dimmed in the diff pane, and with the hide-resolved toggle on, hidden from the diff pane (never from the comments list, which always shows every comment so a resolved one can still be reopened with `x`) — until it is deleted.
 - Editing (`e`) works only on a user comment; on an agent comment it is a no-op that shows a status note instead (`tui.md`).
 - Whether a user comment reaches the shared store immediately or only at send time is the `comment_sync` setting (`config.md`). An agent comment is always store-resident and always rendered, in both modes.
 - A comment whose file leaves the changeset is flagged stale, and kept.
