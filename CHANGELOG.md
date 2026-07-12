@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-07-12
+
+### Added
+- **Bidirectional agent/user comments.** Comments now persist in a per-worktree store
+  (`<git-dir>/reviewr/comments/`, one JSON file each) that both the sidebar and the coding
+  agent read and write. The agent uses new CLI subcommands on the reviewr binary —
+  `comment add`, `comment list [--json] [--all]`, `comment resolve <id>`, `comment rm <id>` —
+  and `herdr-reviewr skill-path` prints a bundled skill that teaches the loop: read the
+  reviewer's open comments, address them, resolve them, and leave anchored notes of its own.
+  Agent notes render as labeled cards in the diff within a poll; `x` in the comments list
+  resolves or reopens any comment, and `h` hides resolved cards in the diff pane. See the
+  README's "Working with agents".
+- **`comment_sync` config key.** `"immediate"` (default) persists your comments as you save
+  them, so the agent can act on them at any time; `"on-send"` keeps them pane-local until `s`.
+
+### Changed
+- **Send no longer consumes comments.** `s` exports open, user-authored comments and leaves
+  them in place until resolved or deleted; the Send count reflects exactly what will be sent.
+
 ## [0.12.0] — 2026-07-11
 
 First release of the `dcieslak19973/herdr-reviewr` fork (upstream: `persiyanov/herdr-reviewr`).
