@@ -282,7 +282,14 @@ impl App {
         // `blocked` (load_turn = false) is the error-only sidebar and must never touch the
         // filesystem, so its comment store stays unresolved — matching the pre-reload state
         // every other repo-reading field is left in below.
-        let comments_disk = load_turn.then(|| comments::Store::open(&repo).ok()).flatten();
+        let (comments_disk, comments_disk_error) = if load_turn {
+            match comments::Store::open(&repo) {
+                Ok(store) => (Some(store), None),
+                Err(e) => (None, Some(e)),
+            }
+        } else {
+            (None, None)
+        };
         let mut app = Self {
             repo,
             base,
@@ -344,6 +351,12 @@ impl App {
         // tick, just run once up front instead of waiting for a signature change.
         if app.comments_disk.is_some() {
             app.sync_comments_from_disk();
+        } else if let Some(e) = comments_disk_error {
+            // The store couldn't be resolved (a non-repo path, or a git failure) — comments
+            // stay TUI-local for the session, and the reviewer is told why via the same
+            // one-line status notice other degraded operations use (`specs/review-model.md`,
+            // "Error handling").
+            app.status = format!("comment store unavailable — comments are session-local ({e})");
         }
         app
     }
@@ -1951,11 +1964,13 @@ impl App {
         }
     }
 
-    /// Send/copy every open, user-authored comment to `target`. Sending never consumes: on
-    /// success every sent comment is persisted (so it survives even in `on-send` mode) and
-    /// left in place, still `Open`, so it stays visible and resolvable afterward
-    /// (`specs/review-model.md`). An agent's own comments are never sent — the agent already
-    /// has them.
+    /// Send/copy every open, user-authored comment to `target`. Sending never consumes: every
+    /// open comment is persisted to disk *before* the export attempt runs (so a failed send
+    /// never loses a comment that was only ever memory-local in `on-send` mode — an idempotent
+    /// re-put in `Immediate` mode, which already persisted it) and left in place, still `Open`,
+    /// regardless of whether the export itself succeeds, so it stays visible and resolvable
+    /// afterward (`specs/review-model.md`). An agent's own comments are never sent — the agent
+    /// already has them.
     pub fn export(&mut self, target: &dyn ExportTarget) {
         let refs: Vec<&Comment> = self
             .store
@@ -1969,10 +1984,12 @@ impl App {
         }
         let text = format_all(&refs);
         let n = refs.len();
+        // Persist first: a failed export must never lose an on-send comment that only lived
+        // in memory until now (specs/review-model.md, "Error handling").
+        self.persist_open_user_comments();
         logln!("export ({n}) -> {} ::\n{text}", target.label());
         match target.export(&text) {
             Ok(()) => {
-                self.persist_open_user_comments();
                 self.status = format!("sent {n} comment(s) to {}", target.label());
                 logln!("export OK");
             }

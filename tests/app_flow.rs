@@ -1374,6 +1374,22 @@ fn a_non_repo_path_yields_an_empty_state_not_an_error() {
 }
 
 #[test]
+fn an_unresolvable_comment_store_surfaces_a_status_notice() {
+    // A non-repo path can't resolve `git rev-parse --git-dir`, so `comments::Store::open`
+    // fails and comments must fall back to TUI-local for the session, with a one-line status
+    // notice explaining why (`specs/review-model.md`, "Error handling"; src/app.rs field doc
+    // on `comments_disk`).
+    let dir = tempfile::tempdir().unwrap();
+    let app = App::new(dir.path().to_path_buf(), Scope::Uncommitted, None);
+    assert!(app.comments_disk.is_none(), "the store could not be resolved");
+    assert!(
+        app.status.contains("comment store unavailable"),
+        "expected a store-unavailable notice, got: {:?}",
+        app.status
+    );
+}
+
+#[test]
 fn jump_moves_the_cursor_onto_a_commented_line() {
     let r = edited_repo();
     let mut app = app_on(&r);
@@ -2172,6 +2188,37 @@ fn external_agent_comment_appears_after_tick() {
     app.check_comment_store();
     assert_eq!(app.store.len(), 1, "the tick-check hook picks up the external write");
     assert_eq!(app.store.iter().next().unwrap().author, herdr_reviewr::comments::Author::Agent);
+}
+
+#[test]
+fn on_send_mode_persists_before_a_failing_export() {
+    // A failed send must never lose an on-send comment that was only ever memory-local: the
+    // persist has to happen before the export attempt, not after a successful one
+    // (specs/review-model.md, "Error handling").
+    let r = edited_repo();
+    let config_dir = tempfile::tempdir().unwrap();
+    std::fs::write(config_dir.path().join("config.toml"), "comment_sync = \"on-send\"\n").unwrap();
+    let config = herdr_reviewr::config::plugin_config_in(config_dir.path()).unwrap();
+
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.set_plugin_config(config);
+    app.reload().unwrap();
+    comment_on(&mut app, '+', "note");
+
+    let store = herdr_reviewr::comments::Store::open(&r.path_buf()).unwrap();
+    assert!(store.load().is_empty(), "on-send mode keeps a new comment memory-only until send");
+
+    app.export(&FakeTarget::failing());
+
+    let disk = store.load();
+    assert_eq!(disk.len(), 1, "the comment is on disk despite the export failing");
+    assert_eq!(
+        disk[0].status,
+        herdr_reviewr::comments::Status::Open,
+        "still open after the failed send"
+    );
+    assert_eq!(app.store.len(), 1, "still present in memory too");
+    assert!(app.status.contains("failed"), "the failure is surfaced on the status line");
 }
 
 #[test]
