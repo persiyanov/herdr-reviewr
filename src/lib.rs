@@ -10,6 +10,7 @@
 
 pub mod app;
 pub mod browser;
+pub mod comments;
 pub mod config;
 pub mod diff;
 pub mod export;
