@@ -25,8 +25,10 @@ What you get, in one persistent pane pointed at a git worktree:
 - **Themes** — 18 named palettes in dark and light, one config line away. Catppuccin, Dracula,
   Nord, Gruvbox, Tokyo Night, Rosé Pine, Solarized, and more.
 
-It **never edits your worktree** and sends nothing on its own. Its only write to git is a private
-`last-turn` baseline ref under `refs/reviewr/`. The **PR** tab reads your forge — GitHub, GitLab,
+It **never edits your worktree** and sends nothing on its own. It writes only under the repo's git
+dir: a private `last-turn` baseline ref under `refs/reviewr/`, and a shared comment store your
+agent reads and writes through a few CLI subcommands (see
+[Working with agents](#working-with-agents)). The **PR** tab reads your forge — GitHub, GitLab,
 or Bitbucket Data Center — but never posts there.
 
 ## Requirements
@@ -182,6 +184,56 @@ track it in git. An ignored-but-intentional file (a plan, a sample env) belongs 
 There it shows as a change and ages out once committed. **All files** can still browse any
 ignored path, dimmed, even untracked ones.
 
+## Working with agents
+
+Comments aren't only for you to write and send — they're a two-way channel with the coding
+agent, backed by one shared store per repo (`<git-dir>/reviewr/comments/`, one JSON file per
+comment; see [`specs/review-model.md`](specs/review-model.md)). Your agent reads and writes it
+through new subcommands on this same binary; you keep using the TUI exactly as above.
+
+### Ask the agent to read reviewr
+
+In any agent session in the same repo:
+
+```
+Run `herdr-reviewr skill-path`, load that skill, then review this code and leave
+comments in reviewr.
+```
+
+`skill-path` prints the bundled skill's location. The agent loads it, lists your open comments
+(`herdr-reviewr comment list`), acts on them, and leaves its own findings as cards in your diff —
+you'll see an `agent`-chipped card within a poll tick, no notification needed.
+
+### The reverse flow
+
+Leave comments the usual way (`c`, type, `Enter`), then tell the agent:
+
+```
+implement the comments I left in reviewr
+```
+
+It runs `herdr-reviewr comment list`, addresses each one, and `comment resolve <id>`s what it
+handled. You'll see the card dim, and — with `h` — disappear from the list once you're done
+checking it.
+
+### `comment_sync`: when your comments become visible to the agent
+
+```toml
+# ~/.config/herdr/plugins/config/dcieslak19973.reviewr/config.toml
+comment_sync = "immediate"   # default; or "on-send"
+```
+
+- **`immediate`** (default) — every comment you save persists to the store right away, so you can
+  tell the agent to address your review at any point, not only after a send.
+- **`on-send`** — your comments stay pane-local until you press `s`, which persists them (and
+  exports as always). Nothing reaches the agent's view of the store before that keystroke, if you
+  prefer the older "nothing leaves without a keystroke" posture.
+- Either setting is about *your* comments only — the agent's own comments are always written to
+  the store immediately and always rendered in your pane, regardless of this key.
+
+Sending (`s`) no longer removes comments from the store: an exported comment stays `open` and
+resolvable, so a send doubles as a durable note rather than a one-shot handoff.
+
 ## Configuration
 
 CLI flags on the pane command:
@@ -204,7 +256,7 @@ Create the file if it does not exist yet. herdr hands this directory to the plug
 reviewr's file, not herdr's. Settings added to herdr's own `~/.config/herdr/config.toml` never
 reach reviewr.
 
-The file accepts these eight keys:
+The file accepts these nine keys:
 
 ```toml
 theme = "tokyo-night"
@@ -215,7 +267,11 @@ auto_open = false
 github_host = "github.example.com"
 gitlab_host = "gitlab.corp.com"
 bitbucket_host = "bitbucket.corp.com"
+comment_sync = "on-send"
 ```
+
+`comment_sync` controls when *your* comments reach the shared store the agent reads — see
+[Working with agents](#working-with-agents) above.
 
 A missing file or omitted key uses its default. Any unknown key, wrong type, or invalid value
 makes the whole file invalid. reviewr never applies the valid-looking parts. The sidebar then
@@ -395,11 +451,13 @@ This is a focused, young tool. The known constraints:
   comment surface caps at one page (100 rows), with a `+more ↗` marker when there is more.
 
 **Review model**
-- **Comments are in-memory and single-session** — closing the pane loses any you haven't sent or
-  copied out.
-- **Sending is all-or-nothing** — Send (or copy-to-clipboard) delivers the whole set and clears
-  it. There is no per-comment send and no duplicate delivery. A failure leaves everything in
-  place.
+- **Comments persist per repo** once saved, under `comment_sync = "immediate"` (the default) —
+  closing the pane or restarting herdr keeps them. Under `"on-send"`, an unsent comment is still
+  pane-local only and is lost on close.
+- **Sending is all-or-nothing but non-destructive** — Send (or copy-to-clipboard) delivers every
+  open, user-authored comment at once. There is no per-comment send and no duplicate delivery, and
+  it no longer clears the set: a sent comment stays `open` and resolvable. A failure leaves
+  everything in place.
 - **No line-number rebasing** — a comment stays locatable by its diff snippet, not its line
   number. reviewr flags a stale comment instead of dropping it.
 - **One sidebar per worktree** — two on the same worktree race the baseline ref, and the last

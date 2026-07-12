@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-10
+Last edited: 2026-07-12
 ---
 
 # Review model
@@ -121,20 +121,80 @@ In `All files` a comment anchors to plain file content instead of a diff. Its `s
 
 A comment renders and is acted on only in the view it belongs to: a content comment in `All files`, a diff comment in `Changes`. Their line numberings differ, so a comment never lands on an unrelated line in the other tab. Send, Copy, and the comments list carry the whole set across both tabs.
 
+## Store
+
+Comments persist to one JSON file per comment: `<git-dir>/reviewr/comments/<id>.json`, where `<git-dir>` is `git rev-parse --git-dir` resolved from the repo — per worktree automatically, since each linked worktree has its own git dir. The directory is created on first write; a missing directory reads as no comments, never an error.
+
+```json
+{
+  "id": "c-1752264012345-7f3a",
+  "author": "user",
+  "status": "open",
+  "created_at": "2026-07-11T18:40:12Z",
+  "file": "worker/index.js",
+  "side": "new",
+  "start": 25,
+  "end": 25,
+  "lines": "+  await KV.put(key, String(n + 1))",
+  "text": "KV increments can lose concurrent updates"
+}
+```
+
+A stored comment is the comment object above plus lifecycle fields:
+
+| field        | type   | meaning                                                             |
+| ------------ | ------ | --------------------------------------------------------------------- |
+| `id`         | string | `c-<epoch-ms>-<4 hex>`, unique and sortable by creation                |
+| `author`     | enum   | `user` (written only by the TUI) or `agent` (the CLI's default)        |
+| `status`     | enum   | `open` or `resolved`                                                   |
+| `created_at` | string | ISO-8601 `…Z`, set at write time                                        |
+| remaining    | —      | exactly the comment object fields above                                |
+
+- Per-comment files make the TUI and the CLI safe concurrent writers with no locking: adding is an exclusive file create (a same-millisecond id collision retries once with a fresh id); a status flip or delete rewrites or unlinks only that one file.
+- Unknown fields survive a rewrite — a status flip reads the file as untyped JSON, sets `status`, and writes it back, so a newer version's extra field is never dropped by an older one.
+- A file that fails to parse is skipped and logged, never deleted — it's left for a human to inspect.
+- The TUI loads the store at startup, and re-reads it whenever a cheap per-tick signature (entry names + mtimes) changes, so an external write — the agent's CLI, another session — shows up without user action.
+
+## CLI
+
+New subcommands on the existing binary; run with no subcommand, it launches the TUI as always. Every subcommand resolves the store from the current directory's git dir and exits 1 with one stderr line when that fails (not a git repo, `git` not on `PATH`).
+
+```
+herdr-reviewr comment add --file <path> --start <n> [--end <n>] [--side new|old]
+                          [--lines <snippet>] [--author user|agent] --text <text>
+herdr-reviewr comment list [--json] [--all]
+herdr-reviewr comment resolve <id>
+herdr-reviewr comment rm <id>
+herdr-reviewr skill-path
+```
+
+| flag                          | default   | notes                                                              |
+| ----------------------------- | --------- | --------------------------------------------------------------------- |
+| `--file`, `--start`, `--text` | —         | required; an unrecognized flag or one missing its value is a usage error (exit 2) |
+| `--end`                       | `--start` | a single-line comment needs only `--start`                            |
+| `--side`                      | `new`     | `new` or `old`                                                         |
+| `--lines`                     | `""`      | an agent note need not carry a snippet; the card still renders at `side:start-end` |
+| `--author`                    | `agent`   | `user` or `agent`                                                      |
+
+- `--start` must be `>= 1`; `--end` must be `>= --start`. Either violation prints a one-line reason to stderr and exits 2, same as a malformed invocation.
+- `add` prints the new comment's `id` to stdout and exits 0.
+- `list` defaults to open comments only; `--all` includes resolved ones too. Human output is one row per comment: `<id>  <status>  <author>  <file>:<start>-<end>  <first line of text>`. `--json` prints one JSON array of full comment documents (the same shape the store persists) instead.
+- `resolve <id>` flips a comment to `resolved`; `rm <id>` deletes its file. Either on an unknown id exits 1, naming the id.
+- `skill-path` prints the bundled `skills/reviewr-comments/SKILL.md` path — resolved from the running binary's install location, falling back to the dev-checkout path when run from a source checkout — and exits 0, or exits 1 naming both candidates it looked for.
+
 ## Behavior
 
-Comments are a review pass, not a durable record.
-
-- Comments live in memory. There is no on-disk store.
-- A comment is removed only by export or delete. Never by a refresh or the agent's edits.
-- Comments can be added, edited, and deleted. Editing changes the text in place.
-- Export takes the whole set and clears it. There is no single-comment export.
+- A user comment is created, edited, and deleted only from the TUI. An agent comment is created only by the CLI's `comment add`; the TUI never writes one.
+- A comment is removed from the store only by an explicit delete: `d` in the TUI (either author's comment) or `comment rm` from the CLI. A refresh, a disk-store merge, or the agent's code edits never remove one.
+- `x` (resolve/reopen) flips `status` in place; either side can flip either author's comment. A resolved comment stays present — dimmed, and with the hide-resolved toggle on, hidden — until it is deleted.
+- Editing (`e`) works only on a user comment; on an agent comment it is a no-op that shows a status note instead (`tui.md`).
+- Whether a user comment reaches the shared store immediately or only at send time is the `comment_sync` setting (`config.md`). An agent comment is always store-resident and always rendered, in both modes.
 - A comment whose file leaves the changeset is flagged stale, and kept.
 - An `All files` comment is flagged stale only when its file is deleted from the worktree.
 
 ### Export
 
-One block per comment, to the agent input (the primary path) or the clipboard:
+One block per comment, to the agent input (the primary path) or the clipboard. Only open, user-authored comments export — an agent's own comments are never sent back to it, since it already has them.
 
 ```
 extruct/core/llm_registry.py:41
@@ -157,24 +217,30 @@ why drop this? it is still needed
 | order     | by `file`, then `start`                                                              |
 | preamble  | none                                                                                 |
 
-- Send injects every block into the agent input, focuses the agent pane, and clears the list. It never submits. The user adds context and presses enter.
-- Copy writes the same blocks to the system clipboard, then clears the list.
+- Send persists every open, user-authored comment to the store first — so a failed send never loses an `on-send`-mode draft that only ever lived in memory — then injects the blocks into the agent input and focuses the agent pane. It never submits; the user adds context and presses enter.
+- Copy persists the same set, then writes the blocks to the system clipboard.
+- Neither clears the list. Sending or copying is not resolving: every exported comment stays `open`, stays visible, and stays exportable again — a repeat send re-injects the same open set. Only `x` (resolve) or delete/`rm` end its life in the review.
 
 How the agent pane is found and filled is in `herdr-host.md`.
 
 ## Failure semantics
 
-- A failed send or copy leaves every comment in place. Removal happens only after a successful export.
-- A consumed batch is gone. A second send never re-injects it.
-- Closing the pane or restarting herdr loses unexported comments.
-- One instance per worktree is assumed.
+- A failed send or copy leaves every comment exactly as it was: persistence happens before the export call runs, so the comment was already durable regardless of whether the export itself succeeds.
+- Send/copy never consumes. A comment stays `open` after a successful export too, and a repeat send re-sends it.
+- In `immediate` `comment_sync` (the default), a saved user comment survives closing the pane or restarting herdr — it was written to disk when saved. In `on-send`, a comment not yet sent is TUI-local only and is lost on close, same as upstream's pre-store behavior.
+- When the store can't be resolved or written (not a git repo, a permission failure), the TUI shows a one-line notice and keeps comments session-local for that run; the CLI exits 1 naming the problem.
+- Concurrent writers (the TUI and any number of agent CLI invocations) never corrupt each other's comments — each comment is its own file, added by exclusive create and mutated by tmp-file-then-rename. A same-instant status flip from both sides picks whichever rename lands last; both outcomes are `resolved`, so the race is benign. A `rm` racing a rewrite can resurrect a file only if the rewrite lands after the unlink — accepted.
+- A corrupt comment file is skipped and logged, never deleted or auto-repaired.
+- One TUI instance per worktree is assumed; the CLI is a short-lived subprocess and any number of invocations may run concurrently.
 
 ## Non-goals
 
-- No durable comment store, lifecycle states, or outdated-tracking.
-- No categories, severities, or threads. Text only.
+- No reply threads — flat notes with resolve. No categories or severities. Text only.
+- No outdated-tracking beyond the existing `stale` flag (file left the changeset, or was deleted).
 - No line-number rebasing as the diff shifts. The snippet keeps a comment locatable.
 - No auto-submit of the agent prompt.
+- No cross-worktree or repo-global comment store — one store per git dir.
+- No daemon, sockets, or live remote control of the TUI from the CLI.
 
 ## Related specs
 

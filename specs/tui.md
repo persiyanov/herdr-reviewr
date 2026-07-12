@@ -180,6 +180,7 @@ A plain-text field that edits at the caret, not only at the end. An empty box sh
 
 - The view polls the worktree every `N` seconds, default 2, configurable.
 - A poll reloads the file list and the open diff, keeping the selected file and scroll where the file still exists.
+- The same poll checks the comment store's change signature (entry names + mtimes) and re-syncs from disk when it moved — an agent's `comment add`/`resolve`/`rm`, or another session's edit, shows up without the user doing anything (`review-model.md`). Disk wins for any id it has; a local id disk doesn't have survives only if this session never persisted it (an `on-send` draft awaiting `s`) — one this session already wrote and no longer finds on disk is treated as removed elsewhere and dropped.
 - While a comment is being composed, the input and its diff are frozen. The file list still updates.
 - `r` forces an immediate reload.
 - The `PR` tab fetches on open, on entering the tab, on `r`, and on the agent's turn-end while active, with a slow fallback timer. Its cadence is separate from the worktree poll.
@@ -189,8 +190,9 @@ A plain-text field that edits at the caret, not only at the end. An empty box sh
 
 ## Failure semantics
 
-- A poll never touches the comment input or saved comments. Draft text and caret survive every refresh.
-- A poll that finds no change makes no visible update: no flicker, no lost selection or scroll.
+- A poll never touches the comment input. Draft text and caret survive every refresh.
+- A poll's comment-store sync only ever adds, updates, or drops rows to match disk — it never touches the comment editor or a draft awaiting `s`.
+- A poll that finds no unchanged file and no comment-store signature change makes no visible update: no flicker, no lost selection or scroll.
 - Git, clipboard, and agent-send calls run synchronously between frames. A very large diff or a hung send can briefly block input. Moving them off the draw path is a v1 non-goal.
 - A paste outside the comment editor is ignored. It never starts or mutates a comment.
 
