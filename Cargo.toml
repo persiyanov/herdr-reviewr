@@ -1,6 +1,6 @@
 [package]
 name = "herdr-reviewr"
-version = "0.6.0"
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.90"
 description = "A herdr-native review sidebar: browse an agent's changes and send comments back to chat, in the terminal."
@@ -13,6 +13,7 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"
+pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30"
 serde_json = "1"
 similar = { version = "3.1.1", features = ["text"] }

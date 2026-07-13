@@ -75,10 +75,13 @@ impl Highlighter {
 
     /// Highlight `content` line by line. Each inner `Vec` is one line's spans. With no
     /// known `language` — or no loaded theme — every line is a single plain span in the
-    /// default color.
+    /// default color. `language` matches as an extension first (paths), then as a token
+    /// name (markdown fence tags like `rust` or `python`).
     pub fn highlight(&self, content: &str, language: Option<&str>) -> Vec<Vec<Span>> {
         let syntaxes = syntaxes();
-        let syntax = language.and_then(|ext| syntaxes.find_syntax_by_extension(ext));
+        let syntax = language.and_then(|lang| {
+            syntaxes.find_syntax_by_extension(lang).or_else(|| syntaxes.find_syntax_by_token(lang))
+        });
         let (Some(syntax), Some(theme)) = (syntax, self.theme.as_ref()) else {
             return content
                 .lines()

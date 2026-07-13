@@ -1,16 +1,16 @@
 ---
 Status: Current
 Created: 2026-06-24
-Last edited: 2026-06-29
+Last edited: 2026-07-12
 ---
 
 # Diff view
 
-The structured diff viewer: how a file's changes are modeled from its content and rendered with syntax highlighting, word-level emphasis, line numbers, and foldable context.
+The structured diff viewer: how a file's changes are modeled and rendered with syntax highlighting, word-level emphasis, line numbers, and foldable context.
 
 ## Overview
 
-The viewer renders a `FileDiff` — the selected file modeled as a list of rows, built from the file's old and new content (not from parsed `git diff` text). A row is the unit the diff pane paints and the cursor moves over. The pane renders the same `FileDiff` in two views: the **Diff view** (`Changes`) shows old-versus-new with change rows and folds; the **File view** (`All files`) shows the whole current file as `context` rows.
+The viewer renders a `FileDiff`: the selected file as a list of rows, built from the file's old and new content, not from parsed `git diff` text. A row is the unit the pane paints and the cursor moves over. One model serves two views. The Diff view (`Changes`) shows old versus new with change rows and folds. The File view (`All files`) shows the whole current file as `context` rows.
 
 What the reviewer sees (unified view, a renamed TypeScript file):
 
@@ -27,116 +27,131 @@ What the reviewer sees (unified view, a renamed TypeScript file):
  ⋯   30 unmodified lines
 ```
 
-- Code is syntax-highlighted; the changed words (`'div'`→`'span'`, the inserted `token.htmlStyle ??`) carry a brighter background.
-- The gutter is a line number plus a one-cell change bar (`▌`): red on a deletion, green on an insertion, blank on context. The bar and the row tint mark the change — there is no `+`/`−` glyph.
-- A run of unchanged lines beyond the context margin collapses to a `⋯ N unmodified lines` fold the reviewer can expand.
+- Code is syntax-highlighted. The changed words carry a brighter background.
+- The gutter is a line number plus a one-cell change bar: red on a deletion, green on an insertion, blank on context. There is no `+`/`−` glyph on screen.
+- A run of unchanged lines beyond the context margin collapses to a `⋯ N unmodified lines` fold.
 
 ### FileDiff
 
-| field | type | meaning |
-|-------|------|---------|
-| `path` | string | Repo-relative path; the new path for a rename. |
-| `previous_path` | string? | The old path when the file was renamed; absent otherwise. |
-| `state` | enum | `normal` shows rows; `binary` and `too_large` show a notice instead. |
-| `view` | enum | `diff` shows change rows and folds; `file` shows every line as `context`, no folds. |
-| `rows` | Row[] | The render-and-cursor units, in display order. |
+| field           | type    | meaning                                                        |
+| --------------- | ------- | --------------------------------------------------------------- |
+| `path`          | string  | repo-relative path, the new path for a rename                   |
+| `previous_path` | string? | the old path when renamed, absent otherwise                     |
+| `state`         | enum    | `normal` shows rows, `binary` and `too_large` show a notice     |
+| `view`          | enum    | `diff` shows change rows and folds, `file` shows all `context`  |
+| `rows`          | Row[]   | the render-and-cursor units, in display order                   |
 
 ### Row
 
-A row is one of four kinds. Content rows (`context`, `deletion`, `insertion`) are selectable for comments; a `fold` is not.
+Content rows are selectable for comments. A `fold` is not.
 
-| kind | carries | meaning |
-|------|---------|---------|
-| `context` | `old_no`, `new_no`, `spans` | An unchanged line shown in both versions. |
-| `deletion` | `old_no`, `spans`, `emphasis` | A line removed from the old version. |
-| `insertion` | `new_no`, `spans`, `emphasis` | A line added in the new version. |
-| `fold` | `hidden` | A collapsed run of `hidden` unchanged lines, expandable in place. |
+| kind        | carries                       | meaning                                        |
+| ----------- | ----------------------------- | ----------------------------------------------- |
+| `context`   | `old_no`, `new_no`, `spans`   | an unchanged line, present in both versions     |
+| `deletion`  | `old_no`, `spans`, `emphasis` | a line removed from the old version             |
+| `insertion` | `new_no`, `spans`, `emphasis` | a line added in the new version                 |
+| `fold`      | `hidden`                      | a collapsed run of unchanged lines, expandable  |
 
-- `spans` — the line's content as syntax-highlighted segments, each a `(text, color)` from highlighting the **whole** file; plain one-segment text when `language` is absent.
-- `emphasis` — the character ranges within the line that differ from its paired counterpart, rendered with a brighter background; empty when the line has no close pair.
+`spans` is the line as syntax-highlighted segments, plain when the language is unknown. `emphasis` is the character ranges that differ from the line's paired counterpart.
 
 ## Behavior
 
-### Building the model
+### The model
 
-- Content comes from git: the old version via `git show <rev>:<path>`, the new version from the worktree (or `git show` for branch scope). An `untracked` file has empty old content; a `deleted` file has empty new content.
-- The diff is computed with the `similar` crate (`TextDiff::from_lines`) over old vs new content, grouped into hunks with a context margin of 3 lines.
-- `emphasis` comes from `similar`'s inline word-level diff over related lines within a change block (a run of deletions then a run of insertions). Lines are matched by **homolog search**, not position (after git-delta): each deletion claims the first not-yet-taken insertion similar enough to be the same line edited; skipped insertions and unmatched deletions stay plain. A pair below the similarity bar — a wholesale rewrite sharing only scraps like indentation or `///` — gets no emphasis at all, since the line-level red/green already carries it and full-line highlighting would be noise. Adjacent changed words separated only by whitespace coalesce into one span (the whitespace is swallowed), so a changed phrase highlights as one block, not fragments; gaps holding any non-space character keep the words separate. Each span is then trimmed to its tokens — leading and trailing whitespace is never highlighted, so a deepened indent or the space before an added trailing comment paints nothing.
-- Highlighting comes from `syntect` over the broad bat/`two-face` syntax and theme set, so most languages color out of the box: the language is detected from the path (absent when unknown, which renders plain), the full old and new content are highlighted once each, and every row reads its line's `spans`. Full-file highlighting is why a multi-line string or comment colors correctly inside a hunk.
-- The diff and the highlighting are both cached per file by content; a poll that finds the file unchanged reuses the prior rows and spans rather than recomputing.
+- Old content comes from `git show`, new content from the worktree (or `git show`, in the `branch` scope). An `untracked` file has empty old content. A `deleted` file has empty new content.
+- Changes group into hunks with a context margin of 3 unchanged lines.
+- The whole file is highlighted, not each hunk. A multi-line string or comment colors correctly inside a hunk.
+- The language is detected from the path. An unknown path renders plain.
+- The diff and highlighting are cached by content. A poll that finds the file unchanged recomputes nothing.
+
+### Word emphasis
+
+- Changed lines pair by similarity, not position. Each deletion claims the first free insertion similar enough to be the same line edited.
+- An unmatched line, or a pair sharing only scraps, gets no emphasis. The row tint already marks it.
+- Changed words separated only by whitespace merge into one emphasis span. A gap holding any non-space character keeps them separate.
+- Emphasis never covers leading or trailing whitespace. A deepened indent paints nothing.
 
 ### File view
 
-- The `All files` tab renders a file in File view: the `FileDiff` is built from the current content alone, every line a `context` row, with no deletions, insertions, `emphasis`, or folds.
-- The gutter shows the single new-line number and a blank change bar; highlighting, wrapping, horizontal scroll, line selection, and comments behave exactly as in Diff view.
-- Folding is off, so the whole file is shown; a `binary` or `too_large` file degrades to a notice as it does in Diff view (the `too_large` wording differs: `file too large` here, `file too large to diff` there).
+- The `FileDiff` is built from current content alone: every line a `context` row, no change rows, no emphasis, no folds.
+- The gutter shows the new-line number and a blank change bar.
+- Highlighting, wrapping, horizontal scroll, selection, and comments behave exactly as in Diff view.
+- A `binary` or `too_large` file degrades to a notice, worded `file too large` here and `file too large to diff` in Diff view.
+
+A markdown file adds a rendered preview:
+
+- The `preview` binding (default `m`) switches between source and rendered markdown (`markdown.md`).
+- A markdown file has a `.md` or `.markdown` extension, case-insensitive. A file that stops qualifying shows source.
+- The pane title carries a `· preview` suffix while the preview is open.
+- The preview choice holds across refreshes of the same file. Opening a file starts in source.
+- The preview is read-only: selection and commenting are inactive, comment cards do not show, and there is no cursor.
+- Entering the preview clears a live selection.
+- `down`/`up`, the page keys, and the wheel scroll the preview by line, with no gutter. The scroll stops with the last line at the pane's bottom edge. A refresh keeps the preview's scroll, clamped the same way.
+- A preview taller than the pane shows a scrollbar on the pane's right border. One that fits shows none.
+- The `wrap` binding and horizontal scroll are inert in the preview.
+
+The toggle carries the reading position, block-aligned, resolved against the painted render:
+
+- Entering the preview opens at the block holding the source cursor's line, or the nearest block above it.
+- Returning to source puts the cursor on the top visible block's first source line, revealed.
+- A round-trip with no preview scroll input restores the exact source cursor and scroll. A refresh clamp is not a scroll input.
+- The horizontal offset always keeps its pre-entry value.
+- A forced return — the file stops qualifying — keeps the prior source position.
 
 ### Color
 
-- The active theme (`theme.md`) supplies every color: the syntax token foregrounds and the structural fills.
-- Syntax `spans` take only foreground token colors; the pane background stays transparent, so the diff sits on the terminal's own background.
-- The structural fills come from the theme: a deletion row tints with its `red`, an insertion its `green`, `emphasis` a stronger blend, and the cursor, selection, and fold their own surface fills — so highlight and syntax never clash.
+- The active theme (`theme.md`) supplies every color: syntax token foregrounds and the structural fills.
+- The pane background stays transparent. The diff sits on the terminal's own background.
+- A deletion row tints with the theme's `red`, an insertion its `green`, emphasis a stronger blend. The cursor, selection, and fold use their own surface fills.
 
 ### Folding
 
-- An unchanged run longer than the context margin collapses to one `fold` row showing its hidden-line count, drawn as a distinct band so it reads as a hunk separator.
-- Expanding a `fold` replaces it with its lines as `context` rows; there is no manual collapse-back, and the expansion persists across refresh polls of the same file. It is per file (opening another file starts collapsed), and an edit that reshapes the fold may re-collapse it.
-- Expanding keeps the viewport visually still: a fold in the top half of the diff grows upward, so the lines below it hold their screen position; a fold in the bottom half grows downward, so the lines above it hold theirs.
-- A file's leading and trailing unchanged regions fold the same way, so the pane opens focused on the changes.
+- An unchanged run longer than the context margin collapses to one `fold` row showing its hidden-line count.
+- Leading and trailing unchanged regions fold too, so the pane opens focused on the changes.
+- Expanding replaces the fold with `context` rows. There is no manual collapse-back.
+- An expansion persists across refreshes of the same file. Opening another file starts collapsed. An edit that reshapes the fold may re-collapse it.
+- Expanding keeps the viewport still: a fold in the top half grows upward, one in the bottom half grows downward.
 
 ### Wrapping and the gutter
 
-- The diff is one unified column: each change block shows its removed lines then its added lines, full width, with a single line-number gutter.
-- Long lines wrap by default, breaking at word boundaries (a space that fits); a word wider than the column hard-breaks. A toggle switches to horizontal scroll, moved with `←`/`→` while the gutter stays pinned. A wrapped continuation row has a blank gutter so numbers stay aligned, and drops the break's leading space so it never starts almost-empty.
-- The gutter is a fixed line-number column plus the one-cell change bar.
-- A line that carries a comment shows its line number in the comment color, so the change bar keeps its add/remove color and the two never collide.
-- Tabs render as spaces (4 by default) so code and the gutter stay aligned.
+- The diff is one unified column: removed lines, then added lines, full width, one gutter.
+- Long lines wrap by default, at word boundaries. A word wider than the column hard-breaks. A toggle switches to horizontal scroll (`←`/`→`), with the gutter pinned.
+- A wrapped continuation row has a blank gutter and drops the break's leading space.
+- A commented line shows its line number in the comment color. The change bar keeps its own color.
+- Tabs render as spaces, 4 by default.
 
 ### Comment anchoring
 
-- A comment anchors to the diff exactly as `review-model.md` defines it: a `side` plus a `start..end` line range, with the verbatim snippet.
-- A selection runs over content rows; a fold is a hard boundary it cannot cross, so the `start..end` range never brackets hidden lines the snippet would omit. The export snippet is reconstructed from the selected rows as `+`/`−`/space-prefixed lines — the markers live in the snippet sent to the agent, not on screen.
+- A comment anchors as `review-model.md` defines: a `side`, a `start..end` range, the verbatim snippet.
+- A selection runs over content rows. A fold is a hard boundary it cannot cross.
+- The export snippet is rebuilt from the selected rows as `+`/`−`/space-prefixed lines. The markers live in the export, not on screen.
 
 ### Config
 
-Presentation flags, each with a default:
-
-- `--theme <name>` — the theme, chrome and syntax together (`theme.md`).
-- `--wrap on|off` — whether long lines wrap on open.
+| flag              | default      | meaning                                    |
+| ----------------- | ------------ | ------------------------------------------- |
+| `--theme <name>`  | `catppuccin` | the theme, chrome and syntax (`theme.md`)   |
+| `--wrap on\|off`  | `on`         | whether long lines wrap on open             |
 
 ## Failure semantics
 
-The viewer is read-only and recomputed on every refresh, so it never persists or double-applies. It degrades rather than blocks:
+The viewer is read-only and recomputed on every refresh. It degrades rather than blocks:
 
-- A file beyond the size budget renders as `too_large` with a notice — never a hang while diffing or highlighting.
-- A `binary` file renders `binary — no line comments`.
-- A highlighting failure (unknown language, grammar error) falls back to plain `spans`; the diff still renders.
-- A diff with no rows at all — an empty file on both sides — renders its header and a one-line notice, not a blank pane. A pure rename or mode-only change (identical content) shows that content, collapsed to a fold.
-- A refresh recomputes the model from current content; the line numbers a saved or in-progress comment anchors to are unaffected, so no comment is lost or re-bound.
+- A file beyond the size budget renders `too_large`, never a hang.
+- A binary file renders `binary — no line comments`.
+- A highlighting failure falls back to plain spans. The diff still renders.
+- An empty-on-both-sides diff renders its header and a one-line notice, never a blank pane. A pure rename or mode-only change shows that content, collapsed to a fold.
+- A refresh recomputes the model. Saved and in-progress comments are unaffected.
 
 ## Non-goals
 
-- No alternate diff layouts — one unified column only; a side-by-side split is roadmap.
-- No tree-sitter highlighting — syntect only.
+- No alternate diff layouts. One unified column, a side-by-side split is roadmap.
 - No editing, staging, or reverting from the viewer.
-- No line-number rebasing of comments as the diff shifts — `review-model.md` owns that, via the snippet.
-
-## Decisions
-
-- Model from file content, not parsed `git diff` text — text carries no syntax context and no lines to expand; the old/new content carries both. Rejected: keep parsing unified-diff text.
-- `similar` for the diff and the inline word emphasis — one pure-Rust crate does line grouping and word-level emphasis. Rejected: `git2`/libgit2, which adds a C dependency for convenience the crate already provides.
-- `syntect` over tree-sitter — one mature crate, ~200 bundled languages, line spans that map straight to ratatui. Rejected: tree-sitter, which needs a grammar crate and highlight query per language.
-- Truecolor RGB throughout, from one theme — the structural fills (add/remove tint, change bars, emphasis, selection) and the syntax token colors both come from the active theme (`theme.md`), so they can never clash. Rejected: mapping syntax onto the terminal's 16 ANSI colors, less rich; keeping structural colors independent of the theme, which desyncs the chrome from syntax.
-- Change bar and tint, not `+`/`−` glyphs — the colored bar plus row tint already mark add versus remove, so the glyphs are redundant on screen. The export snippet keeps `+`/`−`/space markers for the agent. Rejected: showing both.
-- File view is an all-`context` `FileDiff`, not a separate pager — the whole-file browser reuses the diff model, gutter, highlighting, selection, and comment machinery by modeling the file as `context` rows with folding off. Rejected: a second viewer component.
-- Folding off in File view — an unchanged file would collapse to a single fold; `All files` exists to read the file, so it shows every line. Rejected: reusing the context-margin folding.
-
-## Open decisions
-
-- None.
+- No line-number rebasing of comments. `review-model.md` owns comment anchoring, via the snippet.
 
 ## Related specs
 
-- `./review-model.md`
-- `./tui.md`
-- `./theme.md`
+- [review-model](./review-model.md)
+- [tui](./tui.md)
+- [theme](./theme.md)
+- [markdown](./markdown.md)

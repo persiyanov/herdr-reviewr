@@ -1,16 +1,16 @@
 ---
-Status: Draft
+Status: Current
 Created: 2026-06-27
-Last edited: 2026-06-27
+Last edited: 2026-07-12
 ---
 
 # forge host
 
-How herdr-reviewr reads one pull request's state from GitHub — identity, state, checks, and comments — through the `gh` CLI for the read-only `PR` tab (`tui.md`), never writing back.
+How reviewr reads one pull request from GitHub — identity, state, checks, comments — through the `gh` CLI, for the read-only `PR` tab (`tui.md`). It never writes back.
 
 ## Overview
 
-reviewr resolves the open pull request for the worktree's branch and, on each poll, reads a snapshot of it through `gh` on `PATH`. The snapshot is the single value the `PR` tab renders.
+reviewr resolves the worktree's open pull request across the candidate branches its work could be published under, then reads a snapshot of it through `gh` on each poll. The snapshot is the single value the `PR` tab renders.
 
 ```
 PR #226  open  persiyanov/deep-research-benchmark → main   ⇡ 2 unpushed
@@ -21,96 +21,146 @@ PR #226  open  persiyanov/deep-research-benchmark → main   ⇡ 2 unpushed
 
 The snapshot:
 
-- `number`, `title`, `url` (int, string, string) — identity; `number` is `null` when the branch has no PR.
-- `state` (enum, `open`/`merged`/`closed`) and `is_draft` (bool) — lifecycle; only `open` is the live case.
-- `base_ref` (string) — the merge target; the PR head commit is read for `sync` (below) but not stored.
-- `merge` (enum, `clean`/`conflicting`/`blocked`) — the actionable merge blockers, derived from GitHub's `mergeable` and `mergeStateStatus`.
-- `sync` (enum, `in_sync`/`unpushed`/`behind`, with a count) — local `HEAD` vs `head_oid`.
-- `checks` (list) — one row per latest check: `name` and `status` (the conclusion folded in).
-- `comments` (list) — one row per comment, newest first: `kind`, `author`, `author_is_bot`, `anchor`, `body`, `snippet`, `created_at`, `is_resolved`, `is_outdated`, `reply_count`.
-- `truncated` (bool) — a capped surface (reviews/comments/threads/checks) had a further page; the lists are a prefix, and the UI flags it rather than showing partial counts as complete.
+| field          | type      | meaning                                                                |
+| -------------- | --------- | ---------------------------------------------------------------------- |
+| `number`       | int?      | PR number, `null` when no PR resolves                                  |
+| `title`, `url` | string    | identity                                                               |
+| `body`         | string    | the PR description as GitHub returns it, empty when none               |
+| `state`        | enum      | `open`, `merged`, or `closed`                                          |
+| `is_draft`     | bool      | draft flag                                                             |
+| `head_ref`     | string    | the PR's head branch name, which may differ from the local branch      |
+| `head_is_fork` | bool      | the head lives in another repository (GitHub's `isCrossRepository`)    |
+| `base_ref`     | string    | the merge target                                                       |
+| `merge`        | enum      | `clean`, `conflicting`, or `blocked`                                   |
+| `sync`         | enum      | `in_sync`, `unpushed`, `behind`, or `unknown`, with a count when known |
+| `checks`       | list      | one row per latest check: `name` and `status` (conclusion folded in)   |
+| `comments`     | list      | one row per comment, newest first                                      |
+| `truncated`    | bool      | a capped surface had a further page, so a list is a prefix             |
 
 A `comments` row:
 
-- `kind` (enum, `review`/`comment`/`finding`) — a submitted review's body, a plain PR conversation comment, or an inline finding. Only `finding` carries `anchor` = `path:line` and `snippet`; the others are prose with `anchor` = the literal kind word.
-- `author` (string) and `author_is_bot` (bool) — the comment's `@login` and whether the author is a bot.
-- `body` (string) — the text as GitHub returns it, with no per-author chrome-stripping or format parsing.
-- `created_at` (timestamp) — when the comment was posted, and the list's newest-first sort key.
-- `is_resolved`, `is_outdated` (bool) — thread state for a `finding`; always false for `review`/`comment` (they have no anchor).
-- `reply_count` (int) — replies on a `finding`'s thread beyond the root.
+| field                        | type   | meaning                                                              |
+| ---------------------------- | ------ | ---------------------------------------------------------------------- |
+| `kind`                       | enum   | `review` (a review's body), `comment` (conversation), `finding` (inline) |
+| `author`, `author_is_bot`    | string, bool | the `@login` and whether it is a bot                              |
+| `anchor`                     | string | `path:line` for a `finding`, the literal kind word otherwise            |
+| `body`, `snippet`            | string | the text as GitHub returns it, no chrome-stripping or format parsing; only a `finding` carries a snippet |
+| `created_at`                 | time   | post time, the newest-first sort key                                    |
+| `is_resolved`, `is_outdated` | bool   | thread state for a `finding`, always false otherwise                    |
+| `reply_count`                | int    | replies on a `finding`'s thread beyond the root                         |
 
 ## Behavior
 
+### GitHub hosts
+
+`github_host` in reviewr's `config.toml` adds one GitHub Enterprise hostname. Its value contract lives in `config.md`.
+
+```toml
+github_host = "github.example.com"
+```
+
+Host matching is case-insensitive. A missing setting adds no Enterprise host. `github.com` remains supported when the setting is present.
+
+Host identity comes from `origin`'s primary fetch URL after Git's `url.*.insteadOf` rewrite. A separate push URL does not affect PR reads.
+
+| condition                                                 | outcome                                                                         |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| exact `github_host` or SSH alias `github_host-<alias>`    | reviewr reads the repository from the configured Enterprise host                |
+| `github.com` or SSH alias `github.com-<alias>`            | reviewr reads the repository from GitHub.com                                    |
+| any other hosted `origin`                                 | reviewr names the unsupported host and points Enterprise users to `github_host` |
+| missing `origin` or an origin without a host              | reviewr says the PR tab needs a supported GitHub origin                         |
+| supported host without an owner and repository path       | reviewr says the GitHub origin is malformed                                     |
+
+The alias rows apply only to scp-style and `ssh://` origins. An alias is a trusted naming convention; reviewr does not inspect SSH config to verify where it connects.
+
+Hosted URL forms use `http://`, `https://`, or `git://`. File URLs and other schemes are not GitHub repository identities and remain unsupported.
+
+A fetch target is the canonical matched host plus the origin's owner and repository. A fetch input adds the pinned local branch, `HEAD`, candidate branches, and base configuration. `GH_HOST` cannot redirect a fetch to another instance.
+
 ### Resolution
 
-- reviewr resolves the **open** PR for the branch via a GraphQL `pullRequests(headRefName: …, states: OPEN)` query, then reads its detail with a direct `pullRequest(number: …)` query — `mergeable` only populates on direct PR access, never through the list connection.
-- A merged or closed PR on the branch does not count: a branch with one merged PR and one open PR shows the open one as the only PR, no ambiguity.
-- Two or more **open** PRs on one branch is the only ambiguous case; reviewr surfaces the count and the chosen `number` rather than guessing silently.
-- With no open PR but a merged or closed one, reviewr shows that PR as historical state (`merged`/`closed`); with none at all, the empty state.
-- A fork PR reads `checks`, `comments`, and merge state from the **base** repository, where GitHub computes them.
-- A detached `HEAD` — no branch to resolve against, e.g. after `gh pr merge --delete-branch` — shows the empty state; reviewr never queries `headRefName:""`, which GitHub reads as unfiltered and would mis-resolve to an unrelated PR.
+- Each fetch pins `HEAD` and the base ref to commit OIDs at its start. Every ancestry test, distance, and sync count uses the pins, so one fetch reads one consistent local state while the agent commits beside it.
+- The open PR is resolved across all candidate branches in one aliased GraphQL `pullRequests(headRefName: …, states: OPEN)` call. Its detail comes from a direct `pullRequest(number: …)` query, because `mergeable` populates only on direct access.
+- Exactly one open PR across the candidates resolves, under whichever name it lives.
+- Several open PRs resolve to the earliest candidate in derivation order. Several on that one name disambiguate by `headRefOid` equal to the pinned `HEAD`. Failing that, reviewr surfaces the ambiguity count, never a silent guess.
+- With no open PR anywhere, the newest-created merged or closed PR shows as historical state. With none at all, the empty state names the queried candidates, so a surprising resolution is inspectable.
+- A fork PR reads checks, comments, and merge state from the base repository. The resolution key is the head branch name, not a (repository, name) pair, so a same-named fork branch can match. The `⑂` header marker makes that case visible.
+- A detached `HEAD` shows the empty state. reviewr never queries `headRefName:""`, which GitHub reads as unfiltered.
+
+### Candidate branches
+
+The names this worktree's work could be published under, re-derived from local git on every fetch, deduped in this order. Steps 1 and 3 are always included. Step 2 contributes nearest tips up to a total of 8 names, farthest evicted first, never evicting steps 1 or 3.
+
+1. Git's recorded upstream (`branch.<name>.merge`), stripped of its remote prefix, unless it names a configured base branch. `@{push}` is never consulted: git computes a destination even when nothing is recorded, which would shadow a real upstream.
+2. Remote-tracking branches under `refs/remotes/origin/*` (excluding `origin/HEAD` and the base branches) whose tip is ancestry-comparable with the pinned `HEAD`: equal to it, an ancestor of it carrying non-base work, or a descendant of it. Nearest-first by `HEAD...tip` distance, ties lexicographic. With no base resolvable, only equal and descendant tips qualify.
+3. The local branch name, always.
+
+What a user observes:
+
+- A worktree pushed as `git push origin HEAD:<other-name>` resolves its PR. The push updated a distance-0 candidate.
+- One tip pushed under two names resolves to whichever name holds the open PR.
+- A stale upstream never hides a live PR on another candidate. An open PR beats a merged one and beats none.
+- A teammate's branch parked at this worktree's exact `HEAD` never beats the branch git says this worktree pushes to.
+- Stacked branches resolve to the nearest branch of the stack holding an open PR. The recorded push destination outranks the whole stack.
+- A remote branch descending from `HEAD` can be a colleague's continuation of this work. Its PR resolves when no better candidate has one, and the header names the branch.
+- Between a rebase and its force-push, a branch published under a different name with no upstream shows the empty state. The push restores it on the next poll.
 
 ### Derived state
 
-- `merge` folds GitHub's `mergeable` and `mergeStateStatus` to the blockers worth surfacing: `CONFLICTING`/`DIRTY` → `conflicting`, `BLOCKED` → `blocked`; everything else (`CLEAN`, `BEHIND`, `UNSTABLE`, and still-computing `UNKNOWN`) → `clean`, which the footer shows as nothing.
-- `mergeable=UNKNOWN` is GitHub computing lazily — it folds to `clean`, never asserted as a conflict unless `mergeStateStatus` is `DIRTY`.
-- `sync` compares local `HEAD` to `head_oid` — equal is `in_sync`, `HEAD` ahead is `unpushed` (count via `git rev-list --count <head_oid>..HEAD`), `head_oid` ahead is `behind`.
-- `unpushed` means the checks and comments on screen describe an older commit than your local tree.
+- `merge` folds GitHub's fields to the blockers worth surfacing: `CONFLICTING`/`DIRTY` → `conflicting`, `BLOCKED` → `blocked`, and everything else (`CLEAN`, `BEHIND`, `UNSTABLE`, still-computing `UNKNOWN`) → `clean`, which the footer shows as nothing.
+- `mergeable=UNKNOWN` is GitHub computing lazily. It folds to `clean` unless `mergeStateStatus` is `DIRTY`.
+- `sync` compares the pinned `HEAD` OID to the PR's `head_oid`: equal is `in_sync`, `HEAD` ahead is `unpushed` with a `git rev-list --count` count, and `head_oid` ahead is `behind`. If the PR head object is unavailable locally, the relation is `unknown`; reviewr never guesses `in_sync`.
+- `unpushed` means the checks and comments on screen describe an older commit than the local tree.
 
 ### Checks
 
-- A check row is the **latest** run for its `name` — a re-run supersedes the prior run, so a passed re-run replaces an earlier failure rather than listing both.
-- Check runs (Actions/Apps) and commit statuses (external CI) normalise into one list.
-- A top-level rollup gives the overall pass/fail across them.
+- A check row is the latest run for its name. A passed re-run replaces an earlier failure.
+- Check runs and commit statuses normalize into one list.
+- A top-level rollup gives the overall pass or fail.
 
 ### Comments
 
-- Three surfaces merge into one `comments` list, all read in the one detail query: submitted reviews (`reviews`), inline threads (`reviewThreads`), and plain conversation comments (`comments`).
-- All three are read because the AI reviewers split across them — one posts a review body, the other a plain comment.
-- A bot's PR-level posts collapse to its **latest**; a human's are each kept.
-- `is_resolved` and `is_outdated` come from `reviewThreads` (inline comments only) — relevance is GitHub's, never recomputed against the worktree.
-- Outdated and resolved threads stay in the list with their marker, not filtered out.
-- Each surface is read to a fixed cap of 100 rows (one page), not paged to exhaustion — a deliberate v1 bound, since a PR in a review sidebar effectively never exceeds it. When any surface (reviews, comments, threads, or checks) reports a further page, `truncated` is set and the UI shows a `+more on GitHub ↗` marker, so a capped list is never presented as complete.
-- The list is sorted newest-first by `created_at`.
+- Three surfaces merge into one list: submitted reviews, inline threads, and conversation comments. The AI reviewers split across them, so all three are read.
+- A bot's PR-level posts collapse to its latest. A human's are each kept.
+- `is_resolved` and `is_outdated` come from GitHub, never recomputed against the worktree.
+- Outdated and resolved threads stay in the list with their marker.
+- Each surface reads one page of 100 rows, never paged to exhaustion. A further page on any surface — reviews, comments, threads, or checks — sets `truncated`, and the UI shows `+more on GitHub ↗`, so a capped list is never presented as complete.
 
 ### Refresh
 
-- The first fetch starts when the reviewr panel opens, not on first switching to the `PR` tab, so the tab is already populated by the time the user reaches it.
-- A refetch fires on entering the tab, on the manual `r`, and on the agent's turn-end (a `working`→resting edge — `idle` or `done`) while the tab is active — that turn may have pushed or run `gh pr merge`, changing forge state with no other local signal.
-- A fallback poll refetches every 60 seconds while the tab is active, covering forge-side changes (a reviewer's comment) that have no local signal. Off the tab there is no polling; re-entering refetches.
-- Each fetch is two GraphQL calls (resolve the number, then read the detail) run on a worker thread and delivered to the UI when complete, so the `gh` calls never block input or scrolling; only one fetch is in flight at a time (`tui.md`).
-- The snapshot derives entirely from GitHub each fetch; reviewr keeps no local PR state.
+- The first fetch starts when the panel opens, so the tab is populated before the user reaches it.
+- A refetch fires on entering the tab, on the `refresh` binding (default `r`), and on the agent's turn-end (a `working` → `idle`/`done` edge) while the tab is active. A turn may have pushed or merged, changing forge state with no other local signal.
+- A fallback poll refetches every 60 seconds while the tab is active. Off the tab there is no polling.
+- A fetch-input change observed on refresh clears the current PR. It starts a fetch while the tab is active; otherwise the next tab entry starts it.
+- A fetch with an open PR is two GraphQL calls. A fetch that checks historical PRs is three. All run on a worker thread, so `gh` never blocks input or scrolling.
+- One fetch is in flight at a time. A trigger arriving mid-flight supersedes its result and starts a fresh fetch when it completes.
+- Each fetch uses one snapshot of reviewr's config for host and base selection. A later fetch sees a config edit without restarting reviewr.
+- A completed fetch updates the PR tab only when the current worktree and config still derive the same input.
+- The snapshot re-derives in full each fetch. reviewr keeps no hidden or historical PR cache beyond the visible snapshot.
 
 ## Failure semantics
 
-reviewr reads GitHub but never writes it, so every failure degrades to a clear state and the rest of the app (Changes, All files) is unaffected.
+reviewr reads GitHub and never writes it, so every failure degrades to a clear state. `Changes` and `All files` are unaffected.
 
-- `gh` absent, present but not authenticated, or a non-GitHub remote — each shows its own remediation line naming the command that unblocks it; any other failure (a wrong-account 404, a transient API error) shows a generic retry message, never read as "no PR". The next poll or `r` re-attempts cleanly.
-- No open PR shows a directional empty state; the next poll lights the tab up the moment a PR appears, with no manual `r`.
-- A rate-limited or unreachable poll freezes on the last good snapshot with a quiet marker; a failed poll never blanks a populated tab.
-- Second run: every read is idempotent and side-effect-free, so a retry returns the same snapshot.
-- Concurrent runs: two sidebars on one worktree read identical GitHub state — harmless, since neither writes and there is no shared local state.
+- A missing `gh` preserves a same-input snapshot and shows the install remedy. With no same-input snapshot, the remedy fills the tab.
+- An unauthenticated fetch preserves a same-input snapshot and shows `gh auth login --hostname <host>`. With no same-input snapshot, the remedy fills the tab.
+- An unsupported origin names the host and points Enterprise users to `github_host`.
+- Any other fetch failure preserves a same-input snapshot and shows the retry error. With no same-input snapshot, the error fills the tab.
+- A missing `origin` is a clean absence. Any other git command failure is transient and never read as absence, a detached `HEAD`, or an unsupported remote.
+- No open PR shows a directional empty state naming the queried candidates. The next poll lights the tab up when a PR appears.
+- Every read is idempotent and side-effect-free. A retry returns the same snapshot.
+- Two active PR tabs on one worktree converge within one poll interval. An inactive tab catches up when entered.
 
 ## Non-goals
 
-- No writes to GitHub — reviewr never posts, resolves a thread, re-runs a check, merges, or routes feedback to the agent.
-- No event subscription — the snapshot polls `gh`; reviewr opens no webhook or socket (mirrors `herdr-host.md`'s poll-don't-subscribe).
-- No second forge — GitHub via `gh` only; the forge-agnostic core (Changes, All files, the diff viewer) must not import this module.
-
-## Decisions
-
-- `gh` over a REST/GraphQL library — the user's authenticated `gh` is the stable, credential-free interface, matching the `herdr` CLI dependency already in `herdr-host.md`. Rejected: a bundled HTTP client with its own token discovery.
-- Resolve the open PR by branch, confirmed by `head_oid` — a merged PR on the branch is history, and a branch-name lookup alone misses renames and forks; the oid confirms the match. Rejected: resolving any PR, or by branch name only.
-- Read all three comment surfaces — the two AI reviewers split across review bodies and plain comments, so reading one would miss half the reviews. Rejected: review bodies only.
-- Relevance from GitHub, not local rebasing — GitHub computes `is_outdated` against the PR head, so reviewr reads it rather than re-anchoring comments to the worktree. Rejected: local line-rebasing.
-- GitHub-only — `gh` is one well-understood forge; a generic forge layer carries token discovery and per-forge API shapes with no current user. Rejected: a forge abstraction up front.
-
-## Open decisions
-
-- None.
+- No writes to GitHub. reviewr never posts, resolves a thread, re-runs a check, or merges. It never routes PR feedback to the agent.
+- No event subscription. The snapshot polls `gh`, no webhook or socket.
+- No server-version compatibility layer. An Enterprise schema that lacks the snapshot's fields fails like any unavailable GitHub API.
+- No second forge. GitHub via `gh` only, and the forge-agnostic core never imports this module.
 
 ## Related specs
 
-- `./tui.md`
-- `./herdr-host.md`
-- `./overview.md`
+- [configuration](./config.md)
+- [tui](./tui.md)
+- [herdr-host](./herdr-host.md)
+- [overview](./overview.md)

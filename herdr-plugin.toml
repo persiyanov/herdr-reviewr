@@ -1,6 +1,6 @@
 id = "persiyanov.reviewr"
 name = "reviewr"
-version = "0.6.0"
+version = "0.13.0"
 min_herdr_version = "0.7.0"
 platforms = ["macos", "linux"]
 description = "Native terminal code-review sidebar for herdr."
@@ -26,8 +26,19 @@ title = "reviewr: toggle sidebar"
 contexts = ["pane", "workspace"]
 command = ["bash", "herdr/sidebar.sh", "toggle"]
 
-# Auto-open the sidebar for a freshly created worktree.
-[[events]]
-on = "worktree.created"
+[[actions]]
+id = "open"
+title = "reviewr: open sidebar"
+contexts = ["pane", "workspace"]
 command = ["bash", "herdr/sidebar.sh", "open"]
 
+[[actions]]
+id = "close"
+title = "reviewr: close sidebar"
+contexts = ["pane", "workspace"]
+command = ["bash", "herdr/sidebar.sh", "close"]
+
+# Auto-open the sidebar for a freshly created worktree (gated by auto_open; see herdr/sidebar.sh).
+[[events]]
+on = "worktree.created"
+command = ["bash", "herdr/sidebar.sh", "auto-open"]

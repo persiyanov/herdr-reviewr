@@ -75,6 +75,10 @@ struct TabStash {
     diff_scroll: usize,
     h_scroll: usize,
     select_anchor: Option<usize>,
+    preview: bool,
+    preview_scroll: usize,
+    preview_scrolled: bool,
+    preview_text: String,
 }
 
 /// The interaction mode the UI is in.
@@ -104,6 +108,9 @@ pub enum FooterAction {
     CollapseDir,
     /// Switch focus between the file list and the diff; the label names the destination pane.
     TogglePane,
+    /// Toggle the markdown preview; the label names the destination view (`m preview`
+    /// on source, `m source` in the preview).
+    Preview,
     Scope,
     Send,
     List,
@@ -190,6 +197,35 @@ pub struct App {
     pub h_scroll: usize,
     /// Whether long diff lines wrap (default) or are scrolled horizontally.
     pub wrap: bool,
+    /// Whether the markdown preview is open for the active file tab's file. Only `All
+    /// files` renders it; the flag is per file tab and dies with a file change
+    /// (specs/diff-view.md). Only the armed toggle — `preview_active()` is the honest
+    /// on-screen predicate.
+    preview: bool,
+    /// Top visible rendered line of the markdown preview, clamped to the rendered length.
+    pub preview_scroll: usize,
+    /// The open markdown file's current content — the preview's render input, refreshed
+    /// by `set_file_view` so no frame rebuilds it. Empty for a non-markdown file.
+    preview_text: String,
+    /// The preview's maximum useful scroll (rendered lines minus the viewport), noted
+    /// by the renderer each frame so [`Self::preview_scroll_by`] can clamp. `usize::MAX`
+    /// until the first paint.
+    preview_max_scroll: std::cell::Cell<usize>,
+    /// Whether a scroll input moved the preview since entry — the exact-restore
+    /// predicate; a refresh clamp never sets it (specs/diff-view.md).
+    preview_scrolled: bool,
+    /// The diff pane's inner width, noted each paint, so the toggle's position mapping
+    /// renders at the width the pane will paint with.
+    pane_width: std::cell::Cell<usize>,
+    /// The link regions painted this frame — a click resolves against the painted
+    /// frame (specs/markdown.md).
+    painted_links: std::cell::RefCell<Vec<PaintedLink>>,
+    /// The painted markdown body's heading anchors as `(slug, content line index)`,
+    /// covering the whole body — an anchor click can jump past the viewport.
+    painted_anchors: std::cell::RefCell<Vec<(String, usize)>>,
+    /// The PR read pane's maximum useful scroll, noted the same way for
+    /// [`Self::pr_scroll_read`].
+    pr_read_max_scroll: std::cell::Cell<usize>,
     /// The file-list pane's width as a percent of the body; the diff takes the rest. The
     /// reviewer resizes it by dragging the divider or with `[` / `]`.
     pub list_pct: u16,
@@ -206,6 +242,10 @@ pub struct App {
     pub should_quit: bool,
     /// The read-only `PR` tab's view of the pull request (`specs/forge-host.md`).
     pub pr: forge::PrView,
+    /// Persistent same-input fetch remedy shown without replacing the visible snapshot.
+    pr_notice: Option<String>,
+    /// A same-input refresh that crossed the loading-indicator delay.
+    pr_refreshing: bool,
     /// The PR navigator's cursor over its rows (checks then comments).
     pub(crate) pr_cursor: usize,
     /// Top visible line of the PR read pane, reset when the selected comment changes.
@@ -220,21 +260,55 @@ pub struct App {
     theme_name: &'static str,
     /// The `--theme` override name (highest precedence); `None` lets the config file decide.
     cli_theme_name: Option<String>,
+    /// The plugin is either ready with one validated snapshot or wholly blocked on its error.
+    config: PluginConfigState,
     /// The last theme name requested, so re-resolving the same name skips work and logging.
     requested_theme_name: Option<String>,
     cache: DiffCache,
+    /// The one-slot markdown render memo behind the PR read pane and the File-view
+    /// preview (`specs/markdown.md`). Interior-mutable so the renderer can fill it from
+    /// `&App`; cleared with the diff cache on a theme switch.
+    markdown_cache: std::cell::RefCell<crate::markdown::RenderCache>,
     /// The `last-turn` baseline lifecycle, driven by polling the agent's status.
     turn: TurnTracker,
     /// This worktree's key for the private baseline ref, fixed for the session.
     turn_key: String,
 }
 
+/// One painted link region: `x_start..x_end` on screen row `y`, in absolute cells.
+#[derive(Clone, Debug)]
+struct PaintedLink {
+    x_start: u16,
+    x_end: u16,
+    y: u16,
+    url: std::sync::Arc<str>,
+}
+
+#[derive(Debug)]
+enum PluginConfigState {
+    Ready(crate::config::PluginConfig),
+    Blocked { error: String },
+}
+
 impl App {
     pub fn new(repo: PathBuf, scope: Scope, base: Option<String>) -> Self {
+        Self::build(repo, scope, base, true)
+    }
+
+    /// Construct the error-only sidebar without reading repository state.
+    pub(crate) fn blocked(repo: PathBuf, scope: Scope, base: Option<String>) -> Self {
+        Self::build(repo, scope, base, false)
+    }
+
+    fn build(repo: PathBuf, scope: Scope, base: Option<String>, load_turn: bool) -> Self {
         // Resume any persisted turn baseline for this worktree, so `last-turn` keeps its
         // anchor across a sidebar restart (specs/herdr-host.md).
         let turn_key = git::worktree_key(&repo);
-        let turn = TurnTracker::with_baseline(git::read_baseline_ref(&repo, &turn_key));
+        let turn = if load_turn {
+            TurnTracker::with_baseline(git::read_baseline_ref(&repo, &turn_key))
+        } else {
+            TurnTracker::default()
+        };
         let theme = theme::resolve(None);
         Self {
             repo,
@@ -261,6 +335,15 @@ impl App {
             diff_scroll: 0,
             h_scroll: 0,
             wrap: true,
+            preview: false,
+            preview_scroll: 0,
+            preview_text: String::new(),
+            preview_max_scroll: std::cell::Cell::new(usize::MAX),
+            preview_scrolled: false,
+            pane_width: std::cell::Cell::new(0),
+            painted_links: std::cell::RefCell::new(Vec::new()),
+            painted_anchors: std::cell::RefCell::new(Vec::new()),
+            pr_read_max_scroll: std::cell::Cell::new(usize::MAX),
             list_pct: DEFAULT_LIST_PCT,
             resizing: false,
             select_anchor: None,
@@ -271,7 +354,9 @@ impl App {
             caret: 0,
             status: String::new(),
             should_quit: false,
-            pr: forge::PrView::Loading,
+            pr: forge::PrView::Pending,
+            pr_notice: None,
+            pr_refreshing: false,
             pr_cursor: 0,
             pr_read_scroll: 0,
             pr_pending: false,
@@ -279,8 +364,10 @@ impl App {
             palette: theme.palette,
             theme_name: theme.name,
             cli_theme_name: None,
+            config: PluginConfigState::Ready(crate::config::PluginConfig::default()),
             requested_theme_name: None,
             cache: DiffCache::new(),
+            markdown_cache: std::cell::RefCell::new(crate::markdown::RenderCache::default()),
             turn,
             turn_key,
         }
@@ -302,6 +389,7 @@ impl App {
             self.palette = theme.palette;
             self.highlighter = Highlighter::new(theme.syntax);
             self.cache = DiffCache::new();
+            self.markdown_cache.borrow_mut().clear();
         }
     }
 
@@ -311,11 +399,114 @@ impl App {
         self.refresh_theme();
     }
 
-    /// Re-resolve the active theme: the `--theme` override, else the config file's `theme`,
-    /// else the default. Idempotent — `set_theme` no-ops when the name is unchanged.
-    pub fn refresh_theme(&mut self) {
-        let name = self.cli_theme_name.clone().or_else(crate::config::config_file_theme);
-        self.set_theme(name.as_deref());
+    /// Apply one complete validated plugin configuration snapshot.
+    pub fn set_plugin_config(&mut self, config: crate::config::PluginConfig) {
+        self.config = PluginConfigState::Ready(config);
+        self.refresh_theme();
+    }
+
+    /// The validated plugin configuration snapshot normal work currently uses.
+    pub fn plugin_config(&self) -> Option<&crate::config::PluginConfig> {
+        match &self.config {
+            PluginConfigState::Ready(config) => Some(config),
+            PluginConfigState::Blocked { .. } => None,
+        }
+    }
+
+    /// Block the sidebar on one whole-file configuration failure.
+    pub fn set_config_error(&mut self, error: String) {
+        self.config = PluginConfigState::Blocked { error };
+        self.pr_pending = false;
+    }
+
+    /// The active keymap: the snapshot's while ready, the defaults while blocked. The blocked
+    /// arm only keeps this total — blocked key handling never reaches dispatch; the event
+    /// loop's error gate answers the default `quit` key itself (`lib.rs`).
+    pub fn keymap(&self) -> &crate::keymap::Keymap {
+        match &self.config {
+            PluginConfigState::Ready(config) => config.keymap(),
+            PluginConfigState::Blocked { .. } => crate::keymap::default_keymap(),
+        }
+    }
+
+    /// The error-only state rendered while plugin configuration is invalid.
+    pub fn config_error(&self) -> Option<&str> {
+        match &self.config {
+            PluginConfigState::Ready(_) => None,
+            PluginConfigState::Blocked { error, .. } => Some(error),
+        }
+    }
+
+    /// Move user-authored review state into a freshly loaded app after config recovery. Saved
+    /// comments always survive; an in-progress draft keeps the exact frozen diff it was written
+    /// against, matching the ordinary refresh invariant.
+    pub(crate) fn carry_authored_state_from(&mut self, old: &mut Self) {
+        self.store = std::mem::take(&mut old.store);
+        self.list_cursor = old.list_cursor;
+        let old_mode = old.mode.clone();
+        match old_mode {
+            Mode::Normal => {}
+            Mode::List | Mode::Composing { .. } => {
+                self.scope = old.scope;
+                self.tab = old.tab;
+                self.active_file_tab = old.active_file_tab;
+                self.focus = old.focus;
+                self.entries = std::mem::take(&mut old.entries);
+                self.file_rows = std::mem::take(&mut old.file_rows);
+                self.file_cursor = old.file_cursor;
+                self.file_scroll = old.file_scroll;
+                self.reveal_files = old.reveal_files;
+                self.reveal_diff = old.reveal_diff;
+                self.changed = std::mem::take(&mut old.changed);
+                self.diff = std::mem::take(&mut old.diff);
+                self.visible = std::mem::take(&mut old.visible);
+                self.expanded_folds = std::mem::take(&mut old.expanded_folds);
+                self.diff_path = old.diff_path.take();
+                self.diff_cursor = old.diff_cursor;
+                self.diff_scroll = old.diff_scroll;
+                self.h_scroll = old.h_scroll;
+                self.select_anchor = old.select_anchor;
+                self.resume_list = old.resume_list;
+                self.toggled_dirs = std::mem::take(&mut old.toggled_dirs);
+                self.stash = std::mem::take(&mut old.stash);
+                self.wrap = old.wrap;
+                self.preview = old.preview;
+                self.preview_scroll = old.preview_scroll;
+                self.preview_scrolled = old.preview_scrolled;
+                self.preview_text = std::mem::take(&mut old.preview_text);
+                self.list_pct = old.list_pct;
+                self.mode = old.mode.clone();
+                self.input = std::mem::take(&mut old.input);
+                self.caret = old.caret;
+            }
+        }
+    }
+
+    fn config_snapshot(&self) -> &crate::config::PluginConfig {
+        match &self.config {
+            PluginConfigState::Ready(config) => config,
+            PluginConfigState::Blocked { .. } => {
+                unreachable!("normal work is gated while plugin configuration is invalid")
+            }
+        }
+    }
+
+    fn ensure_config_ready(&self) -> Result<()> {
+        match &self.config {
+            PluginConfigState::Ready(_) => Ok(()),
+            PluginConfigState::Blocked { error } => {
+                Err(anyhow::anyhow!("plugin configuration is invalid: {error}"))
+            }
+        }
+    }
+
+    /// Re-resolve the active theme from the CLI override or current validated snapshot.
+    fn refresh_theme(&mut self) {
+        let name = self
+            .cli_theme_name
+            .clone()
+            .unwrap_or_else(|| self.config_snapshot().theme().to_owned());
+        self.set_theme(Some(&name));
     }
 
     /// The active palette every renderer paints from (`specs/theme.md`).
@@ -422,9 +613,7 @@ impl App {
     /// Never touches the comment store or the in-progress input — that is the
     /// "a comment is never lost to a refresh" invariant (`specs/overview.md`).
     pub fn reload(&mut self) -> Result<()> {
-        // The active theme can change between polls (a config edit), independent of the tab, so
-        // re-resolve cheaply first — it no-ops unless the name actually changed (specs/theme.md).
-        self.refresh_theme();
+        self.ensure_config_ready()?;
         // The PR tab holds its own state and renders nothing from the file tree, so a poll on
         // it skips the rebuild; switching back to a file tab reloads it then (specs/tui.md).
         if !self.tab.is_file_tab() {
@@ -458,7 +647,12 @@ impl App {
                 Some(t) => git::changed_against_tree(&self.repo, t)?,
                 None => Vec::new(),
             },
-            _ => git::changed_files(&self.repo, self.scope, self.base.as_deref())?,
+            _ => git::changed_files(
+                &self.repo,
+                self.scope,
+                self.base.as_deref(),
+                self.config_snapshot().base_branches(),
+            )?,
         };
         self.changed = changed.iter().map(|f| (f.path.clone(), Annotation::from(f))).collect();
         self.entries = match self.tab {
@@ -533,6 +727,13 @@ impl App {
     /// Build the File view for `path`: its current worktree content as `Context` rows, no
     /// folds. The `All files` left pane (specs/diff-view.md). Content is scope-independent.
     fn set_file_view(&mut self, path: String) {
+        // Opening a different file starts in source; a same-file refresh keeps the
+        // preview choice and its scroll (specs/diff-view.md).
+        if self.diff_path.as_deref() != Some(path.as_str()) {
+            self.preview = false;
+            self.preview_scroll = 0;
+            self.preview_max_scroll.set(usize::MAX);
+        }
         self.diff_path = Some(path.clone());
         self.expanded_folds.clear(); // the File view has no folds
         // Check the on-disk size before reading: an over-budget blob (a model weight, a vendored
@@ -541,10 +742,20 @@ impl App {
         let oversize = std::fs::metadata(self.repo.join(&path))
             .is_ok_and(|m| crate::diff::over_byte_budget(m.len() as usize));
         self.diff = if oversize {
+            self.preview_text.clear();
             FileDiff::too_large_notice(path)
         } else {
             let content = worktree_content(&self.repo, &path);
-            self.cache.get_file(path, &content, &self.highlighter)
+            let diff = self.cache.get_file(path, &content, &self.highlighter);
+            // Keep the preview's render input current without a per-frame rebuild. A file
+            // the source view degrades to a notice never previews (specs/diff-view.md),
+            // so its content is not held either.
+            if self.markdown_file() && diff.state == crate::diff::FileState::Normal {
+                self.preview_text = content;
+            } else {
+                self.preview_text.clear();
+            }
+            diff
         };
         self.rebuild_visible();
         self.settle_left();
@@ -627,7 +838,11 @@ impl App {
                 (old, new)
             }
             Scope::Branch => {
-                let mb = git::merge_base(&self.repo, self.base.as_deref());
+                let mb = git::merge_base(
+                    &self.repo,
+                    self.base.as_deref(),
+                    self.config_snapshot().base_branches(),
+                );
                 let old =
                     mb.map(|m| git::file_content(&self.repo, &m, old_path)).unwrap_or_default();
                 (old, worktree_content(&self.repo, new_path))
@@ -654,6 +869,9 @@ impl App {
     /// propagates — a missing herdr is normal, so failures only log. Returns whether this
     /// sample ended a turn (the agent went idle after acting), the `PR` tab's refetch signal.
     pub fn track_turn(&mut self) -> bool {
+        if self.plugin_config().is_none() {
+            return false;
+        }
         let status = crate::herdr::resolved_agent_status().ok().flatten();
         self.apply_agent_status(status.as_deref())
     }
@@ -665,6 +883,9 @@ impl App {
     /// only log, so a transient git failure never crashes the poll. Returns whether this
     /// sample ended a turn (a `working`→resting edge), the `PR` tab's refetch signal.
     pub fn apply_agent_status(&mut self, status: Option<&str>) -> bool {
+        if self.plugin_config().is_none() {
+            return false;
+        }
         let Some(status) = status else { return false };
         let parsed = Status::parse(status);
         // Read the turn-end edge before `observe` advances `prev`.
@@ -703,7 +924,7 @@ impl App {
     /// while wrap is on, since the renderer ignores `h_scroll` when wrapping — so the offset
     /// never silently accumulates and then jumps the view when wrap is toggled off.
     pub fn scroll_h(&mut self, delta: isize) {
-        if self.wrap {
+        if self.wrap || self.preview_active() {
             return;
         }
         self.h_scroll = if delta >= 0 {
@@ -715,8 +936,192 @@ impl App {
 
     /// Toggle line wrap; reset the horizontal scroll, which only applies with wrap off.
     pub fn toggle_wrap(&mut self) {
+        if self.preview_active() {
+            return; // the wrap toggle is inert in the preview (specs/diff-view.md)
+        }
         self.wrap = !self.wrap;
         self.h_scroll = 0;
+    }
+
+    /// Whether the open file qualifies for the markdown preview: a `.md`/`.markdown`
+    /// extension, case-insensitive (specs/diff-view.md).
+    #[must_use]
+    fn markdown_file(&self) -> bool {
+        self.diff_path.as_deref().is_some_and(is_markdown_path)
+    }
+
+    /// Whether the markdown preview is on screen: `All files`, the toggle on, the file
+    /// still qualifying, and the source view rendering rows (not a notice) — a file
+    /// renamed away from markdown or degraded mid-preview drops back to source.
+    #[must_use]
+    pub fn preview_active(&self) -> bool {
+        self.tab == Tab::AllFiles
+            && self.preview
+            && self.markdown_file()
+            && !self.visible.is_empty()
+    }
+
+    /// Toggle source ↔ preview on a markdown file in `All files`; inert anywhere else.
+    /// Entering clears a live selection and opens at the cursor's block; returning maps
+    /// the top visible block back to a source cursor (specs/diff-view.md).
+    pub fn toggle_preview(&mut self) {
+        // A file whose source view shows a notice (or nothing) never previews, so the
+        // title can never claim a preview over a notice (specs/diff-view.md).
+        if self.tab != Tab::AllFiles || !self.markdown_file() || self.visible.is_empty() {
+            return;
+        }
+        if self.preview {
+            self.return_from_preview();
+        } else {
+            self.clear_selection();
+            self.preview = true;
+            self.preview_scrolled = false;
+            self.align_preview_to_cursor();
+        }
+    }
+
+    /// Scroll the preview to the block holding the source cursor's line, or the nearest
+    /// block above it. Meta source lines are non-decreasing, so both lookups bisect.
+    fn align_preview_to_cursor(&mut self) {
+        self.preview_scroll = 0;
+        let width = self.pane_width.get();
+        if width == 0 || self.preview_text.is_empty() {
+            return;
+        }
+        // File-view rows are the file's lines one to one, so the cursor's source line
+        // is its row index plus one.
+        let target = self.diff_cursor + 1;
+        let rendered = self.markdown_render(&self.preview_text, width);
+        let after = rendered.meta.partition_point(|m| m.source_line <= target);
+        let Some(last) = after.checked_sub(1) else {
+            return;
+        };
+        let block_line = rendered.meta[last].source_line;
+        self.preview_scroll = rendered.meta.partition_point(|m| m.source_line < block_line);
+    }
+
+    /// Leave the preview. A scrolled preview maps its top visible block back to a source
+    /// cursor; an unscrolled one leaves the source position exactly as it was.
+    fn return_from_preview(&mut self) {
+        let scrolled = self.preview_scrolled;
+        self.preview = false;
+        let width = self.pane_width.get();
+        if !scrolled || width == 0 || self.preview_text.is_empty() {
+            return;
+        }
+        let rendered = self.markdown_render(&self.preview_text, width);
+        if rendered.meta.is_empty() || self.visible.is_empty() {
+            return;
+        }
+        // Clamp to what the frame painted: a stale scroll past the max would map to a
+        // block below the one the reader actually saw at the top of the pane.
+        let top =
+            self.preview_scroll.min(self.preview_max_scroll.get()).min(rendered.meta.len() - 1);
+        let row = rendered.meta[top].source_line.saturating_sub(1);
+        self.diff_cursor = row.min(self.visible.len() - 1);
+        self.reveal_diff = true;
+    }
+
+    /// Scroll the preview by `delta` rendered lines, stopping with the last line at the
+    /// pane's bottom edge — content that fits the pane does not scroll, and over-scroll
+    /// never builds a dead zone the reader must unwind.
+    pub fn preview_scroll_by(&mut self, delta: isize) {
+        self.preview_scrolled = true;
+        self.preview_scroll =
+            clamp_scroll(self.preview_scroll, delta, self.preview_max_scroll.get());
+    }
+
+    /// The open markdown file's current content — the preview's render input.
+    #[must_use]
+    pub(crate) fn preview_text(&self) -> &str {
+        &self.preview_text
+    }
+
+    /// Note the preview's maximum useful scroll; the renderer calls this each preview frame.
+    pub fn note_preview_max_scroll(&self, max: usize) {
+        self.preview_max_scroll.set(max);
+    }
+
+    /// Note the PR read pane's maximum useful scroll; the renderer calls this each frame.
+    pub(crate) fn note_pr_read_max_scroll(&self, max: usize) {
+        self.pr_read_max_scroll.set(max);
+    }
+
+    /// Note the diff pane's inner width; the renderer calls this each paint, and the
+    /// toggle's position mapping renders at this width.
+    pub fn note_diff_width(&self, width: usize) {
+        self.pane_width.set(width);
+    }
+
+    /// Drop the painted link and anchor regions; the renderer calls this each frame.
+    pub(crate) fn clear_painted_links(&self) {
+        self.painted_links.borrow_mut().clear();
+        self.painted_anchors.borrow_mut().clear();
+    }
+
+    /// Note one painted link region, in absolute screen cells.
+    pub(crate) fn note_painted_link(
+        &self,
+        x_start: u16,
+        x_end: u16,
+        y: u16,
+        url: std::sync::Arc<str>,
+    ) {
+        self.painted_links.borrow_mut().push(PaintedLink { x_start, x_end, y, url });
+    }
+
+    /// Note one heading anchor of the painted markdown body, by content line index.
+    pub(crate) fn note_painted_anchor(&self, slug: String, content_line: usize) {
+        self.painted_anchors.borrow_mut().push((slug, content_line));
+    }
+
+    /// The destination under `(col, row)` on the painted frame, if a link was there.
+    #[must_use]
+    pub fn painted_link_at(&self, col: u16, row: u16) -> Option<std::sync::Arc<str>> {
+        self.painted_links
+            .borrow()
+            .iter()
+            .find(|l| l.y == row && col >= l.x_start && col < l.x_end)
+            .map(|l| l.url.clone())
+    }
+
+    /// Act on a clicked link destination (`specs/markdown.md`): a `#anchor` scrolls its
+    /// own surface to the matching heading, an `http(s)` destination opens in the
+    /// browser, and anything else is inert.
+    pub fn open_link(&mut self, url: &str) {
+        if let Some(fragment) = url.strip_prefix('#') {
+            // The fragment runs through the same normalization that made the slugs, so
+            // `#Set-Up!` and `#İstanbul` find their headings (`specs/markdown.md`).
+            self.jump_to_anchor(&crate::markdown::slug_text(fragment));
+            return;
+        }
+        if let Ok(clean) = crate::browser::openable_url(url) {
+            match crate::browser::open(clean) {
+                Ok(()) => self.status = "opened link in browser".to_string(),
+                Err(e) => self.status = e.to_string(),
+            }
+        }
+    }
+
+    /// Scroll the painted markdown surface to `slug`'s heading; a missing anchor is inert.
+    fn jump_to_anchor(&mut self, slug: &str) {
+        let target = self.painted_anchors.borrow().iter().find(|(s, _)| s == slug).map(|(_, i)| *i);
+        let Some(idx) = target else {
+            return;
+        };
+        if self.tab == Tab::Pr {
+            self.pr_read_scroll = idx.min(self.pr_read_max_scroll.get());
+        } else if self.preview_active() {
+            self.preview_scrolled = true;
+            self.preview_scroll = idx.min(self.preview_max_scroll.get());
+        }
+    }
+
+    /// Render `text` as markdown wrapped to `width`, through the one-slot memo
+    /// (`specs/markdown.md`).
+    #[must_use]
+    pub(crate) fn markdown_render(&self, text: &str, width: usize) -> crate::markdown::Rendered {
+        self.markdown_cache.borrow_mut().get(text, width, &self.highlighter, &self.palette)
     }
 
     /// Widen (`+`) or narrow (`-`) the file-list pane by `delta` percent, clamped so neither
@@ -791,6 +1196,7 @@ impl App {
     /// Switch the changeset scope and reload. A no-op while composing, so a comment
     /// in progress is never stranded against a different diff.
     pub fn set_scope(&mut self, scope: Scope) -> Result<()> {
+        self.ensure_config_ready()?;
         if self.scope != scope && !self.composing() {
             self.scope = scope;
             // A scope switch changes the Changes changeset (and each file's old side), so the
@@ -825,6 +1231,7 @@ impl App {
     /// file and scroll, so returning to a tab lands exactly where you left it (specs/tui.md). A
     /// no-op on the active tab or while composing; focus stays on the same side.
     pub fn set_tab(&mut self, tab: Tab) -> Result<()> {
+        self.ensure_config_ready()?;
         if self.tab == tab || self.composing() {
             return Ok(());
         }
@@ -855,35 +1262,85 @@ impl App {
 
     // ---- PR tab (specs/forge-host.md, specs/tui.md) -------------------------------------
 
+    /// Clear a snapshot whose complete fetch input no longer matches the worktree.
+    pub fn clear_pr(&mut self) {
+        self.pr = forge::PrView::Pending;
+        self.pr_notice = None;
+        self.pr_refreshing = false;
+        self.pr_cursor = 0;
+        self.pr_read_scroll = 0;
+    }
+
     /// Apply a snapshot fetched off-thread (`forge::fetch` runs on a worker so the UI never
     /// blocks — `lib.rs`). A transient `Error` keeps the last good snapshot frozen with a status
     /// note, so a failed poll never blanks a populated tab; the cursor clamps to the new rows.
     pub fn apply_pr(&mut self, view: forge::PrView) {
-        if let (forge::PrView::Error(msg), forge::PrView::Pr(_)) = (&view, &self.pr) {
-            self.status = format!("PR refresh failed: {msg}");
+        self.pr_refreshing = false;
+        let has_snapshot = matches!(
+            self.pr,
+            forge::PrView::Pr(_) | forge::PrView::NoPr(_) | forge::PrView::Ambiguous(_)
+        );
+        if has_snapshot
+            && let Some(message) =
+                view.retry_remedy(self.keymap().hint(crate::keymap::Action::Refresh))
+        {
+            self.pr_notice = Some(message);
+            self.pr_read_scroll = 0;
             return;
         }
-        // Follow the selected comment by identity, not index, so a refresh that inserts a newer
+        self.pr_notice = None;
+        // Follow the selected row by identity, not index, so a refresh that inserts a newer
         // comment (the list is newest-first) keeps the cursor on the same one and leaves the read
         // scroll intact — only a vanished or absent selection resets it (mirrors the file tabs'
-        // poll-preservation, specs/tui.md).
+        // poll-preservation, specs/tui.md). The pinned description row's identity is itself:
+        // it survives while the new snapshot still has a description, and an emptied one
+        // vanishes like a deleted comment.
+        let on_description = self.pr_on_description();
         let selected = self
             .pr_selected_comment()
             .map(|c| (c.author.clone(), c.created_at.clone(), c.anchor.clone()));
         self.pr = view;
-        let restored = selected.as_ref().and_then(|(author, created, anchor)| {
-            self.pr_snapshot()?.comments.iter().position(|c| {
-                c.author == *author && c.created_at == *created && c.anchor == *anchor
+        let offset = self.pr_description_offset();
+        let restored = if on_description {
+            self.pr_has_description().then_some(0)
+        } else {
+            selected.as_ref().and_then(|(author, created, anchor)| {
+                let i = self.pr_snapshot()?.comments.iter().position(|c| {
+                    c.author == *author && c.created_at == *created && c.anchor == *anchor
+                })?;
+                Some(i + offset)
             })
-        });
+        };
         if let Some(i) = restored {
             self.pr_cursor = i;
-        } else if self.pr_cursor >= self.pr_row_count() {
-            // The selection vanished (or there was none) and the cursor now points past the end:
-            // clamp it back into range and reset the read pane.
-            self.pr_cursor = self.pr_row_count().saturating_sub(1);
-            self.pr_read_scroll = 0;
+        } else {
+            // The selection vanished (or there was none): clamp the cursor into range,
+            // and reset the read pane whenever a selected row disappeared — the pane now
+            // shows a different row (specs/tui.md).
+            let clamped = self.pr_row_count().saturating_sub(1);
+            if self.pr_cursor > clamped || on_description || selected.is_some() {
+                self.pr_read_scroll = 0;
+            }
+            self.pr_cursor = self.pr_cursor.min(clamped);
         }
+    }
+
+    /// Persistent remedy for a failed same-input refresh.
+    pub fn pr_notice(&self) -> Option<&str> {
+        self.pr_notice.as_deref()
+    }
+
+    pub fn set_pr_refreshing(&mut self, refreshing: bool) {
+        if refreshing && matches!(self.pr, forge::PrView::Pending) {
+            self.pr = forge::PrView::Loading;
+            self.pr_refreshing = false;
+        } else {
+            self.pr_refreshing = refreshing;
+        }
+    }
+
+    pub fn pr_refreshing(&self) -> bool {
+        self.pr_refreshing
     }
 
     /// The resolved snapshot, or `None` in a loading/degraded view.
@@ -895,17 +1352,43 @@ impl App {
         }
     }
 
-    /// The navigator's cursor count: comments only. Checks are a status display, not a cursor
-    /// stop — landing on one shows nothing the row itself doesn't.
+    /// Whether the snapshot carries a PR description — the pinned `description` row's
+    /// existence condition (specs/tui.md).
     #[must_use]
-    pub fn pr_row_count(&self) -> usize {
-        self.pr_snapshot().map_or(0, |s| s.comments.len())
+    pub fn pr_has_description(&self) -> bool {
+        self.pr_snapshot().is_some_and(|s| !s.body.trim().is_empty())
     }
 
-    /// The comment under the navigator cursor, for the read pane.
+    /// Whether the navigator cursor sits on the pinned `description` row.
+    #[must_use]
+    pub fn pr_on_description(&self) -> bool {
+        self.pr_has_description() && self.pr_cursor == 0
+    }
+
+    /// How many cursor rows the pinned description occupies before the comments — the
+    /// one home for the comment-index ↔ cursor-index shift every consumer applies.
+    #[must_use]
+    pub fn pr_description_offset(&self) -> usize {
+        usize::from(self.pr_has_description())
+    }
+
+    /// The navigator's cursor count: the pinned description row (when the PR has one)
+    /// plus the comments. Checks are a status display, not a cursor stop — landing on
+    /// one shows nothing the row itself doesn't.
+    #[must_use]
+    pub fn pr_row_count(&self) -> usize {
+        self.pr_snapshot().map_or(0, |s| s.comments.len() + self.pr_description_offset())
+    }
+
+    /// The comment under the navigator cursor, for the read pane. `None` on the pinned
+    /// description row ([`Self::pr_on_description`]) and in a degraded view.
     #[must_use]
     pub fn pr_selected_comment(&self) -> Option<&forge::Comment> {
-        self.pr_snapshot()?.comments.get(self.pr_cursor)
+        if self.pr_on_description() {
+            return None;
+        }
+        let offset = self.pr_description_offset();
+        self.pr_snapshot()?.comments.get(self.pr_cursor - offset)
     }
 
     /// Move the navigator cursor by `delta`, resetting the read pane to the top.
@@ -924,10 +1407,12 @@ impl App {
         self.pr_read_scroll = 0;
     }
 
-    /// Scroll the read pane by `delta` lines (the wheel and `PageUp`/`PageDown`); the renderer
-    /// clamps to the body height.
+    /// Scroll the read pane by `delta` lines (the wheel and `PageUp`/`PageDown`), stopping
+    /// with the last line at the pane's bottom edge. The base clamps first, so a stale
+    /// scroll (the pane grew, or the body shrank) never swallows the first upward input.
     pub(crate) fn pr_scroll_read(&mut self, delta: isize) {
-        self.pr_read_scroll = self.pr_read_scroll.saturating_add_signed(delta);
+        self.pr_read_scroll =
+            clamp_scroll(self.pr_read_scroll, delta, self.pr_read_max_scroll.get());
     }
 
     /// Open the pull request in the browser (`specs/tui.md`). A resolved PR always carries a
@@ -959,6 +1444,10 @@ impl App {
         std::mem::swap(&mut self.diff_scroll, &mut self.stash.diff_scroll);
         std::mem::swap(&mut self.h_scroll, &mut self.stash.h_scroll);
         std::mem::swap(&mut self.select_anchor, &mut self.stash.select_anchor);
+        std::mem::swap(&mut self.preview, &mut self.stash.preview);
+        std::mem::swap(&mut self.preview_scroll, &mut self.stash.preview_scroll);
+        std::mem::swap(&mut self.preview_text, &mut self.stash.preview_text);
+        std::mem::swap(&mut self.preview_scrolled, &mut self.stash.preview_scrolled);
     }
 
     pub fn toggle_focus(&mut self) {
@@ -973,6 +1462,7 @@ impl App {
     /// keeps the current diff so scanning the tree never blanks the pane. The page/half-page keys
     /// reuse this with a larger `delta`, since paging is just a bigger cursor move in the focus.
     pub fn move_cursor(&mut self, delta: isize) -> Result<()> {
+        self.ensure_config_ready()?;
         match self.focus {
             Focus::Files => {
                 if !self.file_rows.is_empty() {
@@ -984,7 +1474,11 @@ impl App {
                 }
             }
             Focus::Diff => {
-                if !self.visible.is_empty() {
+                // The preview has no cursor: vertical movement scrolls it, and the source
+                // view's cursor waits untouched for the toggle back (specs/diff-view.md).
+                if self.preview_active() {
+                    self.preview_scroll_by(delta);
+                } else if !self.visible.is_empty() {
                     let mut target = step(self.diff_cursor, delta, self.visible.len());
                     if let Some(a) = self.select_anchor {
                         target = self.fold_clamped(a, target);
@@ -1011,6 +1505,7 @@ impl App {
     /// Act on the file-list row at `index` (a mouse click): a file opens its diff, a
     /// directory toggles its expansion.
     pub fn select_file(&mut self, index: usize) -> Result<()> {
+        self.ensure_config_ready()?;
         if index >= self.file_rows.len() {
             return Ok(());
         }
@@ -1111,6 +1606,9 @@ impl App {
 
     /// Expand the directory under the cursor (`→`); a no-op if it is a file or already open.
     pub fn expand_dir(&mut self) {
+        if self.plugin_config().is_none() {
+            return;
+        }
         if let Some(path) = self.dir_under_cursor()
             && self.set_dir_expanded(&path, true)
         {
@@ -1120,6 +1618,9 @@ impl App {
 
     /// Collapse the directory under the cursor (`←`); a no-op if it is a file or already shut.
     pub fn collapse_dir(&mut self) {
+        if self.plugin_config().is_none() {
+            return;
+        }
         if let Some(path) = self.dir_under_cursor()
             && self.set_dir_expanded(&path, false)
         {
@@ -1150,6 +1651,10 @@ impl App {
     /// so wheeling to read context never moves what a comment will attach to. The upper
     /// bound is applied each frame by `bound_diff_scroll`.
     pub fn wheel_diff(&mut self, delta: isize) {
+        if self.preview_active() {
+            self.preview_scroll_by(delta);
+            return;
+        }
         if self.visible.is_empty() {
             return;
         }
@@ -1191,6 +1696,9 @@ impl App {
 
     /// Toggle a range-selection anchor at the current diff line.
     pub fn toggle_select(&mut self) {
+        if self.preview_active() {
+            return; // the preview is read-only (specs/diff-view.md)
+        }
         if self.focus == Focus::Diff && !self.visible.is_empty() {
             self.select_anchor = match self.select_anchor {
                 Some(_) => None,
@@ -1217,6 +1725,9 @@ impl App {
     }
 
     pub fn start_comment(&mut self) {
+        if self.preview_active() {
+            return; // the preview is read-only (specs/diff-view.md)
+        }
         if self.focus == Focus::Diff && self.has_anchorable_selection() {
             // Anchor the cursor at the selection's last line so the scroll keeps it (and
             // the box drawn beneath it) in view.
@@ -1230,10 +1741,17 @@ impl App {
     }
 
     pub fn start_edit(&mut self) {
+        // Cards don't show in the preview, so `e` on the invisible source cursor is inert;
+        // an edit reached through the comments-list overlay drops back to source, where
+        // the composer and its anchor are visible (specs/diff-view.md).
+        if self.preview_active() && self.mode != Mode::List {
+            return;
+        }
         // Editing from the comments-list overlay returns there on finish (else to the diff).
         let from_list = self.mode == Mode::List;
         let Some(i) = self.target_comment() else { return };
         let Some(c) = self.store.get(i) else { return };
+        self.preview = false;
         let (file, side, start, end, text) =
             (c.file.clone(), c.side, c.start, c.end, c.text.clone());
 
@@ -1544,6 +2062,10 @@ impl App {
     }
 
     pub fn delete_comment(&mut self) {
+        // Cards don't show in the preview: `d` only acts through the comments-list overlay.
+        if self.preview_active() && self.mode != Mode::List {
+            return;
+        }
         if let Some(i) = self.target_comment() {
             logln!("comment delete [{i}]");
             self.store.take(i);
@@ -1558,6 +2080,9 @@ impl App {
 
     /// Move the diff cursor to the next (`dir >= 0`) or previous commented line.
     pub fn jump_comment(&mut self, dir: isize) {
+        if self.preview_active() {
+            return; // no cursor and no cards in the preview (specs/diff-view.md)
+        }
         let mut idxs: Vec<usize> = self.commented_lines().into_iter().collect();
         if idxs.is_empty() {
             return;
@@ -1637,7 +2162,13 @@ impl App {
         // Whether the diff-jump is already the primary, so orientation doesn't repeat the toggle.
         let mut pane_is_primary = false;
 
-        if self.file_rows.is_empty() {
+        if self.preview_active() && self.focus == Focus::Diff {
+            // The read-only preview: the way back to the commentable source leads, and
+            // no comment key is offered (specs/tui.md); the shared tail below adds the
+            // scope, send, and orientation actions. With the file list focused, the
+            // tree's own actions apply instead.
+            out.push((A::Preview, Primary));
+        } else if self.file_rows.is_empty() {
             // Nothing in scope to review: only switching scope or refreshing is useful.
             out.push((A::Scope, Primary));
             out.push((A::Refresh, Normal));
@@ -1665,6 +2196,11 @@ impl App {
         } else {
             out.push((A::Comment, Primary));
             out.push((A::Select, Normal));
+            // On a markdown file's source line, surface the way into the preview —
+            // otherwise the rendered view is undiscoverable (specs/tui.md).
+            if self.tab == Tab::AllFiles && self.markdown_file() {
+                out.push((A::Preview, Normal));
+            }
         }
 
         // Switching scope is always available while reviewing, so it shows in every context on
@@ -1831,6 +2367,22 @@ fn offset_by(scroll: usize, delta: isize) -> usize {
     }
 }
 
+/// One scroll step against a per-frame maximum. The base clamps first, so a stale
+/// over-max scroll (the pane grew, the content shrank, an entry alignment overshot)
+/// still yields to the first upward input; the result stops at the bottom edge.
+fn clamp_scroll(base: usize, delta: isize, max: usize) -> usize {
+    base.min(max).saturating_add_signed(delta).min(max)
+}
+
+/// Whether `path` names a markdown file: a `.md`/`.markdown` extension,
+/// case-insensitive (specs/diff-view.md).
+fn is_markdown_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+}
+
 /// The working-tree content of `path`, lossily as UTF-8; empty when the file is
 /// absent (a deletion) or unreadable.
 fn worktree_content(repo: &std::path::Path, path: &str) -> String {
@@ -1866,4 +2418,102 @@ fn anchor(selected: &[&Row]) -> Option<(Side, u32, u32, String)> {
     let min = *old_nos.iter().min()?;
     let max = *old_nos.iter().max()?;
     Some((Side::Old, min, max, snippet))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{App, Mode};
+    use crate::model::{Comment, Scope, Side};
+    use std::path::PathBuf;
+
+    #[test]
+    fn the_read_pane_scroll_stops_at_the_bottom_edge() {
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        app.note_pr_read_max_scroll(4);
+        app.pr_scroll_read(100);
+        assert_eq!(app.pr_read_scroll, 4, "scroll stops with the last line at the pane edge");
+        app.pr_scroll_read(-1);
+        assert_eq!(app.pr_read_scroll, 3, "no dead zone above the clamp");
+        app.note_pr_read_max_scroll(0);
+        app.pr_scroll_read(5);
+        assert_eq!(app.pr_read_scroll, 0, "content that fits the pane does not scroll");
+    }
+
+    #[test]
+    fn config_recovery_carries_an_open_preview() {
+        let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        old.mode = Mode::List;
+        old.preview = true;
+        old.preview_scroll = 7;
+        old.preview_text = "# doc".to_string();
+
+        let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
+        recovered.carry_authored_state_from(&mut old);
+
+        assert!(recovered.preview, "the preview choice survives config recovery");
+        assert_eq!(recovered.preview_scroll, 7);
+        assert_eq!(recovered.preview_text(), "# doc");
+    }
+
+    #[test]
+    fn config_recovery_carries_saved_comments_and_the_live_draft() {
+        let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        old.store.add(Comment {
+            file: "src/lib.rs".to_string(),
+            side: Side::New,
+            start: 1,
+            end: 1,
+            lines: "+line".to_string(),
+            text: "saved".to_string(),
+            diff_anchored: true,
+        });
+        old.mode = Mode::Composing { editing: None };
+        old.resume_list = true;
+        old.input = "draft".to_string();
+        old.caret = 3;
+
+        let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
+        recovered.carry_authored_state_from(&mut old);
+
+        assert_eq!(recovered.store.len(), 1);
+        assert_eq!(recovered.input, "draft");
+        assert_eq!(recovered.caret, 3);
+        assert!(recovered.resume_list);
+        assert!(matches!(recovered.mode, Mode::Composing { editing: None }));
+    }
+
+    #[test]
+    fn config_recovery_keeps_the_comment_list_view_and_navigation() {
+        let mut old = App::blocked(PathBuf::from("."), Scope::Branch, None);
+        old.mode = Mode::List;
+        old.file_cursor = 4;
+        old.file_scroll = 2;
+        old.diff_cursor = 8;
+        old.diff_scroll = 5;
+        old.input = "unsent".to_string();
+
+        let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
+        recovered.carry_authored_state_from(&mut old);
+
+        assert!(matches!(recovered.mode, Mode::List));
+        assert_eq!(recovered.scope, Scope::Branch);
+        assert_eq!(recovered.file_cursor, 4);
+        assert_eq!(recovered.file_scroll, 2);
+        assert_eq!(recovered.diff_cursor, 8);
+        assert_eq!(recovered.diff_scroll, 5);
+        assert_eq!(recovered.input, "unsent");
+    }
+
+    #[test]
+    fn blocked_app_rejects_normal_repository_work_without_panicking() {
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        app.set_config_error("bad config".to_string());
+
+        assert!(app.reload().unwrap_err().to_string().contains("bad config"));
+        assert!(app.set_scope(Scope::Branch).is_err());
+        assert!(app.set_tab(super::Tab::AllFiles).is_err());
+        assert!(app.move_cursor(1).is_err());
+        assert!(app.select_file(0).is_err());
+        assert!(!app.track_turn());
+    }
 }

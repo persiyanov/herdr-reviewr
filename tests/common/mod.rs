@@ -61,3 +61,44 @@ impl Repo {
         self.git(&["commit", "-q", "-m", message]);
     }
 }
+
+/// A minimal open-PR snapshot. Tests override only the fields they exercise:
+/// `PrSnapshot { comments, ..common::pr_snapshot() }` — so a new snapshot field
+/// touches this one literal instead of every test.
+pub fn pr_snapshot() -> herdr_reviewr::forge::PrSnapshot {
+    use herdr_reviewr::forge::{Merge, PrSnapshot, PrState, Sync};
+    PrSnapshot {
+        number: 1,
+        title: "t".into(),
+        body: String::new(),
+        url: "u".into(),
+        state: PrState::Open,
+        is_draft: false,
+        head_ref: "feature".into(),
+        head_is_fork: false,
+        base_ref: "main".into(),
+        merge: Merge::Clean,
+        sync: Sync::InSync,
+        checks: Vec::new(),
+        comments: Vec::new(),
+        truncated: false,
+    }
+}
+
+/// A minimal PR conversation comment. Tests override the fields they exercise:
+/// `Comment { body: "...".into(), ..common::comment() }`.
+pub fn comment() -> herdr_reviewr::forge::Comment {
+    use herdr_reviewr::forge::{Comment, CommentKind};
+    Comment {
+        kind: CommentKind::Comment,
+        author: "ann".into(),
+        author_is_bot: false,
+        anchor: "comment".into(),
+        body: "b".into(),
+        snippet: None,
+        created_at: "2026-06-27T10:00:00Z".into(),
+        is_resolved: false,
+        is_outdated: false,
+        reply_count: 0,
+    }
+}

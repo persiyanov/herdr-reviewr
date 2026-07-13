@@ -1,12 +1,16 @@
 //! Read-only GitHub access: the pull request's identity, state, checks, and comments.
 //!
-//! See `specs/forge-host.md`. Every call here only reads through `gh` — it never posts,
-//! resolves, re-runs, merges, or otherwise writes to GitHub. The `PR` tab renders the
-//! [`PrSnapshot`] this module produces; degradation (no `gh`, no PR, …) is in-band as a
-//! [`PrView`] variant, never an error the UI must handle.
+//! See `specs/forge-host.md`. A fetch first derives [`PrFetchInput`] from local Git and one
+//! validated config snapshot, then reads its canonical target through explicitly hosted `gh`
+//! GraphQL calls. It never posts, resolves, re-runs, merges, or otherwise writes to GitHub. The
+//! `PR` tab renders the [`PrSnapshot`] this module produces; degradation is in-band as [`PrView`].
 
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -14,22 +18,49 @@ use serde_json::Value;
 /// What the `PR` tab shows: the resolved snapshot, or a degraded state with its own remedy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrView {
-    /// Not yet fetched — the tab shows a loading placeholder until the first poll lands.
+    /// Work is pending but has not crossed the loading-indicator delay.
+    Pending,
+    /// Work crossed the loading-indicator delay without producing a snapshot.
     Loading,
-    /// An open (or merged/closed) PR resolved for the branch.
+    /// An open (or merged/closed) PR resolved for one of the worktree's candidate branches.
     Pr(Box<PrSnapshot>),
-    /// The branch has no PR; push and open one.
-    NoPr,
-    /// Two or more open PRs back the branch; the count, so the user knows to pick on GitHub.
+    /// No candidate branch has a PR; the queried candidate names, so the empty state can
+    /// say what was looked for. Empty on a detached `HEAD` (nothing was queried).
+    NoPr(Vec<String>),
+    /// Two or more open PRs back the winning candidate branch and not exactly one matches
+    /// the pinned `HEAD`; the count, so the user knows to pick on GitHub.
     Ambiguous(usize),
     /// `gh` is not on `PATH`.
     NoGh,
-    /// `gh` is installed but not authenticated.
-    NotAuthed,
-    /// The worktree's remote is not GitHub.
-    NotGitHub,
+    /// `gh` is installed but not authenticated for this canonical host.
+    NotAuthed(String),
+    /// Origin is missing or has no hosted Git URL.
+    NeedsGitHubOrigin,
+    /// Origin names a hosted forge outside the supported GitHub hosts.
+    UnsupportedHost(String),
+    /// Origin names a supported host but not an owner/repository path.
+    MalformedOrigin(String),
     /// Any other `gh` failure (rate limit, offline, …); the app freezes the last good view.
     Error(String),
+}
+
+impl PrView {
+    /// A same-input failure that can be retried without discarding the visible snapshot.
+    /// Both snapshot preservation and the empty-state renderer consume this projection so a
+    /// newly added retryable failure cannot diverge between those surfaces. `refresh` is the
+    /// active `refresh` binding's hint key, so the advertised retry key follows a rebind.
+    pub fn retry_remedy(&self, refresh: char) -> Option<String> {
+        match self {
+            Self::NoGh => Some(format!("gh not found — install `gh`, then press {refresh}")),
+            Self::NotAuthed(host) => Some(format!(
+                "not signed in — run `gh auth login --hostname {host}`, then press {refresh}"
+            )),
+            Self::Error(message) => {
+                Some(format!("GitHub unavailable — {message}; press {refresh} to retry now"))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// One pull request's state, read fresh from GitHub each poll.
@@ -38,8 +69,16 @@ pub struct PrSnapshot {
     pub number: u64,
     pub title: String,
     pub url: String,
+    /// The PR description as GitHub returns it, empty when none (`specs/forge-host.md`).
+    pub body: String,
     pub state: PrState,
     pub is_draft: bool,
+    /// The PR's head branch name — the candidate that resolved, which may differ from the
+    /// worktree's local branch name (`specs/forge-host.md`).
+    pub head_ref: String,
+    /// The head branch lives in another repository (GitHub's `isCrossRepository`); shown
+    /// as a marker so a same-named fork PR is visible.
+    pub head_is_fork: bool,
     pub base_ref: String,
     pub merge: Merge,
     pub sync: Sync,
@@ -76,6 +115,8 @@ pub enum Sync {
     Unpushed(u32),
     /// The PR head is ahead of local `HEAD` by N commits.
     Behind(u32),
+    /// The PR head object is not available locally, so its relation to `HEAD` is unknowable.
+    Unknown,
 }
 
 /// One CI check, the latest run for its name.
@@ -149,29 +190,68 @@ impl PrSnapshot {
     }
 }
 
-/// Run `gh` in `repo` and return stdout, or a classified failure. `gh` resolves the repo from
-/// the worktree's remote, so no owner/repo is passed for `pr`/`repo` subcommands.
-fn gh(repo: &Path, args: &[&str]) -> Result<String, GhError> {
-    let out = Command::new("gh").current_dir(repo).args(args).output();
-    let out = match out {
-        Ok(o) => o,
+/// Run explicitly targeted `gh` arguments in `repo` and return stdout or a classified failure.
+fn gh(repo: &Path, host: &str, args: &[&str], cancelled: &AtomicBool) -> Result<String, GhError> {
+    let child = Command::new("gh")
+        .current_dir(repo)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(GhError::NoGh),
         Err(e) => return Err(GhError::Other(e.to_string())),
     };
-    if out.status.success() {
-        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+
+    // Drain both pipes while polling so a large GraphQL response cannot fill a pipe and block
+    // the child before it exits. A superseded config/fetch kills the process; the coordinator
+    // keeps ownership until this worker reports completion, preserving one real fetch in flight.
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr.read_to_end(&mut bytes);
+        bytes
+    });
+    let status = loop {
+        if cancelled.load(Ordering::Acquire) {
+            let _ = child.kill();
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(GhError::Other(error.to_string()));
+            }
+        }
+    };
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    if cancelled.load(Ordering::Acquire) {
+        return Err(GhError::Other("request cancelled".to_string()));
     }
-    Err(classify_failure(&String::from_utf8_lossy(&out.stderr)))
+    if status.success() {
+        return Ok(String::from_utf8_lossy(&stdout).into_owned());
+    }
+    Err(classify_failure(&String::from_utf8_lossy(&stderr), host))
 }
 
 /// Map a failed `gh`'s stderr to a degraded state by its wording — `gh` has no stable exit
 /// codes for these. An unrecognised failure is `Other` → a transient `Error` view.
-fn classify_failure(stderr: &str) -> GhError {
+fn classify_failure(stderr: &str, host: &str) -> GhError {
     let s = stderr.to_lowercase();
     if s.contains("not logged") || s.contains("authentication") || s.contains("gh auth login") {
-        GhError::NotAuthed
-    } else if s.contains("none of the git remotes") || s.contains("not a github") {
-        GhError::NotGitHub
+        GhError::NotAuthed(host.to_owned())
     } else {
         GhError::Other(stderr.trim().to_string())
     }
@@ -181,8 +261,7 @@ fn classify_failure(stderr: &str) -> GhError {
 #[derive(Debug, PartialEq, Eq)]
 enum GhError {
     NoGh,
-    NotAuthed,
-    NotGitHub,
+    NotAuthed(String),
     Other(String),
 }
 
@@ -190,99 +269,216 @@ impl From<GhError> for PrView {
     fn from(e: GhError) -> Self {
         match e {
             GhError::NoGh => PrView::NoGh,
-            GhError::NotAuthed => PrView::NotAuthed,
-            GhError::NotGitHub => PrView::NotGitHub,
+            GhError::NotAuthed(host) => PrView::NotAuthed(host),
             GhError::Other(m) => PrView::Error(m),
         }
     }
 }
 
-/// Read the PR for the worktree's branch, or a degraded view. Never errors — degradation is
-/// in-band so the `PR` tab always has something to render (`specs/forge-host.md`).
+/// Every local and configuration value that identifies one PR fetch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrFetchInput {
+    pub origin: crate::git::OriginIdentity,
+    pub branch: Option<String>,
+    pub head_oid: Option<String>,
+    pub candidates: Vec<String>,
+    pub base: Option<String>,
+    pub base_branches: Vec<String>,
+}
+
+/// Derive one complete fetch input without contacting GitHub.
+pub fn fetch_input(
+    repo: &Path,
+    base: Option<&str>,
+    config: &crate::config::PluginConfig,
+) -> Result<PrFetchInput, String> {
+    let local = crate::git::pr_local(repo, base, config.base_branches(), config.github_host())
+        .map_err(|error| error.0)?;
+    Ok(PrFetchInput {
+        origin: local.origin,
+        branch: local.branch,
+        head_oid: local.head_oid,
+        candidates: local.candidates,
+        base: base.map(str::to_owned),
+        base_branches: config.base_branches().to_vec(),
+    })
+}
+
+/// Read GitHub for one already-derived input. Degradation stays in-band for the PR tab.
 #[must_use]
-pub fn fetch(repo: &Path) -> PrView {
-    match fetch_inner(repo) {
+pub fn fetch(repo: &Path, input: &PrFetchInput) -> PrView {
+    fetch_cancellable(repo, input, &AtomicBool::new(false))
+}
+
+/// Read GitHub with a cancellation signal owned by the event-loop coordinator.
+#[must_use]
+pub(crate) fn fetch_cancellable(
+    repo: &Path,
+    input: &PrFetchInput,
+    cancelled: &AtomicBool,
+) -> PrView {
+    match fetch_inner(repo, input, cancelled) {
         Ok(view) => view,
-        Err(e) => e.into(),
+        Err(error) => error.into(),
     }
 }
 
-fn fetch_inner(repo: &Path) -> Result<PrView, GhError> {
-    let Some((owner, name)) = crate::git::github_slug(repo) else {
-        return Ok(PrView::NotGitHub);
+fn fetch_inner(
+    repo: &Path,
+    input: &PrFetchInput,
+    cancelled: &AtomicBool,
+) -> Result<PrView, GhError> {
+    let target = match &input.origin {
+        crate::git::OriginIdentity::Repository(target) => target,
+        crate::git::OriginIdentity::Missing | crate::git::OriginIdentity::Hostless => {
+            return Ok(PrView::NeedsGitHubOrigin);
+        }
+        crate::git::OriginIdentity::Unsupported(host) => {
+            return Ok(PrView::UnsupportedHost(host.clone()));
+        }
+        crate::git::OriginIdentity::Malformed(host) => {
+            return Ok(PrView::MalformedOrigin(host.clone()));
+        }
     };
-    let Some(branch) = crate::git::current_branch(repo) else {
-        // A detached HEAD (e.g. after `gh pr merge --delete-branch`) has no branch to resolve a
-        // PR against. Show the empty state rather than querying `headRefName:""`, which GitHub
-        // treats as unfiltered and would mis-resolve to an unrelated PR.
-        return Ok(PrView::NoPr);
+    if input.candidates.is_empty() {
+        // A detached HEAD (e.g. after `gh pr merge --delete-branch`) has no branch identity
+        // to publish, so nothing was derived. Show the empty state rather than querying
+        // `headRefName:""`, which GitHub treats as unfiltered and would mis-resolve to an
+        // unrelated PR.
+        return Ok(PrView::NoPr(Vec::new()));
+    }
+    let target = FetchTarget {
+        repo,
+        host: &target.host,
+        owner: &target.owner,
+        name: &target.name,
+        cancelled,
     };
-    // Resolve the branch's PR number, then read all its detail directly. Two GraphQL calls, not
-    // the six `gh` calls this replaced — and `mergeable` only populates on direct access, never
-    // through the list connection (`specs/forge-host.md`).
-    let number = match resolve(repo, &owner, &name, &branch)? {
-        Resolution::One(n) => n,
-        Resolution::None => return Ok(PrView::NoPr),
-        Resolution::Many(count) => return Ok(PrView::Ambiguous(count)),
+    // Resolve the open PR across all candidates in one aliased call, then read its detail
+    // directly — `mergeable` only populates on direct access, never through the list
+    // connection (`specs/forge-host.md`).
+    let open = resolve_candidates(&target, &input.candidates, OPEN, "headRefOid")?;
+    let number = match select_open(&open, input.head_oid.as_deref()) {
+        Pick::One(n) => n,
+        Pick::Ambiguous(count) => return Ok(PrView::Ambiguous(count)),
+        Pick::None => {
+            // No open PR anywhere: fall back to the newest-created merged/closed PR.
+            let hist = resolve_candidates(&target, &input.candidates, HISTORICAL, "createdAt")?;
+            match select_historical(&hist) {
+                Some(n) => n,
+                None => return Ok(PrView::NoPr(input.candidates.clone())),
+            }
+        }
     };
-    let detail = pr_detail(repo, &owner, &name, number)?;
+    let detail = pr_detail(&target, number)?;
     let node = &detail["data"]["repository"]["pullRequest"];
     if node.is_null() {
-        return Ok(PrView::NoPr);
+        return Ok(PrView::NoPr(input.candidates.clone()));
     }
-    let sync = derive_sync(crate::git::ahead_behind(
-        repo,
-        node["headRefOid"].as_str().unwrap_or_default(),
-    ));
+    // Sync compares the fetch's pinned HEAD to the PR head, so a checkout or commit landing
+    // mid-fetch never pairs one branch's PR with another branch's count.
+    let pr_head = node["headRefOid"].as_str().unwrap_or_default();
+    let sync = match input.head_oid.as_deref() {
+        Some(pin) if !pr_head.is_empty() => derive_sync(
+            crate::git::ahead_behind_oids(repo, pin, pr_head).map_err(|e| GhError::Other(e.0))?,
+        ),
+        _ => Sync::Unknown,
+    };
     Ok(PrView::Pr(Box::new(build_snapshot(node, sync))))
 }
 
 /// The local branch's position relative to the PR head, from `git`'s ahead/behind counts. A
 /// diverged branch (both nonzero) leads with the unpushed count — the headline case. `None`
-/// (the PR head isn't local yet) reads as in sync rather than guessing.
+/// (the PR head isn't local yet) stays explicitly unknown rather than guessing.
 fn derive_sync(ahead_behind: Option<(u32, u32)>) -> Sync {
     match ahead_behind {
-        None | Some((0, 0)) => Sync::InSync,
+        None => Sync::Unknown,
+        Some((0, 0)) => Sync::InSync,
         Some((0, behind)) => Sync::Behind(behind),
         Some((ahead, _)) => Sync::Unpushed(ahead),
     }
 }
 
-/// The branch's open PR number, none, or several. A merged/closed PR is consulted only when no
-/// open PR exists (`specs/forge-host.md`).
-enum Resolution {
-    One(u64),
-    None,
-    Many(usize),
+/// The list filter for the open-PR resolve call. `first:100` keeps the surfaced ambiguity
+/// count the real number of open PRs, not a cap.
+const OPEN: &str = "states:OPEN, first:100";
+/// The list filter for the historical fallback: the newest-created merged/closed PR per name.
+const HISTORICAL: &str =
+    "states:[MERGED,CLOSED], first:1, orderBy:{field:CREATED_AT, direction:DESC}";
+
+struct FetchTarget<'a> {
+    repo: &'a Path,
+    host: &'a str,
+    owner: &'a str,
+    name: &'a str,
+    cancelled: &'a AtomicBool,
 }
 
-/// Resolve the branch's PR number via the list connection (cheap, number-only). Prefers an open
-/// PR; falls back to the latest of any state.
-fn resolve(repo: &Path, owner: &str, name: &str, branch: &str) -> Result<Resolution, GhError> {
-    let nums = |filter: &str| -> Result<Vec<u64>, GhError> {
-        let q = format!(
-            "query($o:String!,$n:String!,$b:String!){{repository(owner:$o,name:$n){{\
-             pullRequests(headRefName:$b, {filter}){{nodes{{number}}}}}}}}"
-        );
-        let v = graphql(repo, &q, owner, name, branch)?;
-        Ok(v["data"]["repository"]["pullRequests"]["nodes"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|p| p["number"].as_u64())
-            .collect())
-    };
-    // first:100 so the surfaced ambiguity count is the real number of open PRs, not a cap.
-    let open = nums("states:OPEN, first:100")?;
-    match open.as_slice() {
-        [n] => return Ok(Resolution::One(*n)),
-        [_, ..] => return Ok(Resolution::Many(open.len())),
-        [] => {}
+/// The PRs for every candidate name in one aliased GraphQL call — alias `c{i}` ↔ candidate
+/// `i`, names passed as variables (never interpolated into the query text). Each returned
+/// entry is `(number, extra)` where `extra` is `headRefOid` (open) or `createdAt` (historical).
+fn resolve_candidates(
+    target: &FetchTarget<'_>,
+    candidates: &[String],
+    filter: &str,
+    extra: &str,
+) -> Result<Vec<Vec<(u64, String)>>, GhError> {
+    let query = build_resolve_query(candidates.len(), filter, extra);
+    let mut vars: Vec<(String, String)> = vec![
+        ("o".to_string(), target.owner.to_string()),
+        ("n".to_string(), target.name.to_string()),
+    ];
+    for (i, cand) in candidates.iter().enumerate() {
+        vars.push((format!("b{i}"), cand.clone()));
     }
-    match nums("first:1, orderBy:{field:CREATED_AT, direction:DESC}")?.first() {
-        Some(n) => Ok(Resolution::One(*n)),
-        None => Ok(Resolution::None),
+    let v = graphql(target.repo, target.host, &query, &vars, target.cancelled)?;
+    Ok(parse_resolve(&v, candidates.len(), extra))
+}
+
+/// The winner among the candidates' open PRs (`specs/forge-host.md` "Resolution").
+#[derive(Debug, PartialEq, Eq)]
+enum Pick {
+    One(u64),
+    Ambiguous(usize),
+    None,
+}
+
+/// Pick the open PR: the earliest candidate in derivation order holding any wins — the
+/// recorded upstream outranks an inferred branch, which outranks the bare local name. On
+/// one name backing several open PRs, exactly one head at the pinned `HEAD` wins; else the
+/// ambiguity count is surfaced rather than a silent guess.
+fn select_open(per_candidate: &[Vec<(u64, String)>], pinned_head: Option<&str>) -> Pick {
+    for prs in per_candidate {
+        match prs.as_slice() {
+            [] => {}
+            [(number, _)] => return Pick::One(*number),
+            many => {
+                if let Some(pin) = pinned_head {
+                    let mut hits = many.iter().filter(|(_, oid)| oid == pin);
+                    if let (Some((number, _)), None) = (hits.next(), hits.next()) {
+                        return Pick::One(*number);
+                    }
+                }
+                return Pick::Ambiguous(many.len());
+            }
+        }
     }
+    Pick::None
+}
+
+/// The historical fallback: the newest-created merged/closed PR across all candidates.
+/// ISO-8601 `…Z` strings compare lexically; a strict `>` keeps the earlier candidate on a
+/// timestamp tie, so the pick is deterministic.
+fn select_historical(per_candidate: &[Vec<(u64, String)>]) -> Option<u64> {
+    let mut best: Option<(u64, &str)> = None;
+    for prs in per_candidate {
+        for (number, created) in prs {
+            if best.is_none_or(|(_, b)| created.as_str() > b) {
+                best = Some((*number, created));
+            }
+        }
+    }
+    best.map(|(number, _)| number)
 }
 
 /// All of one PR's state in a single direct GraphQL call — identity, mergeability, checks,
@@ -290,11 +486,12 @@ fn resolve(repo: &Path, owner: &str, name: &str, branch: &str) -> Result<Resolut
 /// PR in a review sidebar — and its `pageInfo` flags a fuller surface so the UI can mark it,
 /// rather than paging to exhaustion (`specs/forge-host.md`). `reviews` reads `last:100` to keep
 /// the newest, so its "more exist" flag is `hasPreviousPage`; the `first:` lists use `hasNextPage`.
-fn pr_detail(repo: &Path, owner: &str, name: &str, number: u64) -> Result<Value, GhError> {
+fn pr_detail(target: &FetchTarget<'_>, number: u64) -> Result<Value, GhError> {
     let q = format!(
         "query($o:String!,$n:String!){{repository(owner:$o,name:$n){{\
          pullRequest(number:{number}){{\
-         number title url isDraft state mergeable mergeStateStatus baseRefName headRefOid \
+         number title url body isDraft state mergeable mergeStateStatus baseRefName headRefName \
+         headRefOid isCrossRepository \
          commits(last:1){{nodes{{commit{{statusCheckRollup{{contexts(first:100){{pageInfo{{hasNextPage}} nodes{{__typename \
          ... on CheckRun{{name status conclusion}} ... on StatusContext{{context state}}}}}}}}}}}}}} \
          reviews(last:100){{pageInfo{{hasPreviousPage}} nodes{{author{{login}} body state submittedAt}}}} \
@@ -302,36 +499,78 @@ fn pr_detail(repo: &Path, owner: &str, name: &str, number: u64) -> Result<Value,
          reviewThreads(first:100){{pageInfo{{hasNextPage}} nodes{{isResolved isOutdated path line \
          comments(first:1){{totalCount nodes{{author{{login}} body createdAt diffHunk}}}}}}}}}}}}}}"
     );
-    graphql(repo, &q, owner, name, number.to_string().as_str())
+    let vars =
+        [("o".to_string(), target.owner.to_string()), ("n".to_string(), target.name.to_string())];
+    graphql(target.repo, target.host, &q, &vars, target.cancelled)
 }
 
-/// Run a GraphQL `query` with the `$o`/`$n`/`$b` variables and parse the response.
+/// Run a GraphQL `query` with `vars` and parse the response. Every variable is passed with
+/// `-f` (raw string) — `-F` type-coerces, so a branch literally named `123` would arrive
+/// as an Int and fail its `String!` declaration.
 fn graphql(
     repo: &Path,
+    host: &str,
     query: &str,
-    owner: &str,
-    name: &str,
-    branch: &str,
+    vars: &[(String, String)],
+    cancelled: &AtomicBool,
 ) -> Result<Value, GhError> {
-    let out = gh(
-        repo,
-        &[
-            "api",
-            "graphql",
-            "-f",
-            &format!("query={query}"),
-            "-F",
-            &format!("o={owner}"),
-            "-F",
-            &format!("n={name}"),
-            "-F",
-            &format!("b={branch}"),
-        ],
-    )?;
+    let args = graphql_args(host, query, vars);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = gh(repo, host, &arg_refs, cancelled)?;
     serde_json::from_str(&out).map_err(|e| GhError::Other(e.to_string()))
 }
 
+fn graphql_args(host: &str, query: &str, vars: &[(String, String)]) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "--hostname".to_string(),
+        host.to_owned(),
+        "-f".to_string(),
+        format!("query={query}"),
+    ];
+    for (key, value) in vars {
+        args.push("-f".to_string());
+        args.push(format!("{key}={value}"));
+    }
+    args
+}
+
 // ---- Pure normalization (unit-tested) --------------------------------------------------
+
+/// The aliased resolve query for `n` candidates: `c{i}: pullRequests(headRefName:$b{i}, …)`.
+/// Branch names ride as `$b{i}` variables, never in the query text.
+fn build_resolve_query(n: usize, filter: &str, extra: &str) -> String {
+    use std::fmt::Write;
+    let mut q = String::from("query($o:String!,$n:String!");
+    for i in 0..n {
+        let _ = write!(q, ",$b{i}:String!");
+    }
+    q.push_str("){repository(owner:$o,name:$n){");
+    for i in 0..n {
+        let _ =
+            write!(q, "c{i}:pullRequests(headRefName:$b{i}, {filter}){{nodes{{number {extra}}}}} ");
+    }
+    q.push_str("}}");
+    q
+}
+
+/// Per-candidate `(number, extra)` lists from the aliased response, index `i` ↔ alias
+/// `c{i}`. A missing or null alias parses as an empty list.
+fn parse_resolve(v: &Value, n: usize, extra: &str) -> Vec<Vec<(u64, String)>> {
+    (0..n)
+        .map(|i| {
+            v["data"]["repository"][format!("c{i}").as_str()]["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|p| {
+                    Some((p["number"].as_u64()?, p[extra].as_str().unwrap_or_default().to_string()))
+                })
+                .collect()
+        })
+        .collect()
+}
 
 /// Assemble the snapshot from the `gh pr view` JSON, the computed `sync`, and the merged comments.
 fn build_snapshot(node: &Value, sync: Sync) -> PrSnapshot {
@@ -352,8 +591,11 @@ fn build_snapshot(node: &Value, sync: Sync) -> PrSnapshot {
         number: node["number"].as_u64().unwrap_or_default(),
         title: node["title"].as_str().unwrap_or_default().to_string(),
         url: node["url"].as_str().unwrap_or_default().to_string(),
+        body: node["body"].as_str().unwrap_or_default().to_string(),
         state: parse_state(node["state"].as_str().unwrap_or("OPEN")),
         is_draft: node["isDraft"].as_bool().unwrap_or(false),
+        head_ref: node["headRefName"].as_str().unwrap_or_default().to_string(),
+        head_is_fork: node["isCrossRepository"].as_bool().unwrap_or(false),
         base_ref: node["baseRefName"].as_str().unwrap_or_default().to_string(),
         merge: derive_merge(node["mergeable"].as_str(), node["mergeStateStatus"].as_str()),
         sync,
@@ -618,6 +860,11 @@ mod tests {
             !build_snapshot(&base, Sync::InSync).truncated,
             "all pages complete → not truncated"
         );
+        // The description parses when present and stays empty when GitHub returns null.
+        assert_eq!(build_snapshot(&base, Sync::InSync).body, "");
+        let mut with_body = base.clone();
+        with_body["body"] = serde_json::json!("## Summary\nfixes things");
+        assert_eq!(build_snapshot(&with_body, Sync::InSync).body, "## Summary\nfixes things");
 
         let mut comments_more = base.clone();
         comments_more["comments"]["pageInfo"]["hasNextPage"] = serde_json::json!(true);
@@ -672,8 +919,11 @@ mod tests {
             number: 1,
             title: String::new(),
             url: String::new(),
+            body: String::new(),
             state: PrState::Open,
             is_draft: false,
+            head_ref: String::new(),
+            head_is_fork: false,
             base_ref: String::new(),
             merge: Merge::Clean,
             sync: Sync::InSync,
@@ -694,6 +944,89 @@ mod tests {
             snap(&[CheckStatus::Running, CheckStatus::Failure]).checks_rollup(),
             Some(CheckStatus::Failure)
         );
+    }
+
+    #[test]
+    fn resolve_query_aliases_candidates_and_never_inlines_names() {
+        let q = build_resolve_query(2, OPEN, "headRefOid");
+        assert_eq!(
+            q,
+            "query($o:String!,$n:String!,$b0:String!,$b1:String!)\
+             {repository(owner:$o,name:$n){\
+             c0:pullRequests(headRefName:$b0, states:OPEN, first:100){nodes{number headRefOid}} \
+             c1:pullRequests(headRefName:$b1, states:OPEN, first:100){nodes{number headRefOid}} }}"
+        );
+        let h = build_resolve_query(1, HISTORICAL, "createdAt");
+        assert!(h.contains(
+            "states:[MERGED,CLOSED], first:1, orderBy:{field:CREATED_AT, direction:DESC}"
+        ));
+        assert!(h.contains("nodes{number createdAt}"));
+    }
+
+    #[test]
+    fn parse_resolve_maps_aliases_in_order_and_null_to_empty() {
+        let v = serde_json::json!({"data": {"repository": {
+            "c0": {"nodes": [{"number": 7, "headRefOid": "abc"}]},
+            "c1": null,
+            "c2": {"nodes": [{"number": 9, "headRefOid": "def"}, {"number": 10, "headRefOid": "ghi"}]}
+        }}});
+        let per = parse_resolve(&v, 3, "headRefOid");
+        assert_eq!(per[0], [(7, "abc".to_string())]);
+        assert!(per[1].is_empty());
+        assert_eq!(per[2], [(9, "def".to_string()), (10, "ghi".to_string())]);
+    }
+
+    #[test]
+    fn select_open_takes_the_earliest_candidate_with_any_open_pr() {
+        let per = vec![
+            vec![],
+            vec![(12, "aaa".to_string())],
+            vec![(99, "bbb".to_string())], // a later candidate never preempts an earlier one
+        ];
+        assert_eq!(select_open(&per, Some("zzz")), Pick::One(12));
+        assert_eq!(select_open(&[vec![], vec![]], Some("zzz")), Pick::None);
+        assert_eq!(select_open(&[], None), Pick::None);
+    }
+
+    #[test]
+    fn select_open_disambiguates_one_name_by_the_pinned_head_else_surfaces_the_count() {
+        let two = vec![vec![(1, "aaa".to_string()), (2, "bbb".to_string())]];
+        assert_eq!(select_open(&two, Some("bbb")), Pick::One(2));
+        // No pinned HEAD, no exact match, or several exact matches: ambiguous, count shown.
+        assert_eq!(select_open(&two, None), Pick::Ambiguous(2));
+        assert_eq!(select_open(&two, Some("zzz")), Pick::Ambiguous(2));
+        let dup = vec![vec![(1, "aaa".to_string()), (2, "aaa".to_string())]];
+        assert_eq!(select_open(&dup, Some("aaa")), Pick::Ambiguous(2));
+    }
+
+    #[test]
+    fn select_historical_takes_the_newest_created_and_ties_to_the_earlier_candidate() {
+        let per = vec![
+            vec![(1, "2026-06-01T00:00:00Z".to_string())],
+            vec![(2, "2026-06-03T00:00:00Z".to_string())],
+            vec![(3, "2026-06-03T00:00:00Z".to_string())], // tie → the earlier candidate keeps
+        ];
+        assert_eq!(select_historical(&per), Some(2));
+        assert_eq!(select_historical(&[vec![], vec![]]), None);
+    }
+
+    #[test]
+    fn snapshot_carries_the_head_ref_and_fork_marker() {
+        let node = serde_json::json!({
+            "number": 5, "title": "t", "url": "u", "state": "OPEN", "isDraft": false,
+            "headRefName": "persiyanov/feature", "isCrossRepository": true, "baseRefName": "main",
+            "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+            "commits": {"nodes": []}, "reviews": {"nodes": []},
+            "comments": {"nodes": []}, "reviewThreads": {"nodes": []}
+        });
+        let s = build_snapshot(&node, Sync::InSync);
+        assert_eq!(s.head_ref, "persiyanov/feature");
+        assert!(s.head_is_fork);
+        // Absent fields default rather than fail — a mid-rollout API response degrades soft.
+        let bare = serde_json::json!({"number": 5});
+        let s = build_snapshot(&bare, Sync::InSync);
+        assert_eq!(s.head_ref, "");
+        assert!(!s.head_is_fork);
     }
 
     #[test]
@@ -785,7 +1118,7 @@ mod tests {
 
     #[test]
     fn sync_leads_with_unpushed_and_tolerates_a_missing_head() {
-        assert_eq!(derive_sync(None), Sync::InSync);
+        assert_eq!(derive_sync(None), Sync::Unknown);
         assert_eq!(derive_sync(Some((0, 0))), Sync::InSync);
         assert_eq!(derive_sync(Some((2, 0))), Sync::Unpushed(2));
         assert_eq!(derive_sync(Some((0, 3))), Sync::Behind(3));
@@ -794,18 +1127,28 @@ mod tests {
 
     #[test]
     fn gh_failure_classifies_by_stderr_wording() {
-        assert_eq!(classify_failure("gh auth login required"), GhError::NotAuthed);
         assert_eq!(
-            classify_failure("You are not logged into any GitHub hosts"),
-            GhError::NotAuthed
+            classify_failure("gh auth login required", "github.example.com"),
+            GhError::NotAuthed("github.example.com".to_string())
         );
         assert_eq!(
-            classify_failure("none of the git remotes point to a GitHub host"),
-            GhError::NotGitHub
+            classify_failure("You are not logged into any GitHub hosts", "github.com"),
+            GhError::NotAuthed("github.com".to_string())
         );
         assert_eq!(
-            classify_failure("HTTP 500 something"),
+            classify_failure("HTTP 500 something", "github.com"),
             GhError::Other("HTTP 500 something".into())
         );
+    }
+
+    #[test]
+    fn graphql_arguments_always_pin_the_canonical_host() {
+        let args = graphql_args(
+            "github.example.com",
+            "query($o:String!){viewer{login}}",
+            &[("o".to_string(), "owner".to_string())],
+        );
+        assert_eq!(&args[..4], ["api", "graphql", "--hostname", "github.example.com"]);
+        assert!(args.windows(2).any(|pair| pair == ["-f", "o=owner"]));
     }
 }

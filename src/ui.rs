@@ -12,18 +12,31 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState,
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Focus, FooterAction, Mode, Tab, Tier};
 use crate::diff::{FileDiff, FileState, Row};
 use crate::file_list::{Annotation, RowKind};
 use crate::forge;
+use crate::keymap::Keymap;
 use crate::model::Comment;
 use crate::theme::Palette;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
+    // Link hit-testing resolves against the painted frame; each frame repaints its own.
+    app.clear_painted_links();
+    if let Some(error) = app.config_error() {
+        frame.render_widget(
+            Paragraph::new(error).wrap(ratatui::widgets::Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
     let p = panes(area, app.list_pct);
 
     if app.tab == Tab::Pr {
@@ -117,6 +130,13 @@ pub fn file_viewport_height(area: Rect, list_pct: u16) -> usize {
 #[must_use]
 pub fn in_files_pane(area: Rect, list_pct: u16, col: u16, row: u16) -> bool {
     contains(panes(area, list_pct).files, col, row)
+}
+
+/// Whether `(col, row)` falls in the diff pane — the markdown preview's click target,
+/// whose rendered geometry the source-row hit test cannot describe.
+#[must_use]
+pub fn in_diff_pane(area: Rect, list_pct: u16, col: u16, row: u16) -> bool {
+    contains(panes(area, list_pct).diff, col, row)
 }
 
 /// The logical diff-row index a click at `(col, row)` lands on, or `None` if outside the
@@ -360,20 +380,24 @@ pub enum HeaderHit {
     Send,
 }
 
-/// Which header control a click at `(col, row)` lands on, if any.
+/// Which header control a click at `(col, row)` lands on, if any. `keymap` must be the keymap
+/// the on-screen frame was drawn with, so a config swap between the draw and the click cannot
+/// shift the spans under the pointer (`specs/config.md`: one snapshot per frame).
 #[must_use]
-pub fn hit_header(area: Rect, app: &App, col: u16, row: u16) -> Option<HeaderHit> {
+pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) -> Option<HeaderHit> {
     if row != area.y {
         return None;
     }
-    for (tab, start, end) in tab_spans() {
+    let spans = tab_spans(keymap);
+    for &(tab, start, end) in &spans {
         if (start as u16..end as u16).contains(&col) {
             return Some(HeaderHit::Tab(tab));
         }
     }
-    let scope_start = header_prefix_len() as u16;
+    let prefix = header_prefix_len(&spans);
+    let scope_start = prefix as u16;
     let scope_end = scope_start + scope_chip(app).len() as u16;
-    let button_start = send_button_col(app, area.width as usize) as u16;
+    let button_start = send_button_col(app, prefix, area.width as usize) as u16;
     if (scope_start..scope_end).contains(&col) {
         Some(HeaderHit::Scope)
     } else if col >= button_start && col < area.width {
@@ -383,32 +407,38 @@ pub fn hit_header(area: Rect, app: &App, col: u16, row: u16) -> Option<HeaderHit
     }
 }
 
-/// The two tabs and their labels, left to right. All-ASCII labels keep the byte length equal
-/// to the display width, so the header column math stays simple.
-const TABS: [(Tab, &str); 3] =
-    [(Tab::Changes, "1 Changes"), (Tab::AllFiles, "2 All files"), (Tab::Pr, "3 PR")];
+/// The three tabs and their labels, left to right, each led by its `tab-*` action's hint key
+/// (`specs/tui.md`). Column math uses display width, since a bound hint key can be wide.
+fn tab_labels(keymap: &Keymap) -> [(Tab, String); 3] {
+    use crate::keymap::Action as K;
+    [
+        (Tab::Changes, format!("{} Changes", keymap.hint(K::TabChanges))),
+        (Tab::AllFiles, format!("{} All files", keymap.hint(K::TabAllFiles))),
+        (Tab::Pr, format!("{} PR", keymap.hint(K::TabPr))),
+    ]
+}
 const HEADER_LEAD: &str = " ";
 const TAB_GAP: &str = "  ";
 const HEADER_GAP: &str = "  ";
 
 /// Each tab's `(tab, start_col, end_col)` in the header, the single source the bar paints and
 /// the click hit-tests against.
-fn tab_spans() -> Vec<(Tab, usize, usize)> {
+fn tab_spans(keymap: &Keymap) -> Vec<(Tab, usize, usize)> {
     let mut col = HEADER_LEAD.len();
     let mut out = Vec::new();
-    for (i, (tab, label)) in TABS.iter().enumerate() {
+    for (i, (tab, label)) in tab_labels(keymap).iter().enumerate() {
         if i > 0 {
             col += TAB_GAP.len();
         }
-        out.push((*tab, col, col + label.len()));
-        col += label.len();
+        out.push((*tab, col, col + label.width()));
+        col += label.width();
     }
     out
 }
 
 /// The column where the scope chip starts: past the tab bar and its trailing gap.
-fn header_prefix_len() -> usize {
-    tab_spans().last().map_or(HEADER_LEAD.len(), |&(_, _, end)| end) + HEADER_GAP.len()
+fn header_prefix_len(spans: &[(Tab, usize, usize)]) -> usize {
+    spans.last().map_or(HEADER_LEAD.len(), |&(_, _, end)| end) + HEADER_GAP.len()
 }
 
 fn scope_chip(app: &App) -> String {
@@ -420,7 +450,9 @@ fn send_button(app: &App) -> String {
 }
 
 /// The header suffix: the active scope's changed-file count. Shared so the painter and the
-/// hit-test place the right-aligned `Send` button at the same column.
+/// hit-test place the right-aligned `Send` button at the same column. The scope chip, suffix,
+/// and `Send` button are all-ASCII, so their byte `.len()` equals their display width; the tab
+/// labels carry the only rebindable (possibly wide) glyphs and are measured by width.
 fn header_suffix(app: &App) -> String {
     format!("  {} changed", app.changed_count())
 }
@@ -429,8 +461,8 @@ fn header_suffix(app: &App) -> String {
 /// when the header fits, packed left right after the suffix when the bar overflows (`pad`
 /// collapses to 0). `hit_header` must use this, not a bare right-alignment, or a `Send` click
 /// mis-fires (and on a narrow sidebar lands in a tab span) when the header overflows.
-fn send_button_col(app: &App, width: usize) -> usize {
-    let before = header_prefix_len() + scope_chip(app).len() + header_suffix(app).len();
+fn send_button_col(app: &App, prefix: usize, width: usize) -> usize {
+    let before = prefix + scope_chip(app).len() + header_suffix(app).len();
     before + width.saturating_sub(before + send_button(app).len())
 }
 
@@ -441,16 +473,16 @@ fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
     let p = app.palette();
     let bar = Style::default().bg(p.surface0);
     let mut spans = vec![Span::styled(HEADER_LEAD, bar)];
-    for (i, (tab, label)) in TABS.iter().enumerate() {
+    for (i, (tab, label)) in tab_labels(app.keymap()).into_iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(TAB_GAP, bar));
         }
-        let style = if *tab == app.tab {
+        let style = if tab == app.tab {
             bar.fg(p.lavender).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             bar.fg(p.subtext0)
         };
-        spans.push(Span::styled(*label, style));
+        spans.push(Span::styled(label, style));
     }
     spans.push(Span::styled(HEADER_GAP, bar));
     spans
@@ -460,7 +492,8 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let chip = scope_chip(app);
     let suffix = header_suffix(app);
     let button = send_button(app);
-    let used = header_prefix_len() + chip.len() + suffix.len() + button.len();
+    let prefix = header_prefix_len(&tab_spans(app.keymap()));
+    let used = prefix + chip.len() + suffix.len() + button.len();
     let pad = (area.width as usize).saturating_sub(used);
 
     // A quiet surface bar: the active tab in bright lavender, the inactive one dimmed, the
@@ -691,7 +724,7 @@ fn truncate_width(s: &str, max: usize) -> String {
 
 fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
-    let title = match (&app.diff_path, &app.diff.previous_path) {
+    let mut title = match (&app.diff_path, &app.diff.previous_path) {
         (Some(new), Some(old)) => format!("{old} → {new}"),
         (Some(new), None) => new.clone(),
         (None, _) => match app.tab {
@@ -700,9 +733,13 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         }
         .to_string(),
     };
+    if app.preview_active() {
+        title.push_str(" · preview");
+    }
     let block = bordered(&title, app.focus == Focus::Diff, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    app.note_diff_width(inner.width as usize);
 
     if app.visible.is_empty() {
         // `All files` is a content browser, not a diff, so its empty/notice copy avoids diff
@@ -730,6 +767,26 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let width = inner.width as usize;
+
+    // The markdown preview: rendered lines, no gutter, no cursor; the scroll clamps to
+    // the rendered length so a refresh that shrank the file keeps the reader in range
+    // (specs/diff-view.md).
+    if app.preview_active() {
+        let rendered = app.markdown_render(app.preview_text(), width.max(1));
+        // Scrolling stops with the last line at the pane's bottom edge; content that
+        // fits the pane does not scroll.
+        let max = rendered.lines.len().saturating_sub(height);
+        app.note_preview_max_scroll(max);
+        let scroll = app.preview_scroll.min(max);
+        note_markdown_regions(app, &rendered, inner, scroll, 0);
+        frame.render_widget(
+            Paragraph::new(rendered.lines).scroll((saturating_row(scroll), 0)),
+            inner,
+        );
+        render_overflow_scrollbar(frame, area, max, scroll, p);
+        return;
+    }
+
     let gutter_w = gutter_for(&app.diff);
     let layout = RowLayout {
         gutter_w,
@@ -949,7 +1006,7 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         .collect()
 }
 
-fn rgb(c: crate::diff::Rgb) -> Color {
+pub(crate) fn rgb(c: crate::diff::Rgb) -> Color {
     Color::Rgb(c.0, c.1, c.2)
 }
 
@@ -1095,34 +1152,48 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
 /// The key glyph and label for a footer action; an empty label renders the glyph alone. The
 /// `TogglePane` and `Send` labels depend on `app` (the destination pane, the comment count).
 fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
+    use crate::keymap::Action as K;
     use FooterAction as A;
-    let (k, l): (&str, &str) = match action {
-        A::Comment => ("c", "comment"),
-        A::Select => ("v", "select"),
-        A::ClearSelection => ("esc", "clear"),
-        A::EditComment => ("e", "edit"),
-        A::DeleteComment => ("d", "delete"),
-        A::JumpComment => ("n/N", "jump"),
-        A::ExpandFold => ("→", "expand fold"),
-        A::ExpandDir => ("→", "expand"),
-        A::CollapseDir => ("←", "collapse"),
+    // A rebindable action's hint is its first bound key (`specs/tui.md`).
+    let hint = |action: K| app.keymap().hint(action).to_string();
+    let (k, l): (String, &str) = match action {
+        A::Comment => (hint(K::Comment), "comment"),
+        A::Select => (hint(K::Select), "select"),
+        A::ClearSelection => ("esc".into(), "clear"),
+        A::EditComment => (hint(K::Edit), "edit"),
+        A::DeleteComment => (hint(K::Delete), "delete"),
+        A::JumpComment => (format!("{}/{}", hint(K::NextComment), hint(K::PrevComment)), "jump"),
+        A::ExpandFold => ("→".into(), "expand fold"),
+        A::ExpandDir => ("→".into(), "expand"),
+        A::CollapseDir => ("←".into(), "collapse"),
         A::TogglePane => {
             return ("⇥".into(), if app.focus == Focus::Files { "diff" } else { "files" }.into());
         }
-        A::Scope => ("u/b/t", "scope"),
-        A::Send => return ("s".into(), format!("send {}", app.store.len())),
-        A::List => ("l", "list"),
-        A::Copy => ("y", "copy"),
-        A::Save => ("enter", "save"),
-        A::Newline => ("⇧⏎", "newline"),
-        A::Cancel => ("esc", "cancel"),
-        A::CloseList => ("esc", "close"),
-        A::OpenPr => ("o", "open ↗"),
-        A::Refresh => ("r", "refresh"),
-        A::Tabs => ("1·2·3", ""),
-        A::Quit => ("q", ""),
+        A::Preview => (hint(K::Preview), if app.preview_active() { "source" } else { "preview" }),
+        A::Scope => (
+            format!(
+                "{}/{}/{}",
+                hint(K::ScopeUncommitted),
+                hint(K::ScopeBranch),
+                hint(K::ScopeLastTurn)
+            ),
+            "scope",
+        ),
+        A::Send => return (hint(K::Send), format!("send {}", app.store.len())),
+        A::List => (hint(K::Comments), "list"),
+        A::Copy => (hint(K::Copy), "copy"),
+        A::Save => ("enter".into(), "save"),
+        A::Newline => ("⇧⏎".into(), "newline"),
+        A::Cancel => ("esc".into(), "cancel"),
+        A::CloseList => ("esc".into(), "close"),
+        A::OpenPr => (hint(K::OpenPr), "open ↗"),
+        A::Refresh => (hint(K::Refresh), "refresh"),
+        A::Tabs => {
+            (format!("{}·{}·{}", hint(K::TabChanges), hint(K::TabAllFiles), hint(K::TabPr)), "")
+        }
+        A::Quit => (hint(K::Quit), ""),
     };
-    (k.into(), l.into())
+    (k, l.into())
 }
 
 /// A tier's `(key, label)` styles: the primary bright and bold, normal actions readable, the
@@ -1310,11 +1381,28 @@ fn render_pr_header(frame: &mut Frame, app: &App, area: Rect) {
         let number = format!("#{}", s.number);
         let (status, color) = pr_status_chip(p, s);
         let chip_w = pr_chip_width(s);
-        // The title fills the gap left of the chip, right-aligned against it (a leading pad).
-        let name = truncate_width(&s.title, w.saturating_sub(lead_tabs + chip_w + 2).max(4));
-        let pad = w.saturating_sub(lead_tabs + name.width() + 2 + chip_w);
+        // The resolved head branch, dim left of the chip — the name that resolved, which can
+        // differ from the worktree's local branch; `⑂` marks a fork head so a same-named
+        // fork PR is visible (specs/forge-host.md). Dropped first when the bar is narrow.
+        let head = match (s.head_ref.is_empty(), s.head_is_fork) {
+            (true, _) => String::new(),
+            (false, true) => format!("⑂ {}", s.head_ref),
+            (false, false) => s.head_ref.clone(),
+        };
+        let head_w = if head.is_empty() { 0 } else { head.width() + 2 };
+        // Keep the branch only while the title still gets a readable minimum beside it.
+        let head_w =
+            if w.saturating_sub(lead_tabs + chip_w + 2 + head_w) >= 8 { head_w } else { 0 };
+        // The title fills the gap left of the branch + chip, right-aligned (a leading pad).
+        let name =
+            truncate_width(&s.title, w.saturating_sub(lead_tabs + chip_w + 2 + head_w).max(4));
+        let pad = w.saturating_sub(lead_tabs + name.width() + head_w + 2 + chip_w);
         spans.push(Span::styled(" ".repeat(pad), bar));
         spans.push(Span::styled(name, bar.fg(p.subtext0)));
+        if head_w > 0 {
+            spans.push(Span::styled("  ", bar));
+            spans.push(Span::styled(head, bar.fg(p.overlay0)));
+        }
         spans.push(Span::styled("  ", bar));
         spans.push(Span::styled(status, bar.fg(color).add_modifier(Modifier::BOLD)));
         spans.push(Span::styled(" ", bar));
@@ -1371,6 +1459,7 @@ fn pr_state_line(s: &forge::PrSnapshot) -> String {
         match s.sync {
             forge::Sync::Unpushed(n) => parts.push(format!("⇡ {n} unpushed")),
             forge::Sync::Behind(n) => parts.push(format!("⇣ {n} behind")),
+            forge::Sync::Unknown => parts.push("? sync unknown".to_string()),
             forge::Sync::InSync => {}
         }
     }
@@ -1411,9 +1500,16 @@ fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
     let dim = Style::default().fg(p.overlay0);
     let now = std::time::SystemTime::now();
 
-    // (row spans, is the navigator cursor on this row). Only comment rows are selectable; the
-    // checks section is a status display.
+    // (row spans, is the navigator cursor on this row). The description row and the
+    // comment rows are the cursor stops; the checks section is a status display.
     let mut rows: Vec<(Vec<Span<'static>>, bool)> = Vec::new();
+    // A non-empty PR description pins a `description` row at the top of the navigator,
+    // above the checks — the PR itself, before its status and discussion (specs/tui.md).
+    let offset = app.pr_description_offset();
+    if app.pr_has_description() {
+        rows.push((vec![Span::styled("description", text_style(p))], app.pr_cursor == 0));
+        rows.push((Vec::new(), false));
+    }
     rows.push((vec![Span::styled(pr_checks_header(s), dim)], false));
     for c in &s.checks {
         let (glyph, color) = check_glyph(p, c.status);
@@ -1428,7 +1524,7 @@ fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
     rows.push((Vec::new(), false));
     rows.push((vec![Span::styled(format!("comments · {}", s.comments.len()), dim)], false));
     for (j, cm) in s.comments.iter().enumerate() {
-        rows.push((pr_comment_row(cm, width, now, p), app.pr_cursor == j));
+        rows.push((pr_comment_row(cm, width, now, p), app.pr_cursor == j + offset));
     }
 
     let viewport = inner.height as usize;
@@ -1478,22 +1574,105 @@ fn pr_comment_row(
     ]
 }
 
+/// Note the painted link regions and heading anchors for a markdown render drawn
+/// inside `inner`, scrolled by `scroll`, with the body's first line at display index
+/// `offset` — so a click can resolve against exactly what this frame painted
+/// (`specs/markdown.md`). Links note only the visible rows; anchors cover the whole
+/// body, since an anchor click can jump past the viewport.
+fn note_markdown_regions(
+    app: &App,
+    rendered: &crate::markdown::Rendered,
+    inner: Rect,
+    scroll: usize,
+    offset: usize,
+) {
+    for (slug, line) in &rendered.anchors {
+        app.note_painted_anchor(slug.clone(), line + offset);
+    }
+    let viewport = inner.height as usize;
+    let visible = rendered.meta.iter().enumerate().filter_map(|(i, m)| {
+        match (i + offset).checked_sub(scroll) {
+            Some(d) if d < viewport => Some((d, m)),
+            _ => None,
+        }
+    });
+    for (display, m) in visible {
+        for link in &m.links {
+            let x1 = inner.x + link.start.min(inner.width as usize) as u16;
+            let x2 = inner.x + link.end.min(inner.width as usize) as u16;
+            if x1 < x2 {
+                app.note_painted_link(x1, x2, inner.y + display as u16, link.url.clone());
+            }
+        }
+    }
+}
+
+/// A ratatui scroll row from a usize offset, saturating — a render past 65k lines must
+/// pin to the end, never wrap back near the top.
+fn saturating_row(scroll: usize) -> u16 {
+    u16::try_from(scroll).unwrap_or(u16::MAX)
+}
+
+/// A scrollbar over `area`'s right border when the content overflows the pane —
+/// rendered markdown has no line numbers, so this is its position feedback
+/// (`specs/diff-view.md`, `specs/tui.md`). `max` is the maximum useful scroll; zero
+/// (content fits) paints nothing.
+fn render_overflow_scrollbar(
+    frame: &mut Frame,
+    area: Rect,
+    max: usize,
+    scroll: usize,
+    p: &Palette,
+) {
+    if max == 0 {
+        return;
+    }
+    let mut state = ScrollbarState::new(max).position(scroll);
+    // A heavy-line accent thumb on the untouched border: the border thickens where the
+    // reader is, and no track paints over it.
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_symbol("┃")
+            .thumb_style(Style::default().fg(p.lavender)),
+        area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
+        &mut state,
+    );
+}
+
 /// The left read pane: the selected comment's hunk (for a finding) then its body, a check's
 /// open hint, or the loading/degraded message.
 fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
     let selected = app.pr_selected_comment();
-    let title = match selected {
+    let mut title = match selected {
         Some(cm) => format!("@{} · {}", cm.author, cm.anchor),
+        None if app.pr_on_description() => "description".to_string(),
         None => "PR".to_string(),
     };
+    // The refetch indicator lives in the title, never in the content flow — a poll must
+    // not shift what the reader is reading (policies/ux-responsiveness.md).
+    if app.pr_refreshing() {
+        title.push_str(" · refreshing…");
+    }
     let block = bordered(&title, false, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = inner.width as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
+    if let Some(notice) = app.pr_notice() {
+        lines.push(Line::from(Span::styled(notice.to_owned(), Style::default().fg(p.yellow))));
+        lines.push(Line::raw(""));
+    }
+
+    // The markdown body's render metadata and its first display row, for hit-testing.
+    let mut body_meta: Option<(usize, crate::markdown::Rendered)> = None;
     if let Some(cm) = selected {
+        // The finding's diff hunk stays plain `+`/`−`-colored lines; only the prose body
+        // renders as markdown (specs/tui.md).
         if let Some(hunk) = &cm.snippet {
             for raw in hunk.lines() {
                 let color = match raw.bytes().next() {
@@ -1505,11 +1684,10 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
             }
             lines.push(Line::raw(""));
         }
-        for logical in cm.body.split('\n') {
-            for piece in wrap_text(logical, width.max(1)) {
-                lines.push(Line::from(Span::styled(piece, text_style(p))));
-            }
-        }
+        let mut rendered = app.markdown_render(&cm.body, width.max(1));
+        let offset = lines.len();
+        lines.append(&mut rendered.lines);
+        body_meta = Some((offset, rendered));
         if cm.reply_count > 0 {
             let plural = if cm.reply_count == 1 { "reply" } else { "replies" };
             lines.push(Line::raw(""));
@@ -1518,28 +1696,75 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(p.overlay0),
             )));
         }
+    } else if app.pr_on_description() {
+        if let Some(s) = app.pr_snapshot() {
+            let mut rendered = app.markdown_render(&s.body, width.max(1));
+            let offset = lines.len();
+            lines.append(&mut rendered.lines);
+            body_meta = Some((offset, rendered));
+        }
     } else {
-        lines
-            .push(Line::from(Span::styled(pr_empty_msg(&app.pr), Style::default().fg(p.overlay0))));
+        // The empty-state remedy can outgrow a narrow pane; wrap it rather than clip it.
+        let refresh = app.keymap().hint(crate::keymap::Action::Refresh);
+        for piece in wrap_text(&pr_empty_msg(&app.pr, refresh), width.max(1)) {
+            lines.push(Line::from(Span::styled(piece, Style::default().fg(p.overlay0))));
+        }
     }
 
-    // Clamp in `usize` before the `u16` cast — `pr_read_scroll` grows unbounded via the wheel,
-    // so casting first could wrap a large value below the clamp.
-    let scroll = app.pr_read_scroll.min(lines.len().saturating_sub(1)) as u16;
-    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+    // Clamp in `usize` before the `u16` cast — a stale `pr_read_scroll` could otherwise
+    // wrap below the clamp. Scrolling stops with the last line at the pane's bottom edge.
+    let max = lines.len().saturating_sub(inner.height as usize);
+    app.note_pr_read_max_scroll(max);
+    let scroll = app.pr_read_scroll.min(max);
+    if let Some((offset, rendered)) = &body_meta {
+        note_markdown_regions(app, rendered, inner, scroll, *offset);
+    }
+    frame.render_widget(Paragraph::new(lines).scroll((saturating_row(scroll), 0)), inner);
+    render_overflow_scrollbar(frame, area, max, scroll, p);
 }
 
 /// The one-line message for a loading or degraded PR view, each naming what unblocks it.
-fn pr_empty_msg(view: &forge::PrView) -> &'static str {
+/// The no-PR state names the candidate branches it queried, so a resolution that surprises
+/// is inspectable rather than silent (specs/forge-host.md). `refresh` is the active `refresh`
+/// binding's hint key.
+fn pr_empty_msg(view: &forge::PrView, refresh: char) -> String {
+    if let Some(message) = view.retry_remedy(refresh) {
+        return message;
+    }
     match view {
-        forge::PrView::Loading => "loading…",
-        forge::PrView::Pr(_) => "",
-        forge::PrView::NoPr => "no PR for this branch yet — push and open one, then press r",
-        forge::PrView::Ambiguous(_) => "this branch backs several open PRs — open one on GitHub",
-        forge::PrView::NoGh => "gh not found — install gh, then press r",
-        forge::PrView::NotAuthed => "not signed in — run `gh auth login`, then press r",
-        forge::PrView::NotGitHub => "not a GitHub remote — the PR tab needs a github.com origin",
-        forge::PrView::Error(_) => "github unavailable — retrying; press r to retry now",
+        forge::PrView::Loading => "loading…".into(),
+        forge::PrView::Pending | forge::PrView::Pr(_) => String::new(),
+        forge::PrView::NoPr(candidates) if candidates.is_empty() => {
+            "detached HEAD — check out a branch to resolve its PR".into()
+        }
+        forge::PrView::NoPr(candidates) => {
+            format!(
+                "no PR for {} yet — push and open one, then press {refresh}",
+                name_a_few(candidates)
+            )
+        }
+        forge::PrView::Ambiguous(n) => {
+            format!("{n} open PRs back this branch — open one on GitHub")
+        }
+        forge::PrView::NoGh | forge::PrView::NotAuthed(_) | forge::PrView::Error(_) => {
+            unreachable!("retry failures returned above")
+        }
+        forge::PrView::NeedsGitHubOrigin => "the PR tab needs a supported GitHub origin".into(),
+        forge::PrView::UnsupportedHost(host) => {
+            format!("unsupported host {host} — Enterprise users can set `github_host`")
+        }
+        forge::PrView::MalformedOrigin(host) => {
+            format!("malformed GitHub origin for {host} — expected owner/repository")
+        }
+    }
+}
+
+/// Up to three names, then `+N more` — the queried candidates stay one readable line.
+fn name_a_few(names: &[String]) -> String {
+    let shown = names.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    match names.len() {
+        0..=3 => shown,
+        n => format!("{shown} +{} more", n - 3),
     }
 }
 
@@ -1558,8 +1783,9 @@ pub fn hit_pr_open(area: Rect, app: &App, col: u16, row: u16) -> bool {
     col >= area.width.saturating_sub(chip_w) && col < area.width
 }
 
-/// The comment index a click at `(col, row)` lands on, or `None` (a check, header, or blank).
-/// Mirrors `render_pr_nav`'s row layout and cursor-windowed scroll; only comments are selectable.
+/// The cursor-row index a click at `(col, row)` lands on — the pinned description at the
+/// top, or a comment — or `None` (a check, header, or blank). Mirrors `render_pr_nav`'s
+/// row layout and cursor-windowed scroll.
 #[must_use]
 pub fn pr_nav_hit(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
     let inner = inner_rect(panes(area, app.list_pct).files);
@@ -1567,21 +1793,28 @@ pub fn pr_nav_hit(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
         return None;
     }
     let s = app.pr_snapshot()?;
-    // The first comment's display row, mirroring `render_pr_nav`'s layout; the view windows on
-    // the selected comment exactly as the painter does.
-    let first = pr_nav_comment_offset(s);
-    let sel_display = first + app.pr_cursor;
+    let has_desc = app.pr_has_description();
+    let offset = app.pr_description_offset();
+    let first = pr_nav_first_comment_row(s, has_desc);
+    // The display row of the selected cursor row; the view windows on it exactly as the
+    // painter does.
+    let sel_display =
+        if has_desc && app.pr_cursor == 0 { 0 } else { first + app.pr_cursor - offset };
     let viewport = inner.height as usize;
     let scroll = sel_display.saturating_sub(viewport.saturating_sub(1));
     let d = (row - inner.y) as usize + scroll;
-    (d >= first && d - first < s.comments.len()).then(|| d - first)
+    if has_desc && d == 0 {
+        return Some(0);
+    }
+    (d >= first && d - first < s.comments.len()).then(|| d - first + offset)
 }
 
-/// The display row of the first comment in `render_pr_nav`'s navigator — past the checks header,
-/// the checks themselves, a blank, and the comments header. The single home for that layout
-/// offset, shared with the click hit-test so the painted rows and the hit math can't drift.
-fn pr_nav_comment_offset(s: &forge::PrSnapshot) -> usize {
-    s.checks.len() + 3
+/// The display row of the first comment in `render_pr_nav`'s navigator — past the pinned
+/// description (when present), the checks header, the checks, a blank, and the comments
+/// header. The single home for that layout offset, shared with the click hit-test so the
+/// painted rows and the hit math can't drift.
+fn pr_nav_first_comment_row(s: &forge::PrSnapshot, has_desc: bool) -> usize {
+    usize::from(has_desc) * 2 + s.checks.len() + 3
 }
 
 /// The status glyph and Catppuccin accent for a check.

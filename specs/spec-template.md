@@ -5,43 +5,74 @@ Last edited: YYYY-MM-DD
 ---
 
 <!--
-One concept per doc: the data model, the API, a subsystem.
-State end-state truth — what must be TRUE when the change is done, not what's built or when.
-Keep the sections in this order; delete any that don't earn their place. Scale to the change.
-Update `Last edited` on every edit. Dates are ISO (YYYY-MM-DD).
-The bar: lead with an example, ### max, one idea per bullet, no schema transcription.
+A spec is a communication medium. The user reviews it. Contributors learn from it.
+It is never a scratchpad. Optimize for reading speed, even in a one-line edit.
+The full bar: references/writing-great-specs.md. The essentials:
+- One concept per doc. End-state truth: what must be TRUE when the change is done.
+- One fact per sentence. Linear sentences, no asides.
+- One grammatical template per list or table. Schema-first tables, columns padded to align raw.
+- Contract only: mechanism -> code, rationale -> PR, provenance -> git.
+- One home per fact. Cite by number everywhere else.
+- Under ~2,000 words. Sections in this order. Delete sections that don't earn their place.
 -->
 
 # <Concept name>
 
-<One sentence: what this concept is and why it exists.>
+<One sentence: what this is and why it exists.>
 
 ## Overview
 
-<The concrete design. Lead with one realistic example, then a field table.>
+<Lead with one realistic example, then a field table.>
+
+```json
+{ "id": "chg_1A2b3C", "amount": 1099, "status": "succeeded" }
+```
+
+| field    | type    | meaning                                          |
+| -------- | ------- | ------------------------------------------------ |
+| `id`     | string  | unique charge identifier                         |
+| `amount` | integer | amount in the smallest currency unit             |
+| `status` | enum    | `pending`, `succeeded`, `failed`, or `unknown`   |
 
 ## Behavior
 
-<Short present-tense statements of what must be true. Show both outcomes for anything that can fail.>
+<Rules as schema-first tables. Number invariants for citation. One grammatical shape per table.>
+
+| #  | Always true                                                    |
+| -- | -------------------------------------------------------------- |
+| I1 | A charge is captured at most once.                              |
+| I2 | A charge reaches exactly one terminal status and never leaves it. |
+
+<Operations as condition → outcome rows:>
+
+| request                                    | outcome                                          |
+| ------------------------------------------ | ------------------------------------------------ |
+| valid `amount`, chargeable `source`        | `2xx`, one `pending` charge committed            |
+| invalid `amount`                           | `400 invalid_request`, nothing persists          |
+| same `Idempotency-Key` replayed within 24h | the original response, nothing charged twice (→ I1) |
+
+## Traces
+
+<Only for temporal contracts: the duplicate, the race, the crash. Delete otherwise.
+Steps share one shape: "actor does X. System does Y (→ I1)."->
+
+**T1 — crash between debit and record**
+
+1. The caller creates a charge. The row commits `pending`.
+2. The processor debits the card.
+3. The service crashes before recording the outcome.
+4. Recovery marks the charge `unknown`, terminal (→ I2).
 
 ## Failure semantics
 
-<!-- Required if this concept is retryable, billable, persistent, or side-effecting. Otherwise delete. -->
-
-<What happens on the second run and under concurrent runs. State the contract, not a label.>
+<Only what no table above states: the second run, the concurrent run, the crash.>
 
 ## Non-goals
 
-<What this explicitly does NOT do.>
+<What this explicitly does not do. One shape per bullet.>
 
-## Decisions
-
-<Each: the decision, the main alternative rejected, a one-line why.>
-
-## Open decisions
-
-- None.
+- Does not handle refunds. See the refunds spec.
 
 ## Related specs
 
-<Relative links to the specs this one depends on or borders.>
+- [refunds](./refunds.md)
