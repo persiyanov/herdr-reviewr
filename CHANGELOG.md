@@ -10,6 +10,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Rust 1.97 is now the minimum toolchain.** Local builds, Clippy, CI, and release builds use the
   same pinned compiler version.
 
+### Fixed
+- **The PR tab finds the pull request when `origin` is a fork.** A checkout whose `origin` is a
+  fork and whose base repository is the `upstream` remote now queries `upstream`, matching the
+  fork workflow. GitHub lists a pull request only under its base repository, so the previous
+  origin-only query showed the empty state.
+
 ## [0.17.0] — 2026-07-14
 
 ### Added

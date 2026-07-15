@@ -312,7 +312,7 @@ fn fetch_inner(
     input: &PrFetchInput,
     cancelled: &AtomicBool,
 ) -> Result<PrView, GhError> {
-    let target = match &input.origin {
+    let target = match &input.target {
         crate::git::OriginIdentity::Repository(target) => target,
         crate::git::OriginIdentity::Missing | crate::git::OriginIdentity::Hostless => {
             return Ok(PrView::NeedsGitHubOrigin);

@@ -1167,7 +1167,7 @@ mod refresh_tests {
 
     fn input(head: &str) -> PrFetchInput {
         PrFetchInput {
-            origin: OriginIdentity::Missing,
+            target: OriginIdentity::Missing,
             head_oid: Some(head.to_string()),
             candidates: vec!["feature".to_string()],
         }

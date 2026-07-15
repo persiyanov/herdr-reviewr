@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-27
-Last edited: 2026-07-12
+Last edited: 2026-07-14
 ---
 
 # forge host
@@ -61,7 +61,9 @@ github_host = "github.example.com"
 
 Host matching is case-insensitive. A missing setting adds no Enterprise host. `github.com` remains supported when the setting is present.
 
-Host identity comes from `origin`'s primary fetch URL after Git's `url.*.insteadOf` rewrite. A separate push URL does not affect PR reads.
+reviewr prefers the fork workflow's base repository as the fetch target: when a remote named `upstream` resolves to a supported GitHub repository, that repository is the target instead of `origin`. `origin` is then the contributor's fork, `upstream` is the base, and GitHub lists a pull request only under its base. An `upstream` that is absent or not a supported GitHub repository leaves `origin` as the target.
+
+Host identity comes from the fetch target's primary fetch URL after Git's `url.*.insteadOf` rewrite. A separate push URL does not affect PR reads.
 
 | condition                                                 | outcome                                                                         |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------- |
@@ -75,7 +77,7 @@ The alias rows apply only to scp-style and `ssh://` origins. An alias is a trust
 
 Hosted URL forms use `http://`, `https://`, or `git://`. File URLs and other schemes are not GitHub repository identities and remain unsupported.
 
-A fetch target is the canonical matched host plus the origin's owner and repository. A fetch input adds the pinned `HEAD` and derived candidate branches. Base configuration shapes those candidates but is not a second identity of its own. `GH_HOST` cannot redirect a fetch to another instance.
+A fetch target is the canonical matched host plus the target repository's owner and name. A fetch input adds the pinned `HEAD` and derived candidate branches. Base configuration shapes those candidates but is not a second identity of its own. `GH_HOST` cannot redirect a fetch to another instance.
 
 ### Resolution
 
@@ -146,7 +148,7 @@ reviewr reads GitHub and never writes it, so every failure degrades to a clear s
 - An unauthenticated fetch preserves a same-input snapshot and shows `gh auth login --hostname <host>`. With no same-input snapshot, the remedy fills the tab.
 - An unsupported origin names the host and points Enterprise users to `github_host`.
 - Any other fetch failure preserves a same-input snapshot and shows the retry error. With no same-input snapshot, the error fills the tab.
-- A missing `origin` is a clean absence. Any other git command failure is transient and never read as absence, a detached `HEAD`, or an unsupported remote.
+- A missing `origin` or `upstream` is a clean absence. Any other git command failure is transient and never read as absence, a detached `HEAD`, or an unsupported remote.
 - No open PR shows a directional empty state naming the queried candidates. The next poll lights the tab up when a PR appears.
 - Every read is idempotent and side-effect-free. A retry returns the same snapshot.
 - Two active PR tabs on one worktree converge within one poll interval. An inactive tab catches up when entered.

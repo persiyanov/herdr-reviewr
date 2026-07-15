@@ -49,7 +49,7 @@ fn push_head_other_name_yields_the_remote_branch_before_the_local_name() {
     repo.git(&["update-ref", "refs/remotes/origin/other", "HEAD"]);
     let local = pr_local(repo.path(), None).expect("pr_local");
     assert_eq!(
-        local.origin,
+        local.target,
         OriginIdentity::Repository(RepoTarget {
             host: "github.com".to_string(),
             owner: "owner".to_string(),
@@ -179,7 +179,7 @@ fn a_missing_origin_is_absence_but_a_non_repo_is_failure() {
     repo.write("a.txt", "one\n");
     repo.commit_all("base");
     let local = pr_local(repo.path(), None).expect("pr_local");
-    assert_eq!(local.origin, OriginIdentity::Missing, "no origin remote is a clean absence");
+    assert_eq!(local.target, OriginIdentity::Missing, "no origin remote is a clean absence");
     assert_eq!(local.candidates, ["main"]);
 
     let dir = tempfile::tempdir().unwrap();
@@ -202,9 +202,45 @@ fn origin_identity_uses_instead_of_rewrite_and_ignores_pushurl() {
     .expect("pr_local");
 
     assert_eq!(
-        local.origin,
+        local.target,
         OriginIdentity::Repository(RepoTarget {
             host: "github.company.com".to_string(),
+            owner: "owner".to_string(),
+            name: "repo".to_string(),
+        })
+    );
+}
+
+#[test]
+fn a_supported_upstream_remote_is_the_fetch_target_over_a_fork_origin() {
+    // Contributor topology: `origin` is the user's fork, `upstream` is the base repo. GitHub
+    // lists the PR only under the base, so the fetch must target `upstream`, not the fork.
+    let repo = worktree();
+    repo.git(&["remote", "set-url", "origin", "https://github.com/contributor/repo.git"]);
+    repo.git(&["remote", "add", "upstream", "https://github.com/owner/repo.git"]);
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert_eq!(
+        local.target,
+        OriginIdentity::Repository(RepoTarget {
+            host: "github.com".to_string(),
+            owner: "owner".to_string(),
+            name: "repo".to_string(),
+        }),
+        "a supported `upstream` is the base repo and outranks the fork `origin`"
+    );
+}
+
+#[test]
+fn a_non_github_upstream_leaves_origin_as_the_fetch_target() {
+    // The redirect fires only when `upstream` resolves to a supported GitHub repository; an
+    // `upstream` on another host must not shadow a working GitHub `origin`.
+    let repo = worktree();
+    repo.git(&["remote", "add", "upstream", "git@gitlab.com:base/repo.git"]);
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert_eq!(
+        local.target,
+        OriginIdentity::Repository(RepoTarget {
+            host: "github.com".to_string(),
             owner: "owner".to_string(),
             name: "repo".to_string(),
         })

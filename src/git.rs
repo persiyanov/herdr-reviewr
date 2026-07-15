@@ -209,11 +209,12 @@ fn git_strict(repo: &Path, args: &[&str]) -> Result<String, GitFail> {
 }
 
 /// Everything the PR fetch reads from local Git in one failure-aware pass. [`OriginIdentity`]
-/// preserves repository, missing, hostless, unsupported, and malformed origin states; the
-/// optional `HEAD` and candidate list preserve detached and unborn states.
+/// preserves repository, missing, hostless, unsupported, and malformed states for the fetch
+/// target — `origin`, or a supported `upstream` when the checkout is a fork; the optional
+/// `HEAD` and candidate list preserve detached and unborn states.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrFetchInput {
-    pub origin: OriginIdentity,
+    pub target: OriginIdentity,
     /// `HEAD` pinned to an OID at the start of the pass; every ancestry test, distance,
     /// and the `sync` count use this pin, so one fetch reads one consistent local state.
     pub head_oid: Option<String>,
@@ -230,10 +231,10 @@ pub fn pr_local(
     config_bases: &[String],
     github_host: Option<&str>,
 ) -> Result<PrFetchInput, GitFail> {
-    let origin = origin_identity(repo, github_host)?;
+    let target = fetch_target(repo, github_host)?;
     let Some(branch) = git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])? else {
         // Detached HEAD — post-merge cleanup, not a review seat; nothing to publish.
-        return Ok(PrFetchInput { origin, head_oid: None, candidates: Vec::new() });
+        return Ok(PrFetchInput { target, head_oid: None, candidates: Vec::new() });
     };
     let head_oid = git_tristate(repo, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?;
     let bases = base_names(base_flag, config_bases);
@@ -246,17 +247,34 @@ pub fn pr_local(
         None => Vec::new(), // an unborn branch has no commits to compare against
     };
     let candidates = candidate_order(push_dest.as_deref(), &tips, &branch);
-    Ok(PrFetchInput { origin, head_oid, candidates })
+    Ok(PrFetchInput { target, head_oid, candidates })
 }
 
-/// Classify origin's primary rewritten fetch URL. A missing origin is a clean state; every other
-/// `remote get-url` failure is transient.
-/// `remote get-url` is kept over `config --get remote.origin.url` because it applies
+/// The repository PRs are queried against. A fork checkout keeps its base repo as the
+/// `upstream` remote (gh's convention) and GitHub lists the pull request only under the base,
+/// so a supported `upstream` outranks `origin`. When `upstream` is absent or is not a supported
+/// GitHub repository, `origin`'s identity — including its missing, hostless, unsupported, and
+/// malformed states — stands unchanged, so the origin-only outcomes are preserved.
+fn fetch_target(repo: &Path, github_host: Option<&str>) -> Result<OriginIdentity, GitFail> {
+    let origin = remote_identity(repo, "origin", github_host)?;
+    match remote_identity(repo, "upstream", github_host)? {
+        OriginIdentity::Repository(base) => Ok(OriginIdentity::Repository(base)),
+        _ => Ok(origin),
+    }
+}
+
+/// Classify a named remote's primary rewritten fetch URL. A missing remote is a clean
+/// [`OriginIdentity::Missing`]; every other `remote get-url` failure is transient.
+/// `remote get-url` is kept over `config --get remote.<name>.url` because it applies
 /// `url.<base>.insteadOf` rewrites, which can be what maps a shorthand to github.com. Its
 /// missing-remote exit code (2) is also git's generic usage-error code, so absence is told
 /// apart by the message text — stable English under [`run_git`]'s `LC_ALL=C`.
-fn origin_identity(repo: &Path, github_host: Option<&str>) -> Result<OriginIdentity, GitFail> {
-    let args = ["remote", "get-url", "origin"];
+fn remote_identity(
+    repo: &Path,
+    remote: &str,
+    github_host: Option<&str>,
+) -> Result<OriginIdentity, GitFail> {
+    let args = ["remote", "get-url", remote];
     let out = run_git(repo, &args)?;
     if out.status.success() {
         return Ok(classify_remote(String::from_utf8_lossy(&out.stdout).trim(), github_host));
