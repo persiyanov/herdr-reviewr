@@ -28,7 +28,8 @@ It **never edits your worktree** and sends nothing on its own. Its only write to
 - **git** on `PATH`.
 - A **truecolor (24-bit)** terminal with Unicode box-drawing support; a light or dark theme to
   match it (see [Theme](#theme)).
-- **macOS or Linux.**
+- **macOS, Linux, or Windows** (Windows needs herdr's Windows build; `cmd` and PowerShell — both
+  present by default — drive the plugin's glue).
 - **`gh`** (the GitHub CLI), authenticated — *optional*, only for the **PR** tab. Everything else
   works without it.
 
@@ -51,8 +52,11 @@ type = "plugin_action"
 command = "persiyanov.reviewr.toggle"   # <plugin_id>.<action_id> — note the id, not the name
 ```
 
+**On Windows the action id is `toggle-win`** (herdr rejects duplicate ids across platforms, so the
+Windows entry is suffixed): bind `command = "persiyanov.reviewr.toggle-win"` instead.
+
 `cmd+…` chords reach herdr; macOS swallows `alt+…`. With no key bound, run it once with
-`herdr plugin action invoke toggle --plugin persiyanov.reviewr`.
+`herdr plugin action invoke toggle --plugin persiyanov.reviewr` (`toggle-win` on Windows).
 
 ## Quick start
 
@@ -196,9 +200,12 @@ This is a focused, young tool. The known constraints, honestly:
 - Unicode box-drawing glyphs are required (no Nerd Font needed).
 
 **Platform**
-- **macOS and Linux only** — no Windows.
-- **Clipboard export** uses `pbcopy` (macOS) or `wl-copy` / `xclip` / `xsel` (Linux); if none is
-  installed it says so and you use **Send** instead. (OSC 52 and Windows are roadmap.)
+- **macOS, Linux, and Windows.** Windows runs the same binary natively (needs herdr's Windows
+  build); the plugin's glue is `cmd`/PowerShell there instead of `sh`. One caveat: the Windows
+  pane launcher isn't quoted, so a plugin path containing a space won't launch — install under a
+  space-free path.
+- **Clipboard export** uses `pbcopy` (macOS), `wl-copy` / `xclip` / `xsel` (Linux), or `clip`
+  (Windows); if none is found it says so and you use **Send** instead. (OSC 52 is roadmap.)
 
 **herdr coupling**
 - **Send** needs a resolvable agent pane — the agent in your tab, or the sole agent in the

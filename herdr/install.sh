@@ -19,21 +19,27 @@ BIN_DIR="$ROOT/bin"
 VERSION="$(grep -m1 '^version' "$ROOT/herdr-plugin.toml" | sed -E 's/.*"([^"]+)".*/\1/')"
 TAG="v${VERSION}"
 
-# Map the running platform to the release target triple.
+# Map the running platform to the release target triple. Windows archives are .zip with a .exe
+# binary inside (taiki-e's convention); unix archives are .tar.gz. On Windows the build runs under
+# a Git Bash / MSYS shell, so `uname -s` reports MINGW*/MSYS*/CYGWIN*.
 os="$(uname -s)"
 arch="$(uname -m)"
+ext="tar.gz"
+bin_name="$NAME"
 case "$os-$arch" in
   Darwin-arm64)              target="aarch64-apple-darwin" ;;
   Darwin-x86_64)             target="x86_64-apple-darwin" ;;
   Linux-aarch64 | Linux-arm64) target="aarch64-unknown-linux-gnu" ;;
   Linux-x86_64)              target="x86_64-unknown-linux-gnu" ;;
+  MINGW*-x86_64 | MSYS*-x86_64 | CYGWIN*-x86_64)
+    target="x86_64-pc-windows-msvc"; ext="zip"; bin_name="$NAME.exe" ;;
   *)
     echo "$NAME: no prebuilt binary for $os-$arch — build from source with 'cargo install --path .'" >&2
     exit 1
     ;;
 esac
 
-archive="${NAME}-${target}.tar.gz"
+archive="${NAME}-${target}.${ext}"
 # taiki-e's checksum sidecar drops the archive extension: <name>-<target>.sha256, not <archive>.sha256.
 checksum="${NAME}-${target}.sha256"
 base="https://github.com/${REPO}/releases/download/${TAG}"
@@ -63,6 +69,10 @@ if [ "$expected" != "$actual" ]; then
 fi
 
 mkdir -p "$BIN_DIR"
-tar -xzf "$tmp/$archive" -C "$tmp"
-install -m 0755 "$tmp/$NAME" "$BIN_DIR/$NAME"
-echo "$NAME: installed $BIN_DIR/$NAME"
+if [ "$ext" = "zip" ]; then
+  unzip -q -o "$tmp/$archive" -d "$tmp"
+else
+  tar -xzf "$tmp/$archive" -C "$tmp"
+fi
+install -m 0755 "$tmp/$bin_name" "$BIN_DIR/$bin_name"
+echo "$NAME: installed $BIN_DIR/$bin_name"

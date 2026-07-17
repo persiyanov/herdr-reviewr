@@ -2,32 +2,51 @@ id = "persiyanov.reviewr"
 name = "reviewr"
 version = "0.5.0"
 min_herdr_version = "0.7.0"
-platforms = ["macos", "linux"]
+platforms = ["macos", "linux", "windows"]
 description = "Native terminal code-review sidebar for herdr."
 
-# On `herdr plugin install`, download the prebuilt `herdr-reviewr` binary for this platform from
-# the matching GitHub Release into $HERDR_PLUGIN_ROOT/bin (no Rust toolchain needed). Skipped by
-# `herdr plugin link` — for a local checkout, build it yourself with `cargo install --path .`.
 [[build]]
 command = ["bash", "herdr/install.sh"]
+platforms = ["macos", "linux"]
 
-# The sidebar pane runs the downloaded binary by absolute path under the plugin root, since the
-# pane's cwd is the repo under review (not the plugin root) and the binary isn't on PATH. The
-# toggle action places it as a right split.
+[[build]]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", 'herdr\install.ps1']
+platforms = ["windows"]
+
 [[panes]]
 id = "sidebar"
 title = "reviewr"
 placement = "split"
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-reviewr\""]
+platforms = ["macos", "linux"]
+
+[[panes]]
+id = "sidebar-win"
+title = "reviewr"
+placement = "split"
+command = ["cmd", "/d", "/c", '%HERDR_PLUGIN_ROOT:\\?\=%\bin\herdr-reviewr.exe']
+platforms = ["windows"]
 
 [[actions]]
 id = "toggle"
 title = "reviewr: toggle sidebar"
 contexts = ["pane", "workspace"]
 command = ["bash", "herdr/sidebar.sh", "toggle"]
+platforms = ["macos", "linux"]
 
-# Auto-open the sidebar for a freshly created worktree.
+[[actions]]
+id = "toggle-win"
+title = "reviewr: toggle sidebar"
+contexts = ["pane", "workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", 'herdr\sidebar.ps1', "toggle"]
+platforms = ["windows"]
+
 [[events]]
 on = "worktree.created"
 command = ["bash", "herdr/sidebar.sh", "open"]
+platforms = ["macos", "linux"]
 
+[[events]]
+on = "worktree.created"
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", 'herdr\sidebar.ps1', "open"]
+platforms = ["windows"]

@@ -43,13 +43,25 @@ pub trait ExportTarget {
 
 /// A clipboard tool and the args that make it read stdin into the system clipboard. Tried in
 /// order — the first one present on `PATH` wins. macOS ships `pbcopy`; Linux needs one of these
-/// installed (Wayland `wl-copy`, or X11 `xclip`/`xsel`). OSC 52 and Windows are roadmap.
+/// installed (Wayland `wl-copy`, or X11 `xclip`/`xsel`). OSC 52 is roadmap.
+#[cfg(not(windows))]
 const CLIPBOARD_TOOLS: &[(&str, &[&str])] = &[
     ("pbcopy", &[]),
     ("wl-copy", &[]),
     ("xclip", &["-selection", "clipboard"]),
     ("xsel", &["--clipboard", "--input"]),
 ];
+
+/// On Windows the built-in `clip` reads stdin into the clipboard; it's always present.
+#[cfg(windows)]
+const CLIPBOARD_TOOLS: &[(&str, &[&str])] = &[("clip", &[])];
+
+/// Remediation shown when no clipboard tool resolves — platform-specific install hint.
+#[cfg(not(windows))]
+const NO_CLIPBOARD: &str =
+    "no clipboard tool found (install wl-clipboard, xclip, or xsel) — use \"Add all to chat\" instead";
+#[cfg(windows)]
+const NO_CLIPBOARD: &str = "no clipboard tool found — use \"Add all to chat\" instead";
 
 /// The system clipboard, via the first available platform clipboard tool.
 #[derive(Debug)]
@@ -61,10 +73,7 @@ impl ExportTarget for Clipboard {
     }
 
     fn export(&self, text: &str) -> Result<()> {
-        let (cmd, args) = select_tool(CLIPBOARD_TOOLS, crate::proc::on_path).context(
-            "no clipboard tool found (install wl-clipboard, xclip, or xsel) — \
-             use \"Add all to chat\" instead",
-        )?;
+        let (cmd, args) = select_tool(CLIPBOARD_TOOLS, crate::proc::on_path).context(NO_CLIPBOARD)?;
         let mut child = Command::new(cmd)
             .args(args)
             .stdin(Stdio::piped())
@@ -112,21 +121,27 @@ impl ExportTarget for Agent {
 
 #[cfg(test)]
 mod tests {
-    use super::{CLIPBOARD_TOOLS, format_all, format_comment, select_tool};
+    use super::{format_all, format_comment, select_tool};
     use crate::model::{Comment, Side};
 
     #[test]
     fn clipboard_tool_selection_prefers_list_order_and_can_be_empty() {
+        // A fixed fixture, independent of the platform-specific CLIPBOARD_TOOLS, so the selection
+        // logic is exercised identically on every OS.
+        const TOOLS: &[(&str, &[&str])] = &[
+            ("pbcopy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+        ];
         // None present -> no tool (the caller surfaces the "install one" error).
-        assert!(select_tool(CLIPBOARD_TOOLS, |_| false).is_none());
+        assert!(select_tool(TOOLS, |_| false).is_none());
         // Only an X11 tool present -> it's chosen, with its selection args.
         assert_eq!(
-            select_tool(CLIPBOARD_TOOLS, |c| c == "xclip"),
+            select_tool(TOOLS, |c| c == "xclip"),
             Some(("xclip", &["-selection", "clipboard"][..]))
         );
         // When several are present, earlier in the list wins (pbcopy over xclip).
         assert_eq!(
-            select_tool(CLIPBOARD_TOOLS, |c| c == "pbcopy" || c == "xclip").map(|(cmd, _)| cmd),
+            select_tool(TOOLS, |c| c == "pbcopy" || c == "xclip").map(|(cmd, _)| cmd),
             Some("pbcopy")
         );
     }
