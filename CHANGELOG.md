@@ -9,10 +9,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - **Windows support.** The binary runs natively on Windows (needs herdr's Windows build). Platform
   glue is split per-OS in the manifest: the sidebar pane launches via `cmd` (the `sidebar-win`
-  entrypoint), and toggle / auto-open run a PowerShell port (`herdr/sidebar.ps1`) with native JSON
-  parsing — no `jq`. `herdr/install.ps1` downloads the Windows release for `plugin install`, and
-  the release workflow now builds `x86_64-pc-windows-msvc`. On Windows bind the `toggle-win`
-  action id (herdr rejects duplicate ids across platforms).
+  entrypoint), and the toggle / open / close / auto-open glue runs a PowerShell port
+  (`herdr/sidebar.ps1`) with native JSON parsing — no `jq`. `herdr/install.ps1` downloads the
+  Windows release for `plugin install`, and the release workflow now builds
+  `x86_64-pc-windows-msvc`. On Windows the actions carry a `-win` suffix (`toggle-win`, `open-win`,
+  `close-win`) since herdr rejects duplicate ids across platforms.
 - **Windows clipboard export** via `clip`, alongside macOS `pbcopy` and Linux `wl-copy`/`xclip`/`xsel`.
 
 ### Fixed
@@ -20,6 +21,254 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   opener uses `rundll32` there instead of `open`/`xdg-open`.
 - A `.gitattributes` keeps `*.sh` LF-only so Windows checkouts don't feed CR-terminated scripts to
   a shell.
+
+## [0.18.1] — 2026-07-16
+
+### Changed
+- **Copy and onboarding are clearer.** Export confirmations now distinguish adding comments to the
+  agent input from copying them, PR failures pair the problem with a concrete recovery step, and
+  config errors explain that a corrected file reloads automatically. The README now shows how to
+  open reviewr immediately after installation, gives the last-turn diff its own feature callout,
+  and demonstrates the full comment-to-agent handoff.
+- **The demo shows reviewr itself.** The README recording now runs the installed plugin full-screen
+  with its real terminal palette instead of simulating an adjacent agent pane.
+
+## [0.18.0] — 2026-07-15
+
+### Changed
+- **Fork pull requests resolve automatically.** A readable, supported `upstream` remote now selects
+  the base repository. An absent or unsupported `upstream` falls back to `origin`; a Git read failure
+  stays visible and never falls through. SSH host aliases are no longer inferred: GitHub.com and
+  configured Enterprise hosts must match exactly. Literal `github.com-*` Enterprise hostnames remain
+  valid when configured exactly. A Git failure before the target resolves replaces any snapshot
+  whose repository can no longer be proven. The ordinary empty state now says `No pull request yet.
+  Ready to ship?`. (#18; thanks @ubuntudroid for the report and original fix.)
+- **Rust 1.97 is now the minimum toolchain.** Local builds, Clippy, CI, and release builds use the
+  same pinned compiler version.
+
+## [0.17.0] — 2026-07-14
+
+### Added
+- **Four-way navigator placement.** The navigator can sit on the right, bottom, left, or top of
+  every tab. Press `p` to cycle clockwise, or set `navigator_position` in plugin config. Side and
+  stacked layouts remember separate sizes, with `<` / `>` and divider dragging available on both
+  axes. (#16)
+- **Independent PR navigator scrolling.** The checks and comments viewport scrolls without moving
+  its selection. `Tab` changes pane focus, and page keys scroll the focused PR pane.
+
+### Changed
+- **Navigator resize actions have position-neutral names.** Config uses `navigator-grow` and
+  `navigator-shrink`; `list-wider` and `list-narrower` remain accepted aliases.
+- **Breaking: `p` is a new default key.** A custom binding that already uses `p` now collides with
+  `navigator-position` and must be moved before the config becomes valid again.
+
+## [0.16.1] — 2026-07-13
+
+### Fixed
+- **The diff cursor is visible from the file list.** The diff pane hid its cursor row whenever the
+  file list held focus, so a hunk step driven from the list moved a cursor you could not see. Both
+  panes now always mark their cursor row, filling it brightly when the pane has focus and a step
+  softer when it does not — the file list already behaved this way.
+
+## [0.16.0] — 2026-07-13
+
+### Added
+- **Changeset traversal.** `]` and `[` jump to the next and previous hunk, so the whole changeset
+  reads hunk by hunk without a detour through the file list. At a file's last hunk the key stops:
+  the footer offers `] next file`, and pressing it again crosses, so a held key never flies past a
+  file. A file with no hunk — a binary, a pure rename — is crossed over. `f` and `F` jump to the
+  next and previous file outright, from either pane. All four are rebindable, like the rest of the
+  keymap.
+
+### Changed
+- **Pane divider keys.** The divider moves with `<` and `>`, each key pointing the way it goes, so
+  `<` widens the file list and `>` narrows it. The old `]` and `[` now step hunks.
+- **Breaking: `]`, `[`, `f`, `F`, `<`, and `>` are new default keys.** A `[keybindings]` config
+  that binds any of them to another action now collides with a default. A collision makes the
+  whole config invalid, so the sidebar shows only the config error until you move the key. The
+  error names both actions involved.
+
+## [0.15.0] — 2026-07-13
+
+### Added
+- **Aggregate change stats in the header.** The header now shows the active scope's line totals
+  next to the changed-file count (`9 changed  +42 −18`), colored like the per-file stats. A zero
+  side drops, and an empty changeset shows the bare count.
+- **Configurable startup scope.** A new `default_scope` config key (`"uncommitted"`, `"branch"`,
+  or `"last-turn"`) names the scope the sidebar starts in. It seeds only a fresh sidebar:
+  switching with `u`/`b`/`t` wins for the session, and a config reread never switches the
+  active scope.
+
+## [0.14.0] — 2026-07-13
+
+### Changed
+- **Markdown preview in the Changes tab.** The `preview` binding (default `m`) now toggles the
+  rendered preview from a markdown file's diff, not only in All files. It renders the file's
+  current content, so a deleted file's toggle is inert. Returning to the diff leaves the cursor,
+  scroll, and folds exactly where they were. The preview choice is kept per tab.
+
+## [0.13.0] — 2026-07-12
+
+### Added
+- **Markdown rendering.** PR comment bodies and the PR description render as styled markdown —
+  headings, emphasis, lists, quotes, links with dim destinations, tables, and fenced code
+  highlighted with the same syntax theme as the diff panes. A wide table degrades to its source
+  text. Control characters and bidi overrides in bodies render as visible placeholders, never raw.
+- **PR description card.** A non-empty PR description pins a `description` row at the top of
+  the PR tab's navigator, above the checks. Its body reads in the left pane.
+- **Markdown preview in All files.** The `preview` binding (default `m`) toggles a read-only
+  rendered preview on `.md`/`.markdown` files, named `· preview` in the pane title. Source stays
+  the commentable view. The toggle carries your reading position both ways, and an unscrolled
+  round-trip restores the exact cursor and scroll.
+- **Clickable links.** A link in rendered markdown — the preview, the PR description, or a
+  comment body — opens in the browser on click. An anchor link (`#section`) scrolls to its
+  heading instead. Only `http`/`https` destinations open, anything else is inert, and a
+  destination carrying control or bidi characters never reaches the OS.
+
+## [0.12.0] — 2026-07-12
+
+### Added
+- **Customizable keybindings.** A `[keybindings]` table in reviewr's `config.toml` rebinds every
+  single-key shortcut per action, with several keys per action so CJK input sources can alias the
+  composed character their layout produces on the same physical key (e.g. `comment = ["c", "ㅊ"]`).
+  A key bound to two actions invalidates the whole file with an error naming both actions. Footer
+  and header hints follow the active bindings. (#12)
+
+### Changed
+- **The comments list no longer closes on `q`.** It closes on `esc` and the `comments` binding
+  (default `l`). `q` inside the list is inert.
+- **Bindings act uniformly wherever their action fires.** The comments list now answers `S` and
+  `Y` for send and copy, matching the main panes.
+- **Ctrl chords no longer trigger character shortcuts.** A bound key fires only unmodified.
+  `ctrl+u` / `ctrl+d` half-page movement and the comment editor's chords are unchanged.
+- **Degraded PR messages name the active refresh key.** "press r" hints follow a rebound
+  `refresh` binding.
+
+## [0.11.0] — 2026-07-10
+
+### Added
+- **GitHub Enterprise support in the PR tab.** Set one bare `github_host` in reviewr's
+  `config.toml`; GitHub.com remains available, exact Enterprise origins and documented SSH aliases
+  resolve to their canonical API host, and every `gh api` call pins that host explicitly. Origin
+  rewrites, malformed URLs, unsupported hosts, and authentication remedies are surfaced directly.
+  (#11)
+
+### Changed
+- **Plugin configuration now fails loud as one value.** Unknown keys or invalid values block the
+  sidebar, actions, and events instead of silently falling back or partially applying settings.
+  The running sidebar shows only the path-aware config error, discards work from the invalidated
+  snapshot, and recovers after the file is corrected. Missing files and omitted keys still use
+  defaults.
+- **PR refreshes reject stale work by complete input.** Host, repository, branch, pinned `HEAD`,
+  candidate branches, and base settings are probed off-thread. Superseded results never replace
+  the current view; same-input failures preserve it with the exact remedy.
+
+## [0.10.0] — 2026-07-09
+
+### Added
+- **`open` and `close` actions for scripts and layout plugins.** `herdr plugin action invoke
+  open --plugin persiyanov.reviewr` opens the sidebar and does nothing when one is already
+  open. `close` removes it, including a sidebar herdr's plugin registry forgot after a restart.
+  `toggle` keeps its key. `open` ignores `auto_open`, so a layout that opts out of auto-open
+  can still place reviewr deliberately. See `specs/herdr-host.md` and the README's layout
+  recipe. (#9)
+
+### Changed
+- **The sidebar is found by its pane label, not a state file.** Toggle, open, and close now
+  look for the `reviewr` pane in the live pane list. A duplicate pane from a race is swept by
+  the next close, nothing goes stale across crashes or herdr restarts, and no state files are
+  written.
+- **Actions report their outcome.** A refused action (no workspace context, or opening outside
+  a git repo) exits non-zero with one line saying why. A success prints the pane it acted on.
+  Both land in `herdr plugin log list`.
+
+## [0.9.0] — 2026-07-09
+
+### Fixed
+- **The PR tab now finds your PR even when the local branch name differs from the pushed
+  name.** Agent worktrees often push with `git push origin HEAD:<name>` and no `-u`, which left
+  the tab stuck on "no PR for this branch yet" while the PR sat open on GitHub. reviewr now
+  derives every branch name the worktree's work could be published under — the recorded
+  upstream, remote branches that carry the worktree's commits, and the local name — and asks
+  GitHub about all of them in one call. GitHub decides which name holds the PR, so a stale
+  upstream or a checkpoint push can never hide it. See `specs/forge-host.md`. (#10)
+- **A git hiccup no longer reads as "no PR".** A failing git command during the fetch (a lock
+  held by `git gc`, a ref pruned mid-read) now freezes the last good view with the retry marker
+  instead of blanking the tab or showing a wrong empty state. Git errors are also read with a
+  pinned locale, so a non-English git classifies the same way.
+
+### Added
+- **The header names the branch that resolved.** The resolved head branch shows dim next to the
+  status chip, marked `⑂` when the head lives in a fork, and drops first on a narrow pane. The
+  local branch can differ from the PR's branch now, so the header tells you which one you are
+  looking at.
+- **Empty states that explain themselves.** With no PR the tab names the branch names it
+  queried. Several matching open PRs show the count. A detached HEAD gets its own wording.
+
+## [0.8.2] — 2026-07-09
+
+### Fixed
+- **A hard kill mid-snapshot no longer wedges the sidebar's refresh for that worktree.** A crash
+  during the turn snapshot's `git add` could leave a stale `reviewr-turn-index.lock` in the
+  worktree's git dir, and every refresh after that failed with `refresh failed: git ["add", "-A"]
+  failed: fatal: Unable to create … File exists` until the lock was deleted by hand. The snapshot
+  now clears any leftover temp index and its lock — both private to reviewr — before running and
+  on every exit path. See `specs/herdr-host.md`.
+- **`herdr plugin install` now delivers the current release again.** v0.8.1 shipped with
+  `herdr-plugin.toml` still saying `0.8.0`, and `install.sh` reads the manifest to pick the
+  download tag, so installs were silently getting the v0.8.0 binary — without the Send resolver
+  fix from #6. Both version files now carry 0.8.2.
+
+## [0.8.1] — 2026-07-08
+
+### Fixed
+- **`Send` no longer fails with "no unambiguous agent" when a plugin sidebar or a plain shell
+  shares the tab or workspace (#6).** `herdr agent list` returns every pane, but only entries
+  carrying an `agent` field are real agents — the resolver now counts those alone, so one agent
+  plus any number of non-agent panes resolves cleanly. Turn tracking uses the same resolver, so
+  `last-turn` no longer pauses in these layouts. A refused send now also says why — no agent
+  here, or several — and points at `y` to copy to the clipboard instead. Thanks @worldnine for
+  the diagnosis and reproduction. See `specs/herdr-host.md`.
+
+## [0.8.0] — 2026-07-08
+
+### Added
+- **`auto_open` config key** — `auto_open = false` in reviewr's `config.toml` turns off the
+  `worktree.created` auto-open, so a layout plugin like herdr-plus can furnish a fresh worktree
+  undisturbed and reviewr opens only on the toggle key, in any placement. Defaults to `true`
+  (today's behavior); an unknown value falls back to the default. See `specs/herdr-host.md`. (#5)
+
+### Changed
+- README now spells out where reviewr's config file lives on disk
+  (`~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml`) instead of only naming
+  `$HERDR_PLUGIN_CONFIG_DIR`, which users cannot resolve from their shell. (#5)
+
+## [0.7.1] — 2026-07-08
+
+### Fixed
+- **The sidebar no longer opens a blank pane when the first `git` scan is slow, failing, or hung
+  (#4).** reviewr now initializes the terminal and paints before running any `git`, so a startup
+  scan error shows `load failed: …` in the status line and a hung `git` shows a frozen-but-visible
+  sidebar — never the blank pane herdr leaves for a process that blocks or exits before it renders.
+  See `specs/herdr-host.md`.
+
+## [0.7.0] — 2026-07-08
+
+### Added
+- **Configurable base branch** — `base_branches` in reviewr's `config.toml` sets the ordered
+  candidate list for the `branch` scope, re-read on refresh. reviewr uses the first entry that
+  exists in the repo (default `origin/main` → `origin/master` → `main` → `master`), so one setting
+  works across repos with different trunks and the base is reachable inside herdr, where no CLI
+  flag is. `--base` still overrides. See `specs/review-model.md`. (#3)
+
+## [0.6.0] — 2026-07-02
+
+### Added
+- **Configurable toggle placement** — `toggle_placement` (`split` | `overlay` | `zoomed` | `tab`,
+  default `split`) and `toggle_direction` (`right` | `down`, split only, default `right`) in
+  reviewr's `config.toml` set how the toggle opens the sidebar. The `worktree.created` auto-open
+  stays a `split`/`tab` (the covering placements open only on a manual toggle). An unknown value
+  falls back to its default. See `specs/herdr-host.md`. (#2)
 
 ## [0.5.0] — 2026-06-29
 

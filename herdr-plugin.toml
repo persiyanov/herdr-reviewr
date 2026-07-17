@@ -1,9 +1,9 @@
 id = "persiyanov.reviewr"
 name = "reviewr"
-version = "0.5.0"
+version = "0.18.1"
 min_herdr_version = "0.7.0"
 platforms = ["macos", "linux", "windows"]
-description = "Native terminal code-review sidebar for herdr."
+description = "Review agent-written diffs beside the chat and add line comments to the agent input."
 
 [[build]]
 command = ["bash", "herdr/install.sh"]
@@ -13,6 +13,9 @@ platforms = ["macos", "linux"]
 command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", 'herdr\install.ps1']
 platforms = ["windows"]
 
+# The sidebar pane runs the downloaded binary by absolute path under the plugin root, since the
+# pane's cwd is the repo under review (not the plugin root) and the binary isn't on PATH. The
+# toggle action's placement is configurable (default: right split); see herdr/sidebar.sh.
 [[panes]]
 id = "sidebar"
 title = "reviewr"
@@ -20,6 +23,9 @@ placement = "split"
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-reviewr\""]
 platforms = ["macos", "linux"]
 
+# Windows can't use the `sh -c` launcher (herdr's `bash` is WSL, which can't see the Windows repo).
+# Launch the .exe by absolute path via cmd; `%HERDR_PLUGIN_ROOT:\\?\=%` strips the \\?\ extended-
+# length prefix so a path with spaces resolves. Single-quoted TOML literal keeps the backslashes.
 [[panes]]
 id = "sidebar-win"
 title = "reviewr"
@@ -41,12 +47,41 @@ contexts = ["pane", "workspace"]
 command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", 'herdr\sidebar.ps1', "toggle"]
 platforms = ["windows"]
 
+[[actions]]
+id = "open"
+title = "reviewr: open sidebar"
+contexts = ["pane", "workspace"]
+command = ["bash", "herdr/sidebar.sh", "open"]
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "open-win"
+title = "reviewr: open sidebar"
+contexts = ["pane", "workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", 'herdr\sidebar.ps1', "open"]
+platforms = ["windows"]
+
+[[actions]]
+id = "close"
+title = "reviewr: close sidebar"
+contexts = ["pane", "workspace"]
+command = ["bash", "herdr/sidebar.sh", "close"]
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "close-win"
+title = "reviewr: close sidebar"
+contexts = ["pane", "workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", 'herdr\sidebar.ps1', "close"]
+platforms = ["windows"]
+
+# Auto-open the sidebar for a freshly created worktree (gated by auto_open; see herdr/sidebar.sh).
 [[events]]
 on = "worktree.created"
-command = ["bash", "herdr/sidebar.sh", "open"]
+command = ["bash", "herdr/sidebar.sh", "auto-open"]
 platforms = ["macos", "linux"]
 
 [[events]]
 on = "worktree.created"
-command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", 'herdr\sidebar.ps1', "open"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", 'herdr\sidebar.ps1', "auto-open"]
 platforms = ["windows"]

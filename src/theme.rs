@@ -13,7 +13,7 @@
 use ratatui::style::Color;
 use two_face::theme::EmbeddedThemeName;
 
-/// The default theme name; the fallback for an unset, unknown, or not-yet-supported value.
+/// The default theme name; the fallback for an unset CLI value.
 pub const DEFAULT: &str = "catppuccin";
 
 /// A theme's intrinsic cast, which sets the derivation direction.
@@ -81,6 +81,12 @@ pub fn resolve(name: Option<&str>) -> Theme {
             catppuccin()
         }),
     }
+}
+
+/// Whether `name` selects a complete built-in theme. Plugin configuration validates against
+/// this same catalog before a snapshot is applied (`specs/config.md`).
+pub fn is_known(name: &str) -> bool {
+    build(name).is_some()
 }
 
 /// The built theme for `name`, or `None` when it is not a known palette. Names match herdr's

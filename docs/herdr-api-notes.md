@@ -38,6 +38,10 @@ herdr plugin pane close <pane_id>
 ```
 - A `split` (or `zoomed`) pane **must** pass `--target-pane` (it implies the workspace); `--workspace` alone errors.
 - New pane id: `.result.plugin_pane.pane.pane_id`. The pane is auto-labeled with the entrypoint `title`.
+- **`plugin pane close` only closes panes in the in-memory plugin-pane registry** — after a herdr
+  restart it refuses a still-live sidebar with `plugin_pane_not_found` (observed, 0.7.1). Plain
+  `herdr pane close <pane_id>` closes any pane by id; prefer it for teardown.
+- `HERDR_PLUGIN_STATE_DIR` resolves to `~/.local/state/herdr/plugins/<plugin_id>/` (observed, 0.7.1).
 - **Pane command resolves against the pane's cwd (`--cwd`, the repo), not the plugin root** — a relative `./target/...` path fails, so invoke the binary by name (`herdr-review`) on `PATH` and install it via the `[[build]]` step.
 
 ## Runtime env (plugin commands and panes)
@@ -49,6 +53,9 @@ herdr runs plugin commands with a minimal `PATH`; prepend common bin dirs for `j
 
 - **Action context** (`HERDR_PLUGIN_CONTEXT_JSON`): `workspace_id`, `tab_id`, `focused_pane_id`,
   `focused_pane_cwd`, `worktree:{repo_root, checkout_path, ...}`.
+- **`plugin action invoke` resolves context from the focused workspace**, wherever it is run — the
+  calling pane's `HERDR_*` env is ignored, and `invoke <action_id> [--plugin ID]` has no workspace
+  selector (verified live, 0.7.1: invoked from pane `w1X:p1`, context arrived for focused `w1B`).
 - **`worktree.created` event** (`HERDR_PLUGIN_EVENT_JSON`): `.data.workspace.workspace_id`,
   `.data.workspace.worktree.checkout_path`, and `.data.worktree.{path, branch, open_workspace_id}`.
 

@@ -3,16 +3,37 @@
 mod common;
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use common::Repo;
 use herdr_reviewr::git::{
-    all_files, changed_against_tree, changed_files, file_content, merge_base, read_baseline_ref,
-    snapshot_worktree, worktree_key, write_baseline_ref,
+    all_files, changed_against_tree, changed_files as changed_files_with_config, file_content,
+    merge_base as merge_base_with_config, read_baseline_ref, snapshot_worktree, worktree_key,
+    write_baseline_ref,
 };
 use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope};
 
 fn by_path(files: &[ChangedFile]) -> HashMap<&str, &ChangedFile> {
     files.iter().map(|f| (f.path.as_str(), f)).collect()
+}
+
+fn bases() -> Vec<String> {
+    herdr_reviewr::config::DEFAULT_BASE_BRANCHES
+        .iter()
+        .map(|branch| (*branch).to_string())
+        .collect()
+}
+
+fn changed_files(
+    repo: &Path,
+    scope: Scope,
+    base: Option<&str>,
+) -> anyhow::Result<Vec<ChangedFile>> {
+    changed_files_with_config(repo, scope, base, &bases())
+}
+
+fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
+    merge_base_with_config(repo, base, &bases())
 }
 
 #[test]
@@ -75,6 +96,34 @@ fn merge_base_is_the_branch_point() {
     r.commit_all("diverge");
 
     assert_eq!(merge_base(r.path(), Some("main")), Some(branch_point));
+}
+
+#[test]
+fn base_resolves_via_the_default_list_without_a_flag() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    let branch_point = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("base.rs", "2\n");
+    r.commit_all("diverge");
+
+    // No flag: the default `base_branches` list skips the absent `origin/*` and finds `main`.
+    assert_eq!(merge_base(r.path(), None), Some(branch_point));
+}
+
+#[test]
+fn a_nonexistent_flag_falls_through_to_the_list() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    let branch_point = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("base.rs", "2\n");
+    r.commit_all("diverge");
+
+    // A `--base` naming no existing ref is skipped, not an error; resolution uses the list.
+    assert_eq!(merge_base(r.path(), Some("no-such-ref")), Some(branch_point));
 }
 
 #[test]
@@ -325,6 +374,23 @@ fn snapshot_worktree_never_mutates_the_repo() {
     assert_eq!(r.git(&["rev-parse", "HEAD"]), head_before, "HEAD unchanged");
     assert_eq!(r.git(&["branch", "-a"]), branches_before, "no branch created");
     assert!(!git_dir.join("reviewr-turn-index").exists(), "the temp index is cleaned up");
+}
+
+#[test]
+fn snapshot_worktree_recovers_from_a_stale_index_lock() {
+    let r = Repo::init();
+    r.write("a.rs", "x\n");
+    r.commit_all("init");
+
+    let git_dir = r.git(&["rev-parse", "--absolute-git-dir"]);
+    let git_dir = std::path::Path::new(git_dir.trim());
+    // A hard crash mid-`add` leaves git's lock on the temp index behind; a later snapshot
+    // must clear it instead of failing "Unable to create ... File exists" forever after.
+    std::fs::write(git_dir.join("reviewr-turn-index.lock"), "").unwrap();
+
+    let tree = snapshot_worktree(r.path()).unwrap();
+    assert_eq!(tree.len(), 40, "a tree object id");
+    assert!(!git_dir.join("reviewr-turn-index.lock").exists(), "the stale lock is cleared");
 }
 
 #[test]

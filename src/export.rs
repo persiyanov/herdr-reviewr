@@ -39,6 +39,13 @@ pub fn format_all(comments: &[&Comment]) -> String {
 pub trait ExportTarget {
     fn export(&self, text: &str) -> Result<()>;
     fn label(&self) -> &'static str;
+    /// Destination-specific confirmation shown after a successful export.
+    fn success_message(&self, count: usize) -> String;
+}
+
+fn counted_comments(count: usize) -> String {
+    let noun = if count == 1 { "comment" } else { "comments" };
+    format!("{count} {noun}")
 }
 
 /// A clipboard tool and the args that make it read stdin into the system clipboard. Tried in
@@ -59,9 +66,9 @@ const CLIPBOARD_TOOLS: &[(&str, &[&str])] = &[("clip", &[])];
 /// Remediation shown when no clipboard tool resolves — platform-specific install hint.
 #[cfg(not(windows))]
 const NO_CLIPBOARD: &str =
-    "no clipboard tool found (install wl-clipboard, xclip, or xsel) — use \"Add all to chat\" instead";
+    "no clipboard tool found (install wl-clipboard, xclip, or xsel) — use Send instead";
 #[cfg(windows)]
-const NO_CLIPBOARD: &str = "no clipboard tool found — use \"Add all to chat\" instead";
+const NO_CLIPBOARD: &str = "no clipboard tool found — use Send instead";
 
 /// The system clipboard, via the first available platform clipboard tool.
 #[derive(Debug)]
@@ -72,8 +79,13 @@ impl ExportTarget for Clipboard {
         "clipboard"
     }
 
+    fn success_message(&self, count: usize) -> String {
+        format!("copied {}", counted_comments(count))
+    }
+
     fn export(&self, text: &str) -> Result<()> {
-        let (cmd, args) = select_tool(CLIPBOARD_TOOLS, crate::proc::on_path).context(NO_CLIPBOARD)?;
+        let (cmd, args) =
+            select_tool(CLIPBOARD_TOOLS, crate::proc::on_path).context(NO_CLIPBOARD)?;
         let mut child = Command::new(cmd)
             .args(args)
             .stdin(Stdio::piped())
@@ -109,6 +121,10 @@ impl ExportTarget for Agent {
         "agent"
     }
 
+    fn success_message(&self, count: usize) -> String {
+        format!("added {} to agent input", counted_comments(count))
+    }
+
     fn export(&self, text: &str) -> Result<()> {
         let pane = herdr::resolve_agent_pane()?;
         herdr::send_text(&pane, text)?;
@@ -121,17 +137,15 @@ impl ExportTarget for Agent {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_all, format_comment, select_tool};
+    use super::{Agent, Clipboard, ExportTarget, format_all, format_comment, select_tool};
     use crate::model::{Comment, Side};
 
     #[test]
     fn clipboard_tool_selection_prefers_list_order_and_can_be_empty() {
         // A fixed fixture, independent of the platform-specific CLIPBOARD_TOOLS, so the selection
         // logic is exercised identically on every OS.
-        const TOOLS: &[(&str, &[&str])] = &[
-            ("pbcopy", &[]),
-            ("xclip", &["-selection", "clipboard"]),
-        ];
+        const TOOLS: &[(&str, &[&str])] =
+            &[("pbcopy", &[]), ("xclip", &["-selection", "clipboard"])];
         // None present -> no tool (the caller surfaces the "install one" error).
         assert!(select_tool(TOOLS, |_| false).is_none());
         // Only an X11 tool present -> it's chosen, with its selection args.
@@ -144,6 +158,14 @@ mod tests {
             select_tool(TOOLS, |c| c == "pbcopy" || c == "xclip").map(|(cmd, _)| cmd),
             Some("pbcopy")
         );
+    }
+
+    #[test]
+    fn export_confirmations_name_the_actual_result_and_pluralize_comments() {
+        assert_eq!(Agent.success_message(1), "added 1 comment to agent input");
+        assert_eq!(Agent.success_message(2), "added 2 comments to agent input");
+        assert_eq!(Clipboard.success_message(1), "copied 1 comment");
+        assert_eq!(Clipboard.success_message(2), "copied 2 comments");
     }
 
     fn comment(file: &str, side: Side, start: u32, end: u32, lines: &str, text: &str) -> Comment {

@@ -6,34 +6,34 @@
 //! worktree snapshot; it promotes the candidate to the live baseline once the turn has
 //! changed a file, so a question-only turn keeps the previous turn's diff.
 
+use serde::Deserialize;
+
 /// The agent status reported by `herdr agent list` (`agent_status`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum Status {
     Idle,
     Working,
     Blocked,
     Done,
+    #[serde(other)]
     Unknown,
 }
 
 impl Status {
-    /// Parse the `agent_status` string; anything unrecognized is `Unknown`.
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "idle" => Status::Idle,
-            "working" => Status::Working,
-            "blocked" => Status::Blocked,
-            "done" => Status::Done,
-            _ => Status::Unknown,
-        }
-    }
-
     /// A resting status the agent waits at between turns — a new `working` after one of
     /// these is a fresh instruction. `blocked` (a permission prompt) and `unknown` (a
     /// transient overlay) are mid-turn, so they are not resting.
     fn is_resting(self) -> bool {
         matches!(self, Status::Idle | Status::Done)
     }
+}
+
+/// The lifecycle edges produced by one status sample.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TurnTransition {
+    pub started: bool,
+    pub ended: bool,
 }
 
 /// The turn baseline lifecycle: the previous status, a candidate snapshot awaiting
@@ -65,22 +65,16 @@ impl TurnTracker {
         self.candidate.as_deref()
     }
 
-    /// Record a status sample; return `true` when a turn just started — the host should
-    /// snapshot the worktree now and hand it back via [`set_candidate`]. A start is a
-    /// transition into `Working` from a resting status; the first sample never starts a
-    /// turn, since its start was not observed.
-    pub fn observe(&mut self, status: Status) -> bool {
-        let started = status == Status::Working && self.prev.is_some_and(Status::is_resting);
+    /// Record a status sample and return its complete lifecycle transition. A start is a
+    /// transition into `Working` from a resting status; the first sample never starts a turn,
+    /// since its start was not observed. An end is a `Working` to resting transition.
+    pub fn observe(&mut self, status: Status) -> TurnTransition {
+        let transition = TurnTransition {
+            started: status == Status::Working && self.prev.is_some_and(Status::is_resting),
+            ended: self.prev == Some(Status::Working) && status.is_resting(),
+        };
         self.prev = Some(status);
-        started
-    }
-
-    /// Whether this next sample *ends* a turn — a `working`→resting edge. After it the agent
-    /// has gone idle, so any commit it pushed or `gh` PR action it ran (e.g. `gh pr merge`) is
-    /// now reflected on the forge and the `PR` tab is worth refetching. Pure: unlike
-    /// [`observe`](Self::observe) it does not advance `prev`, so call it before `observe`.
-    pub fn ends_turn(&self, next: Status) -> bool {
-        self.prev == Some(Status::Working) && next.is_resting()
+        transition
     }
 
     /// Store the worktree snapshot captured at a turn start as the pending candidate,
@@ -105,27 +99,17 @@ mod tests {
     use super::{Status, TurnTracker};
 
     #[test]
-    fn parse_maps_known_states_and_falls_back_to_unknown() {
-        assert_eq!(Status::parse("idle"), Status::Idle);
-        assert_eq!(Status::parse("working"), Status::Working);
-        assert_eq!(Status::parse("blocked"), Status::Blocked);
-        assert_eq!(Status::parse("done"), Status::Done);
-        assert_eq!(Status::parse("starting"), Status::Unknown);
-        assert_eq!(Status::parse(""), Status::Unknown);
-    }
-
-    #[test]
     fn a_turn_starts_when_working_follows_a_resting_status() {
         let mut t = TurnTracker::default();
-        assert!(!t.observe(Status::Idle), "the first sample never starts a turn");
-        assert!(t.observe(Status::Working), "idle → working starts a turn");
+        assert!(!t.observe(Status::Idle).started, "the first sample never starts a turn");
+        assert!(t.observe(Status::Working).started, "idle → working starts a turn");
     }
 
     #[test]
     fn done_is_resting_so_working_after_it_starts_a_turn() {
         let mut t = TurnTracker::default();
         t.observe(Status::Done);
-        assert!(t.observe(Status::Working), "done → working starts a turn");
+        assert!(t.observe(Status::Working).started, "done → working starts a turn");
     }
 
     #[test]
@@ -134,28 +118,30 @@ mod tests {
         t.observe(Status::Idle);
         t.observe(Status::Working); // turn started
         t.observe(Status::Blocked); // permission prompt mid-turn
-        assert!(!t.observe(Status::Working), "blocked → working resumes the same turn");
+        assert!(!t.observe(Status::Working).started, "blocked → working resumes the same turn");
         t.observe(Status::Unknown); // transient overlay
-        assert!(!t.observe(Status::Working), "unknown → working resumes the same turn");
+        assert!(!t.observe(Status::Working).started, "unknown → working resumes the same turn");
     }
 
     #[test]
     fn a_turn_ends_only_on_a_working_to_resting_edge() {
         let mut t = TurnTracker::default();
-        assert!(!t.ends_turn(Status::Idle), "no prior working sample, so no turn to end");
-        t.observe(Status::Idle);
-        t.observe(Status::Working); // mid-turn
-        assert!(!t.ends_turn(Status::Blocked), "working → blocked is a mid-turn pause, not an end");
-        assert!(t.ends_turn(Status::Idle), "working → idle ends the turn");
-        assert!(t.ends_turn(Status::Done), "working → done ends the turn");
-        t.observe(Status::Idle);
-        assert!(!t.ends_turn(Status::Working), "idle → working starts, never ends, a turn");
+        assert!(!t.observe(Status::Idle).ended, "no prior working sample, so no turn to end");
+        assert!(!t.observe(Status::Working).ended, "idle → working starts, never ends, a turn");
+        assert!(
+            !t.observe(Status::Blocked).ended,
+            "working → blocked is a mid-turn pause, not an end"
+        );
+        t.observe(Status::Working);
+        assert!(t.observe(Status::Idle).ended, "working → idle ends the turn");
+        t.observe(Status::Working);
+        assert!(t.observe(Status::Done).ended, "working → done ends the turn");
     }
 
     #[test]
     fn a_lone_first_working_sample_never_starts_a_turn() {
         let mut t = TurnTracker::default();
-        assert!(!t.observe(Status::Working), "we did not observe this turn's start");
+        assert!(!t.observe(Status::Working).started, "we did not observe this turn's start");
     }
 
     #[test]

@@ -20,6 +20,16 @@ impl Scope {
         }
     }
 
+    /// The scope's name in the specs and in config values (`default_scope`): kebab-case,
+    /// unlike the header chip's spaced `label`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Scope::Uncommitted => "uncommitted",
+            Scope::Branch => "branch",
+            Scope::LastTurn => "last-turn",
+        }
+    }
+
     /// Cycle to the next scope, for the header chip click: uncommitted → branch → last turn.
     #[must_use]
     pub fn cycle(self) -> Self {

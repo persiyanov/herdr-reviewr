@@ -1,8 +1,8 @@
 [package]
 name = "herdr-reviewr"
-version = "0.5.0"
+version = "0.18.1"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.97"
 description = "A herdr-native review sidebar: browse an agent's changes and send comments back to chat, in the terminal."
 authors = ["Dmitry Persiyanov <dmitry.persiyanov@gmail.com>"]
 license = "MIT"
@@ -13,7 +13,9 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"
+pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = { version = "3.1.1", features = ["text"] }
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }

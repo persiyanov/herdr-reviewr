@@ -1,16 +1,16 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-06-26
+Last edited: 2026-07-13
 ---
 
 # Review model
 
-The objects a review is made of: the scope being reviewed, the changed files in it, the comments you leave, and how they export.
+The objects a review is made of: the scope, the changed files in it, the comments, and the export.
 
 ## Overview
 
-The central object is a comment — a note attached to a run of diff lines in one file, carrying the snippet it points at:
+The central object is a comment: a note on a run of diff lines in one file, carrying the snippet it points at.
 
 ```json
 {
@@ -23,50 +23,79 @@ The central object is a comment — a note attached to a run of diff lines in on
 }
 ```
 
-| field | type | required | meaning |
-|-------|------|----------|---------|
-| `file` | string | yes | Repo-relative path the comment is on. |
-| `side` | enum | yes | `new` when the range is added or context lines; `old` when it is purely removed lines. |
-| `start` | integer | yes | First line of the range on `side`, 1-based. |
-| `end` | integer | yes | Last line of the range; equals `start` for a single line. |
-| `lines` | string | yes | The verbatim diff lines the comment anchors to, each keeping its `+`/`-`/space marker. |
-| `text` | string | yes | Free-form reviewer text, no categories or severities. May span multiple lines. |
+| field   | type    | meaning                                                                     |
+| ------- | ------- | --------------------------------------------------------------------------- |
+| `file`  | string  | repo-relative path the comment is on                                         |
+| `side`  | enum    | `new` for added or context lines, `old` for purely removed lines             |
+| `start` | integer | first line of the range on `side`, 1-based                                   |
+| `end`   | integer | last line of the range, equal to `start` for a single line                   |
+| `lines` | string  | the verbatim diff lines, each keeping its `+`/`-`/space marker               |
+| `text`  | string  | free-form reviewer text, possibly multi-line                                 |
 
-`lines` is the authoritative anchor: it lets the agent find the exact code even after later edits shift line numbers. `side`/`start`/`end` orient a human and are not re-bound when the diff shifts. The range is always contiguous — `lines` covers every line in `start..end` — because a selection cannot cross a fold (`diff-view.md`), so the range never brackets hidden lines the snippet omits.
+Every field is required.
+
+The anchor rules:
+
+- `lines` is the authoritative anchor. The agent finds the code by snippet, even after edits shift line numbers.
+- `side`, `start`, and `end` orient a human. They are never re-bound when the diff shifts.
+- The range is always contiguous. A selection cannot cross a fold (`diff-view.md`), so the snippet never omits hidden lines.
 
 ### Scopes
 
-A scope selects which changes the `Changes` view shows and which files `All files` annotates; the two tabs share one active scope. The default is `uncommitted`.
+A scope selects which changes `Changes` shows and which files `All files` annotates. The two tabs share one active scope. A sidebar starts in the config's `default_scope`, `uncommitted` when unset (`config.md`). A config reread never switches the active scope.
 
-| scope | means | source |
-|-------|-------|--------|
-| `uncommitted` | staged and unstaged changes vs `HEAD`, plus untracked files | `git diff HEAD` and `git status --porcelain` |
-| `branch` | the worktree vs the merge-base with the base branch — every change this branch carries over its base, committed and uncommitted | `git diff $(git merge-base <base> HEAD)` plus `git status --porcelain` for untracked files |
-| `last-turn` | the worktree vs the turn baseline — what the agent changed in its most recent change-producing turn, including untracked files | `git diff <turn-baseline> <worktree snapshot>` |
+| scope         | shows                                                          | source                                                       |
+| ------------- | --------------------------------------------------------------- | ------------------------------------------------------------ |
+| `uncommitted` | staged and unstaged changes vs `HEAD`, plus untracked files      | `git diff HEAD`, `git status --porcelain`                     |
+| `branch`      | everything the branch carries over its base, committed or not    | `git diff $(git merge-base <base> HEAD)`, plus untracked      |
+| `last-turn`   | what the agent changed in its most recent change-producing turn  | `git diff <turn baseline> <worktree snapshot>`                |
 
-The base branch is `origin/main`, falling back to `origin/master`, then `main`, then `master`. It is overridable by config or flag.
+- `branch` is a superset of `uncommitted`. The base is an ancestor of `HEAD`, so working-tree changes appear in both. With nothing committed past the base, the two coincide.
+- `last-turn` nests in neither. It anchors to a point in time, so it also shows work the agent has since committed.
 
-Because the base is an ancestor of `HEAD`, `branch` is a superset of `uncommitted`: it shows the same working-tree changes plus the branch's committed work, with the merge-base as the old side of every diff. So when nothing is committed past the base, `branch` and `uncommitted` coincide rather than `branch` going empty. `last-turn` is not nested in either — it is anchored to a point in time (the turn snapshot), so it can show work the agent has since committed, which `uncommitted` does not.
+### Base branch
+
+The `branch` scope diffs against the merge-base of the base branch and `HEAD`.
+
+```toml
+# $HERDR_PLUGIN_CONFIG_DIR/config.toml
+base_branches = ["origin/main", "origin/master", "main", "master"]   # the default
+# a gitflow repo puts its trunk first:
+base_branches = ["origin/develop", "origin/main", "main", "master"]
+```
+
+Precedence. The first source that yields a ref existing in the repo wins:
+
+| # | source                          | base is                                        |
+| - | ------------------------------- | ----------------------------------------------- |
+| 1 | `--base <ref>` flag             | `<ref>` when it exists, otherwise skipped       |
+| 2 | `base_branches` in `config.toml` | the first listed ref that exists in the repo   |
+
+- The list is re-read on refresh. Editing it re-bases the scope without a relaunch.
+- A listed ref absent from the repo is skipped, never an error.
+- A missing config or omitted `base_branches` uses the default list. Invalid plugin config follows `config.md`.
+- When no candidate exists, `branch` shows nothing. The other scopes are unaffected.
+- The installed pane passes no arguments, so inside herdr the config key is the only channel. `--base` serves standalone and dev runs, where it wins.
+- Standalone, with no `HERDR_PLUGIN_CONFIG_DIR`, reviewr reads no config file.
 
 ### Ignored paths
 
-Every scope respects `.gitignore`, without exception: a path git ignores is not a change, so build output (`target/`, `node_modules/`) never enters `Changes`. To make a file reviewable, track it — an ignored file you intend to review (a plan, a sample env) belongs in git, where it lists and ages out like any other tracked change.
-
-- This gates `Changes` only; `All files` lists every file regardless, ignored dimmed (`file-list.md`).
+Every scope respects `.gitignore`. A path git ignores is never a change, so build output never enters `Changes`. To review an ignored file, track it. This gates `Changes` only: `All files` lists every file, ignored dimmed (`file-list.md`).
 
 ### Turn baseline
 
-The `last-turn` baseline is the worktree as it was at the start of the agent's most recent turn that changed a file. The scope diffs that baseline against the live worktree, so while the agent works it shows the turn in progress, and once the agent goes idle it shows the just-finished turn.
+The `last-turn` baseline is the worktree as it was when the agent's most recent change-producing turn started. The scope diffs the baseline against the live worktree.
 
-- A turn that changes no file — a question answered, a plan discussed — leaves the baseline untouched, so the scope keeps showing the previous change-producing turn.
-- Until reviewr has observed a turn start, the baseline is unset and the scope is empty (`tui.md`); it becomes live on the next turn.
-- The baseline is independent of commits: if the agent commits mid-turn, the scope still diffs the baseline against the worktree, so committed and uncommitted work both appear.
+- While the agent works, the scope shows the turn in progress. Once the agent goes idle, the just-finished turn.
+- A turn that changes no file leaves the baseline untouched. The scope keeps showing the previous change-producing turn.
+- Before reviewr observes a turn start, the baseline is unset and the scope is empty (`tui.md`). It becomes live on the next observed turn.
+- Commits never move the baseline. Work the agent commits mid-turn still shows.
 
-How reviewr observes turns and captures the baseline is in `herdr-host.md`.
+How turns are observed and the baseline is captured is in `herdr-host.md`.
 
 ### Changed file
 
-A row in the `Changes` list. As rendered:
+A row in the `Changes` list:
 
 ```
 extruct/core/llm_registry.py          M   +18 -8
@@ -74,40 +103,38 @@ docs/specs/2026-06-22-methodology.md  A   +116
 scripts/old_runner.py                 D   -47
 ```
 
-| field | type | meaning |
-|-------|------|---------|
-| `path` | string | Repo-relative path; the new path for a rename. |
-| `previous_path` | string? | The old path when the file was renamed, for diffing against its real old content; absent otherwise. |
-| `kind` | enum | One of `added`, `modified`, `deleted`, `renamed`, `untracked`. |
-| `additions` | integer | Lines added in the scope; an untracked file counts as all additions. |
-| `deletions` | integer | Lines removed in the scope. |
+| field           | type    | meaning                                                          |
+| --------------- | ------- | ----------------------------------------------------------------- |
+| `path`          | string  | repo-relative path, the new path for a rename                     |
+| `previous_path` | string? | the old path when renamed, absent otherwise                       |
+| `kind`          | enum    | `added`, `modified`, `deleted`, `renamed`, or `untracked`         |
+| `additions`     | integer | lines added in the scope, all lines for an untracked file         |
+| `deletions`     | integer | lines removed in the scope                                        |
 
 ### Diff
 
-For the selected file in the current scope, a structured diff built from the file's old and new content, defined in `diff-view.md`. It is what comment anchors and snippets come from: a comment's `lines` snippet is reconstructed from the rows it covers. An untracked file diffs against empty old content; a binary file appears in the list but its pane reads `binary — no line comments`.
+The selected file's structured diff, built from its old and new content (`diff-view.md`). Comment anchors and snippets come from it. An untracked file diffs against empty old content. A binary file lists, and its pane reads `binary — no line comments`.
 
 ### File content
 
-In the `All files` tab a comment anchors to plain file content instead of a diff (`diff-view.md`). Its `side` is always `new`, its `start`/`end` are line numbers in the current file, and its `lines` snippet is those content lines, each space-prefixed like a context line. So an `All files` comment and a context-only diff comment carry the same shape and export identically; the header is `path:start-end`, never with ` (removed)`.
+In `All files` a comment anchors to plain file content instead of a diff. Its `side` is `new`, its range is line numbers in the current file, and its snippet lines are space-prefixed like context lines. It exports identically to a diff comment. Its header never carries ` (removed)`.
 
-A comment renders and is acted on only in the view it belongs to — a content comment in the `All files` File view, a diff comment in the `Changes` diff — so it never lands on an unrelated line in the other tab's view of the same file (their line numberings differ). The shared `Send`/`Copy` and the comments list still carry the whole set across both tabs.
+A comment renders and is acted on only in the view it belongs to: a content comment in `All files`, a diff comment in `Changes`. Their line numberings differ, so a comment never lands on an unrelated line in the other tab. Send, Copy, and the comments list carry the whole set across both tabs.
 
 ## Behavior
 
-### Lifecycle
+Comments are a review pass, not a durable record.
 
-Comments are lightweight and short-lived: a review pass, not a durable record.
-
-- Comments live in memory while the sidebar runs; there is no on-disk store.
-- A comment is removed only by exporting or deleting it — never by a refresh or by the agent editing files.
-- You can add, edit, and delete a comment; editing changes its text in place.
-- Exporting sends the whole set at once and clears it — there is no single-comment export; a sent or copied batch has done its job.
-- A comment whose file leaves the changeset is flagged stale but kept; you decide whether to send or delete it.
-- An `All files` comment, anchored to content rather than a changeset, is flagged stale only when its file is deleted from the worktree.
+- Comments live in memory. There is no on-disk store.
+- A comment is removed only by export or delete. Never by a refresh or the agent's edits.
+- Comments can be added, edited, and deleted. Editing changes the text in place.
+- Export takes the whole set and clears it. There is no single-comment export.
+- A comment whose file leaves the changeset is flagged stale, and kept.
+- An `All files` comment is flagged stale only when its file is deleted from the worktree.
 
 ### Export
 
-A comment goes to the agent (the primary path) or the clipboard, as one block per comment, with the file, the line range, and the snippet it anchors to:
+One block per comment, to the agent input (the primary path) or the clipboard:
 
 ```
 extruct/core/llm_registry.py:41
@@ -121,58 +148,37 @@ scripts/old_runner.py:38 (removed)
 why drop this? it is still needed
 ```
 
-| rule | value |
-|------|-------|
-| header | `path:start-end`, with ` (removed)` appended when `side` is `old` |
-| body | the comment's `lines`, verbatim |
-| footer | the comment's `text`, trimmed, with its line breaks kept; runs of 2+ newlines collapse to one so no blank line splits a block |
-| separator | one blank line between comments |
-| order | by `file`, then `start` |
-| preamble | none — the format reads as review comments on its own |
+| rule      | value                                                                              |
+| --------- | ----------------------------------------------------------------------------------- |
+| header    | `path:start-end`, with ` (removed)` appended when `side` is `old`                    |
+| body      | the comment's `lines`, verbatim                                                      |
+| footer    | the comment's `text`, trimmed, line breaks kept, runs of 2+ newlines collapsed to one |
+| separator | one blank line between comments                                                      |
+| order     | by `file`, then `start`                                                              |
+| preamble  | none                                                                                 |
 
-The actions:
+- Send injects every block into the agent input, focuses the agent pane, and clears the list. It never submits. The user adds context and presses enter.
+- Copy writes the same blocks to the system clipboard, then clears the list.
 
-- Send — inject every comment's block into the agent input, focus the agent pane, and clear the list.
-- Copy — write the same blocks to the system clipboard, then clear the list.
-
-Both act on the whole set; there is no single-comment variant. Send fills the agent input without submitting; you add context and press enter. How the agent pane is found and filled is in `herdr-host.md`.
+How the agent pane is found and filled is in `herdr-host.md`.
 
 ## Failure semantics
 
-Export is the only side effect, and comments are in-memory.
-
-- The agent editing files concurrently never removes a comment or the text being typed; a refresh only re-reads diffs.
-- Comments are removed only after a successful export; a failed send or copy leaves all of them in place.
-- A consumed batch is gone, so a second send never re-injects it — no duplicates.
-- Comments live only in memory: closing the sidebar pane or restarting herdr loses any not yet exported.
-- The sidebar assumes one instance per worktree.
+- A failed send or copy leaves every comment in place. Removal happens only after a successful export.
+- A consumed batch is gone. A second send never re-injects it.
+- Closing the pane or restarting herdr loses unexported comments.
+- One instance per worktree is assumed.
 
 ## Non-goals
 
-- No durable comment store, lifecycle states, or outdated tracking — unlike a full PR-review tool.
-- No categories, severities, or threads — text only.
-- No line-number rebasing as the diff shifts; the `lines` snippet, not the number, keeps a comment locatable.
-- No auto-submit of the agent prompt — you press enter.
-
-## Decisions
-
-- Carry the diff snippet, GitHub-style — a comment exports the lines it anchors to (like GitHub's `diff_hunk`), so removed lines are commentable and the agent sees the exact code, not a number that may shift.
-- In-memory and consumed on export, not a durable store — the workflow is a few comments then a prompt; Conductor persists comments in SQLite with a state machine and `is_outdated`, and Superset persists none, so the light end fits.
-- Allow in-place edit — delete-and-retype mid-review is a trust-breaking surface; editing text is cheap.
-- Flag stale comments, never auto-drop — silently losing a comment destroys trust and forces you to wait for the agent to stop; a comment is removed only by export or delete.
-- Send to the agent, with clipboard secondary — the fill-input-and-focus flow is the asked-for path; clipboard stays for paste-anywhere and remote.
-- One Send, not send-one vs send-all — the workflow is "write a few comments, then hand them over"; a per-comment send is a needless choice on the hot path, so `Send` always takes the whole set (`Copy` likewise).
-- Ignored paths never count as changes — `Changes` follows git's own bookkeeping exactly, so the only thing that surfaces is what git would track. A file you want reviewed gets tracked (the project commits its plans); reviewr does not second-guess `.gitignore`. Rejected: a `keep` opt-in list and a built-in build-dir skip-list, both of which re-litigate gitignore and accumulate stale entries (a kept plan has no baseline, so it lists as an addition forever).
-- `branch` spans the worktree, not only commits — it diffs the merge-base against the working tree (untracked included), so it shows every change the branch carries over its base and is a superset of `uncommitted`. A committed-only range goes empty whenever the agent's work is uncommitted — the common case in live review, and the state the scope most needs to show. Rejected: `merge-base...HEAD`, committed-only.
-- `last-turn` anchors to the most recent change-producing turn, not every turn — re-baselining on every turn start would blank the view after any text-only turn (a question, a plan); holding the baseline until a turn actually edits a file keeps the last real diff on screen. Rejected: re-baseline on every idle→working edge.
-- A comment can anchor to file content, not only a diff — the `All files` tab comments on code the agent did not touch (a missed call site), so an anchor may be plain content with `side` always `new`. Rejected: restricting comments to changed lines.
-
-## Open decisions
-
-- None.
+- No durable comment store, lifecycle states, or outdated-tracking.
+- No categories, severities, or threads. Text only.
+- No line-number rebasing as the diff shifts. The snippet keeps a comment locatable.
+- No auto-submit of the agent prompt.
 
 ## Related specs
 
-- `./diff-view.md`
-- `./tui.md`
-- `./herdr-host.md`
+- [configuration](./config.md)
+- [diff-view](./diff-view.md)
+- [tui](./tui.md)
+- [herdr-host](./herdr-host.md)

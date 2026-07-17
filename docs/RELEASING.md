@@ -67,25 +67,19 @@ end-to-end test: it exercises the exact `herdr plugin install` path a user hits.
    herdr plugin list --plugin persiyanov.reviewr          # confirm: github source + version X.Y.Z
    ```
 
-2. **Relaunch the sidebar** so the open pane runs the new binary instead of the old process. The
-   simple way is to toggle it off and back on with your keybind — `sidebar.sh` owns the pane
-   lifecycle and the state file. Headless or scripted, do it over the API:
+2. **Relaunch the sidebar** so the open pane runs the new binary instead of the old process.
+   The `close` and `open` actions own the pane lifecycle — there is no state file to sync:
 
    ```bash
-   herdr plugin pane close <reviewr_pane_id>              # close the open sidebar
-   herdr plugin pane open --plugin persiyanov.reviewr --entrypoint sidebar \
-     --placement split --direction right --target-pane <agent_pane_id> --cwd <repo> --no-focus
-   # keep the toggle keybind in sync — point the state file at the new pane:
-   echo -n <new_pane_id> > ~/.local/state/herdr/plugins/persiyanov.reviewr/pane-<workspace_id>
+   herdr plugin action invoke close --plugin persiyanov.reviewr   # closes every reviewr pane
+   herdr plugin action invoke open  --plugin persiyanov.reviewr   # opens the new binary
    ```
 
 **Gotchas**
 
-- `herdr plugin pane close` unregisters a *plugin* pane; if the underlying pane lingers as an
-  orphan (a later close returns `plugin_pane_not_found` while it still shows in `pane list`), close
-  it with the general `herdr pane close <id>` instead.
-- Closing then immediately reopening can briefly leave two `reviewr` panes (async lag) — settle to
-  one and sync the state file to the survivor.
+- The actions act on the focused workspace. Focus the workspace you want relaunched first.
+- Closing then immediately reopening can briefly leave two `reviewr` panes (async lag) — a
+  single `close` sweeps them all.
 
 ## Notes
 

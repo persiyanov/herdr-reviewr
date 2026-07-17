@@ -1,7 +1,7 @@
 //! Rendering the Changes view: tab bar, file list, diff, comment box, list, status.
 //!
-//! See `specs/tui.md`. The layout is a header tab bar, a body split into the diff
-//! (left) and the file list (right), and a status bar. While composing, the comment
+//! See `specs/tui.md`. The layout is a header tab bar, a body split into the read pane
+//! and navigator, and a status bar. While composing, the comment
 //! box is spliced inline into the diff under the selected line; the comments-list
 //! overlay is drawn on top when open. Rendering reads `App` only; all state changes
 //! live in `app.rs`.
@@ -12,19 +12,35 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState,
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Focus, FooterAction, Mode, Tab, Tier};
+use crate::config::NavigatorPosition;
 use crate::diff::{FileDiff, FileState, Row};
 use crate::file_list::{Annotation, RowKind};
 use crate::forge;
+use crate::keymap::Keymap;
 use crate::model::Comment;
 use crate::theme::Palette;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let p = panes(area, app.list_pct);
+    // Link hit-testing resolves against the painted frame; each frame repaints its own.
+    app.clear_painted_links();
+    if let Some(error) = app.config_error() {
+        let message =
+            format!("{error}\n\nFix the file to continue. The config reloads automatically.");
+        frame.render_widget(
+            Paragraph::new(message).wrap(ratatui::widgets::Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    let p = panes(area, app);
 
     if app.tab == Tab::Pr {
         render_pr_header(frame, app, p.tab);
@@ -51,8 +67,8 @@ fn vrows(area: Rect) -> Rc<[Rect]> {
     Layout::vertical([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)]).split(area)
 }
 
-/// The frame's layout rects: the diff pane, the file pane, and the whole body band. One
-/// place computes the vertical bands and the horizontal split, so every geometry helper and
+/// The frame's layout rects: the read pane, the navigator, and the whole body band. One
+/// place computes the vertical bands and the active split, so every geometry helper and
 /// the renderer agree by construction (a layout change can't desync hit-testing from paint).
 struct Panes {
     tab: Rect,
@@ -62,15 +78,40 @@ struct Panes {
     status: Rect,
 }
 
-fn panes(area: Rect, list_pct: u16) -> Panes {
+fn panes(area: Rect, app: &App) -> Panes {
     let rows = vrows(area);
     let body = rows[1];
-    let split = Layout::horizontal([
-        Constraint::Percentage(100 - list_pct),
-        Constraint::Percentage(list_pct),
-    ])
-    .split(body);
-    Panes { tab: rows[0], diff: split[0], files: split[1], body, status: rows[2] }
+    let (diff, files) = split_body(body, app.navigator_position, app.navigator_share());
+    Panes { tab: rows[0], diff, files, body, status: rows[2] }
+}
+
+fn split_body(body: Rect, position: NavigatorPosition, share: u16) -> (Rect, Rect) {
+    let axis_len = if position.stacked() { body.height } else { body.width };
+    let mut navigator_len = (u32::from(axis_len) * u32::from(share) / 100) as u16;
+    if axis_len >= 6 {
+        navigator_len = navigator_len.clamp(3, axis_len - 3);
+    } else {
+        navigator_len = axis_len / 2;
+    }
+    let read_len = axis_len - navigator_len;
+    match position {
+        NavigatorPosition::Right => (
+            Rect::new(body.x, body.y, read_len, body.height),
+            Rect::new(body.x + read_len, body.y, navigator_len, body.height),
+        ),
+        NavigatorPosition::Left => (
+            Rect::new(body.x + navigator_len, body.y, read_len, body.height),
+            Rect::new(body.x, body.y, navigator_len, body.height),
+        ),
+        NavigatorPosition::Bottom => (
+            Rect::new(body.x, body.y, body.width, read_len),
+            Rect::new(body.x, body.y + read_len, body.width, navigator_len),
+        ),
+        NavigatorPosition::Top => (
+            Rect::new(body.x, body.y + navigator_len, body.width, read_len),
+            Rect::new(body.x, body.y, body.width, navigator_len),
+        ),
+    }
 }
 
 /// The whole body band (between the tab bar and status bar), for divider hit-testing.
@@ -81,11 +122,23 @@ pub fn body_rect(area: Rect) -> Rect {
 
 /// Whether `(col, row)` lands on the draggable divider between the two panes.
 #[must_use]
-pub fn hit_divider(area: Rect, list_pct: u16, col: u16, row: u16) -> bool {
-    let p = panes(area, list_pct);
-    let in_body = row >= p.body.y && row < p.body.y + p.body.height;
-    // A 3-column grab zone straddling the abutting pane borders.
-    in_body && col + 1 >= p.files.x && col <= p.files.x + 1
+pub fn hit_divider(area: Rect, app: &App, col: u16, row: u16) -> bool {
+    let p = panes(area, app);
+    match app.navigator_position {
+        NavigatorPosition::Left => {
+            contains(p.body, col, row) && at_seam(col, p.files.x + p.files.width)
+        }
+        NavigatorPosition::Right => contains(p.body, col, row) && at_seam(col, p.files.x),
+        NavigatorPosition::Top => {
+            contains(p.body, col, row) && at_seam(row, p.files.y + p.files.height)
+        }
+        NavigatorPosition::Bottom => contains(p.body, col, row) && at_seam(row, p.files.y),
+    }
+}
+
+/// The two adjacent pane-border cells around a split boundary.
+fn at_seam(coordinate: u16, boundary: u16) -> bool {
+    coordinate == boundary || coordinate.checked_add(1) == Some(boundary)
 }
 
 /// The file-row index a click at `(col, row)` lands on, or `None` if outside the list.
@@ -93,13 +146,13 @@ pub fn hit_divider(area: Rect, list_pct: u16, col: u16, row: u16) -> bool {
 #[must_use]
 pub fn hit_file(
     area: Rect,
-    list_pct: u16,
+    app: &App,
     col: u16,
     row: u16,
     n_files: usize,
     file_scroll: usize,
 ) -> Option<usize> {
-    let inner = inner_rect(panes(area, list_pct).files);
+    let inner = inner_rect(panes(area, app).files);
     if !contains(inner, col, row) {
         return None;
     }
@@ -109,14 +162,21 @@ pub fn hit_file(
 
 /// The number of file rows visible in the file pane, used to clamp the file-list scroll.
 #[must_use]
-pub fn file_viewport_height(area: Rect, list_pct: u16) -> usize {
-    inner_rect(panes(area, list_pct).files).height as usize
+pub fn file_viewport_height(area: Rect, app: &App) -> usize {
+    inner_rect(panes(area, app).files).height as usize
 }
 
 /// Whether `(col, row)` falls in the file pane, so the wheel scrolls the list it is over.
 #[must_use]
-pub fn in_files_pane(area: Rect, list_pct: u16, col: u16, row: u16) -> bool {
-    contains(panes(area, list_pct).files, col, row)
+pub fn in_files_pane(area: Rect, app: &App, col: u16, row: u16) -> bool {
+    contains(panes(area, app).files, col, row)
+}
+
+/// Whether `(col, row)` falls in the diff pane — the markdown preview's click target,
+/// whose rendered geometry the source-row hit test cannot describe.
+#[must_use]
+pub fn in_diff_pane(area: Rect, app: &App, col: u16, row: u16) -> bool {
+    contains(panes(area, app).diff, col, row)
 }
 
 /// The logical diff-row index a click at `(col, row)` lands on, or `None` if outside the
@@ -125,13 +185,13 @@ pub fn in_files_pane(area: Rect, list_pct: u16, col: u16, row: u16) -> bool {
 #[must_use]
 pub fn hit_diff(
     area: Rect,
-    list_pct: u16,
+    app: &App,
     col: u16,
     row: u16,
     heights: &[usize],
     diff_scroll: usize,
 ) -> Option<usize> {
-    let inner = inner_rect(panes(area, list_pct).diff);
+    let inner = inner_rect(panes(area, app).diff);
     if !contains(inner, col, row) {
         return None;
     }
@@ -148,14 +208,14 @@ pub fn hit_diff(
 
 /// The number of diff rows visible in the diff pane, used to clamp the scroll.
 #[must_use]
-pub fn diff_viewport_height(area: Rect, list_pct: u16) -> usize {
-    inner_rect(panes(area, list_pct).diff).height as usize
+pub fn diff_viewport_height(area: Rect, app: &App) -> usize {
+    inner_rect(panes(area, app).diff).height as usize
 }
 
 /// The display height (rows on screen) of each visible logical diff row, honoring wrap.
 #[must_use]
 pub fn diff_row_heights(app: &App, area: Rect) -> Vec<usize> {
-    let width = inner_rect(panes(area, app.list_pct).diff).width as usize;
+    let width = inner_rect(panes(area, app).diff).width as usize;
     let gutter_w = gutter_for(&app.diff);
     let p = app.palette();
     // A row's display height is its wrapped code lines plus any inline comment cards under
@@ -204,8 +264,8 @@ pub fn composer_content_width(width: usize) -> usize {
 /// The diff pane's inner content width for the full terminal `area`, so the event loop can
 /// reserve the comment box without a `Frame` (mirrors [`diff_viewport_height`]).
 #[must_use]
-pub fn diff_inner_width(area: Rect, list_pct: u16) -> usize {
-    inner_rect(panes(area, list_pct).diff).width as usize
+pub fn diff_inner_width(area: Rect, app: &App) -> usize {
+    inner_rect(panes(area, app).diff).width as usize
 }
 
 /// The comment box's display lines at `content_w`: each input line word-wrapped, with the
@@ -252,50 +312,16 @@ fn row_with_caret(text: &str, col: usize, p: &Palette) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Wrap one logical line's `chars` to `width` display columns, returning contiguous half-open
-/// char ranges (every char is in exactly one row, so a char index maps cleanly to a row). A
-/// greedy word wrap that keeps the break space on its row; an over-wide word hard-breaks.
-fn box_wrap(chars: &[char], width: usize) -> Vec<(usize, usize)> {
-    if chars.is_empty() {
-        return vec![(0, 0)];
-    }
-    let w = width.max(1);
-    let mut rows = Vec::new();
-    let mut start = 0;
-    while start < chars.len() {
-        let (mut col, mut i, mut last_space) = (0usize, start, None);
-        while i < chars.len() {
-            let cw = UnicodeWidthChar::width(chars[i]).unwrap_or(0);
-            if col + cw > w && i > start {
-                break;
-            }
-            col += cw;
-            if chars[i] == ' ' {
-                last_space = Some(i);
-            }
-            i += 1;
-        }
-        // Break after the last space that fits (keeping it on this row), else hard-break.
-        let end = if i < chars.len() {
-            last_space.filter(|&s| s + 1 > start).map_or(i, |s| s + 1)
-        } else {
-            i
-        };
-        rows.push((start, end));
-        start = end;
-    }
-    rows
-}
-
 /// The box's visual rows over the whole `input`: `(start_char_index, text)` per row, wrapping
-/// each logical line (split on `\n`) with [`box_wrap`]. A trailing newline yields an empty row.
+/// each logical line with [`wrap_segments`]. A trailing newline yields an empty row.
 fn box_rows(input: &str, width: usize) -> Vec<(usize, String)> {
     let chars: Vec<char> = input.chars().collect();
     let mut rows = Vec::new();
     let mut i = 0;
     loop {
         let line_end = chars[i..].iter().position(|&c| c == '\n').map_or(chars.len(), |p| i + p);
-        for (a, b) in box_wrap(&chars[i..line_end], width) {
+        let cells: Vec<Cell> = chars[i..line_end].iter().copied().map(plain_cell).collect();
+        for (a, b) in wrap_segments(&cells, width, ContinuationSpaces::Keep) {
             rows.push((i + a, chars[i + a..i + b].iter().collect::<String>()));
         }
         match chars[line_end..].first() {
@@ -337,16 +363,8 @@ pub fn caret_vertical(input: &str, caret: usize, content_w: usize, down: bool) -
 /// Word-wrap a plain string to `width` columns, reusing the diff's [`wrap_segments`] so the
 /// break rule (last space, hard-break an over-wide word, width-aware) is identical.
 fn wrap_text(s: &str, width: usize) -> Vec<String> {
-    let cells: Vec<Cell> = s
-        .chars()
-        .map(|ch| Cell {
-            ch,
-            w: UnicodeWidthChar::width(ch).unwrap_or(0),
-            fg: Color::Reset,
-            emph: false,
-        })
-        .collect();
-    wrap_segments(&cells, width)
+    let cells: Vec<Cell> = s.chars().map(plain_cell).collect();
+    wrap_segments(&cells, width, ContinuationSpaces::Trim)
         .into_iter()
         .map(|(a, b)| cells[a..b].iter().map(|c| c.ch).collect())
         .collect()
@@ -360,20 +378,24 @@ pub enum HeaderHit {
     Send,
 }
 
-/// Which header control a click at `(col, row)` lands on, if any.
+/// Which header control a click at `(col, row)` lands on, if any. `keymap` must be the keymap
+/// the on-screen frame was drawn with, so a config swap between the draw and the click cannot
+/// shift the spans under the pointer (`specs/config.md`: one snapshot per frame).
 #[must_use]
-pub fn hit_header(area: Rect, app: &App, col: u16, row: u16) -> Option<HeaderHit> {
+pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) -> Option<HeaderHit> {
     if row != area.y {
         return None;
     }
-    for (tab, start, end) in tab_spans() {
+    let spans = tab_spans(keymap);
+    for &(tab, start, end) in &spans {
         if (start as u16..end as u16).contains(&col) {
             return Some(HeaderHit::Tab(tab));
         }
     }
-    let scope_start = header_prefix_len() as u16;
+    let prefix = header_prefix_len(&spans);
+    let scope_start = prefix as u16;
     let scope_end = scope_start + scope_chip(app).len() as u16;
-    let button_start = send_button_col(app, area.width as usize) as u16;
+    let button_start = send_button_col(app, prefix, area.width as usize) as u16;
     if (scope_start..scope_end).contains(&col) {
         Some(HeaderHit::Scope)
     } else if col >= button_start && col < area.width {
@@ -383,32 +405,38 @@ pub fn hit_header(area: Rect, app: &App, col: u16, row: u16) -> Option<HeaderHit
     }
 }
 
-/// The two tabs and their labels, left to right. All-ASCII labels keep the byte length equal
-/// to the display width, so the header column math stays simple.
-const TABS: [(Tab, &str); 3] =
-    [(Tab::Changes, "1 Changes"), (Tab::AllFiles, "2 All files"), (Tab::Pr, "3 PR")];
+/// The three tabs and their labels, left to right, each led by its `tab-*` action's hint key
+/// (`specs/tui.md`). Column math uses display width, since a bound hint key can be wide.
+fn tab_labels(keymap: &Keymap) -> [(Tab, String); 3] {
+    use crate::keymap::Action as K;
+    [
+        (Tab::Changes, format!("{} Changes", keymap.hint(K::TabChanges))),
+        (Tab::AllFiles, format!("{} All files", keymap.hint(K::TabAllFiles))),
+        (Tab::Pr, format!("{} PR", keymap.hint(K::TabPr))),
+    ]
+}
 const HEADER_LEAD: &str = " ";
 const TAB_GAP: &str = "  ";
 const HEADER_GAP: &str = "  ";
 
 /// Each tab's `(tab, start_col, end_col)` in the header, the single source the bar paints and
 /// the click hit-tests against.
-fn tab_spans() -> Vec<(Tab, usize, usize)> {
+fn tab_spans(keymap: &Keymap) -> Vec<(Tab, usize, usize)> {
     let mut col = HEADER_LEAD.len();
     let mut out = Vec::new();
-    for (i, (tab, label)) in TABS.iter().enumerate() {
+    for (i, (tab, label)) in tab_labels(keymap).iter().enumerate() {
         if i > 0 {
             col += TAB_GAP.len();
         }
-        out.push((*tab, col, col + label.len()));
-        col += label.len();
+        out.push((*tab, col, col + label.width()));
+        col += label.width();
     }
     out
 }
 
 /// The column where the scope chip starts: past the tab bar and its trailing gap.
-fn header_prefix_len() -> usize {
-    tab_spans().last().map_or(HEADER_LEAD.len(), |&(_, _, end)| end) + HEADER_GAP.len()
+fn header_prefix_len(spans: &[(Tab, usize, usize)]) -> usize {
+    spans.last().map_or(HEADER_LEAD.len(), |&(_, _, end)| end) + HEADER_GAP.len()
 }
 
 fn scope_chip(app: &App) -> String {
@@ -419,18 +447,24 @@ fn send_button(app: &App) -> String {
     format!("[ Send ({}) ]", app.store.len())
 }
 
-/// The header suffix: the active scope's changed-file count. Shared so the painter and the
-/// hit-test place the right-aligned `Send` button at the same column.
+/// The header suffix: the active scope's changed-file count and its aggregate line totals, in
+/// [`stats_str`]'s grammar, so a zero side drops and an empty changeset shows the bare count.
+/// Shared so the painter and the hit-test place the right-aligned `Send` button at the same
+/// column. The totals' `−` is multi-byte, so the suffix is measured by display width; the scope
+/// chip and `Send` button are all-ASCII, so their byte `.len()` equals their display width.
 fn header_suffix(app: &App) -> String {
-    format!("  {} changed", app.changed_count())
+    let (added, removed) = app.changed_totals();
+    let stats = stats_str(added, removed);
+    let gap = if stats.is_empty() { "" } else { "  " };
+    format!("  {} changed{gap}{stats}", app.changed_count())
 }
 
 /// The column the `Send` button paints at, matching `render_tab_bar`'s layout: right-aligned
 /// when the header fits, packed left right after the suffix when the bar overflows (`pad`
 /// collapses to 0). `hit_header` must use this, not a bare right-alignment, or a `Send` click
 /// mis-fires (and on a narrow sidebar lands in a tab span) when the header overflows.
-fn send_button_col(app: &App, width: usize) -> usize {
-    let before = header_prefix_len() + scope_chip(app).len() + header_suffix(app).len();
+fn send_button_col(app: &App, prefix: usize, width: usize) -> usize {
+    let before = prefix + scope_chip(app).len() + header_suffix(app).width();
     before + width.saturating_sub(before + send_button(app).len())
 }
 
@@ -441,16 +475,16 @@ fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
     let p = app.palette();
     let bar = Style::default().bg(p.surface0);
     let mut spans = vec![Span::styled(HEADER_LEAD, bar)];
-    for (i, (tab, label)) in TABS.iter().enumerate() {
+    for (i, (tab, label)) in tab_labels(app.keymap()).into_iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(TAB_GAP, bar));
         }
-        let style = if *tab == app.tab {
+        let style = if tab == app.tab {
             bar.fg(p.lavender).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             bar.fg(p.subtext0)
         };
-        spans.push(Span::styled(*label, style));
+        spans.push(Span::styled(label, style));
     }
     spans.push(Span::styled(HEADER_GAP, bar));
     spans
@@ -460,7 +494,8 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let chip = scope_chip(app);
     let suffix = header_suffix(app);
     let button = send_button(app);
-    let used = header_prefix_len() + chip.len() + suffix.len() + button.len();
+    let prefix = header_prefix_len(&tab_spans(app.keymap()));
+    let used = prefix + chip.len() + suffix.width() + button.len();
     let pad = (area.width as usize).saturating_sub(used);
 
     // A quiet surface bar: the active tab in bright lavender, the inactive one dimmed, the
@@ -469,7 +504,15 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let bar = Style::default().bg(p.surface0);
     let mut spans = tab_bar_spans(app);
     spans.push(Span::styled(chip, bar.fg(p.yellow).add_modifier(Modifier::BOLD)));
-    spans.push(Span::styled(suffix, bar.fg(p.overlay0)));
+    // The suffix repaints in parts so the totals get the file rows' green/red; the parts spell
+    // out `header_suffix`, which the `Send` column math measures.
+    let (added, removed) = app.changed_totals();
+    spans.push(Span::styled(format!("  {} changed", app.changed_count()), bar.fg(p.overlay0)));
+    let stats = stats_spans(added, removed, p);
+    if !stats.is_empty() {
+        spans.push(Span::styled("  ", bar));
+        spans.extend(stats.into_iter().map(|s| Span::styled(s.content, s.style.bg(p.surface0))));
+    }
 
     let send_fg = if app.store.is_empty() { p.overlay0 } else { p.green };
     spans.push(Span::styled(" ".repeat(pad), bar));
@@ -691,7 +734,7 @@ fn truncate_width(s: &str, max: usize) -> String {
 
 fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
-    let title = match (&app.diff_path, &app.diff.previous_path) {
+    let mut title = match (&app.diff_path, &app.diff.previous_path) {
         (Some(new), Some(old)) => format!("{old} → {new}"),
         (Some(new), None) => new.clone(),
         (None, _) => match app.tab {
@@ -700,9 +743,13 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         }
         .to_string(),
     };
+    if app.preview_active() {
+        title.push_str(" · preview");
+    }
     let block = bordered(&title, app.focus == Focus::Diff, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    app.note_diff_width(inner.width as usize);
 
     if app.visible.is_empty() {
         // `All files` is a content browser, not a diff, so its empty/notice copy avoids diff
@@ -730,6 +777,32 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let width = inner.width as usize;
+
+    // The markdown preview: rendered lines, no gutter, no cursor; the scroll clamps to
+    // the rendered length so a refresh that shrank the file keeps the reader in range
+    // (specs/diff-view.md).
+    if app.preview_active() {
+        let rendered = app.markdown_render(app.preview_text(), width.max(1));
+        // Scrolling stops with the last line at the pane's bottom edge; content that
+        // fits the pane does not scroll.
+        let max = rendered.lines.len().saturating_sub(height);
+        app.note_preview_max_scroll(max);
+        let scroll = app.preview_scroll.min(max);
+        note_markdown_regions(app, &rendered, inner, scroll, 0);
+        frame.render_widget(
+            Paragraph::new(rendered.lines).scroll((saturating_row(scroll), 0)),
+            inner,
+        );
+        render_overflow_scrollbar(
+            frame,
+            area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
+            max,
+            scroll,
+            p,
+        );
+        return;
+    }
+
     let gutter_w = gutter_for(&app.diff);
     let layout = RowLayout {
         gutter_w,
@@ -750,8 +823,11 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     // card of a comment being edited is hidden — its edit box stands in for it.
     let row_lines = |i: usize| -> Vec<Line> {
         let state = RowState {
+            // The cursor row is always marked, dimmed while the pane is unfocused, exactly as
+            // the file list marks its own (`specs/tui.md`). A hunk step driven from the list
+            // moves this cursor, so hiding it would leave the jump with nothing to show.
             commented: commented.contains(&i),
-            cursor: app.focus == Focus::Diff && i == app.diff_cursor,
+            cursor: i == app.diff_cursor,
             selected: selecting && i >= lo && i <= hi,
         };
         let mut lines = render_row(&app.visible[i], layout, state);
@@ -834,7 +910,7 @@ fn row_height(row: &Row, gutter_w: usize, width: usize, wrap: bool) -> usize {
         return 1;
     }
     let code_width = width.saturating_sub(gutter_prefix_width(gutter_w)).max(1);
-    wrap_segments(&code_cells(row, false), code_width).len()
+    wrap_segments(&code_cells(row, false), code_width, ContinuationSpaces::Trim).len()
 }
 
 /// The diff-pane layout: constant for a frame.
@@ -914,7 +990,10 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
     // Without wrap the line is one chunk scrolled by `h_scroll`; with wrap, word-wrapped
     // segments, the first numbered and the rest blank-gutter.
     let chunks: Vec<&[Cell]> = if wrap {
-        wrap_segments(&cells, code_width).into_iter().map(|(s, e)| &cells[s..e]).collect()
+        wrap_segments(&cells, code_width, ContinuationSpaces::Trim)
+            .into_iter()
+            .map(|(s, e)| &cells[s..e])
+            .collect()
     } else {
         vec![cells.get(skip_columns(&cells, h_scroll)..).unwrap_or(&[])]
     };
@@ -949,21 +1028,35 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         .collect()
 }
 
-fn rgb(c: crate::diff::Rgb) -> Color {
+pub(crate) fn rgb(c: crate::diff::Rgb) -> Color {
     Color::Rgb(c.0, c.1, c.2)
 }
 
 /// Tabs expand to this many columns.
 const TAB: usize = 4;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContinuationSpaces {
+    Keep,
+    Trim,
+}
+
+fn plain_cell(ch: char) -> Cell {
+    Cell { ch, w: UnicodeWidthChar::width(ch).unwrap_or(0), fg: Color::Reset, emph: false }
+}
+
 /// Greedy word wrap over display cells into half-open ranges, one per display row.
 ///
 /// Breaks at the last space that fits within `width`, falling back to a hard break when a
-/// single word is wider than the column. Leading spaces on a continuation are dropped so a
-/// break landing just before a space doesn't leave an almost-empty row. An empty line still
-/// yields one (empty) range so it occupies a row. The renderer and [`row_height`] share this
+/// single word is wider than the column. [`ContinuationSpaces::Trim`] drops leading spaces
+/// from continuation rows; [`ContinuationSpaces::Keep`] preserves every character for caret
+/// mapping. An empty line still yields one range. The renderer and [`row_height`] share this
 /// so what's measured matches what's painted.
-fn wrap_segments(cells: &[Cell], width: usize) -> Vec<(usize, usize)> {
+fn wrap_segments(
+    cells: &[Cell],
+    width: usize,
+    continuation_spaces: ContinuationSpaces,
+) -> Vec<(usize, usize)> {
     if cells.is_empty() {
         return vec![(0, 0)];
     }
@@ -991,8 +1084,10 @@ fn wrap_segments(cells: &[Cell], width: usize) -> Vec<(usize, usize)> {
         let end = brk.filter(|&e| e > start).unwrap_or(limit);
         segs.push((start, end));
         start = end;
-        while start < cells.len() && cells[start].ch == ' ' {
-            start += 1;
+        if continuation_spaces == ContinuationSpaces::Trim {
+            while start < cells.len() && cells[start].ch == ' ' {
+                start += 1;
+            }
         }
     }
     segs
@@ -1095,34 +1190,53 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
 /// The key glyph and label for a footer action; an empty label renders the glyph alone. The
 /// `TogglePane` and `Send` labels depend on `app` (the destination pane, the comment count).
 fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
+    use crate::keymap::Action as K;
     use FooterAction as A;
-    let (k, l): (&str, &str) = match action {
-        A::Comment => ("c", "comment"),
-        A::Select => ("v", "select"),
-        A::ClearSelection => ("esc", "clear"),
-        A::EditComment => ("e", "edit"),
-        A::DeleteComment => ("d", "delete"),
-        A::JumpComment => ("n/N", "jump"),
-        A::ExpandFold => ("→", "expand fold"),
-        A::ExpandDir => ("→", "expand"),
-        A::CollapseDir => ("←", "collapse"),
+    // A rebindable action's hint is its first bound key (`specs/tui.md`).
+    let hint = |action: K| app.keymap().hint(action).to_string();
+    let (k, l): (String, &str) = match action {
+        A::Comment => (hint(K::Comment), "comment"),
+        A::Select => (hint(K::Select), "select"),
+        A::ClearSelection => ("esc".into(), "clear"),
+        A::EditComment => (hint(K::Edit), "edit"),
+        A::DeleteComment => (hint(K::Delete), "delete"),
+        A::JumpComment => (format!("{}/{}", hint(K::NextComment), hint(K::PrevComment)), "jump"),
+        A::ExpandFold => ("→".into(), "expand fold"),
+        // The armed crossing is keyed to the hunk step that armed it, so a rebound `next-hunk`
+        // is the key the hint shows.
+        A::CrossFile { forward: true } => (hint(K::NextHunk), "next file"),
+        A::CrossFile { forward: false } => (hint(K::PrevHunk), "prev file"),
+        A::ExpandDir => ("→".into(), "expand"),
+        A::CollapseDir => ("←".into(), "collapse"),
         A::TogglePane => {
             return ("⇥".into(), if app.focus == Focus::Files { "diff" } else { "files" }.into());
         }
-        A::Scope => ("u/b/t", "scope"),
-        A::Send => return ("s".into(), format!("send {}", app.store.len())),
-        A::List => ("l", "list"),
-        A::Copy => ("y", "copy"),
-        A::Save => ("enter", "save"),
-        A::Newline => ("⇧⏎", "newline"),
-        A::Cancel => ("esc", "cancel"),
-        A::CloseList => ("esc", "close"),
-        A::OpenPr => ("o", "open ↗"),
-        A::Refresh => ("r", "refresh"),
-        A::Tabs => ("1·2·3", ""),
-        A::Quit => ("q", ""),
+        A::Preview => (hint(K::Preview), if app.preview_active() { "source" } else { "preview" }),
+        A::NavigatorPosition => (hint(K::NavigatorPosition), "position"),
+        A::Scope => (
+            format!(
+                "{}/{}/{}",
+                hint(K::ScopeUncommitted),
+                hint(K::ScopeBranch),
+                hint(K::ScopeLastTurn)
+            ),
+            "scope",
+        ),
+        A::Send => return (hint(K::Send), format!("send {}", app.store.len())),
+        A::List => (hint(K::Comments), "list"),
+        A::Copy => (hint(K::Copy), "copy"),
+        A::Save => ("enter".into(), "save"),
+        A::Newline => ("⇧⏎".into(), "newline"),
+        A::Cancel => ("esc".into(), "cancel"),
+        A::CloseList => ("esc".into(), "close"),
+        A::OpenPr => (hint(K::OpenPr), "open ↗"),
+        A::Refresh => (hint(K::Refresh), "refresh"),
+        A::Tabs => {
+            (format!("{}·{}·{}", hint(K::TabChanges), hint(K::TabAllFiles), hint(K::TabPr)), "")
+        }
+        A::Quit => (hint(K::Quit), ""),
     };
-    (k.into(), l.into())
+    (k, l.into())
 }
 
 /// A tier's `(key, label)` styles: the primary bright and bold, normal actions readable, the
@@ -1310,11 +1424,28 @@ fn render_pr_header(frame: &mut Frame, app: &App, area: Rect) {
         let number = format!("#{}", s.number);
         let (status, color) = pr_status_chip(p, s);
         let chip_w = pr_chip_width(s);
-        // The title fills the gap left of the chip, right-aligned against it (a leading pad).
-        let name = truncate_width(&s.title, w.saturating_sub(lead_tabs + chip_w + 2).max(4));
-        let pad = w.saturating_sub(lead_tabs + name.width() + 2 + chip_w);
+        // The resolved head branch, dim left of the chip — the name that resolved, which can
+        // differ from the worktree's local branch; `⑂` marks a fork head so a same-named
+        // fork PR is visible (specs/forge-host.md). Dropped first when the bar is narrow.
+        let head = match (s.head_ref.is_empty(), s.head_is_fork) {
+            (true, _) => String::new(),
+            (false, true) => format!("⑂ {}", s.head_ref),
+            (false, false) => s.head_ref.clone(),
+        };
+        let head_w = if head.is_empty() { 0 } else { head.width() + 2 };
+        // Keep the branch only while the title still gets a readable minimum beside it.
+        let head_w =
+            if w.saturating_sub(lead_tabs + chip_w + 2 + head_w) >= 8 { head_w } else { 0 };
+        // The title fills the gap left of the branch + chip, right-aligned (a leading pad).
+        let name =
+            truncate_width(&s.title, w.saturating_sub(lead_tabs + chip_w + 2 + head_w).max(4));
+        let pad = w.saturating_sub(lead_tabs + name.width() + head_w + 2 + chip_w);
         spans.push(Span::styled(" ".repeat(pad), bar));
         spans.push(Span::styled(name, bar.fg(p.subtext0)));
+        if head_w > 0 {
+            spans.push(Span::styled("  ", bar));
+            spans.push(Span::styled(head, bar.fg(p.overlay0)));
+        }
         spans.push(Span::styled("  ", bar));
         spans.push(Span::styled(status, bar.fg(color).add_modifier(Modifier::BOLD)));
         spans.push(Span::styled(" ", bar));
@@ -1371,6 +1502,7 @@ fn pr_state_line(s: &forge::PrSnapshot) -> String {
         match s.sync {
             forge::Sync::Unpushed(n) => parts.push(format!("⇡ {n} unpushed")),
             forge::Sync::Behind(n) => parts.push(format!("⇣ {n} behind")),
+            forge::Sync::Unknown => parts.push("? sync unknown".to_string()),
             forge::Sync::InSync => {}
         }
     }
@@ -1394,53 +1526,97 @@ fn checks_summary(s: &forge::PrSnapshot) -> String {
     }
 }
 
-/// The right navigator: the checks list above the newest-first comments list, with the cursor
+/// The PR navigator: the checks list above the newest-first comments list, with the cursor
 /// row filled and the view windowed to keep it on screen.
 fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
-    // The navigator over the PR's checks and comments. Identity lives in the header; the left
-    // pane reads the selected comment — so this pane names its contents, not "PR" again.
+    // Identity lives in the header; the read pane shows the selected comment, so the navigator
+    // names its contents rather than repeating "PR".
     let p = app.palette();
-    let block = bordered("Checks & comments", true, p);
+    let block = bordered("Checks & comments", app.focus == Focus::Files, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let Some(s) = app.pr_snapshot() else {
-        // The empty/degraded message lives once, in the read pane; this navigator stays blank.
-        return;
-    };
     let width = inner.width as usize;
-    let dim = Style::default().fg(p.overlay0);
-    let now = std::time::SystemTime::now();
-
-    // (row spans, is the navigator cursor on this row). Only comment rows are selectable; the
-    // checks section is a status display.
-    let mut rows: Vec<(Vec<Span<'static>>, bool)> = Vec::new();
-    rows.push((vec![Span::styled(pr_checks_header(s), dim)], false));
-    for c in &s.checks {
-        let (glyph, color) = check_glyph(p, c.status);
-        rows.push((
-            vec![
-                Span::styled(format!(" {glyph} "), Style::default().fg(color)),
-                Span::styled(c.name.clone(), text_style(p)),
-            ],
-            false,
-        ));
-    }
-    rows.push((Vec::new(), false));
-    rows.push((vec![Span::styled(format!("comments · {}", s.comments.len()), dim)], false));
-    for (j, cm) in s.comments.iter().enumerate() {
-        rows.push((pr_comment_row(cm, width, now, p), app.pr_cursor == j));
-    }
-
+    let rows = pr_nav_rows(app, width, std::time::SystemTime::now());
     let viewport = inner.height as usize;
-    let selected = rows.iter().position(|(_, sel)| *sel).unwrap_or(0);
-    let scroll = selected.saturating_sub(viewport.saturating_sub(1));
+    // Transitional frames retain the request until both a viewport and its selected row exist.
+    let can_reveal = viewport > 0 && rows.iter().any(|row| row.cursor == Some(app.pr_cursor));
+    let reveal = can_reveal && app.take_pr_nav_reveal();
+    let (scroll, max_scroll) =
+        settle_pr_nav_scroll(&rows, app.pr_cursor, viewport, app.pr_nav_scroll(), reveal);
+    app.note_pr_nav_max_scroll(max_scroll);
+    app.set_pr_nav_scroll(scroll);
     let items: Vec<ListItem> = rows
         .into_iter()
         .skip(scroll)
         .take(viewport)
-        .map(|(spans, sel)| selectable_row(spans, width, sel.then(|| p.cursor_bg(true))))
+        .map(|row| {
+            let selected = row.cursor == Some(app.pr_cursor);
+            selectable_row(row.spans, width, selected.then(|| p.cursor_bg(true)))
+        })
         .collect();
     frame.render_widget(List::new(items), inner);
+}
+
+/// One painted PR navigator row and the cursor index it selects, when interactive.
+struct PrNavRow {
+    spans: Vec<Span<'static>>,
+    cursor: Option<usize>,
+}
+
+/// The complete PR navigator layout, shared by painting and click hit-testing.
+fn pr_nav_rows(app: &App, width: usize, now: std::time::SystemTime) -> Vec<PrNavRow> {
+    let Some(s) = app.pr_snapshot() else { return Vec::new() };
+    let p = app.palette();
+    let dim = Style::default().fg(p.overlay0);
+    let mut rows = Vec::new();
+    if app.pr_has_description() {
+        rows.push(PrNavRow {
+            spans: vec![Span::styled("description", text_style(p))],
+            cursor: Some(0),
+        });
+        rows.push(PrNavRow { spans: Vec::new(), cursor: None });
+    }
+    rows.push(PrNavRow { spans: vec![Span::styled(pr_checks_header(s), dim)], cursor: None });
+    for check in &s.checks {
+        let (glyph, color) = check_glyph(p, check.status);
+        rows.push(PrNavRow {
+            spans: vec![
+                Span::styled(format!(" {glyph} "), Style::default().fg(color)),
+                Span::styled(check.name.clone(), text_style(p)),
+            ],
+            cursor: None,
+        });
+    }
+    rows.push(PrNavRow { spans: Vec::new(), cursor: None });
+    rows.push(PrNavRow {
+        spans: vec![Span::styled(format!("comments · {}", s.comments.len()), dim)],
+        cursor: None,
+    });
+    let offset = app.pr_description_offset();
+    rows.extend(s.comments.iter().enumerate().map(|(index, comment)| PrNavRow {
+        spans: pr_comment_row(comment, width, now, p),
+        cursor: Some(index + offset),
+    }));
+    rows
+}
+
+fn settle_pr_nav_scroll(
+    rows: &[PrNavRow],
+    cursor: usize,
+    viewport: usize,
+    current: usize,
+    reveal: bool,
+) -> (usize, usize) {
+    let max = rows.len().saturating_sub(viewport);
+    let mut scroll = current.min(max);
+    if reveal && let Some(target) = rows.iter().position(|row| row.cursor == Some(cursor)) {
+        if target < scroll {
+            scroll = target;
+        } else if target >= scroll.saturating_add(viewport) {
+            scroll = target.saturating_add(1).saturating_sub(viewport);
+        }
+    }
+    (scroll.min(max), max)
 }
 
 /// The `checks` section header with its rollup (`✗ 1 failing` / `✓ N passed` / `running`).
@@ -1478,22 +1654,139 @@ fn pr_comment_row(
     ]
 }
 
-/// The left read pane: the selected comment's hunk (for a finding) then its body, a check's
-/// open hint, or the loading/degraded message.
+/// Note the painted link regions and heading anchors for a markdown render drawn
+/// inside `inner`, scrolled by `scroll`, with the body's first line at display index
+/// `offset` — so a click can resolve against exactly what this frame painted
+/// (`specs/markdown.md`). Links note only the visible rows; anchors cover the whole
+/// body, since an anchor click can jump past the viewport.
+fn note_markdown_regions(
+    app: &App,
+    rendered: &crate::markdown::Rendered,
+    inner: Rect,
+    scroll: usize,
+    offset: usize,
+) {
+    for (slug, line) in &rendered.anchors {
+        app.note_painted_anchor(slug.clone(), line + offset);
+    }
+    let viewport = inner.height as usize;
+    let visible = rendered.meta.iter().enumerate().filter_map(|(i, m)| {
+        match (i + offset).checked_sub(scroll) {
+            Some(d) if d < viewport => Some((d, m)),
+            _ => None,
+        }
+    });
+    for (display, m) in visible {
+        for link in &m.links {
+            let x1 = inner.x + link.start.min(inner.width as usize) as u16;
+            let x2 = inner.x + link.end.min(inner.width as usize) as u16;
+            if x1 < x2 {
+                app.note_painted_link(x1, x2, inner.y + display as u16, link.url.clone());
+            }
+        }
+    }
+}
+
+/// A ratatui scroll row from a usize offset, saturating — a render past 65k lines must
+/// pin to the end, never wrap back near the top.
+fn saturating_row(scroll: usize) -> u16 {
+    u16::try_from(scroll).unwrap_or(u16::MAX)
+}
+
+/// A scrollbar in `track` when the content overflows the pane —
+/// rendered markdown has no line numbers, so this is its position feedback
+/// (`specs/diff-view.md`, `specs/tui.md`). `max` is the maximum useful scroll; zero
+/// (content fits) paints nothing.
+fn render_overflow_scrollbar(
+    frame: &mut Frame,
+    track: Rect,
+    max: usize,
+    scroll: usize,
+    p: &Palette,
+) {
+    if max == 0 {
+        return;
+    }
+    let mut state = ScrollbarState::new(max).position(scroll);
+    // A heavy-line accent thumb on the untouched border: the border thickens where the
+    // reader is, and no track paints over it.
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_symbol("┃")
+            .thumb_style(Style::default().fg(p.lavender)),
+        track,
+        &mut state,
+    );
+}
+
+/// The PR read pane: the selected description or comment, or the loading/degraded message.
 fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
     let selected = app.pr_selected_comment();
-    let title = match selected {
+    let mut title = match selected {
         Some(cm) => format!("@{} · {}", cm.author, cm.anchor),
+        None if app.pr_on_description() => "description".to_string(),
         None => "PR".to_string(),
     };
-    let block = bordered(&title, false, p);
+    // The refetch indicator lives in the title, never in the content flow — a poll must
+    // not shift what the reader is reading (policies/ux-responsiveness.md).
+    if app.pr_refreshing() {
+        title.push_str(" · refreshing…");
+    }
+    let block = bordered(&title, app.focus == Focus::Diff, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = inner.width as usize;
+    let notice_lines =
+        app.pr_notice().map(|notice| wrap_text(notice, width.max(1))).unwrap_or_default();
+    // Keep one body row whenever the pane has room. If the remedy still cannot fit, retain its
+    // opening state and actionable tail; the middle detail is less useful than a visible recovery.
+    let notice_capacity = match inner.height {
+        0 => 0,
+        1 => 1,
+        height => height - 1,
+    } as usize;
+    let notice_lines = if notice_lines.len() <= notice_capacity {
+        notice_lines
+    } else if notice_capacity == 0 {
+        Vec::new()
+    } else if notice_capacity == 1 {
+        notice_lines.into_iter().rev().take(1).collect()
+    } else {
+        let tail = notice_lines.len() - (notice_capacity - 1);
+        std::iter::once(notice_lines[0].clone())
+            .chain(notice_lines.into_iter().skip(tail))
+            .collect()
+    };
+    let notice_height = notice_lines.len() as u16;
+    if notice_height > 0 {
+        let notice_area = Rect::new(inner.x, inner.y, inner.width, notice_height);
+        frame.render_widget(
+            Paragraph::new(
+                notice_lines
+                    .into_iter()
+                    .map(|line| Line::from(Span::styled(line, Style::default().fg(p.yellow))))
+                    .collect::<Vec<_>>(),
+            ),
+            notice_area,
+        );
+    }
+    let body = Rect::new(
+        inner.x,
+        inner.y.saturating_add(notice_height),
+        inner.width,
+        inner.height.saturating_sub(notice_height),
+    );
     let mut lines: Vec<Line<'static>> = Vec::new();
 
+    // The markdown body's render metadata and its first display row, for hit-testing.
+    let mut body_meta: Option<(usize, crate::markdown::Rendered)> = None;
     if let Some(cm) = selected {
+        // The finding's diff hunk stays plain `+`/`−`-colored lines; only the prose body
+        // renders as markdown (specs/tui.md).
         if let Some(hunk) = &cm.snippet {
             for raw in hunk.lines() {
                 let color = match raw.bytes().next() {
@@ -1505,11 +1798,10 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
             }
             lines.push(Line::raw(""));
         }
-        for logical in cm.body.split('\n') {
-            for piece in wrap_text(logical, width.max(1)) {
-                lines.push(Line::from(Span::styled(piece, text_style(p))));
-            }
-        }
+        let mut rendered = app.markdown_render(&cm.body, width.max(1));
+        let offset = lines.len();
+        lines.append(&mut rendered.lines);
+        body_meta = Some((offset, rendered));
         if cm.reply_count > 0 {
             let plural = if cm.reply_count == 1 { "reply" } else { "replies" };
             lines.push(Line::raw(""));
@@ -1518,28 +1810,68 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(p.overlay0),
             )));
         }
+    } else if app.pr_on_description() {
+        if let Some(s) = app.pr_snapshot() {
+            let mut rendered = app.markdown_render(&s.body, width.max(1));
+            let offset = lines.len();
+            lines.append(&mut rendered.lines);
+            body_meta = Some((offset, rendered));
+        }
     } else {
-        lines
-            .push(Line::from(Span::styled(pr_empty_msg(&app.pr), Style::default().fg(p.overlay0))));
+        // The empty-state remedy can outgrow a narrow pane; wrap it rather than clip it.
+        let refresh = app.keymap().hint(crate::keymap::Action::Refresh);
+        for piece in wrap_text(&pr_empty_msg(&app.pr, refresh), width.max(1)) {
+            lines.push(Line::from(Span::styled(piece, Style::default().fg(p.overlay0))));
+        }
     }
 
-    // Clamp in `usize` before the `u16` cast — `pr_read_scroll` grows unbounded via the wheel,
-    // so casting first could wrap a large value below the clamp.
-    let scroll = app.pr_read_scroll.min(lines.len().saturating_sub(1)) as u16;
-    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), inner);
+    // Clamp in `usize` before the `u16` cast — a stale `pr_read_scroll` could otherwise
+    // wrap below the clamp. Scrolling stops with the last line at the pane's bottom edge.
+    let max = lines.len().saturating_sub(body.height as usize);
+    app.note_pr_read_max_scroll(max);
+    let scroll = app.pr_read_scroll.min(max);
+    if let Some((offset, rendered)) = &body_meta {
+        note_markdown_regions(app, rendered, body, scroll, *offset);
+    }
+    frame.render_widget(Paragraph::new(lines).scroll((saturating_row(scroll), 0)), body);
+    render_overflow_scrollbar(
+        frame,
+        Rect::new(area.x, body.y, area.width, body.height),
+        max,
+        scroll,
+        p,
+    );
 }
 
-/// The one-line message for a loading or degraded PR view, each naming what unblocks it.
-fn pr_empty_msg(view: &forge::PrView) -> &'static str {
+/// The one-line message for a loading, empty, or degraded PR view. `refresh` is the active
+/// `refresh` binding's hint key.
+fn pr_empty_msg(view: &forge::PrView, refresh: char) -> String {
+    if let Some(message) = view.retry_remedy(refresh) {
+        return message;
+    }
     match view {
-        forge::PrView::Loading => "loading…",
-        forge::PrView::Pr(_) => "",
-        forge::PrView::NoPr => "no PR for this branch yet — push and open one, then press r",
-        forge::PrView::Ambiguous(_) => "this branch backs several open PRs — open one on GitHub",
-        forge::PrView::NoGh => "gh not found — install gh, then press r",
-        forge::PrView::NotAuthed => "not signed in — run `gh auth login`, then press r",
-        forge::PrView::NotGitHub => "not a GitHub remote — the PR tab needs a github.com origin",
-        forge::PrView::Error(_) => "github unavailable — retrying; press r to retry now",
+        forge::PrView::Loading => "loading…".into(),
+        forge::PrView::Pending | forge::PrView::Pr(_) => String::new(),
+        forge::PrView::Detached => "No pull request found — HEAD is detached.".into(),
+        forge::PrView::NoPr => "No pull request yet. Ready to ship?".into(),
+        forge::PrView::Ambiguous(n) => {
+            format!("Found {n} open PRs for this branch. Keep one open, then press {refresh}.")
+        }
+        forge::PrView::NoGh
+        | forge::PrView::NotAuthed(_)
+        | forge::PrView::GitError(_)
+        | forge::PrView::Error(_) => {
+            unreachable!("retry failures returned above")
+        }
+        forge::PrView::NeedsGitHubRemote => {
+            "PRs need a GitHub remote named upstream or origin.".into()
+        }
+        forge::PrView::UnsupportedHost(host) => {
+            format!("Unsupported host: {host}. Using GitHub Enterprise? Set `github_host`.")
+        }
+        forge::PrView::MalformedOrigin(host) => {
+            format!("The origin remote must point to a GitHub owner/repository on {host}.")
+        }
     }
 }
 
@@ -1558,30 +1890,17 @@ pub fn hit_pr_open(area: Rect, app: &App, col: u16, row: u16) -> bool {
     col >= area.width.saturating_sub(chip_w) && col < area.width
 }
 
-/// The comment index a click at `(col, row)` lands on, or `None` (a check, header, or blank).
-/// Mirrors `render_pr_nav`'s row layout and cursor-windowed scroll; only comments are selectable.
+/// The cursor-row index a click at `(col, row)` lands on — the pinned description at the
+/// row layout and the scroll captured by the painted frame.
 #[must_use]
 pub fn pr_nav_hit(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
-    let inner = inner_rect(panes(area, app.list_pct).files);
+    let inner = inner_rect(panes(area, app).files);
     if !contains(inner, col, row) {
         return None;
     }
-    let s = app.pr_snapshot()?;
-    // The first comment's display row, mirroring `render_pr_nav`'s layout; the view windows on
-    // the selected comment exactly as the painter does.
-    let first = pr_nav_comment_offset(s);
-    let sel_display = first + app.pr_cursor;
-    let viewport = inner.height as usize;
-    let scroll = sel_display.saturating_sub(viewport.saturating_sub(1));
-    let d = (row - inner.y) as usize + scroll;
-    (d >= first && d - first < s.comments.len()).then(|| d - first)
-}
-
-/// The display row of the first comment in `render_pr_nav`'s navigator — past the checks header,
-/// the checks themselves, a blank, and the comments header. The single home for that layout
-/// offset, shared with the click hit-test so the painted rows and the hit math can't drift.
-fn pr_nav_comment_offset(s: &forge::PrSnapshot) -> usize {
-    s.checks.len() + 3
+    let rows = pr_nav_rows(app, inner.width as usize, std::time::SystemTime::now());
+    let scroll = app.pr_nav_scroll();
+    rows.get((row - inner.y) as usize + scroll)?.cursor
 }
 
 /// The status glyph and Catppuccin accent for a check.

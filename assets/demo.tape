@@ -1,7 +1,11 @@
 # Demo recording for herdr-reviewr. Regenerate with:
-#   cargo build --release && vhs assets/demo.tape
-# Self-contained: builds a throwaway git repo with an agent-style change, then drives the
-# release binary through the review loop. Needs `git` and `vhs` on PATH.
+#   VERSION=$(awk -F'"' '/^version = / {print $2; exit}' herdr-plugin.toml) && herdr plugin install persiyanov/herdr-reviewr --ref "v$VERSION" --yes && vhs assets/demo.tape
+# Builds a throwaway git repo with an agent-style change, then drives the installed release through
+# the review loop. Needs `git`, `herdr`, `jq`, and `vhs`, with `persiyanov.reviewr` installed.
+
+Require git
+Require herdr
+Require jq
 
 Output assets/demo.gif
 
@@ -15,12 +19,11 @@ Set TypingSpeed 45ms
 
 # --- Hidden setup: a temp repo with a committed baseline + an uncommitted edit to review ---
 Hide
-Type "BIN=$PWD/target/release/herdr-reviewr && bash assets/demo-fixture.sh /tmp/herdr-reviewr-demo" Enter
-Type "cd /tmp/herdr-reviewr-demo && clear" Enter
+Type "BIN=$(bash assets/demo-bin.sh) && bash assets/demo-fixture.sh /tmp/herdr-reviewr-demo || exit 1" Enter
+Type "bash /tmp/herdr-reviewr-demo/.git/reviewr-demo/demo-session $BIN || exit 1" Enter
 Show
 
 # --- The review loop ---
-Type "$BIN" Enter
 Sleep 2s
 
 # Focus the diff and move into the changed region.
@@ -41,23 +44,8 @@ Sleep 600ms
 Type "guard the empty value here too?"
 Sleep 800ms
 Enter
-Sleep 1500ms
-
-# Browse the whole tree on the All files tab.
-Type "2"
 Sleep 1200ms
-Down
-Sleep 500ms
-Down
-Sleep 900ms
 
-# Back to Changes, open the comments list.
-Type "1"
-Sleep 700ms
-Type "l"
-Sleep 1800ms
-Escape
-Sleep 600ms
-
-Type "q"
-Sleep 800ms
+# Send the review. reviewr exports it to the agent input and confirms the handoff in the footer.
+Type "s"
+Sleep 2800ms

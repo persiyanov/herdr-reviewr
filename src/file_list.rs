@@ -23,7 +23,7 @@ pub struct Row {
     pub ignored: bool,
 }
 
-/// What a [`Row`] is: a directory (togglable) or a file (opens the left pane).
+/// What a [`Row`] is: a directory (togglable) or a file (opens the read pane).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RowKind {
     /// A directory: its full path keys its expansion state.

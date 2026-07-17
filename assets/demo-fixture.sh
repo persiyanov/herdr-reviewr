@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build a throwaway repo for the demo recording (assets/demo.tape): a committed baseline plus an
-# uncommitted edit + a new file, so the Changes tab has a clear diff to review. Kept out of the
-# tape itself because vhs's lexer can't carry the quoting.
+# uncommitted edit + a new file, so the Changes tab has a clear diff to review. It also writes a
+# tiny `herdr` stand-in so the send flow can complete. Kept out of the tape itself because vhs's
+# lexer can't carry the quoting.
 set -euo pipefail
 
 D="${1:-/tmp/herdr-reviewr-demo}"
@@ -41,3 +42,43 @@ cat > utils.py <<'EOF'
 def clamp(n, lo, hi):
     return max(lo, min(n, hi))
 EOF
+
+TOOLS="$D/.git/reviewr-demo"
+mkdir -p "$TOOLS"
+
+cat > "$TOOLS/mock-herdr" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${1:-} ${2:-}" in
+  "agent list")
+    printf '%s\n' '{"result":{"agents":[{"agent":"codex","agent_status":"idle","pane_id":"demo:p1","tab_id":"demo:t1","workspace_id":"demo"}]}}'
+    ;;
+  "agent send" | "agent focus")
+    :
+    ;;
+  *)
+    printf 'unsupported demo command: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$TOOLS/mock-herdr"
+
+cat > "$TOOLS/demo-session" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+BIN="$1"
+TOOLS="$(cd "$(dirname "$0")" && pwd)"
+D="$(cd "$TOOLS/../.." && pwd)"
+
+# The recorder should show reviewr's real palette even when its parent shell opts out of color.
+unset NO_COLOR
+cd "$D"
+exec env \
+  HERDR_BIN_PATH="$TOOLS/mock-herdr" \
+  HERDR_TAB_ID=demo:t1 \
+  "$BIN"
+EOF
+chmod +x "$TOOLS/demo-session"
