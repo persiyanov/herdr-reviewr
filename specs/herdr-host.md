@@ -122,7 +122,8 @@ The binary reviews the pane's working directory, normalized to its git top level
 `Send` hands over every written comment at once. The target is resolved in order:
 
 1. the sole agent in the sidebar's tab,
-2. else the sole agent in its workspace.
+2. else the sole agent in its workspace,
+3. else the agent in the nearest tab to the left of the sidebar, in the visible left-to-right tab order.
 
 reviewr writes the comment blocks into the agent pane without submitting, then focuses it. You add context and press enter.
 
@@ -133,10 +134,13 @@ The candidate rules, coded for citation:
 | `HH-AGENT-PANES`           | Only panes carrying an `agent` field are candidates.                    |
 | `HH-NOT-SELF`              | The sidebar's own pane is never a candidate.                            |
 | `HH-TAB-WINS`              | A sole tab agent wins over the workspace fallback.                      |
-| `HH-SOLE-OR-REFUSE`        | Zero or several candidates refuse the send. Nothing is sent partially.  |
+| `HH-NEAREST-LEFT`          | With several workspace agents, the one in the nearest tab left of the sidebar wins. |
+| `HH-SOLE-OR-REFUSE`        | No resolvable candidate refuses the send. Nothing is sent partially.    |
 | `HH-REFUSE-SAYS-CLIPBOARD` | A refusal says why and points at the clipboard copy.                    |
 
-With `tab` placement the sidebar has its own tab, so resolution goes straight to the workspace fallback.
+The tab order is `herdr tab list`'s array order — the live left-to-right order that tracks drag-reorders, not the tab `number` (a creation id). Left of the sidebar means a lower array index in the same workspace; the nearest such agent tab wins, and a nearest tab holding several agents refuses rather than guess.
+
+With `tab` placement the sidebar has its own tab, so resolution skips the tab rule — to the sole workspace agent, then to the nearest agent tab on its left (`HH-NEAREST-LEFT`).
 
 ## Clipboard
 
@@ -165,7 +169,7 @@ Actions:
 Send and tracking:
 
 - Browsing and the clipboard export work without the herdr CLI. Sending and turn tracking need it. Without it, `last-turn` stays empty and `uncommitted` and `branch` are unaffected.
-- Turn tracking resolves the agent under the same candidate rules (`HH-AGENT-PANES`, `HH-NOT-SELF`, `HH-TAB-WINS`), so a plugin sidebar or shell in the tab never pauses tracking.
+- Turn tracking resolves the agent under the same candidate rules (`HH-AGENT-PANES`, `HH-NOT-SELF`, `HH-TAB-WINS`, `HH-NEAREST-LEFT`), so a Review tab with its own placement tracks the agent tab on its left, and a plugin sidebar or shell in the tab never pauses tracking.
 - A failed clipboard utility or `herdr agent send` reports the error. The comments stay in the list.
 - A turn shorter than one poll interval, or one whose start is masked by a transient `unknown` status, is missed. `last-turn` then shows the changes since the last observed turn start. It never shows lines the agent did not write.
 - A crash mid-snapshot costs at most one failed refresh. Ref updates are atomic. Leftover locks are cleared before the next snapshot and on every exit path.

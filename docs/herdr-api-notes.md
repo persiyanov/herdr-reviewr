@@ -80,6 +80,13 @@ herdr agent send  <agent_pane> "<literal text>"   # writes input, no Enter
 herdr agent focus <agent_pane>                    # focus so the reviewer submits
 ```
 
+## Tabs (nearest-left send target)
+
+`herdr tab list [--workspace <ws>]` → `{"result":{"tabs":[ {tab_id, workspace_id, number, label, focused, agent_status, pane_count} ]}}` (verified live, 0.7.4).
+- `--workspace <ws>` filters to that workspace's tabs (verified live). `tab get <tab_id>` exposes no position/index field.
+- `number` is a per-workspace creation id with gaps after closed tabs, not a position.
+- **Ordering (verified by observation, 0.7.4):** the array is not sorted by `number`; it is the tab bar's visible left-to-right order, which the nearest-left rule (`../specs/herdr-host.md`, HH-NEAREST-LEFT) relies on. Confirmed with two live tests: focusing a tab does *not* reorder the array (a `focused` tab was observed at a non-first index, and focusing a middle tab left the array byte-identical), while dragging a tab to a new position *does* move it in the array — so the order tracks position, not focus/MRU. There is no documented API guarantee and no `position`/`index` field to fall back on, so this rests on that observed 0.7.4 behavior.
+
 ## Diff scopes (plain git, no herdr)
 
 - Uncommitted: `git -C <repo> diff` + `git status --porcelain -z --untracked-files=all`.

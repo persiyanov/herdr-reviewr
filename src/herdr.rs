@@ -29,6 +29,24 @@ struct AgentPane {
     workspace_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TabListResponse {
+    result: TabList,
+}
+
+#[derive(Debug, Deserialize)]
+struct TabList {
+    tabs: Vec<TabRef>,
+}
+
+/// One `herdr tab list` entry. The array order is the live left-to-right tab order and
+/// tracks drag-reorders; `number` is a creation id, not a position, so only order counts.
+#[derive(Debug, Deserialize)]
+struct TabRef {
+    tab_id: String,
+    workspace_id: String,
+}
+
 fn herdr_bin() -> String {
     env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string())
 }
@@ -59,13 +77,42 @@ fn agent_list() -> Result<Vec<AgentPane>> {
     parse_agents(&herdr(&["agent", "list"])?)
 }
 
-/// The agent pane to send to: the sole agent in this tab, else the sole workspace agent.
+/// The workspace's tab ids in visible left-to-right order (`herdr tab list` array order).
+/// Best-effort: any failure yields an empty order, which disables the nearest-left rule
+/// without affecting the tab and sole-workspace resolutions.
+fn tab_order(ws: Option<&str>) -> Vec<String> {
+    let Some(ws) = ws else { return Vec::new() };
+    match herdr(&["tab", "list", "--workspace", ws]) {
+        Ok(json) => parse_tab_order(&json, ws),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The `result.tabs` ids from `herdr tab list`, in array order, scoped to `ws`. A malformed
+/// envelope yields an empty order. `--workspace` already scopes the list; the `ws` filter is
+/// a guard against a herdr that ignores the flag and returns every workspace's tabs.
+fn parse_tab_order(json: &str, ws: &str) -> Vec<String> {
+    let Ok(response) = serde_json::from_str::<TabListResponse>(json) else {
+        return Vec::new();
+    };
+    response
+        .result
+        .tabs
+        .into_iter()
+        .filter(|tab| tab.workspace_id == ws)
+        .map(|tab| tab.tab_id)
+        .collect()
+}
+
+/// The agent pane to send to: the sole tab agent, else the sole workspace agent, else the
+/// agent in the nearest tab to the left of the sidebar (`specs/herdr-host.md`, HH-NEAREST-LEFT).
 ///
 /// A refusal says why and names the clipboard fallback (`specs/herdr-host.md`, HH-SOLE-OR-REFUSE/HH-REFUSE-SAYS-CLIPBOARD) —
 /// the status line renders it as `agent failed: <this message>`.
 pub fn resolve_agent_pane() -> Result<String> {
     let (tab, ws, me) = agent_env();
-    match pick_agent(&agent_list()?, tab.as_deref(), ws.as_deref(), me.as_deref()) {
+    let order = || tab_order(ws.as_deref());
+    match pick_agent(&agent_list()?, order, tab.as_deref(), ws.as_deref(), me.as_deref()) {
         Ok(agent) => Ok(agent.pane_id.clone()),
         Err(Refusal::NoAgent) => bail!("no agent here — copy to the clipboard instead"),
         Err(Refusal::Several) => bail!("several agents here — copy to the clipboard instead"),
@@ -83,7 +130,8 @@ fn parse_agents(json: &str) -> Result<Vec<AgentPane>> {
 /// treats an absent or ambiguous agent the same as a missing herdr — turn tracking pauses.
 pub fn resolved_agent_status() -> Result<Option<Status>> {
     let (tab, ws, me) = agent_env();
-    Ok(pick_agent(&agent_list()?, tab.as_deref(), ws.as_deref(), me.as_deref())
+    let order = || tab_order(ws.as_deref());
+    Ok(pick_agent(&agent_list()?, order, tab.as_deref(), ws.as_deref(), me.as_deref())
         .ok()
         .map(|agent| agent.agent_status))
 }
@@ -95,13 +143,19 @@ enum Refusal {
     Several,
 }
 
-/// The sole agent in this tab, else the sole workspace agent (`specs/herdr-host.md`, HH-AGENT-PANES through HH-SOLE-OR-REFUSE).
+/// The sole tab agent, else the sole workspace agent, else the agent in the nearest tab to
+/// the left of the sidebar (`specs/herdr-host.md`, HH-AGENT-PANES through HH-NEAREST-LEFT).
 ///
 /// The workspace candidates are a superset of the tab candidates whenever both env ids are
-/// present, so the refusal reason reads off the widest scope: no candidates anywhere is
-/// `NoAgent`, anything else is `Several`.
+/// present. The nearest-left rule only fires when several workspace agents remain, so a lone
+/// agent is always taken first. With nothing resolvable, no candidates anywhere is `NoAgent`,
+/// anything else is `Several`.
+///
+/// `tab_order` is lazy: only several workspace agents can reach the nearest-left rule, so the
+/// common single-agent resolutions never pay for the `herdr tab list` subprocess it wraps.
 fn pick_agent<'a>(
     agents: &'a [AgentPane],
+    tab_order: impl FnOnce() -> Vec<String>,
     tab: Option<&str>,
     ws: Option<&str>,
     me: Option<&str>,
@@ -110,10 +164,46 @@ fn pick_agent<'a>(
     if let &[agent] = in_tab.as_slice() {
         return Ok(agent);
     }
-    match candidates(agents, ws, me, |agent| &agent.workspace_id).as_slice() {
-        &[agent] => Ok(agent),
-        [] if in_tab.is_empty() => Err(Refusal::NoAgent),
-        _ => Err(Refusal::Several),
+    let in_ws = candidates(agents, ws, me, |agent| &agent.workspace_id);
+    if let &[agent] = in_ws.as_slice() {
+        return Ok(agent);
+    }
+    // `&&` short-circuits, so `tab_order()` (a `herdr tab list` subprocess) runs only when
+    // several workspace agents actually reach the nearest-left rule.
+    if in_ws.len() >= 2
+        && let Some(agent) = nearest_left_agent(&in_ws, &tab_order(), tab)
+    {
+        return Ok(agent);
+    }
+    if in_tab.is_empty() && in_ws.is_empty() {
+        Err(Refusal::NoAgent)
+    } else {
+        Err(Refusal::Several)
+    }
+}
+
+/// The workspace agent in the nearest tab to the left of the sidebar's own tab, by visible
+/// tab order (`specs/herdr-host.md`, HH-NEAREST-LEFT). `None` when the sidebar's tab is
+/// absent from the order, no agent sits left of it, or the nearest left tab holds several
+/// agents — a tab reviewr will not guess between.
+fn nearest_left_agent<'a>(
+    ws_agents: &[&'a AgentPane],
+    tab_order: &[String],
+    tab: Option<&str>,
+) -> Option<&'a AgentPane> {
+    let own = tab_order.iter().position(|id| Some(id.as_str()) == tab)?;
+    let position_of = |tab_id: &str| tab_order.iter().position(|id| id.as_str() == tab_id);
+    let left: Vec<(usize, &'a AgentPane)> = ws_agents
+        .iter()
+        .filter_map(|agent| position_of(agent.tab_id.as_str()).map(|pos| (pos, *agent)))
+        .filter(|(pos, _)| *pos < own)
+        .collect();
+    let nearest = left.iter().map(|(pos, _)| *pos).max()?;
+    let in_nearest: Vec<&'a AgentPane> =
+        left.into_iter().filter(|(pos, _)| *pos == nearest).map(|(_, agent)| agent).collect();
+    match in_nearest.as_slice() {
+        &[agent] => Some(agent),
+        _ => None,
     }
 }
 
@@ -150,7 +240,7 @@ pub fn focus(pane: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentPane, Refusal, Status, parse_agents, pick_agent};
+    use super::{AgentPane, Refusal, Status, parse_agents, parse_tab_order, pick_agent};
 
     /// One agent entry shaped like the real `herdr agent list` output (api notes).
     fn agent(pane: &str, tab: &str, ws: &str) -> AgentPane {
@@ -175,14 +265,28 @@ mod tests {
         }
     }
 
-    /// [`pick_agent`] reduced to the picked `pane_id`, for terse assertions.
+    /// [`pick_agent`] with no tab order, reduced to the picked `pane_id`. Exercises the tab
+    /// and sole-workspace rules; the nearest-left rule stays dormant with an empty order.
     fn pick(
         agents: &[AgentPane],
         tab: Option<&str>,
         ws: Option<&str>,
         me: Option<&str>,
     ) -> Result<String, Refusal> {
-        pick_agent(agents, tab, ws, me).map(|agent| agent.pane_id.clone())
+        pick_agent(agents, Vec::new, tab, ws, me).map(|agent| agent.pane_id.clone())
+    }
+
+    /// [`pick_agent`] with a visible tab order, reduced to the picked `pane_id`. Drives the
+    /// nearest-left rule; `order` lists tab ids left to right.
+    fn pick_ordered(
+        agents: &[AgentPane],
+        order: &[&str],
+        tab: Option<&str>,
+        ws: Option<&str>,
+        me: Option<&str>,
+    ) -> Result<String, Refusal> {
+        let order: Vec<String> = order.iter().map(ToString::to_string).collect();
+        pick_agent(agents, move || order, tab, ws, me).map(|agent| agent.pane_id.clone())
     }
 
     #[test]
@@ -257,5 +361,103 @@ mod tests {
         assert_eq!(parse_agents(wrapped).unwrap(), [agent("w8:p1", "w8:t1", "w8")]);
         assert!(parse_agents("[]").is_err());
         assert_eq!(serde_json::from_str::<Status>(r#""starting""#).unwrap(), Status::Unknown);
+    }
+
+    #[test]
+    fn nearest_left_binds_the_first_agent_left_of_the_sidebar() {
+        let agents = vec![agent("w:p1", "w:t1", "w"), agent("w:p7", "w:t7", "w")];
+        // Sidebar tab w:t5 has no agent; w:t2 to its left has none either, so the nearest
+        // agent tab left of it is w:t1 (HH-NEAREST-LEFT). w:t7 is to the right, ignored.
+        let order = ["w:t1", "w:t2", "w:t5", "w:t7"];
+        assert_eq!(
+            pick_ordered(&agents, &order, Some("w:t5"), Some("w"), None),
+            Ok("w:p1".to_string())
+        );
+    }
+
+    #[test]
+    fn nearest_left_prefers_the_closest_of_several_left_agents() {
+        let agents = vec![
+            agent("w:p1", "w:t1", "w"),
+            agent("w:p3", "w:t3", "w"),
+            agent("w:p7", "w:t7", "w"),
+        ];
+        // Two agents sit left of the sidebar (w:t1, w:t3); the closer one, w:t3, wins.
+        let order = ["w:t1", "w:t3", "w:t5", "w:t7"];
+        assert_eq!(
+            pick_ordered(&agents, &order, Some("w:t5"), Some("w"), None),
+            Ok("w:p3".to_string())
+        );
+    }
+
+    #[test]
+    fn a_sole_tab_agent_wins_over_an_agent_to_the_left() {
+        let agents = vec![agent("w:p5", "w:t5", "w"), agent("w:p1", "w:t1", "w")];
+        // The sidebar shares w:t5 with one agent; the tab rule takes it before nearest-left.
+        let order = ["w:t1", "w:t5"];
+        assert_eq!(
+            pick_ordered(&agents, &order, Some("w:t5"), Some("w"), Some("w:p9")),
+            Ok("w:p5".to_string())
+        );
+    }
+
+    #[test]
+    fn a_sole_workspace_agent_wins_even_when_it_is_to_the_right() {
+        let agents = vec![agent("w:p7", "w:t7", "w")];
+        // One agent, to the right of the sidebar: the sole-workspace rule still binds it, so
+        // nearest-left never runs (it only disambiguates several agents).
+        let order = ["w:t5", "w:t7"];
+        assert_eq!(
+            pick_ordered(&agents, &order, Some("w:t5"), Some("w"), None),
+            Ok("w:p7".to_string())
+        );
+    }
+
+    #[test]
+    fn several_agents_with_none_to_the_left_refuse_as_several() {
+        let agents = vec![agent("w:p7", "w:t7", "w"), agent("w:p9", "w:t9", "w")];
+        // Both agents are to the right of the sidebar and neither shares its tab — nothing to
+        // the left, so it refuses rather than guess (→ empty last-turn).
+        let order = ["w:t5", "w:t7", "w:t9"];
+        assert_eq!(
+            pick_ordered(&agents, &order, Some("w:t5"), Some("w"), None),
+            Err(Refusal::Several)
+        );
+    }
+
+    #[test]
+    fn several_agents_in_the_nearest_left_tab_refuse() {
+        let agents = vec![agent("w:p1", "w:t1", "w"), agent("w:p2", "w:t1", "w")];
+        // The nearest tab to the left holds two agents; reviewr will not guess between them.
+        let order = ["w:t1", "w:t5"];
+        assert_eq!(
+            pick_ordered(&agents, &order, Some("w:t5"), Some("w"), None),
+            Err(Refusal::Several)
+        );
+    }
+
+    #[test]
+    fn a_sidebar_tab_absent_from_the_order_disables_nearest_left() {
+        let agents = vec![agent("w:p1", "w:t1", "w"), agent("w:p3", "w:t3", "w")];
+        // The order predates the sidebar's tab (a stale `tab list`), so "left of it" is
+        // undefined — nearest-left stays dormant and two agents refuse (HH-NEAREST-LEFT).
+        let order = ["w:t1", "w:t3"];
+        assert_eq!(
+            pick_ordered(&agents, &order, Some("w:t9"), Some("w"), None),
+            Err(Refusal::Several)
+        );
+    }
+
+    #[test]
+    fn parse_tab_order_keeps_array_order_and_scopes_to_the_workspace() {
+        let json = r#"{"result":{"tabs":[
+            {"tab_id":"w:t7","workspace_id":"w","number":7,"focused":true},
+            {"tab_id":"w:t1","workspace_id":"w","number":1,"focused":false},
+            {"tab_id":"x:t2","workspace_id":"x","number":2,"focused":false}
+        ]}}"#;
+        // Array order is preserved (not sorted by `number`) and other workspaces drop out.
+        assert_eq!(parse_tab_order(json, "w"), ["w:t7".to_string(), "w:t1".to_string()]);
+        // A malformed envelope yields an empty order, which disables the nearest-left rule.
+        assert!(parse_tab_order("not json", "w").is_empty());
     }
 }
