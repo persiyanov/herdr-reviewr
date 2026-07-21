@@ -1,0 +1,401 @@
+{
+ "meta": {
+  "binary": "target/release/herdr-reviewr",
+  "binary_mtime": 1784367206,
+  "source_rev": "cd50666",
+  "cols": 160,
+  "rows": 45,
+  "quiet_ms": 120,
+  "timestamp": "2026-07-18T11:33:31"
+ },
+ "runs": [
+  {
+   "label": "fixture",
+   "repo": "/var/folders/1g/qfv0jsqj5jl2y1npdksp1zyr0000gn/T/reviewr-bench-fixture",
+   "iterations": 8,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold_first_ms": 116.2,
+     "first_byte": {
+      "n": 8,
+      "min": 103.6,
+      "median": 116.2,
+      "p95": 127.7,
+      "max": 127.7
+     },
+     "painted": {
+      "n": 8,
+      "min": 103.7,
+      "median": 116.3,
+      "p95": 127.8,
+      "max": 127.8
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold_first_ms": 78.4,
+     "first_byte": {
+      "n": 8,
+      "min": 77.4,
+      "median": 80.2,
+      "p95": 106.4,
+      "max": 106.4
+     },
+     "painted": {
+      "n": 8,
+      "min": 77.5,
+      "median": 80.5,
+      "p95": 106.5,
+      "max": 106.5
+     }
+    },
+    {
+     "scenario": "tab_enter_all_files_then_f",
+     "cold_first_ms": 115.3,
+     "first_byte": {
+      "n": 8,
+      "min": 98.0,
+      "median": 110.9,
+      "p95": 151.5,
+      "max": 151.5
+     },
+     "painted": {
+      "n": 8,
+      "min": 98.2,
+      "median": 111.2,
+      "p95": 151.7,
+      "max": 151.7
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold_first_ms": 18.5,
+     "first_byte": {
+      "n": 8,
+      "min": 17.0,
+      "median": 19.4,
+      "p95": 23.8,
+      "max": 23.8
+     },
+     "painted": {
+      "n": 8,
+      "min": 17.0,
+      "median": 19.5,
+      "p95": 23.8,
+      "max": 23.8
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold_first_ms": 0.4,
+     "first_byte": {
+      "n": 8,
+      "min": 0.3,
+      "median": 0.3,
+      "p95": 0.7,
+      "max": 0.7
+     },
+     "painted": {
+      "n": 8,
+      "min": 0.3,
+      "median": 0.3,
+      "p95": 0.7,
+      "max": 0.7
+     }
+    }
+   ]
+  },
+  {
+   "label": "landing",
+   "repo": "/Users/persijano/me/proj-extruct/landing",
+   "iterations": 8,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold_first_ms": 530.1,
+     "first_byte": {
+      "n": 8,
+      "min": 156.0,
+      "median": 252.8,
+      "p95": 530.1,
+      "max": 530.1
+     },
+     "painted": {
+      "n": 8,
+      "min": 156.3,
+      "median": 253.5,
+      "p95": 530.3,
+      "max": 530.3
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold_first_ms": 125.6,
+     "first_byte": {
+      "n": 8,
+      "min": 125.6,
+      "median": 146.9,
+      "p95": 163.1,
+      "max": 163.1
+     },
+     "painted": {
+      "n": 8,
+      "min": 125.9,
+      "median": 147.2,
+      "p95": 163.5,
+      "max": 163.5
+     }
+    },
+    {
+     "scenario": "tab_enter_all_files_then_f",
+     "cold_first_ms": 288.2,
+     "first_byte": {
+      "n": 8,
+      "min": 221.5,
+      "median": 278.3,
+      "p95": 319.7,
+      "max": 319.7
+     },
+     "painted": {
+      "n": 8,
+      "min": 223.6,
+      "median": 288.9,
+      "p95": 320.8,
+      "max": 320.8
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold_first_ms": 0.4,
+     "first_byte": {
+      "n": 8,
+      "min": 0.3,
+      "median": 0.5,
+      "p95": 0.6,
+      "max": 0.6
+     },
+     "painted": {
+      "n": 8,
+      "min": 0.3,
+      "median": 0.5,
+      "p95": 0.6,
+      "max": 0.6
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold_first_ms": 28.3,
+     "first_byte": {
+      "n": 8,
+      "min": 0.9,
+      "median": 2.9,
+      "p95": 504.8,
+      "max": 504.8
+     },
+     "painted": {
+      "n": 8,
+      "min": 1.2,
+      "median": 3.3,
+      "p95": 505.1,
+      "max": 505.1
+     }
+    }
+   ]
+  },
+  {
+   "label": "grip",
+   "repo": "/Users/persijano/me/proj-extruct/grip",
+   "iterations": 8,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold_first_ms": 2.2,
+     "first_byte": {
+      "n": 8,
+      "min": 2.2,
+      "median": 178.4,
+      "p95": 228.1,
+      "max": 228.1
+     },
+     "painted": {
+      "n": 8,
+      "min": 2.5,
+      "median": 179.0,
+      "p95": 228.6,
+      "max": 228.6
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold_first_ms": 109.6,
+     "first_byte": {
+      "n": 8,
+      "min": 96.5,
+      "median": 102.8,
+      "p95": 109.6,
+      "max": 109.6
+     },
+     "painted": {
+      "n": 8,
+      "min": 96.9,
+      "median": 103.2,
+      "p95": 109.9,
+      "max": 109.9
+     }
+    },
+    {
+     "scenario": "tab_enter_all_files_then_f",
+     "cold_first_ms": 169.2,
+     "first_byte": {
+      "n": 8,
+      "min": 101.3,
+      "median": 172.0,
+      "p95": 182.8,
+      "max": 182.8
+     },
+     "painted": {
+      "n": 8,
+      "min": 102.5,
+      "median": 175.6,
+      "p95": 184.1,
+      "max": 184.1
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold_first_ms": 0.2,
+     "first_byte": {
+      "n": 8,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 0.4,
+      "max": 0.4
+     },
+     "painted": {
+      "n": 8,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 0.4,
+      "max": 0.4
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold_first_ms": 1.0,
+     "first_byte": {
+      "n": 8,
+      "min": 0.6,
+      "median": 1.9,
+      "p95": 440.1,
+      "max": 440.1
+     },
+     "painted": {
+      "n": 8,
+      "min": 0.6,
+      "median": 2.0,
+      "p95": 440.2,
+      "max": 440.2
+     }
+    }
+   ]
+  },
+  {
+   "label": "reviewr-wt",
+   "repo": "/Users/persijano/.herdr/worktrees/herdr-reviewr/worktree-green-field-5793",
+   "iterations": 8,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold_first_ms": 196.7,
+     "first_byte": {
+      "n": 8,
+      "min": 84.3,
+      "median": 164.9,
+      "p95": 223.7,
+      "max": 223.7
+     },
+     "painted": {
+      "n": 8,
+      "min": 84.5,
+      "median": 165.3,
+      "p95": 224.1,
+      "max": 224.1
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold_first_ms": 134.0,
+     "first_byte": {
+      "n": 8,
+      "min": 53.3,
+      "median": 87.1,
+      "p95": 263.0,
+      "max": 263.0
+     },
+     "painted": {
+      "n": 8,
+      "min": 53.5,
+      "median": 87.4,
+      "p95": 263.2,
+      "max": 263.2
+     }
+    },
+    {
+     "scenario": "tab_enter_all_files_then_f",
+     "cold_first_ms": 100.2,
+     "first_byte": {
+      "n": 8,
+      "min": 82.0,
+      "median": 124.3,
+      "p95": 148.7,
+      "max": 148.7
+     },
+     "painted": {
+      "n": 8,
+      "min": 83.9,
+      "median": 127.7,
+      "p95": 189.0,
+      "max": 189.0
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold_first_ms": 0.2,
+     "first_byte": {
+      "n": 8,
+      "min": 0.2,
+      "median": 0.2,
+      "p95": 0.4,
+      "max": 0.4
+     },
+     "painted": {
+      "n": 8,
+      "min": 0.2,
+      "median": 0.2,
+      "p95": 0.4,
+      "max": 0.4
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold_first_ms": 0.5,
+     "first_byte": {
+      "n": 8,
+      "min": 0.3,
+      "median": 0.5,
+      "p95": 0.6,
+      "max": 0.6
+     },
+     "painted": {
+      "n": 8,
+      "min": 0.3,
+      "median": 0.5,
+      "p95": 0.6,
+      "max": 0.6
+     }
+    }
+   ]
+  }
+ ]
+}

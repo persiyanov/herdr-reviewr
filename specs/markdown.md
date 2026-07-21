@@ -21,7 +21,7 @@ A comment body, rendered:
  See the failing run (https://ci.example/8123)    ← [text](url): accent text, dim destination
 ```
 
-The PR tab's description and comment bodies (`tui.md`) and the markdown preview in both file tabs (`diff-view.md`) render through it.
+The PR tab's description and comment bodies (`pr-tab.md`) and the markdown preview in both file tabs (`diff-view.md`) render through it.
 
 | element                       | renders as                                                                     |
 | ----------------------------- | ------------------------------------------------------------------------------ |
@@ -87,5 +87,5 @@ Every input renders. Malformed or partial markdown degrades toward plain paragra
 
 - [theme](./theme.md)
 - [diff-view](./diff-view.md)
-- [tui](./tui.md)
+- [pr-tab](./pr-tab.md)
 - [forge-host](./forge-host.md)

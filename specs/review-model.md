@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-13
+Last edited: 2026-07-17
 ---
 
 # Review model
@@ -59,20 +59,21 @@ The `branch` scope diffs against the merge-base of the base branch and `HEAD`.
 
 ```toml
 # $HERDR_PLUGIN_CONFIG_DIR/config.toml
-base_branches = ["origin/main", "origin/master", "main", "master"]   # the default
+base_branches = ["main", "master"]   # the default
 # a gitflow repo puts its trunk first:
-base_branches = ["origin/develop", "origin/main", "main", "master"]
+base_branches = ["develop", "main", "master"]
 ```
 
-Precedence. The first source that yields a ref existing in the repo wins:
+Precedence. Entries canonicalize and resolve per `config.md`. The first source with a resolving entry wins:
 
-| # | source                          | base is                                        |
-| - | ------------------------------- | ----------------------------------------------- |
-| 1 | `--base <ref>` flag             | `<ref>` when it exists, otherwise skipped       |
-| 2 | `base_branches` in `config.toml` | the first listed ref that exists in the repo   |
+| # | source                           | base is                                               |
+| - | -------------------------------- | ----------------------------------------------------- |
+| 1 | `--base <ref>` flag              | any rev, resolved verbatim, else as a canonical entry |
+| 2 | `base_branches` in `config.toml` | the first listed entry that resolves                  |
+| 3 | `origin/HEAD`                    | the default branch it names, when present             |
 
 - The list is re-read on refresh. Editing it re-bases the scope without a relaunch.
-- A listed ref absent from the repo is skipped, never an error.
+- A listed entry that resolves to no ref is skipped, never an error.
 - A missing config or omitted `base_branches` uses the default list. Invalid plugin config follows `config.md`.
 - When no candidate exists, `branch` shows nothing. The other scopes are unaffected.
 - The installed pane passes no arguments, so inside herdr the config key is the only channel. `--base` serves standalone and dev runs, where it wins.

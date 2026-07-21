@@ -58,7 +58,18 @@ impl Config {
 
 /// The built-in base-branch candidates for the `branch` scope, used when `config.toml`
 /// sets no `base_branches` (`specs/review-model.md`).
-pub const DEFAULT_BASE_BRANCHES: [&str; 4] = ["origin/main", "origin/master", "main", "master"];
+pub const DEFAULT_BASE_BRANCHES: [&str; 2] = ["main", "master"];
+
+/// One `base_branches` entry's canonical bare branch name: a leading `refs/heads/`,
+/// `refs/remotes/origin/`, or `origin/` prefix is stripped (`specs/config.md`).
+pub(crate) fn canonical_base(entry: &str) -> String {
+    entry
+        .strip_prefix("refs/remotes/origin/")
+        .or_else(|| entry.strip_prefix("refs/heads/"))
+        .or_else(|| entry.strip_prefix("origin/"))
+        .unwrap_or(entry)
+        .to_string()
+}
 
 const PLUGIN_CONFIG_KEYS: [&str; 9] = [
     "theme",
@@ -334,7 +345,10 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
                     "a non-empty array of Git ref names",
                 ));
             }
-            branches.push(branch.to_owned());
+            let canonical = canonical_base(branch);
+            if !branches.contains(&canonical) {
+                branches.push(canonical);
+            }
         }
         config.base_branches = branches;
     }
@@ -422,8 +436,8 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
     Ok(config)
 }
 
-/// Parse and resolve the `[keybindings]` table (`specs/config.md` K1–K2): action names from the
-/// keymap table in `specs/tui.md`, each bound to a non-empty array of one-character keys.
+/// Parse and resolve the `[keybindings]` table (`specs/config.md` `CFG-KEY-PRINTABLE`/`CFG-KEY-UNIQUE`): action names from the
+/// keymap table in `specs/input.md`, each bound to a non-empty array of one-character keys.
 fn parse_keybindings(
     path: &Path,
     value: &toml::Value,
@@ -468,7 +482,7 @@ fn parse_keybindings(
             };
             let mut it = text.chars();
             match (it.next(), it.next()) {
-                // K1's "printable" is one visible cell: a positive display width also rejects
+                // `CFG-KEY-PRINTABLE`'s "printable" is one visible cell: a positive display width also rejects
                 // the zero-width class `is_control` misses (format chars, combining marks).
                 (Some(key), None)
                     if !key.is_whitespace()
@@ -499,7 +513,7 @@ fn value_error(path: &Path, key: &str, expected: &str) -> PluginConfigError {
     PluginConfigError::new(path, format!("invalid value for `{key}`; expected {expected}"))
 }
 
-/// The one C3 unknown-key grammar, shared by the top-level table and `[keybindings]`.
+/// The one `CFG-WHOLE-FILE` unknown-key grammar, shared by the top-level table and `[keybindings]`.
 fn unknown_key_error(path: &Path, key: &str, options: &str) -> PluginConfigError {
     PluginConfigError::new(path, format!("unknown key {key:?}; expected one of {options}"))
 }
@@ -626,13 +640,30 @@ mod tests {
         .unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.theme(), "tokyo-night");
-        assert_eq!(config.base_branches(), ["origin/dev", "main"]);
+        // Entries canonicalize to bare names at validation (`specs/config.md`).
+        assert_eq!(config.base_branches(), ["dev", "main"]);
         assert_eq!(config.default_scope(), Scope::LastTurn);
         assert_eq!(config.navigator_position(), NavigatorPosition::Bottom);
         assert_eq!(config.toggle_placement(), TogglePlacement::Overlay);
         assert_eq!(config.toggle_direction(), ToggleDirection::Down);
         assert!(!config.auto_open());
         assert_eq!(config.github_host(), Some("github.example.com"));
+    }
+
+    #[test]
+    fn base_entries_canonicalize_and_duplicates_collapse_to_the_first() {
+        assert_eq!(super::canonical_base("origin/main"), "main");
+        assert_eq!(super::canonical_base("refs/heads/main"), "main");
+        assert_eq!(super::canonical_base("refs/remotes/origin/main"), "main");
+        assert_eq!(super::canonical_base("release/1.0"), "release/1.0");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "base_branches = [\"origin/main\", \"main\", \"refs/heads/master\"]\n",
+        )
+        .unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.base_branches(), ["main", "master"]);
     }
 
     #[test]

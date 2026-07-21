@@ -1,0 +1,110 @@
+{
+ "meta": {
+  "binary": "target/release/herdr-reviewr",
+  "binary_mtime": 1784364765,
+  "source_rev": "765a781",
+  "cols": 160,
+  "rows": 45,
+  "quiet_ms": 120,
+  "timestamp": "2026-07-18T11:29:35"
+ },
+ "runs": [
+  {
+   "label": "fixture",
+   "repo": "/var/folders/1g/qfv0jsqj5jl2y1npdksp1zyr0000gn/T/reviewr-bench-fixture",
+   "iterations": 6,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold_first_ms": 188.7,
+     "first_byte": {
+      "n": 6,
+      "min": 94.3,
+      "median": 125.1,
+      "p95": 188.7,
+      "max": 188.7
+     },
+     "painted": {
+      "n": 6,
+      "min": 94.4,
+      "median": 125.2,
+      "p95": 188.8,
+      "max": 188.8
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold_first_ms": 98.6,
+     "first_byte": {
+      "n": 6,
+      "min": 58.5,
+      "median": 69.5,
+      "p95": 98.6,
+      "max": 98.6
+     },
+     "painted": {
+      "n": 6,
+      "min": 58.7,
+      "median": 69.6,
+      "p95": 98.8,
+      "max": 98.8
+     }
+    },
+    {
+     "scenario": "tab_enter_all_files_then_f",
+     "cold_first_ms": 95.0,
+     "first_byte": {
+      "n": 6,
+      "min": 87.9,
+      "median": 99.0,
+      "p95": 109.1,
+      "max": 109.1
+     },
+     "painted": {
+      "n": 6,
+      "min": 88.1,
+      "median": 99.2,
+      "p95": 109.3,
+      "max": 109.3
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold_first_ms": 26.4,
+     "first_byte": {
+      "n": 6,
+      "min": 18.7,
+      "median": 22.3,
+      "p95": 26.4,
+      "max": 26.4
+     },
+     "painted": {
+      "n": 6,
+      "min": 18.8,
+      "median": 22.3,
+      "p95": 26.4,
+      "max": 26.4
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold_first_ms": 0.3,
+     "first_byte": {
+      "n": 6,
+      "min": 0.3,
+      "median": 0.4,
+      "p95": 0.6,
+      "max": 0.6
+     },
+     "painted": {
+      "n": 6,
+      "min": 0.3,
+      "median": 0.4,
+      "p95": 0.6,
+      "max": 0.6
+     }
+    }
+   ]
+  }
+ ]
+}

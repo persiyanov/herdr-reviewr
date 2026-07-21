@@ -1,0 +1,23 @@
+name: audit
+
+# cargo-deny over deny.toml: advisories, license policy, bans, and source checks.
+# Runs on dependency changes and weekly, so a new advisory on an unchanged tree still surfaces.
+on:
+  push:
+    paths: ["Cargo.toml", "Cargo.lock", "deny.toml", ".github/workflows/audit.yml"]
+  pull_request:
+    paths: ["Cargo.toml", "Cargo.lock", "deny.toml", ".github/workflows/audit.yml"]
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

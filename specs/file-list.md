@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-24
-Last edited: 2026-07-14
+Last edited: 2026-07-18
 ---
 
 # File list
@@ -65,7 +65,7 @@ The list is a flat sequence of visible rows over the tree.
 ### Selection
 
 - The cursor selects a row. `j`/`k` and the arrows move it, skipping collapsed subtrees. The list scrolls to keep it visible.
-- The hunk steps and the file skips move the cursor onto the file they open, from either pane (`tui.md`).
+- The hunk steps and the file skips move the cursor onto the file they open, from either pane (`input.md`).
 - Moving onto a file opens it in the read pane: its diff in `Changes`, its content in `All files`.
 - The wheel scrolls the viewport only. The selection and the open file stay put, so browsing never reloads a diff.
 - `←`/`→` or a click collapses and expands a directory. A click on a file selects and opens it. There is no `enter` activation.
@@ -89,4 +89,6 @@ The list is a flat sequence of visible rows over the tree.
 ## Related specs
 
 - [review-model](./review-model.md)
+- [input](./input.md)
 - [tui](./tui.md)
+- [search](./search.md)

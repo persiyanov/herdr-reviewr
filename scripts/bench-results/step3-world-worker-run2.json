@@ -1,0 +1,349 @@
+{
+ "meta": {
+  "binary": "target/release/herdr-reviewr",
+  "binary_mtime": 1784380883,
+  "source_rev": "b724994",
+  "cols": 160,
+  "rows": 45,
+  "quiet_ms": 300,
+  "timestamp": "2026-07-18T15:21:23"
+ },
+ "runs": [
+  {
+   "label": "fixture",
+   "repo": "/var/folders/1g/qfv0jsqj5jl2y1npdksp1zyr0000gn/T/reviewr-bench-fixture",
+   "iterations": 10,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold": {
+      "first_ms": 79.2,
+      "painted_ms": 79.2
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 79.2,
+      "max": 79.2
+     },
+     "painted": {
+      "n": 10,
+      "min": 65.5,
+      "median": 82.1,
+      "p95": 98.5,
+      "max": 98.5
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold": {
+      "first_ms": 0.3,
+      "painted_ms": 58.6
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 0.2,
+      "median": 0.5,
+      "p95": 1.5,
+      "max": 1.5
+     },
+     "painted": {
+      "n": 10,
+      "min": 58.4,
+      "median": 76.5,
+      "p95": 94.9,
+      "max": 94.9
+     }
+    },
+    {
+     "scenario": "tab_enter_all_files_then_f",
+     "cold": {
+      "first_ms": 0.4,
+      "painted_ms": 82.8
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 1.1,
+      "max": 1.1
+     },
+     "painted": {
+      "n": 10,
+      "min": 65.7,
+      "median": 82.4,
+      "p95": 100.1,
+      "max": 100.1
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold": {
+      "first_ms": 21.0,
+      "painted_ms": 21.1
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 11.2,
+      "median": 26.4,
+      "p95": 34.3,
+      "max": 34.3
+     },
+     "painted": {
+      "n": 10,
+      "min": 11.3,
+      "median": 26.5,
+      "p95": 34.4,
+      "max": 34.4
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold": {
+      "first_ms": 0.4,
+      "painted_ms": 0.4
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 0.3,
+      "median": 0.4,
+      "p95": 0.7,
+      "max": 0.7
+     },
+     "painted": {
+      "n": 10,
+      "min": 0.3,
+      "median": 0.4,
+      "p95": 0.7,
+      "max": 0.7
+     }
+    }
+   ]
+  },
+  {
+   "label": "landing",
+   "repo": "/Users/persijano/me/proj-extruct/landing",
+   "iterations": 10,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold": {
+      "first_ms": 115.4,
+      "painted_ms": 115.9
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 1.2,
+      "median": 2.1,
+      "p95": 115.4,
+      "max": 115.4
+     },
+     "painted": {
+      "n": 10,
+      "min": 107.7,
+      "median": 130.3,
+      "p95": 146.4,
+      "max": 146.4
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold": {
+      "first_ms": 0.4,
+      "painted_ms": 94.3
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 0.2,
+      "median": 0.3,
+      "p95": 0.5,
+      "max": 0.5
+     },
+     "painted": {
+      "n": 10,
+      "min": 64.4,
+      "median": 86.2,
+      "p95": 97.4,
+      "max": 97.4
+     }
+    },
+    {
+     "scenario": "tab_enter_all_files_then_f",
+     "cold": {
+      "first_ms": 1.6,
+      "painted_ms": 136.9
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 0.3,
+      "median": 0.5,
+      "p95": 1.6,
+      "max": 1.6
+     },
+     "painted": {
+      "n": 10,
+      "min": 110.9,
+      "median": 123.5,
+      "p95": 152.0,
+      "max": 152.0
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold": {
+      "first_ms": 0.4,
+      "painted_ms": 0.4
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 0.7,
+      "max": 0.7
+     },
+     "painted": {
+      "n": 10,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 0.7,
+      "max": 0.7
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold": {
+      "first_ms": 0.4,
+      "painted_ms": 0.5
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 0.4,
+      "median": 4.2,
+      "p95": 266.5,
+      "max": 266.5
+     },
+     "painted": {
+      "n": 10,
+      "min": 0.5,
+      "median": 4.4,
+      "p95": 266.7,
+      "max": 266.7
+     }
+    }
+   ]
+  },
+  {
+   "label": "grip",
+   "repo": "/Users/persijano/me/proj-extruct/grip",
+   "iterations": 10,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold": {
+      "first_ms": 63.7,
+      "painted_ms": 64.0
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 0.4,
+      "median": 0.7,
+      "p95": 63.7,
+      "max": 63.7
+     },
+     "painted": {
+      "n": 10,
+      "min": 64.0,
+      "median": 82.8,
+      "p95": 101.6,
+      "max": 101.6
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold": {
+      "first_ms": 0.3,
+      "painted_ms": 48.7
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 0.2,
+      "median": 0.3,
+      "p95": 0.6,
+      "max": 0.6
+     },
+     "painted": {
+      "n": 10,
+      "min": 48.4,
+      "median": 65.4,
+      "p95": 66.0,
+      "max": 66.0
+     }
+    },
+    {
+     "scenario": "tab_enter_all_files_then_f",
+     "cold": {
+      "first_ms": 0.9,
+      "painted_ms": 111.9
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 0.2,
+      "median": 0.6,
+      "p95": 6.9,
+      "max": 6.9
+     },
+     "painted": {
+      "n": 10,
+      "min": 50.2,
+      "median": 83.4,
+      "p95": 111.9,
+      "max": 111.9
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold": {
+      "first_ms": 0.3,
+      "painted_ms": 0.3
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 1.4,
+      "max": 1.4
+     },
+     "painted": {
+      "n": 10,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 1.4,
+      "max": 1.4
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold": {
+      "first_ms": 4.0,
+      "painted_ms": 4.3
+     },
+     "first_byte": {
+      "n": 10,
+      "min": 0.4,
+      "median": 2.7,
+      "p95": 353.5,
+      "max": 353.5
+     },
+     "painted": {
+      "n": 10,
+      "min": 0.4,
+      "median": 2.9,
+      "p95": 353.6,
+      "max": 353.6
+     }
+    }
+   ]
+  }
+ ]
+}

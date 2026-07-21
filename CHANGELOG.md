@@ -22,6 +22,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A `.gitattributes` keeps `*.sh` LF-only so Windows checkouts don't feed CR-terminated scripts to
   a shell.
 
+## [0.21.0] — 2026-07-20
+
+### Added
+- **Search.** `/` from any tab opens a search screen over the whole worktree. Fuzzy file names
+  and literal code grep share one list, in the engine's order. Pick a result to land on its
+  file and line. Matching, ranking, and indexing come from
+  [fff](https://github.com/dmtrKovalenko/fff). Ranking improves as you pick, and the frecency
+  store lives in the cache directory, never the worktree.
+
+## [0.20.1] — 2026-07-18
+
+### Changed
+- **Input never waits on a refresh.** Every background rebuild — the changed set, the file tree,
+  the agent-status sample, the turn snapshot — now runs on a worker thread. A keypress paints
+  immediately even while the sidebar refreshes, and a poll tick can no longer swallow a keystroke
+  mid-scroll. Results land only while they still describe what you are looking at, so the view is
+  at worst briefly stale, never wrong.
+- **A refresh indicator in the tab strip.** Pressing `r` lights a one-cell `⟳` beside the tabs
+  immediately, held long enough to read. Background refreshes show it only when they run long — a
+  cold scan, a slow fetch, a hung git. It replaces the `PR` pane's `· refreshing…` title note, and
+  its reserved cell means the header never shifts.
+- **Scope switches repaint consistently.** Switching scope in `All files` updates the header count
+  and every row's change badge in the same frame, with the tree itself refreshing right behind.
+
+## [0.19.0] — 2026-07-18
+
+### Changed
+- **Tab switches are instant.** Entering `Changes` or `All files` paints the tab exactly as you
+  left it in one frame and refreshes right behind it, on any repo size. A first-ever visit loads
+  before its frame, so the header never describes a tab that shows nothing.
+- **`All files` is fast in huge repos.** The ignored-tree listing no longer walks inside ignored
+  directories. Entering the tab dropped from over a second to well under 200ms on a 10k-file repo
+  with gigabytes of ignored trees, and every background refresh sheds the same cost.
+- **The `PR` tab resolves by published commits, not branch names.** The worktree's published
+  work nominates its pull request by exact commit identity, so renames, deletions, and same-named
+  fork branches cannot misdirect the tab.
+- **The `PR` tab keeps its snapshot while it refreshes.** New commits no longer blank the tab to
+  `loading`. It clears only when the repository itself changes. A turn-end refetch now fires from
+  any tab, so opening `PR` after the agent finishes finds fresh data already on its way.
+
 ## [0.18.1] — 2026-07-16
 
 ### Changed

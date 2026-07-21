@@ -1,0 +1,329 @@
+{
+ "meta": {
+  "binary": "target/release/herdr-reviewr",
+  "binary_mtime": 1784364765,
+  "source_rev": "765a781",
+  "cols": 160,
+  "rows": 45,
+  "quiet_ms": 120,
+  "timestamp": "2026-07-18T10:55:45"
+ },
+ "runs": [
+  {
+   "label": "fixture",
+   "repo": "/var/folders/1g/qfv0jsqj5jl2y1npdksp1zyr0000gn/T/reviewr-bench-fixture",
+   "iterations": 8,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold_first_ms": 118.8,
+     "first_byte": {
+      "n": 8,
+      "min": 82.6,
+      "median": 95.2,
+      "p95": 118.8,
+      "max": 118.8
+     },
+     "painted": {
+      "n": 8,
+      "min": 82.7,
+      "median": 95.3,
+      "p95": 118.9,
+      "max": 118.9
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold_first_ms": 69.4,
+     "first_byte": {
+      "n": 8,
+      "min": 58.5,
+      "median": 66.4,
+      "p95": 69.4,
+      "max": 69.4
+     },
+     "painted": {
+      "n": 8,
+      "min": 58.7,
+      "median": 66.5,
+      "p95": 69.5,
+      "max": 69.5
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold_first_ms": 18.0,
+     "first_byte": {
+      "n": 8,
+      "min": 14.9,
+      "median": 18.0,
+      "p95": 19.8,
+      "max": 19.8
+     },
+     "painted": {
+      "n": 8,
+      "min": 14.9,
+      "median": 18.1,
+      "p95": 19.9,
+      "max": 19.9
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold_first_ms": 0.4,
+     "first_byte": {
+      "n": 8,
+      "min": 0.3,
+      "median": 0.4,
+      "p95": 0.5,
+      "max": 0.5
+     },
+     "painted": {
+      "n": 8,
+      "min": 0.3,
+      "median": 0.4,
+      "p95": 0.5,
+      "max": 0.5
+     }
+    }
+   ]
+  },
+  {
+   "label": "landing",
+   "repo": "/Users/persijano/me/proj-extruct/landing",
+   "iterations": 8,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold_first_ms": 1218.7,
+     "first_byte": {
+      "n": 8,
+      "min": 1137.0,
+      "median": 1153.0,
+      "p95": 1218.7,
+      "max": 1218.7
+     },
+     "painted": {
+      "n": 8,
+      "min": 1137.3,
+      "median": 1153.3,
+      "p95": 1219.0,
+      "max": 1219.0
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold_first_ms": 98.5,
+     "first_byte": {
+      "n": 8,
+      "min": 80.1,
+      "median": 91.2,
+      "p95": 98.5,
+      "max": 98.5
+     },
+     "painted": {
+      "n": 8,
+      "min": 80.3,
+      "median": 91.4,
+      "p95": 98.7,
+      "max": 98.7
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold_first_ms": 0.3,
+     "first_byte": {
+      "n": 8,
+      "min": 0.2,
+      "median": 0.3,
+      "p95": 0.4,
+      "max": 0.4
+     },
+     "painted": {
+      "n": 8,
+      "min": 0.2,
+      "median": 0.3,
+      "p95": 0.4,
+      "max": 0.4
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold_first_ms": 0.7,
+     "first_byte": {
+      "n": 8,
+      "min": 0.5,
+      "median": 0.7,
+      "p95": 6.8,
+      "max": 6.8
+     },
+     "painted": {
+      "n": 8,
+      "min": 0.5,
+      "median": 0.8,
+      "p95": 6.9,
+      "max": 6.9
+     }
+    }
+   ]
+  },
+  {
+   "label": "grip",
+   "repo": "/Users/persijano/me/proj-extruct/grip",
+   "iterations": 8,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold_first_ms": 269.6,
+     "first_byte": {
+      "n": 8,
+      "min": 231.0,
+      "median": 238.1,
+      "p95": 269.6,
+      "max": 269.6
+     },
+     "painted": {
+      "n": 8,
+      "min": 231.3,
+      "median": 238.4,
+      "p95": 269.8,
+      "max": 269.8
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold_first_ms": 52.9,
+     "first_byte": {
+      "n": 8,
+      "min": 52.9,
+      "median": 56.7,
+      "p95": 60.9,
+      "max": 60.9
+     },
+     "painted": {
+      "n": 8,
+      "min": 53.1,
+      "median": 56.9,
+      "p95": 61.1,
+      "max": 61.1
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold_first_ms": 0.2,
+     "first_byte": {
+      "n": 8,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 0.4,
+      "max": 0.4
+     },
+     "painted": {
+      "n": 8,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 0.4,
+      "max": 0.4
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold_first_ms": 4.7,
+     "first_byte": {
+      "n": 8,
+      "min": 4.4,
+      "median": 17.1,
+      "p95": 82.0,
+      "max": 82.0
+     },
+     "painted": {
+      "n": 8,
+      "min": 4.6,
+      "median": 17.2,
+      "p95": 82.1,
+      "max": 82.1
+     }
+    }
+   ]
+  },
+  {
+   "label": "reviewr-wt",
+   "repo": "/Users/persijano/.herdr/worktrees/herdr-reviewr/worktree-green-field-5793",
+   "iterations": 8,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold_first_ms": 98.0,
+     "first_byte": {
+      "n": 8,
+      "min": 92.5,
+      "median": 102.8,
+      "p95": 136.2,
+      "max": 136.2
+     },
+     "painted": {
+      "n": 8,
+      "min": 92.7,
+      "median": 103.0,
+      "p95": 136.5,
+      "max": 136.5
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold_first_ms": 52.7,
+     "first_byte": {
+      "n": 8,
+      "min": 43.1,
+      "median": 51.6,
+      "p95": 53.1,
+      "max": 53.1
+     },
+     "painted": {
+      "n": 8,
+      "min": 43.3,
+      "median": 51.8,
+      "p95": 53.3,
+      "max": 53.3
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold_first_ms": 0.3,
+     "first_byte": {
+      "n": 8,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 0.5,
+      "max": 0.5
+     },
+     "painted": {
+      "n": 8,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 0.5,
+      "max": 0.5
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold_first_ms": 3.7,
+     "first_byte": {
+      "n": 8,
+      "min": 2.6,
+      "median": 23.8,
+      "p95": 75.6,
+      "max": 75.6
+     },
+     "painted": {
+      "n": 8,
+      "min": 2.7,
+      "median": 24.0,
+      "p95": 75.7,
+      "max": 75.7
+     }
+    }
+   ]
+  }
+ ]
+}

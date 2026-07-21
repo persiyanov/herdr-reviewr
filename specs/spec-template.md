@@ -7,13 +7,19 @@ Last edited: YYYY-MM-DD
 <!--
 A spec is a communication medium. The user reviews it. Contributors learn from it.
 It is never a scratchpad. Optimize for reading speed, even in a one-line edit.
-The full bar: references/writing-great-specs.md. The essentials:
+The full bar lives in AGENTS.md. The essentials:
 - One concept per doc. End-state truth: what must be TRUE when the change is done.
+- Structure derives from the domain, not the history of the discussion or investigation.
 - One fact per sentence. Linear sentences, no asides.
 - One grammatical template per list or table. Schema-first tables, columns padded to align raw.
+- Every collection states one admission rule and contains the complete admitted set.
 - Contract only: mechanism -> code, rationale -> PR, provenance -> git.
-- One home per fact. Cite by number everywhere else.
-- Under ~2,000 words. Sections in this order. Delete sections that don't earn their place.
+- One home per fact. Link to that home everywhere else.
+- Invariants are optional. Add one only when it holds across operations, breaking it creates invalid
+  state, several operations or another spec rely on it, and no local section can state it better.
+  Code it (the doc's prefix + an uppercase kebab slug, `CHG-AT-MOST-ONCE`) only when another section,
+  spec, or test needs a stable citation.
+- Under ~2,000 words. Delete every section that does not earn its place.
 -->
 
 # <Concept name>
@@ -22,7 +28,7 @@ The full bar: references/writing-great-specs.md. The essentials:
 
 ## Overview
 
-<Lead with one realistic example, then a field table.>
+<Give the smallest useful mental model. Use an example when it teaches faster than prose.>
 
 ```json
 { "id": "chg_1A2b3C", "amount": 1099, "status": "succeeded" }
@@ -36,32 +42,25 @@ The full bar: references/writing-great-specs.md. The essentials:
 
 ## Behavior
 
-<Rules as schema-first tables. Number invariants for citation. One grammatical shape per table.>
-
-| #  | Always true                                                    |
-| -- | -------------------------------------------------------------- |
-| I1 | A charge is captured at most once.                              |
-| I2 | A charge reaches exactly one terminal status and never leaves it. |
-
-<Operations as condition → outcome rows:>
+<State operations as complete condition → outcome rows. Keep local rules beside the operation.>
 
 | request                                    | outcome                                          |
 | ------------------------------------------ | ------------------------------------------------ |
 | valid `amount`, chargeable `source`        | `2xx`, one `pending` charge committed            |
 | invalid `amount`                           | `400 invalid_request`, nothing persists          |
-| same `Idempotency-Key` replayed within 24h | the original response, nothing charged twice (→ I1) |
+| same `Idempotency-Key` replayed within 24h | the original response, nothing charged twice     |
 
 ## Traces
 
 <Only for temporal contracts: the duplicate, the race, the crash. Delete otherwise.
-Steps share one shape: "actor does X. System does Y (→ I1)."->
+Steps share one shape: "actor does X. System does Y." -->
 
-**T1 — crash between debit and record**
+**CHG-CRASH-MID-CAPTURE — crash between debit and record**
 
 1. The caller creates a charge. The row commits `pending`.
 2. The processor debits the card.
 3. The service crashes before recording the outcome.
-4. Recovery marks the charge `unknown`, terminal (→ I2).
+4. Recovery marks the charge `unknown`, terminal.
 
 ## Failure semantics
 

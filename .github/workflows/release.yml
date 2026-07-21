@@ -8,6 +8,10 @@ on:
 
 permissions:
   contents: write
+  # Sigstore-signed build provenance for every release asset, verifiable by anyone via
+  # `gh attestation verify <asset> --repo persiyanov/herdr-reviewr`.
+  id-token: write
+  attestations: write
 
 jobs:
   # A tag push creates no Release object on its own, and the upload action below uploads to an
@@ -16,13 +20,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Create the release if it doesn't exist
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-                 --title "herdr-reviewr $GITHUB_REF_NAME" --verify-tag --generate-notes
+      # The release body is the tag's CHANGELOG.md section, so the page a human lands on says
+      # what changed. The action parses the Keep-a-Changelog format and fails when the tag has
+      # no section, so a forgotten changelog entry fails the release instead of shipping the
+      # bare compare link. Idempotent: an existing release is left as is.
+      # Draft until the binaries attach: the repo publishes immutable releases, which refuse
+      # asset uploads after publish — so publish is the pipeline's last step, not its first.
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          changelog: CHANGELOG.md
+          title: herdr-reviewr $version
+          draft: true
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   binaries:
     needs: create-release
@@ -50,3 +59,19 @@ jobs:
           archive: $bin-$target
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The archive the step above built and uploaded gets a signed provenance attestation.
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: herdr-reviewr-${{ matrix.target }}.tar.gz
+
+  # Publish once every target's assets are attached. Publishing seals an immutable release,
+  # so this runs last; a failed target leaves the draft for inspection instead of shipping a
+  # release that installs 404.
+  publish:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

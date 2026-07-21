@@ -1,0 +1,18 @@
+name: Feature request
+description: Something reviewr should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do in your review flow, and where reviewr gets in the way or falls short.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like
+      description: How it could work. Rough is fine — the flow matters more than the exact keys.
+    validations:
+      required: true

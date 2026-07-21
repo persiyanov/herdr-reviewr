@@ -61,7 +61,7 @@ fn agent_list() -> Result<Vec<AgentPane>> {
 
 /// The agent pane to send to: the sole agent in this tab, else the sole workspace agent.
 ///
-/// A refusal says why and names the clipboard fallback (`specs/herdr-host.md`, S4/S5) —
+/// A refusal says why and names the clipboard fallback (`specs/herdr-host.md`, HH-SOLE-OR-REFUSE/HH-REFUSE-SAYS-CLIPBOARD) —
 /// the status line renders it as `agent failed: <this message>`.
 pub fn resolve_agent_pane() -> Result<String> {
     let (tab, ws, me) = agent_env();
@@ -95,7 +95,7 @@ enum Refusal {
     Several,
 }
 
-/// The sole agent in this tab, else the sole workspace agent (`specs/herdr-host.md`, S1–S4).
+/// The sole agent in this tab, else the sole workspace agent (`specs/herdr-host.md`, HH-AGENT-PANES through HH-SOLE-OR-REFUSE).
 ///
 /// The workspace candidates are a superset of the tab candidates whenever both env ids are
 /// present, so the refusal reason reads off the widest scope: no candidates anywhere is
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn pick_prefers_the_tab_agent_over_the_workspace() {
         let agents = vec![agent("w8:p1", "w8:t1", "w8"), agent("w8:p2", "w8:t2", "w8")];
-        // Both share workspace w8; our tab is w8:t2, so its pane wins (S3).
+        // Both share workspace w8; our tab is w8:t2, so its pane wins (HH-TAB-WINS).
         assert_eq!(pick(&agents, Some("w8:t2"), Some("w8"), None), Ok("w8:p2".to_string()));
     }
 
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn the_reviewr_pane_excludes_itself_so_the_real_agent_resolves() {
         // Even if herdr listed our own sidebar pane (w8:p5) as an agent alongside the real
-        // one (w8:p1), excluding our pane leaves the real agent unambiguous (S2).
+        // one (w8:p1), excluding our pane leaves the real agent unambiguous (HH-NOT-SELF).
         let agents = vec![agent("w8:p1", "w8:t1", "w8"), agent("w8:p5", "w8:t1", "w8")];
         assert_eq!(
             pick(&agents, Some("w8:t1"), Some("w8"), Some("w8:p5")),
@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn non_agent_panes_do_not_make_the_tab_ambiguous() {
         // A tab holding one real agent plus a non-agent pane (another plugin's sidebar, a
-        // plain shell) resolves to the agent, not an ambiguity refusal (S1, #6).
+        // plain shell) resolves to the agent, not an ambiguity refusal (HH-AGENT-PANES, #6).
         let agents = vec![agent("w3:p1", "w3:t1", "w3"), non_agent_pane("w3:p4", "w3:t1", "w3")];
         assert_eq!(
             pick(&agents, Some("w3:t1"), Some("w3"), Some("w3:p5")),
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn only_non_agent_panes_refuse_as_no_agent() {
-        // A tab and workspace holding nothing but non-agent panes has no one to send to (S1, S4).
+        // A tab and workspace holding nothing but non-agent panes has no one to send to (HH-AGENT-PANES, HH-SOLE-OR-REFUSE).
         let agents =
             vec![non_agent_pane("w3:p2", "w3:t1", "w3"), non_agent_pane("w3:p4", "w3:t1", "w3")];
         assert_eq!(pick(&agents, Some("w3:t1"), Some("w3"), None), Err(Refusal::NoAgent));
@@ -232,14 +232,14 @@ mod tests {
     #[test]
     fn no_matching_agent_refuses_as_no_agent() {
         let agents = vec![agent("w9:p1", "w9:t1", "w9")];
-        // An agent exists, but in another workspace entirely (S4, S5).
+        // An agent exists, but in another workspace entirely (HH-SOLE-OR-REFUSE, HH-REFUSE-SAYS-CLIPBOARD).
         assert_eq!(pick(&agents, Some("w8:t1"), Some("w8"), None), Err(Refusal::NoAgent));
     }
 
     #[test]
     fn two_workspace_agents_refuse_as_several() {
         let agents = vec![agent("w8:p1", "w8:t1", "w8"), agent("w8:p2", "w8:t2", "w8")];
-        // Neither shares our tab and the workspace has two — refuse to guess (S4, S5).
+        // Neither shares our tab and the workspace has two — refuse to guess (HH-SOLE-OR-REFUSE, HH-REFUSE-SAYS-CLIPBOARD).
         assert_eq!(pick(&agents, Some("w8:tZ"), Some("w8"), None), Err(Refusal::Several));
     }
 
@@ -247,7 +247,7 @@ mod tests {
     fn two_tab_agents_refuse_as_several_even_without_a_workspace_id() {
         let agents = vec![agent("w8:p1", "w8:t1", "w8"), agent("w8:p2", "w8:t1", "w8")];
         // Two agents share our tab and no workspace id is available to widen the scope —
-        // still a several-agents refusal, not a missing-agent one (S4, S5).
+        // still a several-agents refusal, not a missing-agent one (HH-SOLE-OR-REFUSE, HH-REFUSE-SAYS-CLIPBOARD).
         assert_eq!(pick(&agents, Some("w8:t1"), None, None), Err(Refusal::Several));
     }
 

@@ -24,9 +24,11 @@ pub mod log;
 pub mod markdown;
 pub mod model;
 pub mod proc;
+pub mod search;
 pub mod theme;
 pub mod turn;
 pub mod ui;
+pub mod world;
 
 use std::io;
 use std::sync::Arc;
@@ -135,7 +137,11 @@ const STATUS_TTL: Duration = Duration::from_secs(4);
 /// changes with no local signal (a reviewer's comment). Local pushes and `gh` PR actions refresh
 /// sooner, on the agent's turn-end, so this cadence is the slow safety net (specs/forge-host.md).
 const PR_POLL: Duration = Duration::from_mins(1);
-const PR_LOADING_DELAY: Duration = Duration::from_millis(150);
+/// How long an ambient refresh must stay in flight before the tab-strip glyph shows —
+/// routine refreshes stay invisible; a commanded one (`r`) shows immediately (specs/tui.md).
+const INDICATOR_DELAY: Duration = Duration::from_millis(200);
+/// Once lit, the glyph holds at least this long, so a fast landing still reads.
+const INDICATOR_MIN_SHOW: Duration = Duration::from_millis(300);
 const PR_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
@@ -148,7 +154,12 @@ struct TaggedPr {
 
 #[derive(Debug)]
 enum PrEffect {
+    /// The view's identity changed (repository or candidate set): the snapshot may describe
+    /// the wrong pull request, so it blanks while the replacement fetches.
     Clear,
+    /// Only `HEAD` moved: the same pull request gained newer commits. The snapshot stays on
+    /// screen — stale, never wrong — while the replacement fetches behind it (forge-host.md).
+    Refetch,
     Apply(crate::forge::PrView),
 }
 
@@ -314,7 +325,7 @@ fn schedule_poll_probe(pr: &mut PrCoordinator, tab: crate::app::Tab) {
 enum ConfigGate {
     Blocked,
     Unchanged,
-    Changed { file_reloaded: bool, pr_changed: bool },
+    Changed { pr_changed: bool },
 }
 
 impl ConfigGate {
@@ -324,10 +335,6 @@ impl ConfigGate {
 
     fn pr_unchanged(self) -> bool {
         !matches!(self, Self::Blocked | Self::Changed { pr_changed: true, .. })
-    }
-
-    fn file_reloaded(self) -> bool {
-        matches!(self, Self::Changed { file_reloaded: true, .. })
     }
 }
 
@@ -363,25 +370,40 @@ impl PrRefresh {
         }
     }
 
-    fn observed(
-        &mut self,
-        input: crate::forge::PrFetchInput,
-        epoch: u64,
-        active: bool,
-    ) -> Option<PrEffect> {
-        let changed = self.current_input.as_ref().is_some_and(|old| old != &input);
-        if changed {
+    fn observed(&mut self, input: crate::forge::PrFetchInput, epoch: u64) -> Option<PrEffect> {
+        // Two tiers (forge-host.md). Identity is where the pull request lives: the resolved
+        // repository target and the origin the association query runs against — a change
+        // there clears, because the snapshot may describe the wrong pull request. Everything
+        // locally derived — the pinned `HEAD` and base, the publication points, the
+        // tiebreak — moves on a mere commit or push, so it is freshness: the snapshot stays
+        // painted while the replacement fetches behind it, stale, never wrong
+        // (`overview.md` Continuity). Both tiers start that fetch at once, on or off the
+        // tab, so entering the tab finds fresh work already underway.
+        let Some(previous) = self.current_input.as_ref() else {
+            self.current_input = Some(input.clone());
+            return self.take_pending(&input, epoch);
+        };
+        let identity_changed = previous.repository != input.repository
+            || previous.origin_repository != input.origin_repository;
+        let freshness_changed = previous.local != input.local;
+        if identity_changed || freshness_changed {
             self.generation = self.generation.wrapping_add(1);
             self.pending = None;
             self.current_input = Some(input);
-            self.fetch_needed = active;
-            return Some(PrEffect::Clear);
+            self.fetch_needed = true;
+            return Some(if identity_changed { PrEffect::Clear } else { PrEffect::Refetch });
         }
         self.current_input = Some(input.clone());
+        self.take_pending(&input, epoch)
+    }
+
+    /// Apply the pending completion when it exactly matches the just-verified input, or ask
+    /// for a fresh fetch when it doesn't. The shared tail of [`Self::observed`].
+    fn take_pending(&mut self, input: &crate::forge::PrFetchInput, epoch: u64) -> Option<PrEffect> {
         if let Some(completion) = self.pending.take() {
             if completion.generation == self.generation
                 && completion.config_epoch == epoch
-                && completion.input == input
+                && completion.input == *input
             {
                 self.fetch_needed = false;
                 return Some(PrEffect::Apply(completion.view));
@@ -406,6 +428,91 @@ impl PrRefresh {
     }
 }
 
+/// Land one world completion. The worker's baseline syncs and a turn end schedules the PR
+/// refetch regardless of the tag; the snapshot reconciles only when the completion carries
+/// the live generation and its input still matches the view — a mismatched snapshot is
+/// discarded whole and a fresh refresh queued (specs/tui.md). Returns whether the
+/// completion matched the live generation — the caller clears the in-flight marker on
+/// `true`.
+pub fn land_world_completion(
+    app: &mut App,
+    completion: crate::world::WorldCompletion,
+    generation: u64,
+) -> bool {
+    app.sync_turn_baseline(completion.input.turn_baseline.clone());
+    if completion.turn.as_ref().is_some_and(|t| t.ended) {
+        // One fetch per turn, on any tab: the turn may have pushed or merged, and
+        // entering the tab then finds fresh work already underway (forge-host.md).
+        app.pr_pending = true;
+    }
+    if completion.generation != generation {
+        // A superseding job carries reveal=false, so a superseded switch's reveal would
+        // die here; re-arm it to ride the next dispatch instead (specs/tui.md).
+        if completion.reveal {
+            app.request_world_refresh(false, true);
+        }
+        return false;
+    }
+    match completion.snapshot {
+        Some(Ok(snapshot))
+            if app.config_error().is_none() && app.world_input() == completion.input =>
+        {
+            app.reconcile_world(snapshot);
+            if completion.reveal {
+                // The switch frame revealed the stashed cursor; the landing may have
+                // re-anchored it, so settle and reveal again.
+                app.settle_tab_entry();
+                app.reveal_files = true;
+            }
+        }
+        // The view moved on while the build ran: discard whole, refresh again, keeping
+        // an undelivered reveal alive.
+        Some(Ok(_)) => app.request_world_refresh(false, completion.reveal),
+        // A failed refresh reports and keeps the stale frame — the same contract as a
+        // failed poll (specs/tui.md).
+        Some(Err(e)) => app.status = format!("refresh failed: {e}"),
+        None => {}
+    }
+    true
+}
+
+/// Land one search completion. A stale generation is discarded whole — a result set
+/// paints only while it matches the query as typed (specs/search.md). Returns whether the
+/// completion matched the live generation, mirroring [`land_world_completion`].
+pub fn land_search_completion(
+    app: &mut App,
+    completion: crate::search::SearchCompletion,
+    generation: u64,
+) -> bool {
+    if completion.generation != generation {
+        return false;
+    }
+    app.apply_search_completion(completion);
+    true
+}
+
+/// Whether a file tab's in-flight refresh shows the tab-strip glyph: past the delay, and
+/// only for a job that builds a snapshot — a sample-only job never lights it (specs/tui.md).
+fn world_indicator(inflight: Option<(Duration, bool)>) -> bool {
+    inflight.is_some_and(|(elapsed, builds)| builds && elapsed >= INDICATOR_DELAY)
+}
+
+/// Whether a lit glyph may go dark: only once the minimum display has passed, so the
+/// acknowledgment is perceptible rather than a two-frame blink (specs/tui.md).
+fn glyph_clears(lit_for: Duration) -> bool {
+    lit_for >= INDICATOR_MIN_SHOW
+}
+
+/// The tight wake while a worker owes a completion, so its landing paints near the
+/// build's own speed — shared by the world and search workers.
+const WORKER_TIGHT_WAKE: Duration = Duration::from_millis(15);
+
+/// The wake while a world job is in flight: tight for a building job so its landing paints
+/// near the build's own speed, the fetch cadence for a sample-only one.
+fn world_wake(builds: bool) -> Duration {
+    if builds { WORKER_TIGHT_WAKE } else { Duration::from_millis(100) }
+}
+
 /// Draw, then wait up to the poll deadline for input; refresh on each tick.
 fn event_loop(
     terminal: &mut DefaultTerminal,
@@ -424,6 +531,27 @@ fn event_loop(
     let mut recovery_inflight = false;
     let (pr_tx, pr_rx) = mpsc::channel::<TaggedPr>();
     let mut pr = PrCoordinator::new(app.plugin_config().is_some());
+    // The world worker owns every refresh build and the turn tracker; the loop sends
+    // input-tagged jobs and reconciles the completions (specs/tui.md).
+    let (world_tx, world_job_rx) = mpsc::channel::<crate::world::WorldJob>();
+    let (world_res_tx, world_rx) = mpsc::channel::<crate::world::WorldCompletion>();
+    let _world_worker = crate::world::spawn(
+        crate::world::TurnHost::open(app.repo.clone()),
+        world_job_rx,
+        world_res_tx,
+    );
+    let mut world_generation = 0_u64;
+    let mut world_inflight: Option<(Instant, bool)> = None;
+    // The search worker spawns on the first overlay open, so a session that never
+    // searches never pays for the engine's index (specs/search.md).
+    let mut search_worker: Option<(
+        mpsc::Sender<crate::search::SearchJob>,
+        mpsc::Receiver<crate::search::SearchCompletion>,
+    )> = None;
+    let mut search_generation = 0_u64;
+    let mut search_inflight = false;
+    // When the tab-strip glyph turned on — the minimum-display clock (specs/tui.md).
+    let mut glyph_since: Option<Instant> = None;
     let mut config_epoch = 0_u64;
     let mut status_at = Instant::now();
     let mut last_status = String::new();
@@ -464,10 +592,33 @@ fn event_loop(
                 &mut recovery_inflight,
                 &mut pr,
             );
-            if pr.wait_started.is_some_and(|started| started.elapsed() >= PR_LOADING_DELAY) {
+            if pr.wait_started.is_some_and(|started| started.elapsed() >= INDICATOR_DELAY) {
                 app.set_pr_refreshing(true);
                 pr.wait_started = None;
             }
+            // The tab-strip refresh glyph (specs/tui.md): a commanded refresh lights it
+            // immediately, an ambient one past the appear delay, each tab only for its own
+            // refresh. Once lit it holds a minimum, so a fast landing still reads.
+            if std::mem::take(&mut app.refresh_commanded) {
+                glyph_since.get_or_insert_with(Instant::now);
+            }
+            let glyph_due = if app.tab == crate::app::Tab::Pr {
+                app.pr_refreshing()
+            } else {
+                world_indicator(world_inflight.map(|(started, builds)| (started.elapsed(), builds)))
+            };
+            let mut glyph_wake = None;
+            if glyph_due {
+                glyph_since.get_or_insert_with(Instant::now);
+            } else if let Some(lit) = glyph_since {
+                if glyph_clears(lit.elapsed()) {
+                    glyph_since = None;
+                } else {
+                    // Wake at the hold boundary, so the glyph goes dark on time when idle.
+                    glyph_wake = Some(INDICATOR_MIN_SHOW.saturating_sub(lit.elapsed()));
+                }
+            }
+            app.refresh_indicator = glyph_since.is_some();
             // Expire a stale status line: restart the timer when the message changes, and clear
             // it once it has lingered past the TTL, so a notification doesn't stay up forever.
             if app.status != last_status {
@@ -485,6 +636,13 @@ fn event_loop(
             // keep revealing so the anchored line stays above the growing box.
             let size = terminal.size()?;
             let area = Rect::new(0, 0, size.width, size.height);
+            // Rebuild the search preview only once input has settled: with input still queued
+            // the build defers, so a pick sweep never waits on it. `build_search_preview` is
+            // idempotent — it rebuilds only when the preview no longer matches the pick
+            // (specs/search.md Preview).
+            if app.mode == crate::app::Mode::Search && !event::poll(Duration::ZERO)? {
+                app.build_search_preview();
+            }
             let viewport = ui::diff_viewport_height(area, app);
             let effective = if app.composing() {
                 let box_h = ui::composer_height(app, ui::diff_inner_width(area, app));
@@ -504,6 +662,103 @@ fn event_loop(
             app.bound_file_scroll(file_vp);
             let painted_frame = PaintedFrameSnapshot::capture(app);
             terminal.draw(|f| ui::render(f, app))?;
+
+            // A world completion reconciles into the view only while the view it described is
+            // still current; the worker's baseline is authoritative either way (specs/tui.md).
+            if let Ok(completion) = world_rx.try_recv() {
+                if land_world_completion(app, completion, world_generation) {
+                    world_inflight = None;
+                }
+                continue;
+            }
+
+            // A search completion paints only while it matches the query as typed: a stale
+            // generation is discarded whole (specs/search.md).
+            if let Some((_, rx)) = &search_worker
+                && let Ok(completion) = rx.try_recv()
+            {
+                if land_search_completion(app, completion, search_generation) {
+                    // A warming engine answers `indexing…` and re-runs by itself, so
+                    // the tight wake stays on until real results land.
+                    search_inflight = app
+                        .search
+                        .as_ref()
+                        .is_some_and(|s| s.phase == crate::app::SearchPhase::Indexing);
+                }
+                // Repaint at once, like a world landing — without this the results sit
+                // computed but unpainted until the next wake (policies/ux-responsiveness.md).
+                continue;
+            }
+            // A closed overlay owes no landing: without this, a still-warming engine's
+            // periodic `indexing…` completions would re-arm the tight wake after `esc`
+            // and spin the loop until the cold scan finishes.
+            if app.search.is_none() {
+                search_inflight = false;
+            }
+
+            // Dispatch the queued query after the frame above painted, so typing paints at
+            // input speed and the results land behind it (specs/search.md).
+            if std::mem::take(&mut app.search_dirty)
+                && app.mode == crate::app::Mode::Search
+                && app.config_error().is_none()
+            {
+                let (tx, _) = search_worker.get_or_insert_with(|| {
+                    let (job_tx, job_rx) = mpsc::channel();
+                    let (res_tx, res_rx) = mpsc::channel();
+                    crate::search::spawn(
+                        app.repo.clone(),
+                        crate::search::cache_dir(),
+                        job_rx,
+                        res_tx,
+                    );
+                    (job_tx, res_rx)
+                });
+                search_generation = search_generation.wrapping_add(1);
+                let query = app.search.as_ref().map(|s| s.query.clone()).unwrap_or_default();
+                search_inflight = tx
+                    .send(crate::search::SearchJob::Query { generation: search_generation, query })
+                    .is_ok();
+                if !search_inflight
+                    && let Some(s) = app.search.as_mut()
+                    && !matches!(s.phase, crate::app::SearchPhase::Error(_))
+                {
+                    // A dead worker's first, specific error stays up; only a phase that
+                    // never saw one gets the generic message.
+                    s.phase = crate::app::SearchPhase::Error("search worker unavailable".into());
+                    // Drop the last preview, like a failed completion, so no stale file shows
+                    // under the error (specs/search.md).
+                    s.preview = None;
+                }
+            }
+            if let Some(path) = app.search_track.take()
+                && let Some((tx, _)) = &search_worker
+            {
+                let _ = tx.send(crate::search::SearchJob::Track { path });
+            }
+
+            // Dispatch the queued refresh after the frame above painted, so a switch stays
+            // instant and the fresh state lands behind it (specs/tui.md).
+            if app.world_request.is_some() && app.config_error().is_none() {
+                let request = app.world_request.take().expect("checked above");
+                world_generation = world_generation.wrapping_add(1);
+                let job = crate::world::WorldJob {
+                    generation: world_generation,
+                    input: app.world_input(),
+                    sample_turn: request.sample_turn,
+                    reveal: request.reveal,
+                };
+                // A sample-only job (the `PR` tab's poll) builds no snapshot: it neither
+                // lights the file tabs' glyph nor deserves the tight landing wake.
+                let builds = job.input.tab.is_file_tab();
+                world_inflight = if world_tx.send(job).is_ok() {
+                    Some((Instant::now(), builds))
+                } else {
+                    // A dead worker must not pin the in-flight marker (and its glyph and
+                    // tight wake) for the rest of the session.
+                    app.status = "refresh worker unavailable".to_string();
+                    None
+                };
+            }
 
             // Record user and fallback refreshes before consuming worker results. A trigger that
             // arrived during completion verification supersedes that completion before it can
@@ -611,12 +866,23 @@ fn event_loop(
             } else {
                 poll_left.min(STATUS_TTL.saturating_sub(status_at.elapsed()))
             };
-            // While a fetch is in flight, wake often so its result paints promptly when it lands.
+            // While a fetch is in flight, wake often so its result paints promptly when it
+            // lands. A world refresh usually lands within tens of milliseconds, so its wake
+            // is tighter — the landing paints near the build's own speed.
             if pr.active_fetch.is_some() || pr.active_probe_epoch.is_some() {
                 timeout = timeout.min(Duration::from_millis(100));
             }
+            if let Some((_, builds)) = world_inflight {
+                timeout = timeout.min(world_wake(builds));
+            }
+            if search_inflight {
+                timeout = timeout.min(WORKER_TIGHT_WAKE);
+            }
+            if let Some(wake) = glyph_wake {
+                timeout = timeout.min(wake.max(Duration::from_millis(15)));
+            }
             if let Some(started) = pr.wait_started {
-                timeout = timeout.min(PR_LOADING_DELAY.saturating_sub(started.elapsed()));
+                timeout = timeout.min(INDICATOR_DELAY.saturating_sub(started.elapsed()));
             }
             if event::poll(timeout)? {
                 if !painted_frame.still_current(app) {
@@ -697,20 +963,11 @@ fn event_loop(
                     continue;
                 }
                 schedule_poll_probe(&mut pr, app.tab);
-                // Advance the last-turn baseline before reloading, so a turn promoted this poll
-                // is visible to this poll's changed-files build. When the agent just went idle, its
-                // turn may have pushed or run `gh pr merge`; refetch the PR if the tab is showing it
-                // (entering the tab refetches on its own otherwise) (specs/forge-host.md).
-                let turn_changed = app.track_turn();
-                if turn_changed && app.tab == crate::app::Tab::Pr {
-                    app.pr_pending = true;
-                }
-                // A failed refresh must never crash the UI or drop a comment.
-                if (!config_gate.file_reloaded() || turn_changed)
-                    && let Err(e) = app.reload()
-                {
-                    app.status = format!("refresh failed: {e}");
-                }
+                // The tick's refresh runs on the worker. The same request samples the agent's
+                // status there, so a turn promoted by the sample is visible to the same
+                // request's changed-files build (specs/herdr-host.md). A turn end sets the PR
+                // refetch when the completion lands.
+                app.request_world_refresh(true, false);
                 logln!(
                     "poll files={} composing={} diff_cursor={} scroll={}",
                     app.entries.len(),
@@ -781,11 +1038,17 @@ fn apply_pr_probe_result(
             true
         }
         Ok(input) => {
-            match pr.refresh.observed(input, config_epoch, app.tab == crate::app::Tab::Pr) {
+            match pr.refresh.observed(input, config_epoch) {
                 Some(PrEffect::Clear) => {
                     app.clear_pr();
                     pr.wait_started = (app.tab == crate::app::Tab::Pr).then(Instant::now);
                     true
+                }
+                Some(PrEffect::Refetch) => {
+                    // The snapshot stays painted; only the refreshing indicator may appear
+                    // once the wait crosses the loading delay. Nothing repaints now.
+                    pr.wait_started = (app.tab == crate::app::Tab::Pr).then(Instant::now);
+                    false
                 }
                 Some(PrEffect::Apply(view)) => {
                     app.apply_pr(view);
@@ -830,7 +1093,7 @@ fn reconcile_plugin_config(
             app.status = format!("config refresh failed: {error}");
         }
     }
-    ConfigGate::Changed { file_reloaded: file_changed, pr_changed }
+    ConfigGate::Changed { pr_changed }
 }
 
 /// Observe one complete config snapshot. Invalid state blocks work. Recovery loads a fresh app on
@@ -906,15 +1169,42 @@ fn apply_plugin_config_observation(
 const PAGE: isize = 15;
 const HALF_PAGE: isize = 8;
 
+/// Apply one readline-style editing key to the active field — the comment draft or the
+/// search query — so the two input surfaces stay in lockstep, edited by one control set
+/// (`specs/input.md`). The caller handles its own mode keys first and delegates the rest
+/// here. `word` requests a word-wise horizontal move (Alt/Ctrl + arrow, terminal-dependent).
+fn apply_text_edit(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bool) {
+    use KeyCode::{Backspace, Char, Delete, End, Home, Left, Right};
+    match code {
+        Char('w') if ctrl => app.input_delete_word(),
+        Char('a') if ctrl => app.caret_home(),
+        Char('e') if ctrl => app.caret_end(),
+        Char('u') if ctrl => app.input_kill_to_start(),
+        Char('k') if ctrl => app.input_kill_to_end(),
+        // Word-jump: `Alt+b`/`Alt+f` (readline; survives as ESC-prefixed, unlike modified
+        // arrows, which many terminals/multiplexers strip) and modified arrows where they are
+        // delivered. These precede the plain-character insert below.
+        Char('b') if alt => app.caret_word_left(),
+        Char('f') if alt => app.caret_word_right(),
+        Left if word => app.caret_word_left(),
+        Right if word => app.caret_word_right(),
+        Left => app.caret_left(),
+        Right => app.caret_right(),
+        Home => app.caret_home(),
+        End => app.caret_end(),
+        Delete => app.input_delete_forward(),
+        Backspace => app.input_backspace(),
+        Char(c) if !ctrl => app.input_push(c),
+        _ => {}
+    }
+}
+
 /// Map one key press onto `App` through `keymap` — the keymap of the frame on screen, so a
 /// stale hint never dispatches a different action than it advertised (`specs/config.md`).
 /// Public for the dispatch tests; the event loop is the runtime caller.
 pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Result<()> {
     use crate::keymap::Action as K;
-    use KeyCode::{
-        Backspace, Char, Delete, Down, End, Enter, Esc, Home, Left, PageDown, PageUp, Right, Tab,
-        Up,
-    };
+    use KeyCode::{Char, Down, Enter, Esc, Left, PageDown, PageUp, Right, Tab, Up};
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     // A keypress cancels the gesture but keeps consuming its drag events until mouse-up.
@@ -932,28 +1222,32 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             Enter if alt_or_shift => app.input_push('\n'),
             Enter => app.submit_comment(),
             Char('j') if ctrl => app.input_push('\n'),
-            Char('w') if ctrl => app.input_delete_word(),
-            Char('a') if ctrl => app.caret_home(),
-            Char('e') if ctrl => app.caret_end(),
-            Char('u') if ctrl => app.input_kill_to_start(),
-            Char('k') if ctrl => app.input_kill_to_end(),
-            // Word-jump: `Alt+b`/`Alt+f` (readline; survives as ESC-prefixed, unlike modified
-            // arrows, which many terminals/multiplexers strip) and modified arrows where they
-            // are delivered. These precede the plain-character insert below.
-            Char('b') if alt => app.caret_word_left(),
-            Char('f') if alt => app.caret_word_right(),
-            Left if word => app.caret_word_left(),
-            Right if word => app.caret_word_right(),
-            Left => app.caret_left(),
-            Right => app.caret_right(),
+            // The box wraps, so `↑`/`↓` walk display rows here rather than editing text.
             Up => app.caret = ui::caret_vertical(&app.input, app.caret, cw, false),
             Down => app.caret = ui::caret_vertical(&app.input, app.caret, cw, true),
-            Home => app.caret_home(),
-            End => app.caret_end(),
-            Delete => app.input_delete_forward(),
-            Backspace => app.input_backspace(),
-            Char(c) if !ctrl => app.input_push(c),
-            _ => {}
+            code => apply_text_edit(app, code, ctrl, alt, word),
+        }
+        return Ok(());
+    }
+
+    // The search screen: the query edits with the comment editor's caret controls,
+    // newlines excluded — every edit re-queries off the frame loop. `tab` flips the
+    // mode; the page keys scroll the preview (specs/search.md).
+    if app.mode == Mode::Search {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let word = alt || ctrl;
+        match key.code {
+            Esc => app.close_search(),
+            Enter => app.search_open_pick()?,
+            Tab => app.search_flip(),
+            PageDown => app.scroll_search_preview(PAGE),
+            PageUp => app.scroll_search_preview(-PAGE),
+            // The single-line query has no rows, so `↑`/`↓` (and `ctrl+n`/`p`) move the pick.
+            Down => app.search_move(1),
+            Up => app.search_move(-1),
+            Char('n') if ctrl => app.search_move(1),
+            Char('p') if ctrl => app.search_move(-1),
+            code => apply_text_edit(app, code, ctrl, alt, word),
         }
         return Ok(());
     }
@@ -961,7 +1255,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
     // The bound character shortcuts dispatch through the frame's keymap; a `ctrl` chord is
     // never a bound key. `↓`/`↑` are fixed synonyms of the `down`/`up` actions, folded in here
     // so every context pairs them exactly once. The other fixed keys (`tab`, `esc`, the page
-    // keys, `←`/`→`) stay hardcoded per context below (`specs/tui.md`).
+    // keys, `←`/`→`) stay hardcoded per context below (`specs/input.md`).
     let action = match key.code {
         Char(c) if !ctrl => keymap.action_for(c),
         Down => Some(K::Down),
@@ -970,7 +1264,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
     };
 
     // An armed crossing waits for a repeat of the hunk step that armed it. Every other key drops
-    // it, and still does its own work (`specs/tui.md`). The steps themselves settle their arm in
+    // it, and still does its own work (`specs/input.md`). The steps themselves settle their arm in
     // `step_hunk`, which is what makes the other direction disarm too.
     if !matches!(action, Some(K::NextHunk | K::PrevHunk)) {
         app.disarm_cross();
@@ -980,10 +1274,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
     if app.tab == crate::app::Tab::Pr {
         match (action, key.code) {
             (Some(K::Quit), _) => app.should_quit = true,
-            (Some(K::Refresh), _) => app.pr_pending = true,
+            (Some(K::Refresh), _) => {
+                app.pr_pending = true;
+                app.refresh_commanded = true;
+            }
             (Some(K::TabChanges), _) => app.set_tab(crate::app::Tab::Changes)?,
             (Some(K::TabAllFiles), _) => app.set_tab(crate::app::Tab::AllFiles)?,
             (Some(K::OpenPr), _) => app.pr_open(),
+            (Some(K::Search), _) => app.open_search(),
             (Some(K::NavigatorPosition), _) => app.cycle_navigator_position(),
             (Some(K::NavigatorGrow), _) => app.resize_navigator(4),
             (Some(K::NavigatorShrink), _) => app.resize_navigator(-4),
@@ -1000,7 +1298,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
     }
 
     // The comments-list overlay acts through the same bindings and closes on `esc` and the
-    // `comments` binding (`specs/tui.md`).
+    // `comments` binding (`specs/input.md`).
     if app.mode == Mode::List {
         match (action, key.code) {
             (Some(K::Comments), _) | (_, Esc) => app.close_list(),
@@ -1018,7 +1316,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
     if let Some(action) = action {
         match action {
             K::Quit => app.should_quit = true,
-            K::Refresh => app.reload()?,
+            K::Refresh => {
+                app.request_world_refresh(false, false);
+                app.refresh_commanded = true;
+            }
             K::TabChanges => app.set_tab(crate::app::Tab::Changes)?,
             K::TabAllFiles => app.set_tab(crate::app::Tab::AllFiles)?,
             K::TabPr => app.set_tab(crate::app::Tab::Pr)?,
@@ -1048,6 +1349,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::NextComment => app.jump_comment(1),
             K::PrevComment => app.jump_comment(-1),
             K::Comments => app.open_list(),
+            K::Search => app.open_search(),
             // `edit`/`delete` off the diff, and `open-pr` off the `PR` tab, are inert.
             K::Edit | K::Delete | K::OpenPr => {}
         }
@@ -1094,6 +1396,53 @@ pub fn handle_mouse(
     heights: &[usize],
     keymap: &Keymap,
 ) -> Result<()> {
+    // On the search screen: chips flip, a click picks (a second click on the picked row
+    // opens), the wheel moves the pick over results and scrolls the preview, and the
+    // divider drags search's own share (specs/search.md Keys). A cancelled divider
+    // gesture still owns its remaining drag and mouse-up events like in every modal.
+    if app.mode == Mode::Search {
+        use ui::SearchTarget as T;
+        match m.kind {
+            MouseEventKind::Drag(MouseButton::Left) if app.divider_drag_active() => {
+                // The share maps the pointer's row into the band-to-footer span the two
+                // panes divide, matching `search_layout`'s geometry.
+                let l = ui::search_layout(ui::body_rect(area), app);
+                let axis_len = l.results.height + l.preview.height;
+                let offset = m.row.saturating_sub(l.results.y);
+                app.drag_search_divider(axis_len, offset);
+            }
+            MouseEventKind::Drag(MouseButton::Left) if app.divider_drag_captured() => {}
+            MouseEventKind::Up(MouseButton::Left) if app.divider_drag_captured() => {
+                app.finish_divider_drag();
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                match ui::search_target(app, area, m.column, m.row) {
+                    Some(T::Chips) => app.search_flip(),
+                    Some(T::Divider) => app.start_divider_drag(),
+                    Some(T::Row(pick)) => {
+                        let picked = app.search.as_ref().is_some_and(|s| s.pick == pick);
+                        if picked {
+                            app.search_open_pick()?;
+                        } else if let Some(s) = app.search.as_mut() {
+                            s.pick = pick;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                let delta: isize = if m.kind == MouseEventKind::ScrollDown { 1 } else { -1 };
+                match ui::search_target(app, area, m.column, m.row) {
+                    Some(T::Row(_) | T::Results) => app.search_move(delta),
+                    Some(T::Preview | T::Divider) => app.scroll_search_preview(delta * 3),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
     // A modal captures new mouse gestures, but a divider gesture cancelled by the key that
     // opened it still owns its remaining drag and mouse-up events.
     if app.composing() || app.mode == Mode::List {
@@ -1109,7 +1458,7 @@ pub fn handle_mouse(
         return Ok(());
     }
     // A mouse gesture is one of the "any other input" that drops an armed crossing: the reviewer
-    // who reaches for the mouse has left the file's edge behind (`specs/tui.md`). Pointer motion
+    // who reaches for the mouse has left the file's edge behind (`specs/input.md`). Pointer motion
     // is not a gesture — capture reports every move over the pane, and a pointer resting on the
     // sidebar would otherwise disarm the crossing without the reviewer touching anything.
     if !matches!(m.kind, MouseEventKind::Moved) {
@@ -1238,10 +1587,40 @@ pub fn handle_mouse(
 mod refresh_tests {
     use super::{
         ActiveFetch, PaintedFrameSnapshot, PrCoordinator, PrEffect, PrRefresh, TaggedPr,
-        apply_plugin_config_observation, apply_pr_probe_result, drain_pr_shutdown,
-        handle_blocked_event, handle_resize, ready_app, schedule_poll_probe,
+        apply_plugin_config_observation, apply_pr_probe_result, drain_pr_shutdown, glyph_clears,
+        handle_blocked_event, handle_resize, ready_app, schedule_poll_probe, world_indicator,
+        world_wake,
     };
     use crate::app::{App, Tab};
+
+    #[test]
+    fn the_indicator_lights_only_for_a_building_job_past_the_delay() {
+        use std::time::Duration;
+        assert!(!world_indicator(None), "nothing in flight, nothing lit");
+        assert!(
+            !world_indicator(Some((Duration::from_millis(500), false))),
+            "sample-only jobs never light it"
+        );
+        assert!(!world_indicator(Some((Duration::from_millis(100), true))), "below the delay");
+        assert!(
+            world_indicator(Some((Duration::from_millis(200), true))),
+            "a building job past the delay lights it"
+        );
+    }
+
+    #[test]
+    fn the_lit_glyph_holds_its_minimum_display() {
+        use std::time::Duration;
+        assert!(!glyph_clears(Duration::from_millis(100)), "a fast landing keeps the glyph lit");
+        assert!(glyph_clears(Duration::from_millis(300)), "past the hold it goes dark");
+    }
+
+    #[test]
+    fn the_in_flight_wake_is_tight_only_for_a_building_job() {
+        use std::time::Duration;
+        assert_eq!(world_wake(true), Duration::from_millis(15));
+        assert_eq!(world_wake(false), Duration::from_millis(100));
+    }
     use crate::config::{Config, plugin_config_in};
     use crate::forge::{PrFetchInput, PrView};
     use crate::git::RepositoryIdentity;
@@ -1255,22 +1634,27 @@ mod refresh_tests {
     use std::time::Duration;
 
     fn input(head: &str) -> PrFetchInput {
-        input_with("github.com", "acme", "widgets", head, &["feature"])
+        input_with("github.com", "acme", "widgets", head)
     }
 
-    fn input_with(
-        host: &str,
-        owner: &str,
-        name: &str,
-        head: &str,
-        candidates: &[&str],
-    ) -> PrFetchInput {
+    fn input_with(host: &str, owner: &str, name: &str, head: &str) -> PrFetchInput {
         PrFetchInput {
             repository: RepositoryIdentity::Repository(
                 crate::git::RepoTarget::new(host, owner, name).unwrap(),
             ),
-            head_oid: Some(head.to_string()),
-            candidates: candidates.iter().map(|name| (*name).to_string()).collect(),
+            origin_repository: None,
+            local: crate::git::PrLocalState {
+                head_oid: Some(head.to_string()),
+                base_oid: Some("base".to_string()),
+                points: vec![crate::git::PublicationPoint {
+                    oid: head.to_string(),
+                    names: vec!["feature".to_string()],
+                }],
+                absorbed: Vec::new(),
+                head_nominates: true,
+                upstream: None,
+                detached: false,
+            },
         }
     }
 
@@ -1292,11 +1676,30 @@ mod refresh_tests {
     fn a_probe_that_changes_pr_rows_requires_a_repaint_before_input() {
         let mut app = App::new(std::path::PathBuf::from("."), Scope::Uncommitted, None);
         let mut coordinator = PrCoordinator::new(true);
+        coordinator.refresh.current_input = Some(input("head"));
+        let moved = input_with("github.com", "upstream", "widgets", "head");
+
+        assert!(apply_pr_probe_result(&mut app, &mut coordinator, Ok(moved.clone()), 0));
+        assert!(matches!(app.pr, PrView::Pending));
+        assert!(!apply_pr_probe_result(&mut app, &mut coordinator, Ok(moved), 0));
+    }
+
+    #[test]
+    fn a_moved_head_keeps_the_snapshot_painted_and_refetches_behind_it() {
+        let mut app = App::new(std::path::PathBuf::from("."), Scope::Uncommitted, None);
+        app.apply_pr(no_pr()); // a resolved snapshot is on screen
+        let mut coordinator = PrCoordinator::new(true);
         coordinator.refresh.current_input = Some(input("old"));
 
-        assert!(apply_pr_probe_result(&mut app, &mut coordinator, Ok(input("new")), 0));
-        assert!(matches!(app.pr, PrView::Pending));
+        // The agent committed: same repository, same candidates, new HEAD. The painted
+        // model is untouched (no repaint), and the replacement fetch is already queued.
         assert!(!apply_pr_probe_result(&mut app, &mut coordinator, Ok(input("new")), 0));
+        assert!(matches!(app.pr, PrView::NoPr), "the snapshot stays painted");
+        assert_eq!(
+            coordinator.refresh.take_fetch().map(|(_, i)| i),
+            Some(input("new")),
+            "the refetch starts against the moved head"
+        );
     }
 
     #[test]
@@ -1377,7 +1780,7 @@ mod refresh_tests {
     fn superseded_completion_never_applies_and_schedules_the_new_generation() {
         let a = input("a");
         let mut refresh = PrRefresh::new(true);
-        assert!(refresh.observed(a.clone(), 0, true).is_none());
+        assert!(refresh.observed(a.clone(), 0).is_none());
         let (old_generation, old_input) = refresh.take_fetch().unwrap();
 
         refresh.trigger();
@@ -1391,18 +1794,18 @@ mod refresh_tests {
             0,
             true,
         );
-        assert!(refresh.observed(a, 0, true).is_none());
+        assert!(refresh.observed(a, 0).is_none());
 
         let (new_generation, _) = refresh.take_fetch().unwrap();
         assert_ne!(new_generation, old_generation);
     }
 
     #[test]
-    fn changed_input_clears_instead_of_applying_a_completed_old_snapshot() {
+    fn a_changed_input_supersedes_a_completed_old_snapshot_instead_of_applying_it() {
         let a = input("a");
         let b = input("b");
         let mut refresh = PrRefresh::new(true);
-        refresh.observed(a.clone(), 0, true);
+        refresh.observed(a.clone(), 0);
         let (generation, old_input) = refresh.take_fetch().unwrap();
         refresh.completed(
             TaggedPr { generation, config_epoch: 0, input: old_input, view: no_pr() },
@@ -1410,14 +1813,18 @@ mod refresh_tests {
             true,
         );
 
-        assert!(matches!(refresh.observed(b, 0, true), Some(PrEffect::Clear)));
+        // A head-only change supersedes the completed old snapshot without blanking: the
+        // effect is Refetch, the stale completion is discarded, and the new fetch is queued.
+        assert!(matches!(refresh.observed(b.clone(), 0), Some(PrEffect::Refetch)));
+        assert_eq!(refresh.take_fetch().map(|(_, input)| input), Some(b.clone()));
+        assert!(refresh.observed(b, 0).is_none(), "the old completion never applies");
     }
 
     #[test]
     fn a_trigger_during_completion_verification_supersedes_before_apply() {
         let a = input("a");
         let mut refresh = PrRefresh::new(true);
-        refresh.observed(a.clone(), 0, true);
+        refresh.observed(a.clone(), 0);
         let (old_generation, fetch_input) = refresh.take_fetch().unwrap();
         refresh.completed(
             TaggedPr {
@@ -1431,24 +1838,23 @@ mod refresh_tests {
         );
 
         refresh.trigger();
-        assert!(refresh.observed(a, 0, true).is_none(), "the completed snapshot never applies");
+        assert!(refresh.observed(a, 0).is_none(), "the completed snapshot never applies");
         let (new_generation, _) = refresh.take_fetch().unwrap();
         assert_ne!(new_generation, old_generation);
     }
 
     #[test]
-    fn repository_target_and_candidates_are_refresh_boundaries() {
+    fn repository_and_origin_changes_are_identity_boundaries() {
         let original = input("head");
         let changes = [
-            input_with("github.com", "upstream", "widgets", "head", &["feature"]),
-            input_with("github.enterprise.test", "acme", "widgets", "head", &["feature"]),
-            input_with("github.com", "acme", "other-widgets", "head", &["feature"]),
-            input_with("github.com", "acme", "widgets", "head", &["published", "feature"]),
+            input_with("github.com", "upstream", "widgets", "head"),
+            input_with("github.enterprise.test", "acme", "widgets", "head"),
+            input_with("github.com", "acme", "other-widgets", "head"),
         ];
 
         for changed in changes {
             let mut refresh = PrRefresh::new(true);
-            refresh.observed(original.clone(), 0, true);
+            refresh.observed(original.clone(), 0);
             let (generation, old_input) = refresh.take_fetch().unwrap();
             refresh.completed(
                 TaggedPr { generation, config_epoch: 0, input: old_input, view: no_pr() },
@@ -1456,48 +1862,61 @@ mod refresh_tests {
                 true,
             );
 
-            assert!(matches!(refresh.observed(changed.clone(), 0, true), Some(PrEffect::Clear)));
+            assert!(matches!(refresh.observed(changed.clone(), 0), Some(PrEffect::Clear)));
             assert_eq!(refresh.take_fetch().map(|(_, input)| input), Some(changed));
         }
     }
 
     #[test]
-    fn off_tab_repository_change_clears_and_defers_its_replacement() {
-        let old = input("head");
-        let changed = input_with("github.com", "upstream", "widgets", "head", &["feature"]);
-        let mut refresh = PrRefresh::new(true);
-        refresh.observed(old, 0, true);
-        let _ = refresh.take_fetch().unwrap();
+    fn local_state_churn_keeps_the_snapshot_and_refetches_behind_it() {
+        // The locally derived state — pins, points, tiebreak — moves on a mere commit or
+        // push, so it is freshness, not identity (forge-host.md): the snapshot stays
+        // painted while the replacement fetch runs.
+        let original = input("head");
+        let mut renamed_point = input("head");
+        renamed_point.local.points[0].names.push("published".to_string());
+        let mut moved_base = input("head");
+        moved_base.local.base_oid = Some("advanced".to_string());
+        let changes = [input("moved-head"), renamed_point, moved_base];
 
-        assert!(matches!(refresh.observed(changed.clone(), 0, false), Some(PrEffect::Clear)));
-        assert!(refresh.take_fetch().is_none());
-
-        refresh.trigger();
-        assert!(refresh.observed(changed.clone(), 0, true).is_none());
-        assert_eq!(refresh.take_fetch().map(|(_, input)| input), Some(changed));
+        for changed in changes {
+            let mut refresh = PrRefresh::new(true);
+            refresh.observed(original.clone(), 0);
+            let _ = refresh.take_fetch().unwrap();
+            assert!(matches!(refresh.observed(changed.clone(), 0), Some(PrEffect::Refetch)));
+            assert_eq!(
+                refresh.take_fetch().map(|(_, input)| input),
+                Some(changed),
+                "the replacement fetch starts at once, on or off the tab"
+            );
+        }
     }
 
     #[test]
-    fn stale_config_epoch_and_off_tab_input_change_do_not_start_or_apply_work() {
+    fn a_stale_config_epoch_discards_the_completion_and_the_input_change_still_refetches() {
         let a = input("a");
         let b = input("b");
         let mut refresh = PrRefresh::new(true);
-        refresh.observed(a.clone(), 1, true);
+        refresh.observed(a.clone(), 1);
         let (generation, old_input) = refresh.take_fetch().unwrap();
         refresh.completed(
             TaggedPr { generation, config_epoch: 1, input: old_input, view: no_pr() },
             2,
             false,
         );
-        assert!(matches!(refresh.observed(b, 2, false), Some(PrEffect::Clear)));
-        assert!(refresh.take_fetch().is_none());
+        assert!(matches!(refresh.observed(b.clone(), 2), Some(PrEffect::Refetch)));
+        assert_eq!(
+            refresh.take_fetch().map(|(_, input)| input),
+            Some(b),
+            "the discarded completion never blocks the replacement fetch"
+        );
     }
 
     #[test]
     fn matching_completion_applies_only_after_the_verification_probe() {
         let a = input("a");
         let mut refresh = PrRefresh::new(true);
-        refresh.observed(a.clone(), 3, true);
+        refresh.observed(a.clone(), 3);
         let (generation, fetch_input) = refresh.take_fetch().unwrap();
         refresh.completed(
             TaggedPr { generation, config_epoch: 3, input: fetch_input, view: no_pr() },
@@ -1505,14 +1924,14 @@ mod refresh_tests {
             true,
         );
 
-        assert!(matches!(refresh.observed(a, 3, true), Some(PrEffect::Apply(PrView::NoPr))));
+        assert!(matches!(refresh.observed(a, 3), Some(PrEffect::Apply(PrView::NoPr))));
     }
 
     #[test]
     fn a_failed_verification_probe_discards_the_hidden_completion() {
         let a = input("a");
         let mut refresh = PrRefresh::new(true);
-        refresh.observed(a.clone(), 0, true);
+        refresh.observed(a.clone(), 0);
         let (generation, fetch_input) = refresh.take_fetch().unwrap();
         refresh.completed(
             TaggedPr { generation, config_epoch: 0, input: fetch_input, view: no_pr() },
@@ -1523,7 +1942,7 @@ mod refresh_tests {
         refresh.probe_failed(false);
         assert!(refresh.take_fetch().is_none());
         refresh.trigger();
-        assert!(refresh.observed(a, 0, true).is_none());
+        assert!(refresh.observed(a, 0).is_none());
         assert!(refresh.take_fetch().is_some(), "the next refresh starts a fresh GitHub fetch");
     }
 
@@ -1531,7 +1950,7 @@ mod refresh_tests {
     fn a_failed_probe_cannot_fetch_the_previous_repository() {
         let a = input("a");
         let mut refresh = PrRefresh::new(true);
-        refresh.observed(a.clone(), 0, true);
+        refresh.observed(a.clone(), 0);
         let _ = refresh.take_fetch().unwrap();
         refresh.trigger();
 
@@ -1539,7 +1958,7 @@ mod refresh_tests {
         assert!(refresh.take_fetch().is_none());
 
         refresh.trigger();
-        assert!(refresh.observed(a, 0, true).is_none());
+        assert!(refresh.observed(a, 0).is_none());
         assert!(refresh.take_fetch().is_some());
     }
 
@@ -1547,12 +1966,12 @@ mod refresh_tests {
     fn a_failed_probe_keeps_a_refresh_that_was_queued_behind_it() {
         let a = input("a");
         let mut refresh = PrRefresh::new(true);
-        refresh.observed(a.clone(), 0, true);
+        refresh.observed(a.clone(), 0);
         let _ = refresh.take_fetch().unwrap();
 
         refresh.trigger();
         refresh.probe_failed(true);
-        assert!(refresh.observed(a, 0, true).is_none());
+        assert!(refresh.observed(a, 0).is_none());
         assert!(refresh.take_fetch().is_some(), "the queued refresh still starts GitHub work");
     }
 
@@ -1560,7 +1979,7 @@ mod refresh_tests {
     fn an_unproven_repository_replaces_the_snapshot_and_blocks_a_stale_fetch() {
         let mut app = App::new(std::path::PathBuf::from("."), Scope::Uncommitted, None);
         let mut coordinator = PrCoordinator::new(true);
-        coordinator.refresh.observed(input("head"), 0, true);
+        coordinator.refresh.observed(input("head"), 0);
         let _ = coordinator.refresh.take_fetch().unwrap();
         coordinator.refresh.trigger();
         coordinator.probe_pending = false;
@@ -1583,7 +2002,7 @@ mod refresh_tests {
         let snapshot = no_pr();
         app.apply_pr(snapshot.clone());
         let mut coordinator = PrCoordinator::new(true);
-        coordinator.refresh.observed(input("head"), 0, true);
+        coordinator.refresh.observed(input("head"), 0);
         coordinator.probe_pending = false;
 
         assert!(apply_pr_probe_result(
@@ -1606,7 +2025,7 @@ mod refresh_tests {
         let mut app = App::new(std::path::PathBuf::from("."), Scope::Uncommitted, None);
         app.apply_pr(no_pr());
         let mut coordinator = PrCoordinator::new(true);
-        coordinator.refresh.observed(input("head"), 0, true);
+        coordinator.refresh.observed(input("head"), 0);
         coordinator.probe_pending = false;
 
         assert!(apply_pr_probe_result(
@@ -1626,7 +2045,7 @@ mod refresh_tests {
     #[test]
     fn config_change_off_the_pr_tab_does_not_schedule_a_fetch() {
         let mut refresh = PrRefresh::new(false);
-        refresh.observed(input("a"), 0, false);
+        refresh.observed(input("a"), 0);
         refresh.config_changed(false);
         assert!(refresh.take_fetch().is_none());
     }

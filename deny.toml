@@ -3,6 +3,12 @@
 
 [advisories]
 yanked = "deny"
+ignore = [
+    # bincode 1.x is unmaintained (RUSTSEC-2025-0141). syntect, the highlighter, uses it
+    # only to read its own bundled syntax and theme dumps - local, trusted input, never
+    # untrusted deserialization. Drop this when syntect moves off bincode 1.
+    "RUSTSEC-2025-0141",
+]
 
 [bans]
 multiple-versions = "warn"
@@ -16,9 +22,15 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    # MPL-2.0 is file-level copyleft, not permissive. Accepted for unmodified
+    # crates.io dependencies only (today: option-ext via dirs, which enters both
+    # directly and through fff-search), where it imposes nothing on this MIT binary.
+    "MPL-2.0",
 ]
 confidence-threshold = 0.9
 

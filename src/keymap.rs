@@ -1,10 +1,10 @@
 //! The rebindable action keymap: action names, default keys, resolution of `[keybindings]`
 //! overrides, and the char → action lookup the dispatcher and the hint renderers share
-//! (`specs/tui.md` Interaction, `specs/config.md` Keybindings).
+//! (`specs/input.md`, `specs/config.md` Keybindings).
 
 use std::sync::LazyLock;
 
-/// One rebindable character-shortcut action from the keymap table in `specs/tui.md`.
+/// One rebindable character-shortcut action from the keymap table in `specs/input.md`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Down,
@@ -31,6 +31,7 @@ pub enum Action {
     NextComment,
     PrevComment,
     Comments,
+    Search,
     Send,
     Copy,
     OpenPr,
@@ -40,7 +41,7 @@ pub enum Action {
 
 /// Every action with its config name and default keys — the single source the default keymap,
 /// the name lookup, and the config error message are built from.
-const ACTIONS: [(Action, &str, &[char]); 29] = [
+const ACTIONS: [(Action, &str, &[char]); 30] = [
     (Action::Down, "down", &['j']),
     (Action::Up, "up", &['k']),
     (Action::NextHunk, "next-hunk", &[']']),
@@ -65,6 +66,7 @@ const ACTIONS: [(Action, &str, &[char]); 29] = [
     (Action::NextComment, "next-comment", &['n']),
     (Action::PrevComment, "prev-comment", &['N']),
     (Action::Comments, "comments", &['l']),
+    (Action::Search, "search", &['/']),
     (Action::Send, "send", &['s', 'S']),
     (Action::Copy, "copy", &['y', 'Y']),
     (Action::OpenPr, "open-pr", &['o']),
@@ -125,7 +127,7 @@ pub fn default_keymap() -> &'static Keymap {
 impl Keymap {
     /// Apply `[keybindings]` overrides to the defaults. An overridden action answers exactly its
     /// configured keys; every other action keeps its defaults. A character bound twice anywhere
-    /// is a collision (K2, `specs/config.md`); the error detail names each action involved.
+    /// is a collision (`CFG-KEY-UNIQUE`, `specs/config.md`); the error detail names each action involved.
     pub fn resolve(overrides: &[(Action, Vec<char>)]) -> Result<Self, String> {
         let mut keymap = Self::default();
         for (action, keys) in overrides {
@@ -172,7 +174,7 @@ impl Keymap {
         self.bindings.iter().find(|(_, keys)| keys.contains(&key)).map(|(action, _)| *action)
     }
 
-    /// The action's hint key: the first bound character (`specs/tui.md`).
+    /// The action's hint key: the first bound character (`specs/input.md`).
     #[must_use]
     pub fn hint(&self, action: Action) -> char {
         self.bindings

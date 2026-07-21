@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-12
+Last edited: 2026-07-18
 ---
 
 # herdr host
@@ -40,17 +40,17 @@ What each action does:
 
 With valid plugin config, the shared rules are:
 
-| #  | question                | answer                                                        |
-| -- | ----------------------- | -------------------------------------------------------------- |
-| A1 | run it twice?           | it converges and exits 0, nothing stacks and nothing errors     |
-| A2 | does `auto_open` gate?  | no, event-only rules never apply, any placement opens (P1)      |
-| A3 | focus?                  | same rules as the toggle (P6)                                   |
-| A4 | on refusal, on success? | exit 1 with one stderr line, exit 0 with one stdout line naming the pane |
-| A5 | what counts as open?    | any pane labeled `reviewr` in the workspace, in any tab         |
-| A6 | which workspace?        | the focused one, wherever the action is invoked from            |
-| A7 | what does `close` sweep? | every labeled pane, even one herdr's plugin registry forgot after a restart |
+| question                 | answer                                                                      |
+| ------------------------ | ---------------------------------------------------------------------------- |
+| run it twice?            | it converges and exits 0, nothing stacks and nothing errors                   |
+| does `auto_open` gate?   | no, event-only rules never apply, any placement opens (→ HH-PLACEMENT-CONFIGURED) |
+| focus?                   | same rules as the toggle (→ HH-FOCUS-BY-PLACEMENT)                            |
+| on refusal, on success?  | exit 1 with one stderr line, exit 0 with one stdout line naming the pane      |
+| what counts as open?     | any pane labeled `reviewr` in the workspace, in any tab                       |
+| which workspace?         | the focused one, wherever the action is invoked from                          |
+| what does `close` sweep? | every labeled pane, even one herdr's plugin registry forgot after a restart   |
 
-Every action validates plugin config before inspecting the workspace (config.md). An action also refuses when there is no workspace context or an open is outside a git repo. Both outcomes land in `herdr plugin log list` (→ A4).
+Every action validates plugin config before inspecting the workspace (config.md). An action also refuses when there is no workspace context or an open is outside a git repo. Both outcomes land in `herdr plugin log list` with the same exit and line discipline.
 
 ## Sidebar placement
 
@@ -62,16 +62,17 @@ toggle_direction = "down"      # right | down, split only         (default: righ
 auto_open = false              # auto-open on worktree.created    (default: true)
 ```
 
-| #  | Always true                                                                             |
-| -- | --------------------------------------------------------------------------------------- |
-| P1 | Every open uses the placement named by `toggle_placement`.                                |
-| P2 | A missing key uses its default. Invalid plugin config follows `config.md`.                |
-| P3 | `toggle_direction` affects `split` only.                                                  |
-| P4 | The event auto-opens only `split` and `tab`.                                              |
-| P5 | The event never takes focus.                                                              |
-| P6 | A manual open keeps focus on the agent for `split`. It gives focus to reviewr otherwise.  |
-| P7 | At most one sidebar exists per workspace, in steady state.                                |
-| P8 | With `auto_open = false` the event does nothing.                                          |
+The cross-action invariants, coded for citation:
+
+| code                      | Always true                                                                              |
+| ------------------------- | ----------------------------------------------------------------------------------------- |
+| `HH-PLACEMENT-CONFIGURED` | Every open uses the placement named by `toggle_placement`.                                 |
+| `HH-EVENT-SPLIT-TAB`      | The event auto-opens only `split` and `tab`.                                               |
+| `HH-FOCUS-BY-PLACEMENT`   | A manual open keeps focus on the agent for `split`. It gives focus to reviewr otherwise.   |
+| `HH-ONE-SIDEBAR`          | At most one sidebar exists per workspace, in steady state.                                 |
+| `HH-EVENT-OFF`            | With `auto_open = false` the event does nothing.                                           |
+
+A missing key uses its default. Invalid plugin config follows `config.md`. `toggle_direction` affects `split` only. The event never takes focus.
 
 Each placement maps to one pane-open shape (`../docs/herdr-api-notes.md`):
 
@@ -84,33 +85,33 @@ Each placement maps to one pane-open shape (`../docs/herdr-api-notes.md`):
 
 A `split` or `zoomed` open attaches to the focused pane. When the context has none, it attaches to the workspace's first pane.
 
-**T1 — placement changed between open and close**
+**Placement changed between open and close**
 
 1. `toggle_placement = split`. The user toggles. A right split opens.
 2. The user sets `toggle_placement = overlay`.
-3. The user toggles. The script finds the labeled pane and closes it (P7).
-4. The user toggles. An overlay opens (P1).
+3. The user toggles. The script finds the labeled pane and closes it (→ HH-ONE-SIDEBAR).
+4. The user toggles. An overlay opens (→ HH-PLACEMENT-CONFIGURED).
 
-**T2 — event with a covering placement**
+**Event with a covering placement**
 
 1. `toggle_placement = zoomed`. A worktree is created.
-2. The event fires. Zoomed is not an auto-open placement. Nothing opens (P4).
-3. The user toggles later. A zoomed pane opens and takes focus (P6).
+2. The event fires. Zoomed is not an auto-open placement. Nothing opens (→ HH-EVENT-SPLIT-TAB).
+3. The user toggles later. A zoomed pane opens and takes focus (→ HH-FOCUS-BY-PLACEMENT).
 
-**T3 — event beside a layout plugin**
+**HH-EVENT-BESIDE-LAYOUT — event beside a layout plugin**
 
 1. `auto_open = false`. A layout plugin also handles `worktree.created`.
 2. A worktree is created. herdr runs both handlers in any order.
-3. reviewr opens nothing either way (P8). The layout builds undisturbed.
-4. The user toggles later. reviewr opens over the finished layout (P1).
+3. reviewr opens nothing either way (→ HH-EVENT-OFF). The layout builds undisturbed.
+4. The user toggles later. reviewr opens over the finished layout (→ HH-PLACEMENT-CONFIGURED).
 
-**T4 — a layout plugin opens reviewr explicitly**
+**A layout plugin opens reviewr explicitly**
 
-1. `auto_open = false`. The layout builds its tabs on the event (T3).
+1. `auto_open = false`. The layout builds its tabs on the event (→ HH-EVENT-BESIDE-LAYOUT).
 2. The layout invokes `open` while the new workspace has focus.
 3. No labeled pane exists. The configured placement opens.
 4. The layout re-runs `open`. The labeled pane exists. Nothing happens.
-5. The user presses the toggle key. The sidebar closes (P7).
+5. The user presses the toggle key. The sidebar closes (→ HH-ONE-SIDEBAR).
 
 ## Repo discovery
 
@@ -125,13 +126,15 @@ The binary reviews the pane's working directory, normalized to its git top level
 
 reviewr writes the comment blocks into the agent pane without submitting, then focuses it. You add context and press enter.
 
-| #  | Always true                                                                  |
-| -- | ---------------------------------------------------------------------------- |
-| S1 | Only panes carrying an `agent` field are candidates.                          |
-| S2 | The sidebar's own pane is never a candidate.                                  |
-| S3 | A sole tab agent wins over the workspace fallback.                            |
-| S4 | Zero or several candidates refuse the send. Nothing is sent partially.        |
-| S5 | A refusal says why and points at the clipboard copy.                          |
+The candidate rules, coded for citation:
+
+| code                       | Always true                                                            |
+| -------------------------- | ---------------------------------------------------------------------- |
+| `HH-AGENT-PANES`           | Only panes carrying an `agent` field are candidates.                    |
+| `HH-NOT-SELF`              | The sidebar's own pane is never a candidate.                            |
+| `HH-TAB-WINS`              | A sole tab agent wins over the workspace fallback.                      |
+| `HH-SOLE-OR-REFUSE`        | Zero or several candidates refuse the send. Nothing is sent partially.  |
+| `HH-REFUSE-SAYS-CLIPBOARD` | A refusal says why and points at the clipboard copy.                    |
 
 With `tab` placement the sidebar has its own tab, so resolution goes straight to the workspace fallback.
 
@@ -162,11 +165,11 @@ Actions:
 Send and tracking:
 
 - Browsing and the clipboard export work without the herdr CLI. Sending and turn tracking need it. Without it, `last-turn` stays empty and `uncommitted` and `branch` are unaffected.
-- Turn tracking resolves the agent under the same S1–S3 rules, so a plugin sidebar or shell in the tab never pauses tracking.
+- Turn tracking resolves the agent under the same candidate rules (`HH-AGENT-PANES`, `HH-NOT-SELF`, `HH-TAB-WINS`), so a plugin sidebar or shell in the tab never pauses tracking.
 - A failed clipboard utility or `herdr agent send` reports the error. The comments stay in the list.
 - A turn shorter than one poll interval, or one whose start is masked by a transient `unknown` status, is missed. `last-turn` then shows the changes since the last observed turn start. It never shows lines the agent did not write.
 - A crash mid-snapshot costs at most one failed refresh. Ref updates are atomic. Leftover locks are cleared before the next snapshot and on every exit path.
-- Two sidebars on one worktree write the same baseline ref. Both compute the same baseline, so last-writer-wins is harmless.
+- Two sidebars on one worktree write the same baseline ref. Each samples on its own clock, so their snapshots of one turn start can differ by the edits between them. Last-writer-wins keeps the baseline within one poll interval of the turn start.
 
 ## Non-goals
 

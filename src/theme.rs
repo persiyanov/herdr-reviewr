@@ -60,6 +60,9 @@ pub struct Palette {
     pub ins_bg: Color,
     pub emph_del_bg: Color,
     pub emph_ins_bg: Color,
+    /// The search match highlight: a warm fill behind a matched substring, legible over a
+    /// plain row, a syntax-colored row, and the preview's banded hit line alike.
+    pub match_hl: Color,
 }
 
 impl Palette {
@@ -167,6 +170,7 @@ fn catppuccin() -> Theme {
             ins_bg: Color::Rgb(0x1f, 0x3a, 0x2a),
             emph_del_bg: Color::Rgb(0x6e, 0x34, 0x46),
             emph_ins_bg: Color::Rgb(0x30, 0x55, 0x3f),
+            match_hl: Color::Rgb(0x5c, 0x51, 0x2b),
         },
         syntax: SyntaxChoice::Bundled(MOCHA_TM),
     }
@@ -297,6 +301,7 @@ fn derive(a: Anchors, appearance: Appearance) -> Palette {
         ins_bg: readable_tint(a.green, a.base, a.text, appearance, false),
         emph_del_bg: readable_tint(a.red, a.base, a.text, appearance, true),
         emph_ins_bg: readable_tint(a.green, a.base, a.text, appearance, true),
+        match_hl: readable_tint(a.yellow, a.base, a.text, appearance, true),
     }
 }
 

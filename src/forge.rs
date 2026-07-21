@@ -22,14 +22,14 @@ pub enum PrView {
     Pending,
     /// Work crossed the loading-indicator delay without producing a snapshot.
     Loading,
-    /// An open (or merged/closed) PR resolved for one of the worktree's candidate branches.
+    /// An open (or merged/closed) PR resolved through the worktree's publication points.
     Pr(Box<PrSnapshot>),
-    /// No candidate branch has a PR.
+    /// No PR contains the worktree's published work.
     NoPr,
     /// `HEAD` is detached, so there is no branch identity to query.
     Detached,
-    /// Two or more open PRs back the winning candidate branch and not exactly one matches
-    /// the pinned `HEAD`; the count, so the user knows to pick on GitHub.
+    /// Two or more open PRs contain the published work and no tiebreak decides; the
+    /// count, so the user knows to pick on GitHub.
     Ambiguous(usize),
     /// `gh` is not on `PATH`.
     NoGh,
@@ -323,15 +323,19 @@ fn fetch_input_inner(
     config: &crate::config::PluginConfig,
     verify_repository: bool,
 ) -> Result<PrFetchInput, PrInputError> {
-    let repository = crate::git::repository_identity(repo, config.github_host())
+    let (repository, origin_repository) = crate::git::remote_identities(repo, config.github_host())
         .map_err(|error| PrInputError::TargetRead(error.0))?;
     let crate::git::RepositoryIdentity::Repository(target) = &repository else {
-        return Ok(PrFetchInput { repository, head_oid: None, candidates: Vec::new() });
+        return Ok(PrFetchInput {
+            repository,
+            origin_repository: None,
+            local: crate::git::PrLocalState::default(),
+        });
     };
     let local = match crate::git::pr_local(repo, base, config.base_branches()) {
         Ok(local) => local,
         Err(error) => {
-            let current = crate::git::repository_identity(repo, config.github_host())
+            let (current, _) = crate::git::remote_identities(repo, config.github_host())
                 .map_err(|read_error| PrInputError::TargetRead(read_error.0))?;
             if current != repository {
                 return Err(PrInputError::TargetRead(
@@ -341,13 +345,13 @@ fn fetch_input_inner(
             return Err(PrInputError::BranchState { target: target.clone(), message: error.0 });
         }
     };
-    let repository = if verify_repository {
-        crate::git::repository_identity(repo, config.github_host())
+    let (repository, origin_repository) = if verify_repository {
+        crate::git::remote_identities(repo, config.github_host())
             .map_err(|error| PrInputError::TargetRead(error.0))?
     } else {
-        repository
+        (repository, origin_repository)
     };
-    Ok(PrFetchInput { repository, head_oid: local.head_oid, candidates: local.candidates })
+    Ok(PrFetchInput { repository, origin_repository, local })
 }
 
 /// Read GitHub for one already-derived input. Degradation stays in-band for the PR tab.
@@ -386,12 +390,18 @@ fn fetch_inner(
             return Ok(PrView::MalformedOrigin(host.clone()));
         }
     };
-    if input.candidates.is_empty() {
-        // A detached HEAD (e.g. after `gh pr merge --delete-branch`) has no branch identity
-        // to publish, so nothing was derived. Show the empty state rather than querying
-        // `headRefName:""`, which GitHub treats as unfiltered and would mis-resolve to an
-        // unrelated PR.
+    if input.local.detached {
+        // A detached HEAD (e.g. after `gh pr merge --delete-branch`) has no pin.
         return Ok(PrView::Detached);
+    }
+    if input.local.points.is_empty()
+        && input.local.absorbed.is_empty()
+        && nominated_head(&input.local).is_none()
+    {
+        // No published work beyond the base, no parked published tip, and no
+        // exact-identity HEAD — nothing can prove a PR, so nothing is fetched
+        // (`specs/forge-host.md`).
+        return Ok(PrView::NoPr);
     }
     let target = FetchTarget {
         repo,
@@ -400,25 +410,21 @@ fn fetch_inner(
         name: repository.name(),
         cancelled,
     };
-    // Resolve the open PR across all candidates in one aliased call, then read its detail
-    // directly — `mergeable` only populates on direct access, never through the list
-    // connection (`specs/forge-host.md`).
-    let open = resolve_candidates(&target, &input.candidates, OPEN, "headRefOid")?;
-    let number = match select_open(&open, input.head_oid.as_deref()) {
+    let source = select_source(input.origin_repository.as_ref(), repository);
+    let head = nominated_head(&input.local);
+    let assoc =
+        associate_points(&target, source, &input.local.points, &input.local.absorbed, head)?;
+    let number = match pick_open(&assoc.open, input) {
         Pick::One(n) => n,
         Pick::Ambiguous(count) => {
             return Ok(PrView::Ambiguous(count));
         }
-        Pick::None => {
-            // No open PR anywhere: fall back to the newest-created merged/closed PR.
-            let hist = resolve_candidates(&target, &input.candidates, HISTORICAL, "createdAt")?;
-            match select_historical(&hist) {
-                Some(n) => n,
-                None => {
-                    return Ok(PrView::NoPr);
-                }
+        Pick::None => match pick_merged(&assoc.merged).or_else(|| pick_closed(&assoc.closed)) {
+            Some(n) => n,
+            None => {
+                return Ok(PrView::NoPr);
             }
-        }
+        },
     };
     let detail = pr_detail(&target, number)?;
     let node = &detail["data"]["repository"]["pullRequest"];
@@ -428,7 +434,7 @@ fn fetch_inner(
     // Sync compares the fetch's pinned HEAD to the PR head, so a checkout or commit landing
     // mid-fetch never pairs one branch's PR with another branch's count.
     let pr_head = node["headRefOid"].as_str().unwrap_or_default();
-    let sync = match input.head_oid.as_deref() {
+    let sync = match input.local.head_oid.as_deref() {
         Some(pin) if !pr_head.is_empty() => derive_sync(
             crate::git::ahead_behind_oids(repo, pin, pr_head)
                 .map_err(|error| GhError::LocalGit(error.0))?,
@@ -450,13 +456,6 @@ fn derive_sync(ahead_behind: Option<(u32, u32)>) -> Sync {
     }
 }
 
-/// The list filter for the open-PR resolve call. `first:100` keeps the surfaced ambiguity
-/// count the real number of open PRs, not a cap.
-const OPEN: &str = "states:OPEN, first:100";
-/// The list filter for the historical fallback: the newest-created merged/closed PR per name.
-const HISTORICAL: &str =
-    "states:[MERGED,CLOSED], first:1, orderBy:{field:CREATED_AT, direction:DESC}";
-
 struct FetchTarget<'a> {
     repo: &'a Path,
     host: &'a str,
@@ -465,22 +464,216 @@ struct FetchTarget<'a> {
     cancelled: &'a AtomicBool,
 }
 
-/// The PRs for every candidate name in one aliased GraphQL call — alias `c{i}` ↔ candidate
-/// `i`, names passed as variables (never interpolated into the query text). Each returned
-/// entry is `(number, extra)` where `extra` is `headRefOid` (open) or `createdAt` (historical).
-fn resolve_candidates(
-    target: &FetchTarget<'_>,
-    candidates: &[String],
-    filter: &str,
-    extra: &str,
-) -> Result<Vec<Vec<(u64, String)>>, GhError> {
-    let query = build_resolve_query(candidates.len(), filter, extra);
-    let vars = resolve_vars(target.owner, target.name, candidates);
-    let v = graphql(target.repo, target.host, &query, &vars, target.cancelled)?;
-    Ok(parse_resolve(&v, candidates.len(), extra))
+/// One PR from the association query, reduced to the pick-relevant fields.
+#[derive(Debug)]
+struct AssocPr {
+    number: u64,
+    head_oid: String,
+    head_ref: String,
+    merged_at: String,
+    created_at: String,
 }
 
-/// The winner among the candidates' open PRs (`specs/forge-host.md` "Resolution").
+/// The association result, split by lifecycle: open and merged from the commit
+/// association, closed-unmerged from the exact-identity name lookup.
+#[derive(Debug, Default)]
+struct Association {
+    open: Vec<AssocPr>,
+    merged: Vec<AssocPr>,
+    closed: Vec<AssocPr>,
+}
+
+/// The repository the association query runs against: the origin repository, where the
+/// published commits live — the fork case resolves through it (`specs/forge-host.md`). An
+/// origin on another host cannot prove anything on the target's forge, so the target
+/// stands in.
+fn select_source<'a>(
+    origin: Option<&'a crate::git::RepoTarget>,
+    target: &'a crate::git::RepoTarget,
+) -> &'a crate::git::RepoTarget {
+    origin.filter(|origin| origin.host() == target.host()).unwrap_or(target)
+}
+
+/// The pinned `HEAD` as one more exact-identity nomination, unless a point already
+/// carries the same OID. A nominating `HEAD` sits outside base history, so it can never
+/// be an absorbed candidate (`specs/forge-host.md`).
+fn nominated_head(local: &crate::git::PrLocalState) -> Option<&str> {
+    local
+        .head_oid
+        .as_deref()
+        .filter(|head| local.head_nominates && !local.points.iter().any(|point| point.oid == *head))
+}
+
+/// The closed-lookup aliases, one per `(point, tip name)` pair: `(alias, var, point index,
+/// name)`. Build, vars, and parse all enumerate through this one owner, so the alias ↔
+/// point pairing cannot drift between them. Capped at 8 pairs — a tip that many refs point
+/// at (post-release coincidences, mirror refs) must not balloon the query past API limits.
+fn closed_aliases(points: &[crate::git::PublicationPoint]) -> Vec<(String, String, usize, String)> {
+    points
+        .iter()
+        .enumerate()
+        .flat_map(|(i, point)| {
+            point
+                .names
+                .iter()
+                .enumerate()
+                .map(move |(j, name)| (format!("c{i}_{j}"), format!("b{i}_{j}"), i, name.clone()))
+        })
+        .take(8)
+        .collect()
+}
+
+/// Ask the forge which PRs contain each publication point, in one aliased call against the
+/// `source` repository, with the closed-unmerged name lookup against the target riding
+/// along (`specs/forge-host.md`). Only PRs based on the target repository count.
+fn associate_points(
+    target: &FetchTarget<'_>,
+    source: &crate::git::RepoTarget,
+    points: &[crate::git::PublicationPoint],
+    absorbed: &[String],
+    head: Option<&str>,
+) -> Result<Association, GhError> {
+    let closed = closed_aliases(points);
+    let query =
+        build_association_query(points.len() + absorbed.len() + head.iter().count(), &closed);
+    let mut vars = vec![
+        ("so".to_string(), source.owner().to_string()),
+        ("sn".to_string(), source.name().to_string()),
+        ("to".to_string(), target.owner.to_string()),
+        ("tn".to_string(), target.name.to_string()),
+    ];
+    for (i, oid) in points
+        .iter()
+        .map(|p| p.oid.as_str())
+        .chain(absorbed.iter().map(String::as_str))
+        .chain(head)
+        .enumerate()
+    {
+        vars.push((format!("p{i}"), oid.to_string()));
+    }
+    for (_, var, _, name) in &closed {
+        vars.push((var.clone(), name.clone()));
+    }
+    let v = graphql(target.repo, target.host, &query, &vars, target.cancelled)?;
+    Ok(parse_association(&v, points, absorbed, head, &closed))
+}
+
+/// The aliased association query: `p{i}: object(oid:$p{i})` per nominated OID — points,
+/// absorbed candidates, then the exact-identity `HEAD` — against the source repository,
+/// plus one closed-PR lookup per `(point, tip name)` pair against the target. The target block always carries `id` — the rename-proof base filter, and
+/// the reason the block is never an empty selection set. Values ride as variables, never
+/// in the query text.
+fn build_association_query(oids: usize, closed: &[(String, String, usize, String)]) -> String {
+    use std::fmt::Write;
+    let mut q = String::from("query($so:String!,$sn:String!,$to:String!,$tn:String!");
+    for i in 0..oids {
+        let _ = write!(q, ",$p{i}:GitObjectID!");
+    }
+    for (_, var, _, _) in closed {
+        let _ = write!(q, ",${var}:String!");
+    }
+    q.push_str("){src:repository(owner:$so,name:$sn){");
+    for i in 0..oids {
+        let _ = write!(
+            q,
+            "p{i}:object(oid:$p{i}){{... on Commit{{associatedPullRequests(first:100){{nodes{{\
+             number state headRefOid headRefName createdAt mergedAt \
+             baseRepository{{id}}}}}}}}}} "
+        );
+    }
+    q.push_str("} tgt:repository(owner:$to,name:$tn){id ");
+    for (alias, var, _, _) in closed {
+        let _ = write!(
+            q,
+            "{alias}:pullRequests(headRefName:${var}, states:[CLOSED], first:10, \
+             orderBy:{{field:CREATED_AT, direction:DESC}}){{nodes{{\
+             number headRefOid headRefName createdAt}}}} "
+        );
+    }
+    q.push_str("}}");
+    q
+}
+
+/// Push `pr` unless its number is already in `bucket` — a PR's identity is its number.
+fn push_unique(bucket: &mut Vec<AssocPr>, pr: AssocPr) {
+    if !bucket.iter().any(|have| have.number == pr.number) {
+        bucket.push(pr);
+    }
+}
+
+/// Split the association response by lifecycle. Association nodes keep only PRs whose base
+/// repository `id` equals the target's — ids survive renames and transfers, names do not.
+/// Nodes from `absorbed` aliases are admitted only as a merged PR whose head is exactly an
+/// absorbed commit — the parked epilogue. Nodes from the `head` alias are admitted only
+/// when their head is exactly the pinned `HEAD` — the exact-identity epilogue. Closed
+/// nodes keep only an exact head match to their point — identity, never a name
+/// (`specs/forge-host.md`). Duplicates collapse.
+fn parse_association(
+    v: &Value,
+    points: &[crate::git::PublicationPoint],
+    absorbed: &[String],
+    head: Option<&str>,
+    closed: &[(String, String, usize, String)],
+) -> Association {
+    let mut assoc = Association::default();
+    let target_id = v["data"]["tgt"]["id"].as_str().unwrap_or_default();
+    let pr_of = |node: &Value| -> Option<AssocPr> {
+        Some(AssocPr {
+            number: node["number"].as_u64()?,
+            head_oid: node["headRefOid"].as_str().unwrap_or_default().to_string(),
+            head_ref: node["headRefName"].as_str().unwrap_or_default().to_string(),
+            merged_at: node["mergedAt"].as_str().unwrap_or_default().to_string(),
+            created_at: node["createdAt"].as_str().unwrap_or_default().to_string(),
+        })
+    };
+    for i in 0..points.len() + absorbed.len() + head.iter().count() {
+        let from_absorbed = i >= points.len() && i < points.len() + absorbed.len();
+        let from_head = i >= points.len() + absorbed.len();
+        let nodes = &v["data"]["src"][format!("p{i}").as_str()]["associatedPullRequests"]["nodes"];
+        for node in nodes.as_array().into_iter().flatten() {
+            let base = node["baseRepository"]["id"].as_str().unwrap_or_default();
+            if base.is_empty() || base != target_id {
+                continue;
+            }
+            let Some(pr) = pr_of(node) else { continue };
+            if from_absorbed {
+                // An absorbed commit is base history, which proves nothing by containment.
+                // Only the exact parked epilogue is admissible: a merged PR whose head is
+                // an absorbed commit itself.
+                let exact = absorbed.iter().any(|oid| oid == &pr.head_oid);
+                if exact && node["state"].as_str() == Some("MERGED") {
+                    push_unique(&mut assoc.merged, pr);
+                }
+                continue;
+            }
+            if from_head {
+                // The pinned HEAD is not published, so containment proves nothing. Only
+                // exact identity admits: the worktree is parked on the PR's own head.
+                if Some(pr.head_oid.as_str()) != head {
+                    continue;
+                }
+            }
+            match node["state"].as_str() {
+                Some("OPEN") => push_unique(&mut assoc.open, pr),
+                Some("MERGED") => push_unique(&mut assoc.merged, pr),
+                _ => {}
+            }
+        }
+    }
+    for (alias, _, i, _) in closed {
+        let nodes = &v["data"]["tgt"][alias.as_str()]["nodes"];
+        for node in nodes.as_array().into_iter().flatten() {
+            let Some(pr) = pr_of(node) else { continue };
+            if pr.head_oid != points[*i].oid {
+                continue;
+            }
+            push_unique(&mut assoc.closed, pr);
+        }
+    }
+    assoc
+}
+
+/// The winner among the open PRs (`specs/forge-host.md` "Resolution").
 #[derive(Debug, PartialEq, Eq)]
 enum Pick {
     One(u64),
@@ -488,52 +681,74 @@ enum Pick {
     None,
 }
 
-/// Pick the open PR: the earliest candidate in derivation order holding any wins — the
-/// recorded upstream outranks an inferred branch, which outranks the bare local name. On
-/// one name backing several open PRs, exactly one head at the pinned `HEAD` wins; else the
-/// ambiguity count is surfaced rather than a silent guess.
-fn select_open(per_candidate: &[Vec<(u64, String)>], pinned_head: Option<&str>) -> Pick {
-    for prs in per_candidate {
-        match prs.as_slice() {
-            [] => {}
-            [(number, _)] => return Pick::One(*number),
-            many => {
-                if let Some(pin) = pinned_head {
-                    let mut hits = many.iter().filter(|(_, oid)| oid == pin);
-                    if let (Some((number, _)), None) = (hits.next(), hits.next()) {
-                        return Pick::One(*number);
-                    }
+/// Pick the open PR: a lone PR wins; several disambiguate by a head equal to the pinned
+/// `HEAD`, then a head equal to a publication point, then the head named by the recorded
+/// upstream — each only when exactly one matches. Failing all three, the count surfaces.
+fn pick_open(open: &[AssocPr], input: &PrFetchInput) -> Pick {
+    match open {
+        [] => Pick::None,
+        [only] => Pick::One(only.number),
+        many => {
+            let unique = |test: &dyn Fn(&AssocPr) -> bool| -> Option<u64> {
+                let mut hits = many.iter().filter(|pr| test(pr));
+                match (hits.next(), hits.next()) {
+                    (Some(pr), None) => Some(pr.number),
+                    _ => None,
                 }
-                return Pick::Ambiguous(many.len());
+            };
+            if let Some(pin) = input.local.head_oid.as_deref()
+                && let Some(number) = unique(&|pr| pr.head_oid == pin)
+            {
+                return Pick::One(number);
             }
+            if let Some(number) =
+                unique(&|pr| input.local.points.iter().any(|point| point.oid == pr.head_oid))
+            {
+                return Pick::One(number);
+            }
+            if let Some(upstream) = input.local.upstream.as_deref()
+                && let Some(number) = unique(&|pr| pr.head_ref == upstream)
+            {
+                return Pick::One(number);
+            }
+            Pick::Ambiguous(many.len())
         }
     }
-    Pick::None
 }
 
-/// The historical fallback: the newest-created merged/closed PR across all candidates.
-/// ISO-8601 `…Z` strings compare lexically; a strict `>` keeps the earlier candidate on a
-/// timestamp tie, so the pick is deterministic.
-fn select_historical(per_candidate: &[Vec<(u64, String)>]) -> Option<u64> {
-    let mut best: Option<(u64, &str)> = None;
-    for prs in per_candidate {
-        for (number, created) in prs {
-            if best.is_none_or(|(_, b)| created.as_str() > b) {
-                best = Some((*number, created));
-            }
+/// The PR with the newest `key` timestamp. ISO-8601 `…Z` strings compare lexically; a
+/// strict `>` keeps the earlier entry on a tie, so the pick is deterministic.
+fn newest_by(prs: &[AssocPr], key: impl Fn(&AssocPr) -> &str) -> Option<u64> {
+    let mut best: Option<&AssocPr> = None;
+    for pr in prs {
+        if best.is_none_or(|b| key(pr) > key(b)) {
+            best = Some(pr);
         }
     }
-    best.map(|(number, _)| number)
+    best.map(|pr| pr.number)
+}
+
+/// The newest-merged PR containing a publication point.
+fn pick_merged(merged: &[AssocPr]) -> Option<u64> {
+    newest_by(merged, |pr| &pr.merged_at)
+}
+
+/// The newest closed-unmerged PR whose head is exactly a publication point.
+fn pick_closed(closed: &[AssocPr]) -> Option<u64> {
+    newest_by(closed, |pr| &pr.created_at)
 }
 
 /// All of one PR's state in a single direct GraphQL call — identity, mergeability, checks,
-/// reviews, plain comments, and review threads. Each list caps at 100 rows — ample for any real
-/// PR in a review sidebar — and its `pageInfo` flags a fuller surface so the UI can mark it,
-/// rather than paging to exhaustion (`specs/forge-host.md`). `reviews` reads `last:100` to keep
-/// the newest, so its "more exist" flag is `hasPreviousPage`; the `first:` lists use `hasNextPage`.
+/// reviews, plain comments, and review threads. Each list surface reads its newest 100 rows
+/// (`last:100`, flagged by `hasPreviousPage`) — ample for any real PR in a review sidebar —
+/// and flags a fuller surface so the UI can mark it, rather than paging to exhaustion
+/// (`specs/forge-host.md`). Checks keep `first:100`/`hasNextPage`.
 fn pr_detail(target: &FetchTarget<'_>, number: u64) -> Result<Value, GhError> {
     let q = build_detail_query(number);
-    let vars = repository_vars(target.owner, target.name);
+    let vars = vec![
+        ("o".to_string(), target.owner.to_string()),
+        ("n".to_string(), target.name.to_string()),
+    ];
     graphql(target.repo, target.host, &q, &vars, target.cancelled)
 }
 
@@ -546,26 +761,11 @@ fn build_detail_query(number: u64) -> String {
          headRefOid isCrossRepository \
          commits(last:1){{nodes{{commit{{statusCheckRollup{{contexts(first:100){{pageInfo{{hasNextPage}} nodes{{__typename \
          ... on CheckRun{{name status conclusion}} ... on StatusContext{{context state}}}}}}}}}}}}}} \
-         reviews(last:100){{pageInfo{{hasPreviousPage}} nodes{{author{{login}} body state submittedAt}}}} \
-         comments(first:100){{pageInfo{{hasNextPage}} nodes{{author{{login}} body createdAt}}}} \
-         reviewThreads(first:100){{pageInfo{{hasNextPage}} nodes{{isResolved isOutdated path line \
+         reviews(last:100){{pageInfo{{hasPreviousPage}} nodes{{author{{login}} body submittedAt}}}} \
+         comments(last:100){{pageInfo{{hasPreviousPage}} nodes{{author{{login}} body createdAt}}}} \
+         reviewThreads(last:100){{pageInfo{{hasPreviousPage}} nodes{{isResolved isOutdated path line \
          comments(first:1){{totalCount nodes{{author{{login}} body createdAt diffHunk}}}}}}}}}}}}}}"
     )
-}
-
-fn repository_vars(owner: &str, name: &str) -> Vec<(String, String)> {
-    vec![("o".to_string(), owner.to_string()), ("n".to_string(), name.to_string())]
-}
-
-fn resolve_vars(owner: &str, name: &str, candidates: &[String]) -> Vec<(String, String)> {
-    let mut vars = repository_vars(owner, name);
-    vars.extend(
-        candidates
-            .iter()
-            .enumerate()
-            .map(|(index, candidate)| (format!("b{index}"), candidate.clone())),
-    );
-    vars
 }
 
 /// Run a GraphQL `query` with `vars` and parse the response. Every variable is passed with
@@ -602,47 +802,13 @@ fn graphql_args(host: &str, query: &str, vars: &[(String, String)]) -> Vec<Strin
 
 // ---- Pure normalization (unit-tested) --------------------------------------------------
 
-/// The aliased resolve query for `n` candidates: `c{i}: pullRequests(headRefName:$b{i}, …)`.
-/// Branch names ride as `$b{i}` variables, never in the query text.
-fn build_resolve_query(n: usize, filter: &str, extra: &str) -> String {
-    use std::fmt::Write;
-    let mut q = String::from("query($o:String!,$n:String!");
-    for i in 0..n {
-        let _ = write!(q, ",$b{i}:String!");
-    }
-    q.push_str("){repository(owner:$o,name:$n){");
-    for i in 0..n {
-        let _ =
-            write!(q, "c{i}:pullRequests(headRefName:$b{i}, {filter}){{nodes{{number {extra}}}}} ");
-    }
-    q.push_str("}}");
-    q
-}
-
-/// Per-candidate `(number, extra)` lists from the aliased response, index `i` ↔ alias
-/// `c{i}`. A missing or null alias parses as an empty list.
-fn parse_resolve(v: &Value, n: usize, extra: &str) -> Vec<Vec<(u64, String)>> {
-    (0..n)
-        .map(|i| {
-            v["data"]["repository"][format!("c{i}").as_str()]["nodes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|p| {
-                    Some((p["number"].as_u64()?, p[extra].as_str().unwrap_or_default().to_string()))
-                })
-                .collect()
-        })
-        .collect()
-}
-
 /// Assemble the snapshot from the `gh pr view` JSON, the computed `sync`, and the merged comments.
 fn build_snapshot(node: &Value, sync: Sync) -> PrSnapshot {
     let contexts = &node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"];
     let rollup = &contexts["nodes"];
     // A surface whose page reports more in the direction it pages is a prefix, not the whole set.
-    // Each query asks only for its own flag — `hasNextPage` for the `first:` lists, `hasPreviousPage`
-    // for `reviews` (a `last:` list) — so OR-ing both reads whichever applies; the absent one is false.
+    // Each query asks only for its own flag — `hasPreviousPage` for the `last:` lists,
+    // `hasNextPage` for checks — so OR-ing both reads whichever applies; the absent one is false.
     let more = |conn: &Value| {
         conn["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false)
             || conn["pageInfo"]["hasPreviousPage"].as_bool().unwrap_or(false)
@@ -930,12 +1096,13 @@ mod tests {
         with_body["body"] = serde_json::json!("## Summary\nfixes things");
         assert_eq!(build_snapshot(&with_body, Sync::InSync).body, "## Summary\nfixes things");
 
+        // Comments and threads read `last:100`, so their "more exist" flag pages backward.
         let mut comments_more = base.clone();
-        comments_more["comments"]["pageInfo"]["hasNextPage"] = serde_json::json!(true);
+        comments_more["comments"]["pageInfo"]["hasPreviousPage"] = serde_json::json!(true);
         assert!(build_snapshot(&comments_more, Sync::InSync).truncated);
 
         let mut threads_more = base.clone();
-        threads_more["reviewThreads"]["pageInfo"]["hasNextPage"] = serde_json::json!(true);
+        threads_more["reviewThreads"]["pageInfo"]["hasPreviousPage"] = serde_json::json!(true);
         assert!(build_snapshot(&threads_more, Sync::InSync).truncated);
 
         let mut checks_more = base.clone();
@@ -1010,68 +1177,275 @@ mod tests {
         );
     }
 
+    fn point(oid: &str, names: &[&str]) -> crate::git::PublicationPoint {
+        crate::git::PublicationPoint {
+            oid: oid.to_string(),
+            names: names.iter().map(|n| (*n).to_string()).collect(),
+        }
+    }
+
+    fn input(
+        head: &str,
+        points: Vec<crate::git::PublicationPoint>,
+        up: Option<&str>,
+    ) -> PrFetchInput {
+        PrFetchInput {
+            repository: crate::git::RepositoryIdentity::Missing,
+            origin_repository: None,
+            local: crate::git::PrLocalState {
+                head_oid: Some(head.to_string()),
+                base_oid: Some("base".to_string()),
+                points,
+                absorbed: Vec::new(),
+                head_nominates: false,
+                upstream: up.map(str::to_string),
+                detached: false,
+            },
+        }
+    }
+
+    fn assoc(number: u64, head_oid: &str, head_ref: &str) -> AssocPr {
+        AssocPr {
+            number,
+            head_oid: head_oid.to_string(),
+            head_ref: head_ref.to_string(),
+            merged_at: String::new(),
+            created_at: String::new(),
+        }
+    }
+
     #[test]
-    fn resolve_query_aliases_candidates_and_never_inlines_names() {
-        let q = build_resolve_query(2, OPEN, "headRefOid");
-        assert_eq!(
-            q,
-            "query($o:String!,$n:String!,$b0:String!,$b1:String!)\
-             {repository(owner:$o,name:$n){\
-             c0:pullRequests(headRefName:$b0, states:OPEN, first:100){nodes{number headRefOid}} \
-             c1:pullRequests(headRefName:$b1, states:OPEN, first:100){nodes{number headRefOid}} }}"
+    fn fetch_gates_resolve_without_touching_the_forge() {
+        // Each early gate returns before any `gh` spawn: identity failures, a detached
+        // HEAD, and a worktree with no publication points (`specs/forge-host.md`).
+        let gated = |input: &PrFetchInput| fetch(Path::new("."), input);
+        let mut missing = input("head", vec![], None);
+        missing.repository = crate::git::RepositoryIdentity::Missing;
+        assert_eq!(gated(&missing), PrView::NeedsGitHubRemote);
+
+        let mut unsupported = input("head", vec![], None);
+        unsupported.repository = crate::git::RepositoryIdentity::Unsupported("gitlab.com".into());
+        assert_eq!(gated(&unsupported), PrView::UnsupportedHost("gitlab.com".into()));
+
+        let repo = crate::git::RepositoryIdentity::Repository(
+            crate::git::RepoTarget::new("github.com", "owner", "repo").unwrap(),
         );
-        let h = build_resolve_query(1, HISTORICAL, "createdAt");
-        assert!(h.contains(
-            "states:[MERGED,CLOSED], first:1, orderBy:{field:CREATED_AT, direction:DESC}"
+        let mut detached = input("head", vec![], None);
+        detached.repository = repo.clone();
+        detached.local.detached = true;
+        assert_eq!(gated(&detached), PrView::Detached);
+
+        let mut zero_work = input("head", vec![], None);
+        zero_work.repository = repo;
+        assert_eq!(gated(&zero_work), PrView::NoPr);
+    }
+
+    #[test]
+    fn absorbed_aliases_admit_only_an_exact_head_merged_pr() {
+        // The parked epilogue: the worktree sits on base history, so containment proves
+        // nothing — only a merged PR whose head IS the absorbed commit resolves.
+        let v = serde_json::json!({"data": {
+            "src": {
+                "p0": {"associatedPullRequests": {"nodes": [
+                    {"number": 82, "state": "MERGED", "headRefOid": "parked", "headRefName": "fix",
+                     "createdAt": "2026-07-01T00:00:00Z", "mergedAt": "2026-07-02T00:00:00Z",
+                     "baseRepository": {"id": "R1"}},
+                    {"number": 90, "state": "MERGED", "headRefOid": "other", "headRefName": "else",
+                     "createdAt": "2026-07-01T00:00:00Z", "mergedAt": "2026-07-03T00:00:00Z",
+                     "baseRepository": {"id": "R1"}},
+                    {"number": 91, "state": "OPEN", "headRefOid": "parked", "headRefName": "fix",
+                     "createdAt": "2026-07-01T00:00:00Z", "mergedAt": null,
+                     "baseRepository": {"id": "R1"}}
+                ]}}
+            },
+            "tgt": {"id": "R1"}
+        }});
+        let absorbed = vec!["parked".to_string()];
+        let a = parse_association(&v, &[], &absorbed, None, &[]);
+        // #90 contains the commit but its head is a stranger's; #91 is open — neither admits.
+        assert_eq!(a.merged.iter().map(|p| p.number).collect::<Vec<_>>(), [82]);
+        assert!(a.open.is_empty());
+    }
+
+    fn assoc_node(number: u64, state: &str, head: &str) -> serde_json::Value {
+        serde_json::json!({"number": number, "state": state, "headRefOid": head,
+            "headRefName": "feat", "createdAt": "2026-07-01T00:00:00Z",
+            "mergedAt": null, "baseRepository": {"id": "R1"}})
+    }
+
+    #[test]
+    fn head_alias_admits_only_exact_head_matches_open_or_merged() {
+        // The exact-identity epilogue: the pinned HEAD nominates, so a PR whose head IS
+        // that commit admits — open or merged. A PR that merely contains it does not,
+        // and closed-unmerged PRs never associate on the forge at all.
+        let v = serde_json::json!({"data": {
+            "src": {"p0": {"associatedPullRequests": {"nodes": [
+                assoc_node(10, "MERGED", "tip"),
+                assoc_node(11, "OPEN", "tip"),
+                assoc_node(12, "CLOSED", "tip"),
+                assoc_node(13, "MERGED", "other"),
+                assoc_node(14, "OPEN", "other")
+            ]}}},
+            "tgt": {"id": "R1"}
+        }});
+        let a = parse_association(&v, &[], &[], Some("tip"), &[]);
+        assert_eq!(a.open.iter().map(|p| p.number).collect::<Vec<_>>(), [11]);
+        assert_eq!(a.merged.iter().map(|p| p.number).collect::<Vec<_>>(), [10]);
+        assert!(a.closed.is_empty(), "the exact-identity path never fills closed");
+    }
+
+    #[test]
+    fn alias_index_classes_stay_aligned_with_all_three_sources_present() {
+        // One point, one absorbed candidate, and the head alias in one response: each
+        // index must land in its own admission class, not a neighbor's.
+        let v = serde_json::json!({"data": {
+            "src": {
+                "p0": {"associatedPullRequests": {"nodes": [assoc_node(20, "OPEN", "elsewhere")]}},
+                "p1": {"associatedPullRequests": {"nodes": [assoc_node(21, "MERGED", "parked")]}},
+                "p2": {"associatedPullRequests": {"nodes": [assoc_node(22, "MERGED", "tip")]}}
+            },
+            "tgt": {"id": "R1"}
+        }});
+        let points = vec![point("published", &[])];
+        let absorbed = vec!["parked".to_string()];
+        let a = parse_association(&v, &points, &absorbed, Some("tip"), &[]);
+        assert_eq!(a.open.iter().map(|p| p.number).collect::<Vec<_>>(), [20], "containment");
+        assert_eq!(a.merged.iter().map(|p| p.number).collect::<Vec<_>>(), [21, 22], "exact");
+    }
+
+    #[test]
+    fn the_head_nominates_only_when_flagged_and_not_already_a_point() {
+        // The gate and the alias both route through this one filter, so a regression
+        // that drops the nomination re-tightens the NoPr gate and fails here.
+        let mut local = input("tip", vec![], None).local;
+        assert_eq!(nominated_head(&local), None, "an unflagged HEAD never nominates");
+        local.head_nominates = true;
+        assert_eq!(nominated_head(&local), Some("tip"), "a flagged HEAD nominates alone");
+        local.points = vec![point("tip", &["feat"])];
+        assert_eq!(nominated_head(&local), None, "a point already carries the OID");
+    }
+
+    #[test]
+    fn association_query_aliases_points_and_closed_names_and_never_inlines_values() {
+        let points = vec![point("aaa", &[]), point("bbb", &["feat", "backup"])];
+        let closed = closed_aliases(&points);
+        assert_eq!(
+            closed
+                .iter()
+                .map(|(alias, var, i, name)| (alias.as_str(), var.as_str(), *i, name.as_str()))
+                .collect::<Vec<_>>(),
+            [("c1_0", "b1_0", 1, "feat"), ("c1_1", "b1_1", 1, "backup")]
+        );
+        let q = build_association_query(points.len(), &closed);
+        assert!(q.starts_with(
+            "query($so:String!,$sn:String!,$to:String!,$tn:String!,\
+             $p0:GitObjectID!,$p1:GitObjectID!,$b1_0:String!,$b1_1:String!)"
         ));
-        assert!(h.contains("nodes{number createdAt}"));
+        assert!(q.contains("src:repository(owner:$so,name:$sn){p0:object(oid:$p0)"));
+        assert!(q.contains("associatedPullRequests(first:100)"));
+        assert!(q.contains("baseRepository{id}"));
+        assert!(q.contains("tgt:repository(owner:$to,name:$tn){id "));
+        assert!(q.contains("c1_0:pullRequests(headRefName:$b1_0, states:[CLOSED]"));
+        assert!(q.contains("c1_1:pullRequests(headRefName:$b1_1, states:[CLOSED]"));
+        // With no named point, the target block still carries `id` — never an empty
+        // selection set, which GitHub rejects as a parse error.
+        let bare = vec![point("aaa", &[])];
+        let q = build_association_query(bare.len(), &closed_aliases(&bare));
+        assert!(q.contains("tgt:repository(owner:$to,name:$tn){id }"));
     }
 
     #[test]
-    fn parse_resolve_maps_aliases_in_order_and_null_to_empty() {
-        let v = serde_json::json!({"data": {"repository": {
-            "c0": {"nodes": [{"number": 7, "headRefOid": "abc"}]},
-            "c1": null,
-            "c2": {"nodes": [{"number": 9, "headRefOid": "def"}, {"number": 10, "headRefOid": "ghi"}]}
-        }}});
-        let per = parse_resolve(&v, 3, "headRefOid");
-        assert_eq!(per[0], [(7, "abc".to_string())]);
-        assert!(per[1].is_empty());
-        assert_eq!(per[2], [(9, "def".to_string()), (10, "ghi".to_string())]);
+    fn parse_association_splits_lifecycles_filters_by_repo_id_and_dedups() {
+        let v = serde_json::json!({"data": {
+            "src": {
+                "p0": {"associatedPullRequests": {"nodes": [
+                    {"number": 7, "state": "OPEN", "headRefOid": "abc", "headRefName": "feat-x",
+                     "createdAt": "2026-07-01T00:00:00Z", "mergedAt": null,
+                     "baseRepository": {"id": "R1"}},
+                    {"number": 8, "state": "MERGED", "headRefOid": "def", "headRefName": "feat-y",
+                     "createdAt": "2026-06-01T00:00:00Z", "mergedAt": "2026-06-02T00:00:00Z",
+                     "baseRepository": {"id": "R1"}},
+                    {"number": 9, "state": "OPEN", "headRefOid": "zzz", "headRefName": "other",
+                     "createdAt": "2026-07-01T00:00:00Z", "mergedAt": null,
+                     "baseRepository": {"id": "R-other"}}
+                ]}},
+                "p1": {"associatedPullRequests": {"nodes": [
+                    {"number": 7, "state": "OPEN", "headRefOid": "abc", "headRefName": "feat-x",
+                     "createdAt": "2026-07-01T00:00:00Z", "mergedAt": null,
+                     "baseRepository": {"id": "R1"}}
+                ]}}
+            },
+            "tgt": {
+                "id": "R1",
+                "c1_0": {"nodes": [
+                    {"number": 5, "headRefOid": "p1oid", "headRefName": "old-name",
+                     "createdAt": "2026-05-01T00:00:00Z"},
+                    {"number": 6, "headRefOid": "impostor", "headRefName": "old-name",
+                     "createdAt": "2026-05-02T00:00:00Z"}
+                ]}
+            }
+        }});
+        let points = vec![point("p0oid", &[]), point("p1oid", &["old-name"])];
+        let a = parse_association(&v, &points, &[], None, &closed_aliases(&points));
+        // Open #7 appears under both points but lands once; #9 based elsewhere is dropped.
+        assert_eq!(a.open.iter().map(|p| p.number).collect::<Vec<_>>(), [7]);
+        assert_eq!(a.merged.iter().map(|p| p.number).collect::<Vec<_>>(), [8]);
+        // The closed lookup admits only an exact head match to the point.
+        assert_eq!(a.closed.iter().map(|p| p.number).collect::<Vec<_>>(), [5]);
     }
 
     #[test]
-    fn select_open_takes_the_earliest_candidate_with_any_open_pr() {
-        let per = vec![
-            vec![],
-            vec![(12, "aaa".to_string())],
-            vec![(99, "bbb".to_string())], // a later candidate never preempts an earlier one
+    fn pick_open_prefers_head_then_point_then_upstream_else_surfaces_the_count() {
+        let one = [assoc(1, "aaa", "feat")];
+        assert_eq!(pick_open(&one, &input("zzz", vec![], None)), Pick::One(1));
+        assert_eq!(pick_open(&[], &input("zzz", vec![], None)), Pick::None);
+
+        let two = [assoc(1, "aaa", "feat"), assoc(2, "bbb", "cont")];
+        assert_eq!(pick_open(&two, &input("bbb", vec![], None)), Pick::One(2));
+        assert_eq!(pick_open(&two, &input("zzz", vec![point("aaa", &[])], None)), Pick::One(1));
+        assert_eq!(pick_open(&two, &input("zzz", vec![], Some("cont"))), Pick::One(2));
+        assert_eq!(pick_open(&two, &input("zzz", vec![], None)), Pick::Ambiguous(2));
+        // A tiebreak matching several PRs decides nothing.
+        let dup = [assoc(1, "aaa", "feat"), assoc(2, "aaa", "feat")];
+        assert_eq!(pick_open(&dup, &input("aaa", vec![], Some("feat"))), Pick::Ambiguous(2));
+        // Tiers outrank, not merely win in isolation: with the pinned HEAD on one PR and
+        // both lower tiers pointing at the other, the HEAD tier decides. Same one rung
+        // down — a point identity beats an upstream name, per "names never prove identity".
+        let crossed = [assoc(1, "aaa", "feat"), assoc(2, "bbb", "cont")];
+        assert_eq!(
+            pick_open(&crossed, &input("aaa", vec![point("bbb", &[])], Some("cont"))),
+            Pick::One(1)
+        );
+        assert_eq!(
+            pick_open(&crossed, &input("zzz", vec![point("aaa", &[])], Some("cont"))),
+            Pick::One(1)
+        );
+    }
+
+    #[test]
+    fn source_selection_prefers_a_same_host_origin_else_the_target() {
+        let target = crate::git::RepoTarget::new("github.com", "acme", "widgets").unwrap();
+        let fork = crate::git::RepoTarget::new("github.com", "contributor", "widgets").unwrap();
+        let foreign = crate::git::RepoTarget::new("ghe.corp.test", "me", "widgets").unwrap();
+        assert_eq!(select_source(Some(&fork), &target), &fork);
+        assert_eq!(select_source(Some(&foreign), &target), &target);
+        assert_eq!(select_source(None, &target), &target);
+    }
+
+    #[test]
+    fn merged_pick_takes_the_newest_merge_and_closed_pick_the_newest_created() {
+        let merged = [
+            AssocPr { merged_at: "2026-06-01T00:00:00Z".into(), ..assoc(1, "a", "x") },
+            AssocPr { merged_at: "2026-06-03T00:00:00Z".into(), ..assoc(2, "b", "y") },
+            AssocPr { merged_at: "2026-06-03T00:00:00Z".into(), ..assoc(3, "c", "z") }, // tie → earlier
         ];
-        assert_eq!(select_open(&per, Some("zzz")), Pick::One(12));
-        assert_eq!(select_open(&[vec![], vec![]], Some("zzz")), Pick::None);
-        assert_eq!(select_open(&[], None), Pick::None);
-    }
-
-    #[test]
-    fn select_open_disambiguates_one_name_by_the_pinned_head_else_surfaces_the_count() {
-        let two = vec![vec![(1, "aaa".to_string()), (2, "bbb".to_string())]];
-        assert_eq!(select_open(&two, Some("bbb")), Pick::One(2));
-        // No pinned HEAD, no exact match, or several exact matches: ambiguous, count shown.
-        assert_eq!(select_open(&two, None), Pick::Ambiguous(2));
-        assert_eq!(select_open(&two, Some("zzz")), Pick::Ambiguous(2));
-        let dup = vec![vec![(1, "aaa".to_string()), (2, "aaa".to_string())]];
-        assert_eq!(select_open(&dup, Some("aaa")), Pick::Ambiguous(2));
-    }
-
-    #[test]
-    fn select_historical_takes_the_newest_created_and_ties_to_the_earlier_candidate() {
-        let per = vec![
-            vec![(1, "2026-06-01T00:00:00Z".to_string())],
-            vec![(2, "2026-06-03T00:00:00Z".to_string())],
-            vec![(3, "2026-06-03T00:00:00Z".to_string())], // tie → the earlier candidate keeps
+        assert_eq!(pick_merged(&merged), Some(2));
+        assert_eq!(pick_merged(&[]), None);
+        let closed = [
+            AssocPr { created_at: "2026-05-01T00:00:00Z".into(), ..assoc(4, "d", "x") },
+            AssocPr { created_at: "2026-05-09T00:00:00Z".into(), ..assoc(5, "e", "y") },
         ];
-        assert_eq!(select_historical(&per), Some(2));
-        assert_eq!(select_historical(&[vec![], vec![]]), None);
+        assert_eq!(pick_closed(&closed), Some(5));
     }
 
     #[test]

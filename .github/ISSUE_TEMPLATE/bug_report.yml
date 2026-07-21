@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible bug in reviewr.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. A screenshot or recording of the pane is worth a thousand words.
+        Setup and conventions live in [CONTRIBUTING.md](https://github.com/persiyanov/herdr-reviewr/blob/main/CONTRIBUTING.md).
+
+  - type: textarea
+    id: current-behavior
+    attributes:
+      label: Current behavior
+      description: What happens now?
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What should happen instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Steps from a fresh pane. Mention the tab, scope, and keys pressed.
+      placeholder: |
+        1. Open reviewr in a repo with …
+        2. Press …
+        3. See …
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: reviewr version
+      description: From `herdr plugin list`, or the release you installed.
+      placeholder: v0.19.0
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, terminal emulator, and herdr version (`herdr --version`) if running as a plugin.
+      placeholder: macOS 15, Ghostty, herdr 0.9.2
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything unusual about the repo
+      description: Only if relevant — very large worktree, big ignored trees, fork remotes, detached HEAD.

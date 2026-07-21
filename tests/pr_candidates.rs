@@ -1,7 +1,7 @@
 //! Integration tests for the PR fetch's local reads (`git::pr_local`,
 //! `git::ahead_behind_oids`) against real temp repos. Remote-tracking branches are faked
 //! with `git update-ref refs/remotes/origin/<name> <sha>` — no network, no `gh`.
-//! See `specs/forge-host.md` "Candidate branches".
+//! See `specs/forge-host.md` "Resolution".
 
 mod common;
 
@@ -41,6 +41,10 @@ fn pr_local(repo: &Path, base: Option<&str>) -> Result<PrLocalState, GitFail> {
     pr_local_with_config(repo, base, config.base_branches())
 }
 
+fn point_oids(local: &PrLocalState) -> Vec<&str> {
+    local.points.iter().map(|p| p.oid.as_str()).collect()
+}
+
 fn assert_target(identity: &RepositoryIdentity, host: &str, owner: &str, name: &str) {
     let RepositoryIdentity::Repository(target) = identity else {
         panic!("expected a repository target, got {identity:?}");
@@ -51,13 +55,16 @@ fn assert_target(identity: &RepositoryIdentity, host: &str, owner: &str, name: &
 }
 
 #[test]
-fn a_standard_fork_uses_the_base_repository_without_setup() {
+fn a_standard_fork_uses_the_base_repository_and_queries_the_origin() {
     let repo = worktree();
     repo.git(&["remote", "set-url", "origin", "git@github.com:contributor/widgets.git"]);
     repo.git(&["remote", "add", "upstream", "https://github.com/acme/widgets.git"]);
 
     let input = fetch_input(repo.path(), None, &defaults()).unwrap();
     assert_target(&input.repository, "github.com", "acme", "widgets");
+    // The association query runs where the commits live: the fork.
+    let origin = input.origin_repository.expect("origin identity");
+    assert_eq!((origin.owner(), origin.name()), ("contributor", "widgets"));
 }
 
 #[test]
@@ -108,112 +115,213 @@ fn a_github_com_prefixed_host_is_only_supported_when_configured_literally() {
 }
 
 #[test]
-fn push_head_other_name_yields_the_remote_branch_before_the_local_name() {
+fn push_head_other_name_publishes_head_as_the_point_with_that_name() {
     // The headline workflow: `git push origin HEAD:other` with no `-u` updates the
-    // remote-tracking ref; the pushed name must outrank the (PR-less) local name.
+    // remote-tracking ref; HEAD itself is the publication point, carrying the name.
     let repo = worktree();
     repo.git(&["update-ref", "refs/remotes/origin/other", "HEAD"]);
     let local = pr_local(repo.path(), None).expect("pr_local");
-    assert_eq!(local.head_oid.as_deref(), Some(head(&repo).as_str()));
-    assert_eq!(local.candidates, ["other", "work"]);
+    let tip = head(&repo);
+    assert_eq!(local.head_oid.as_deref(), Some(tip.as_str()));
+    assert_eq!(point_oids(&local), [tip.as_str()]);
+    assert_eq!(local.points[0].names, ["other"]);
+    assert_eq!(local.upstream, None);
 }
 
 #[test]
-fn recorded_upstream_is_the_first_candidate() {
+fn unpushed_commits_move_the_point_to_the_published_boundary() {
     let repo = worktree();
     repo.git(&["update-ref", "refs/remotes/origin/other", "HEAD"]);
+    let published = head(&repo);
+    repo.write("c.txt", "three\n");
+    repo.commit_all("unpushed");
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert_eq!(point_oids(&local), [published.as_str()]);
+    assert_eq!(local.points[0].names, ["other"]);
+}
+
+#[test]
+fn a_zero_work_worktree_has_no_points_even_among_sibling_branches() {
+    // The parallel-worktree adversary: HEAD parked at (or behind) the base tip while
+    // sibling branches with open PRs descend from it. Nothing is provable, nothing shows.
+    let repo = worktree();
+    repo.git(&["switch", "-qC", "work", "main"]); // zero work: HEAD == base tip
+    repo.git(&["update-ref", "refs/remotes/origin/sibling", "HEAD"]);
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert!(local.points.is_empty(), "a base-ancestor point proves nothing");
+
+    // The Campaigns Fable shape: HEAD strictly behind the base tip.
+    repo.git(&["switch", "-q", "main"]);
+    repo.write("m.txt", "advance\n");
+    repo.commit_all("main moves on");
+    repo.git(&["update-ref", "refs/remotes/origin/main", "main"]);
+    repo.git(&["switch", "-q", "work"]);
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert!(local.points.is_empty(), "an ancestor of the base proves nothing");
+}
+
+#[test]
+fn recorded_upstream_rides_along_unless_it_names_a_base() {
+    let repo = worktree();
     repo.git(&["config", "branch.work.remote", "origin"]);
     repo.git(&["config", "branch.work.merge", "refs/heads/pub"]);
     let local = pr_local(repo.path(), None).expect("pr_local");
-    assert_eq!(local.candidates, ["pub", "other", "work"]);
-}
+    assert_eq!(local.upstream.as_deref(), Some("pub"));
 
-#[test]
-fn an_upstream_naming_a_base_branch_is_excluded() {
-    // `git switch -c work origin/main` auto-tracks the base; that record is not a
-    // publication and must not become a candidate.
-    let repo = worktree();
-    repo.git(&["config", "branch.work.remote", "origin"]);
+    // The record `git switch -c work origin/main` auto-writes is tracking, not
+    // publication — it never joins the tiebreak.
     repo.git(&["config", "branch.work.merge", "refs/heads/main"]);
     let local = pr_local(repo.path(), None).expect("pr_local");
-    assert_eq!(local.candidates, ["work"]);
+    assert_eq!(local.upstream, None);
 }
 
 #[test]
-fn stacked_branches_qualify_but_the_base_and_diverged_siblings_do_not() {
+fn secondary_configured_bases_also_exclude_points() {
+    // Gitflow: `develop` wins the pin, but a point sitting on `main` history must still
+    // prove nothing — the old name-exclusion covered every configured base.
     let repo = worktree();
-    // Ancestor carrying non-base work: origin/stack at `work`'s first commit.
-    repo.git(&["update-ref", "refs/remotes/origin/stack", "HEAD"]);
-    repo.write("c.txt", "three\n");
-    repo.commit_all("more");
-    // Descendant: origin/cont one commit past HEAD.
-    repo.git(&["switch", "-qc", "cont"]);
-    repo.write("d.txt", "four\n");
-    repo.commit_all("continuation");
-    let cont_tip = head(&repo);
-    repo.git(&["switch", "-q", "work"]);
-    repo.git(&["update-ref", "refs/remotes/origin/cont", &cont_tip]);
-    // Diverged sibling: branches off `main`, not comparable with HEAD.
-    repo.git(&["switch", "-qc", "sibling", "main"]);
-    repo.write("e.txt", "five\n");
-    repo.commit_all("elsewhere");
-    let sibling_tip = head(&repo);
-    repo.git(&["switch", "-q", "work"]);
-    repo.git(&["branch", "-qD", "cont", "sibling"]);
-    repo.git(&["update-ref", "refs/remotes/origin/sibling", &sibling_tip]);
-    let local = pr_local(repo.path(), None).expect("pr_local");
-    // stack (ancestor, distance 1) and cont (descendant, distance 1) qualify, ordered
-    // lexicographically on the tie; origin/main (base) and the diverged sibling do not.
-    assert_eq!(local.candidates, ["cont", "stack", "work"]);
+    repo.git(&["switch", "-qc", "develop", "main"]);
+    repo.write("d.txt", "dev\n");
+    repo.commit_all("develop work");
+    repo.git(&["update-ref", "refs/remotes/origin/develop", "HEAD"]);
+    // main advances past develop's branch point; a sibling ref sits at its tip.
+    repo.git(&["switch", "-q", "main"]);
+    repo.write("m.txt", "release\n");
+    repo.commit_all("release merge");
+    repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    repo.git(&["update-ref", "refs/remotes/origin/release-pr", "HEAD"]);
+    // The worktree parks at main's tip with zero work of its own.
+    repo.git(&["switch", "-qC", "work", "main"]);
+
+    let config_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        "base_branches = [\"develop\", \"main\"]\n",
+    )
+    .unwrap();
+    let config = plugin_config_in(config_dir.path()).unwrap();
+    let local = pr_local_with_config(repo.path(), None, config.base_branches()).expect("pr_local");
+    let develop_tip = repo.git(&["rev-parse", "origin/develop"]).trim().to_string();
+    assert_eq!(local.base_oid.as_deref(), Some(develop_tip.as_str()), "develop wins the pin");
+    assert!(local.points.is_empty(), "a point on main history proves nothing");
 }
 
 #[test]
-fn without_a_resolvable_base_only_equal_and_descendant_tips_qualify() {
-    // A repo whose only branch is `trunk`: none of the default base names resolve, so
-    // "an ancestor carrying non-base work" is undefined and ancestors drop out.
+fn a_parked_merged_tip_survives_as_an_absorbed_candidate() {
+    // The worktree's branch merged into main and the worktree stays parked at its tip:
+    // no point survives, but the tip rides along for the exact-head epilogue.
+    let repo = worktree();
+    repo.git(&["update-ref", "refs/remotes/origin/fix", "HEAD"]);
+    let merged_tip = head(&repo);
+    repo.git(&["switch", "-q", "main"]);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "merge fix", "work"]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", "main"]);
+    repo.git(&["switch", "-q", "work"]);
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert!(local.points.is_empty(), "the tip is base history now");
+    assert_eq!(local.absorbed, [merged_tip], "the parked tip nominates the epilogue");
+
+    // A surviving point clears the absorbed set — live work owns the resolution.
+    repo.write("n.txt", "new\n");
+    repo.commit_all("new work");
+    repo.git(&["update-ref", "refs/remotes/origin/fix2", "HEAD"]);
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert!(!local.points.is_empty());
+    assert!(local.absorbed.is_empty());
+}
+
+#[test]
+fn head_nominates_only_outside_every_resolved_base() {
+    // A branch with its own commit past main: HEAD is provably this worktree's work.
+    let repo = worktree();
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert!(local.head_nominates, "a HEAD beyond the base nominates by exact identity");
+
+    // A zero-work worktree parked at the base tip: HEAD is base history, so a stranger's
+    // PR head parked at the same commit must never attach.
+    repo.git(&["switch", "-qC", "work", "main"]);
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert!(!local.head_nominates, "a HEAD in base history proves nothing");
+}
+
+#[test]
+fn a_squash_merged_tip_with_a_deleted_branch_still_nominates_by_head_identity() {
+    // The deleted-branch epilogue: main absorbed the work as a different commit (squash)
+    // and the remote branch is gone, so no origin ref reaches the parked tip. Points and
+    // absorbed cannot prove the PR — only the exact-identity HEAD can.
+    let repo = worktree();
+    repo.git(&["switch", "-q", "main"]);
+    repo.git(&["merge", "-q", "--squash", "work"]);
+    repo.git(&["commit", "-qm", "squash of work"]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", "main"]);
+    repo.git(&["switch", "-q", "work"]);
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert!(local.points.is_empty(), "the orphaned tip is on no origin ref");
+    assert!(local.head_nominates, "the squashed tip is not base history");
+}
+
+#[test]
+fn a_point_carries_every_origin_name_at_its_tip() {
+    let repo = worktree();
+    repo.git(&["update-ref", "refs/remotes/origin/feat", "HEAD"]);
+    repo.git(&["update-ref", "refs/remotes/origin/backup", "HEAD"]);
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert_eq!(local.points.len(), 1);
+    assert_eq!(local.points[0].names, ["backup", "feat"], "every tip name, refname order");
+}
+
+#[test]
+fn the_base_flag_resolves_verbatim_revs_before_canonical_entries() {
+    let repo = worktree();
+    // A raw SHA works verbatim, exactly as the flag always did.
+    let main_tip = repo.git(&["rev-parse", "main"]).trim().to_string();
+    let local = pr_local(repo.path(), Some(&main_tip)).expect("pr_local");
+    assert_eq!(local.base_oid.as_deref(), Some(main_tip.as_str()));
+    // A non-origin remote-tracking ref works verbatim too (the fork-review flag).
+    repo.git(&["update-ref", "refs/remotes/upstream/main", "main"]);
+    let local = pr_local(repo.path(), Some("upstream/main")).expect("pr_local");
+    assert_eq!(local.base_oid.as_deref(), Some(main_tip.as_str()));
+}
+
+#[test]
+fn without_a_resolvable_base_no_point_is_provable() {
+    // A repo whose only branch is `trunk` and no origin/HEAD: no base resolves, so no
+    // point can be proven beyond it (`specs/forge-host.md`).
     let repo = Repo::init();
     repo.git(&["branch", "-qm", "trunk"]);
     repo.write("a.txt", "one\n");
     repo.commit_all("first");
     repo.git(&["remote", "add", "origin", "https://github.com/owner/repo.git"]);
-    repo.git(&["update-ref", "refs/remotes/origin/old", "HEAD"]);
+    repo.git(&["update-ref", "refs/remotes/origin/trunk", "HEAD"]);
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert_eq!(local.base_oid, None);
+    assert!(local.points.is_empty());
+    assert!(!local.head_nominates, "no base resolved, so nothing can prove HEAD");
+
+    // origin/HEAD backstops the unresolvable list (`specs/review-model.md`).
+    repo.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]);
     repo.write("b.txt", "two\n");
-    repo.commit_all("second");
-    repo.git(&["update-ref", "refs/remotes/origin/same", "HEAD"]);
+    repo.commit_all("beyond trunk");
+    repo.git(&["update-ref", "refs/remotes/origin/feat", "HEAD"]);
     let local = pr_local(repo.path(), None).expect("pr_local");
-    // `same` (equal tip) qualifies; `old` (ancestor) does not without a base to test against.
-    assert_eq!(local.candidates, ["same", "trunk"]);
+    assert!(local.base_oid.is_some(), "origin/HEAD resolves the base");
+    assert_eq!(point_oids(&local), [head(&repo).as_str()]);
 }
 
 #[test]
-fn the_base_flag_pins_the_base_and_joins_the_exclusion_set() {
+fn base_entries_canonicalize_and_resolve_origin_first() {
     let repo = worktree();
-    // A dev trunk the repo treats as base via --base; a branch merged into it must not
-    // qualify, and origin/dev itself must be excluded by name.
-    repo.git(&["update-ref", "refs/remotes/origin/dev", "HEAD"]);
-    let local = pr_local(repo.path(), Some("origin/dev")).expect("pr_local");
-    assert_eq!(local.candidates, ["work"]);
-}
+    // `origin/main` and `main` are one entry; both pin the same base.
+    let spelled = pr_local(repo.path(), Some("origin/main")).expect("pr_local");
+    let bare = pr_local(repo.path(), Some("main")).expect("pr_local");
+    assert_eq!(spelled.base_oid, bare.base_oid);
+    assert!(spelled.base_oid.is_some());
 
-#[test]
-fn nearest_first_and_the_cap_evicts_farthest_keeping_the_local_name() {
-    let repo = worktree();
-    // Nine remote names at increasing distances: d0 at HEAD, d1 one commit back, …
-    // (each historical tip is an ancestor carrying non-base work).
-    let mut tips = vec![head(&repo)];
-    for i in 1..9 {
-        repo.write(&format!("f{i}.txt"), "x\n");
-        repo.commit_all(&format!("c{i}"));
-        tips.push(head(&repo));
-    }
-    // tips[k] is k commits behind the final HEAD; name them so distance != lexical order.
-    for (k, tip) in tips.iter().enumerate() {
-        let dist = 8 - k; // tips[8] is HEAD (distance 0), tips[0] is distance 8
-        repo.git(&["update-ref", &format!("refs/remotes/origin/d{dist}"), tip]);
-    }
+    // A stale local base loses to the origin tracking ref (`specs/config.md`).
+    repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
     let local = pr_local(repo.path(), None).expect("pr_local");
-    // 9 tips + local = 10 names; the cap keeps the 7 nearest tips plus the local name.
-    assert_eq!(local.candidates, ["d0", "d1", "d2", "d3", "d4", "d5", "d6", "work"]);
+    assert_eq!(local.base_oid.as_deref(), Some(head(&repo).as_str()));
+    assert!(local.points.is_empty(), "everything is base history under the fresh origin ref");
 }
 
 #[test]
@@ -221,14 +329,15 @@ fn detached_head_and_unborn_branch_are_clean_absences() {
     let repo = worktree();
     repo.git(&["switch", "-q", "--detach", "HEAD"]);
     let local = pr_local(repo.path(), None).expect("pr_local");
-    assert!(local.candidates.is_empty(), "detached HEAD derives no candidates");
+    assert!(local.detached, "detached HEAD is its own state");
+    assert!(local.points.is_empty());
 
-    // A fresh `git init`: a branch with no commits. The local name is still a candidate;
-    // there is no HEAD to compare tips against.
+    // A fresh `git init`: a branch with no commits, nothing published.
     let fresh = Repo::init();
     let local = pr_local(fresh.path(), None).expect("pr_local");
     assert_eq!(local.head_oid, None);
-    assert_eq!(local.candidates, ["main"]);
+    assert!(!local.detached);
+    assert!(local.points.is_empty());
 }
 
 #[test]
@@ -236,12 +345,10 @@ fn a_missing_origin_is_absence_but_a_non_repo_is_failure() {
     let repo = Repo::init();
     repo.write("a.txt", "one\n");
     repo.commit_all("base");
-    assert_eq!(
-        fetch_input(repo.path(), None, &defaults()).expect("fetch input").repository,
-        RepositoryIdentity::Missing,
-        "no origin remote is a clean absence"
-    );
-    assert_eq!(pr_local(repo.path(), None).expect("pr_local").candidates, ["main"]);
+    let input = fetch_input(repo.path(), None, &defaults()).expect("fetch input");
+    assert_eq!(input.repository, RepositoryIdentity::Missing, "no origin is a clean absence");
+    assert_eq!(input.origin_repository, None);
+    assert!(pr_local(repo.path(), None).expect("pr_local").points.is_empty());
 
     let dir = tempfile::tempdir().unwrap();
     assert!(pr_local(dir.path(), None).is_err(), "a non-repo directory is a failure");
@@ -265,29 +372,27 @@ fn fetch_input_uses_instead_of_rewrite_and_ignores_pushurl() {
 #[test]
 fn fetch_input_changes_only_with_derived_query_state() {
     let repo = worktree();
+    repo.git(&["update-ref", "refs/remotes/origin/published", "HEAD"]);
     let first = fetch_input(repo.path(), None, &defaults()).unwrap();
     assert_eq!(fetch_input(repo.path(), Some("main"), &defaults()).unwrap(), first);
 
-    repo.git(&["update-ref", "refs/remotes/origin/published", "HEAD"]);
-    let candidate_changed = fetch_input(repo.path(), None, &defaults()).unwrap();
-    assert_ne!(candidate_changed, first);
-    assert!(candidate_changed.candidates.contains(&"published".to_string()));
+    // A pushed name at the same tip joins the point's names.
+    repo.git(&["update-ref", "refs/remotes/origin/renamed", "HEAD"]);
+    let names_changed = fetch_input(repo.path(), None, &defaults()).unwrap();
+    assert_ne!(names_changed, first);
 
+    // A new commit moves the pinned HEAD (the point stays at the published tip).
     repo.write("new.txt", "new\n");
     repo.commit_all("new head");
     let head_changed = fetch_input(repo.path(), None, &defaults()).unwrap();
-    assert_ne!(head_changed, candidate_changed);
+    assert_ne!(head_changed, names_changed);
 
+    // A different base pin changes the input.
     let config_dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        config_dir.path().join("config.toml"),
-        "base_branches = [\"origin/develop\", \"develop\"]\n",
-    )
-    .unwrap();
+    std::fs::write(config_dir.path().join("config.toml"), "base_branches = [\"work\"]\n").unwrap();
     let custom = plugin_config_in(config_dir.path()).unwrap();
     let base_changed = fetch_input(repo.path(), None, &custom).unwrap();
     assert_ne!(base_changed, head_changed);
-    assert_ne!(base_changed.candidates, head_changed.candidates);
 }
 
 #[test]

@@ -1,0 +1,125 @@
+{
+ "meta": {
+  "binary": "target/release/herdr-reviewr",
+  "binary_mtime": 1784372637,
+  "source_rev": "eba5973",
+  "cols": 160,
+  "rows": 45,
+  "quiet_ms": 300,
+  "timestamp": "2026-07-18T13:03:58"
+ },
+ "runs": [
+  {
+   "label": "fixture",
+   "repo": "/var/folders/1g/qfv0jsqj5jl2y1npdksp1zyr0000gn/T/reviewr-bench-fixture",
+   "iterations": 6,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold": {
+      "first_ms": 94.0,
+      "painted_ms": 94.1
+     },
+     "first_byte": {
+      "n": 6,
+      "min": 0.2,
+      "median": 0.7,
+      "p95": 94.0,
+      "max": 94.0
+     },
+     "painted": {
+      "n": 6,
+      "min": 68.2,
+      "median": 106.5,
+      "p95": 116.0,
+      "max": 116.0
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold": {
+      "first_ms": 0.7,
+      "painted_ms": 99.6
+     },
+     "first_byte": {
+      "n": 6,
+      "min": 0.3,
+      "median": 0.6,
+      "p95": 0.7,
+      "max": 0.7
+     },
+     "painted": {
+      "n": 6,
+      "min": 62.4,
+      "median": 99.6,
+      "p95": 111.1,
+      "max": 111.1
+     }
+    },
+    {
+     "scenario": "tab_enter_all_files_then_f",
+     "cold": {
+      "first_ms": 0.3,
+      "painted_ms": 75.0
+     },
+     "first_byte": {
+      "n": 6,
+      "min": 0.2,
+      "median": 0.3,
+      "p95": 0.5,
+      "max": 0.5
+     },
+     "painted": {
+      "n": 6,
+      "min": 75.0,
+      "median": 78.1,
+      "p95": 86.6,
+      "max": 86.6
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold": {
+      "first_ms": 14.4,
+      "painted_ms": 14.5
+     },
+     "first_byte": {
+      "n": 6,
+      "min": 13.6,
+      "median": 14.4,
+      "p95": 24.1,
+      "max": 24.1
+     },
+     "painted": {
+      "n": 6,
+      "min": 13.6,
+      "median": 14.5,
+      "p95": 24.2,
+      "max": 24.2
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold": {
+      "first_ms": 0.3,
+      "painted_ms": 0.3
+     },
+     "first_byte": {
+      "n": 6,
+      "min": 0.2,
+      "median": 0.3,
+      "p95": 0.5,
+      "max": 0.5
+     },
+     "painted": {
+      "n": 6,
+      "min": 0.2,
+      "median": 0.3,
+      "p95": 0.5,
+      "max": 0.5
+     }
+    }
+   ]
+  }
+ ]
+}

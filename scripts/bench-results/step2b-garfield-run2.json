@@ -1,0 +1,207 @@
+{
+ "meta": {
+  "binary": "target/release/herdr-reviewr",
+  "binary_mtime": 1784371937,
+  "source_rev": "de33297",
+  "cols": 160,
+  "rows": 45,
+  "quiet_ms": 300,
+  "timestamp": "2026-07-18T12:52:17"
+ },
+ "runs": [
+  {
+   "label": "fixture",
+   "repo": "/var/folders/1g/qfv0jsqj5jl2y1npdksp1zyr0000gn/T/reviewr-bench-fixture",
+   "iterations": 8,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold_first_ms": 113.1,
+     "first_byte": {
+      "n": 8,
+      "min": 0.3,
+      "median": 0.4,
+      "p95": 113.1,
+      "max": 113.1
+     },
+     "painted": {
+      "n": 8,
+      "min": 83.9,
+      "median": 113.2,
+      "p95": 134.9,
+      "max": 134.9
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold_first_ms": 0.5,
+     "first_byte": {
+      "n": 8,
+      "min": 0.3,
+      "median": 0.5,
+      "p95": 0.7,
+      "max": 0.7
+     },
+     "painted": {
+      "n": 8,
+      "min": 85.8,
+      "median": 103.3,
+      "p95": 149.1,
+      "max": 149.1
+     }
+    },
+    {
+     "scenario": "tab_enter_all_files_then_f",
+     "cold_first_ms": 112.4,
+     "first_byte": {
+      "n": 8,
+      "min": 0.3,
+      "median": 0.4,
+      "p95": 1.1,
+      "max": 1.1
+     },
+     "painted": {
+      "n": 8,
+      "min": 89.4,
+      "median": 113.1,
+      "p95": 146.6,
+      "max": 146.6
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold_first_ms": 30.4,
+     "first_byte": {
+      "n": 8,
+      "min": 19.9,
+      "median": 29.1,
+      "p95": 33.6,
+      "max": 33.6
+     },
+     "painted": {
+      "n": 8,
+      "min": 20.0,
+      "median": 29.2,
+      "p95": 33.7,
+      "max": 33.7
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold_first_ms": 0.5,
+     "first_byte": {
+      "n": 8,
+      "min": 0.4,
+      "median": 0.5,
+      "p95": 0.7,
+      "max": 0.7
+     },
+     "painted": {
+      "n": 8,
+      "min": 0.4,
+      "median": 0.5,
+      "p95": 0.7,
+      "max": 0.7
+     }
+    }
+   ]
+  },
+  {
+   "label": "landing",
+   "repo": "/Users/persijano/me/proj-extruct/landing",
+   "iterations": 8,
+   "results": [
+    {
+     "scenario": "tab_enter_all_files",
+     "cold_first_ms": 160.2,
+     "first_byte": {
+      "n": 8,
+      "min": 0.9,
+      "median": 3.1,
+      "p95": 160.2,
+      "max": 160.2
+     },
+     "painted": {
+      "n": 8,
+      "min": 121.6,
+      "median": 150.4,
+      "p95": 187.5,
+      "max": 187.5
+     }
+    },
+    {
+     "scenario": "tab_enter_changes",
+     "cold_first_ms": 0.6,
+     "first_byte": {
+      "n": 8,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 0.7,
+      "max": 0.7
+     },
+     "painted": {
+      "n": 8,
+      "min": 82.4,
+      "median": 100.7,
+      "p95": 109.2,
+      "max": 109.2
+     }
+    },
+    {
+     "scenario": "tab_enter_all_files_then_f",
+     "cold_first_ms": 150.8,
+     "first_byte": {
+      "n": 8,
+      "min": 0.4,
+      "median": 0.7,
+      "p95": 2.6,
+      "max": 2.6
+     },
+     "painted": {
+      "n": 8,
+      "min": 150.8,
+      "median": 171.0,
+      "p95": 261.2,
+      "max": 261.2
+     }
+    },
+    {
+     "scenario": "file_next_changes",
+     "cold_first_ms": 0.7,
+     "first_byte": {
+      "n": 8,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 0.7,
+      "max": 0.7
+     },
+     "painted": {
+      "n": 8,
+      "min": 0.2,
+      "median": 0.4,
+      "p95": 0.7,
+      "max": 0.7
+     }
+    },
+    {
+     "scenario": "file_next_all_files",
+     "cold_first_ms": 30.2,
+     "first_byte": {
+      "n": 8,
+      "min": 0.5,
+      "median": 3.2,
+      "p95": 383.6,
+      "max": 383.6
+     },
+     "painted": {
+      "n": 8,
+      "min": 0.8,
+      "median": 3.6,
+      "p95": 383.9,
+      "max": 383.9
+     }
+    }
+   ]
+  }
+ ]
+}

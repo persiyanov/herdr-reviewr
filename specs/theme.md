@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-29
-Last edited: 2026-07-10
+Last edited: 2026-07-20
 ---
 
 # Theme
@@ -41,6 +41,7 @@ The derived slots:
 | `subtext0`                    | `text`, dimmed toward `base`              | secondary text                   |
 | `del_bg` / `ins_bg`           | `red` / `green` blended over `base`       | deletion / insertion row tint    |
 | `emph_del_bg` / `emph_ins_bg` | `red` / `green`, a stronger blend         | word-emphasis fill               |
+| `match_hl`                    | `yellow`, a stronger blend                | search match highlight           |
 
 The theme set:
 

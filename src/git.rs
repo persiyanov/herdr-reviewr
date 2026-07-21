@@ -179,9 +179,9 @@ fn split_remote(url: &str) -> Option<(RemoteTransport, &str, &str, bool)> {
     }
 }
 
-// --- PR-fetch local reads (candidate branches) -----------------------------------
+// --- PR-fetch local reads (publication points) ------------------------------------
 //
-// See `specs/forge-host.md` "Resolution" / "Candidate branches". Repository selection and
+// See `specs/forge-host.md` "Resolution". Repository selection and
 // branch-state derivation both use the same failure contract: a git command that *fails* is a
 // transient [`GitFail`], never read as absence. The caller distinguishes a target read failure
 // from a later branch-state failure so only an unproven target replaces the visible snapshot.
@@ -233,55 +233,228 @@ fn git_strict(repo: &Path, args: &[&str]) -> Result<String, GitFail> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrFetchInput {
     pub repository: RepositoryIdentity,
+    /// The `origin` repository, when it is a usable GitHub identity — the home of the
+    /// worktree's published commits, so the association query runs there.
+    pub origin_repository: Option<RepoTarget>,
+    /// The locally derived pins, points, and tiebreak, read in the same pass.
+    pub local: PrLocalState,
+}
+
+/// One published commit that nominates PRs, with the `origin` branch names at its tip
+/// (the closed-unmerged epilogue's exact-identity lookup).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicationPoint {
+    pub oid: String,
+    pub names: Vec<String>,
+}
+
+/// The local identity one PR fetch derives: pins, publication points, and the upstream name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PrLocalState {
     /// `HEAD` pinned to an OID at the start of the pass; every ancestry test, distance,
     /// and the `sync` count use this pin, so one fetch reads one consistent local state.
     pub head_oid: Option<String>,
-    /// The candidate branch names, in derivation order. Empty iff the worktree is on a
-    /// detached `HEAD` (a branch always contributes at least its own name).
-    pub candidates: Vec<String>,
+    /// The winning base entry pinned to an OID — the paint guard keys on it, so a base
+    /// moving mid-fetch never paints a stale verdict. Point filtering uses every resolved
+    /// base, not this pin alone.
+    pub base_oid: Option<String>,
+    /// The publication points: the nearest ancestors of the pinned `HEAD` present on
+    /// `origin`, each beyond every resolved base. Empty means no reviewable work is published.
+    pub points: Vec<PublicationPoint>,
+    /// The published-but-absorbed candidates: base-history commits this worktree is
+    /// parked on, kept only when no point survives. A merged PR whose head is exactly
+    /// one of them still resolves as the epilogue (`specs/forge-host.md`).
+    pub absorbed: Vec<String>,
+    /// The pinned `HEAD` nominates by exact identity: it sits outside every resolved
+    /// base's history, so a PR whose head is exactly this commit is provably this
+    /// worktree's — the exact-identity epilogue (`specs/forge-host.md`).
+    pub head_nominates: bool,
+    /// The recorded upstream's bare branch name, the last open-PR tiebreak. A record
+    /// naming a configured base is tracking, not publication, and is dropped.
+    pub upstream: Option<String>,
+    /// `HEAD` is detached — post-merge cleanup, not a review seat.
+    pub detached: bool,
 }
 
-/// The local branch identity and candidate publication names.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PrLocalState {
-    pub head_oid: Option<String>,
-    pub candidates: Vec<String>,
-}
-
-/// Derive the pinned `HEAD` and candidate branches (`specs/forge-host.md`).
+/// Derive the pinned `HEAD`, pinned bases, and publication points (`specs/forge-host.md`).
 pub fn pr_local(
     repo: &Path,
     base_flag: Option<&str>,
     config_bases: &[String],
 ) -> Result<PrLocalState, GitFail> {
     let Some(branch) = git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])? else {
-        // Detached HEAD — post-merge cleanup, not a review seat; nothing to publish.
-        return Ok(PrLocalState { head_oid: None, candidates: Vec::new() });
+        return Ok(PrLocalState { detached: true, ..PrLocalState::default() });
     };
     let head_oid = git_tristate(repo, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?;
-    let bases = base_names(base_flag, config_bases);
-    let push_dest = push_destination(repo, &branch, &bases)?;
-    let tips = match &head_oid {
-        Some(head) => {
-            let base_oid = pin_base(repo, base_flag, config_bases)?;
-            remote_candidates(repo, head, base_oid.as_deref(), &bases)?
-        }
-        None => Vec::new(), // an unborn branch has no commits to compare against
+    let bases = resolve_bases(repo, base_flag, config_bases)?;
+    let (points, absorbed) = match &head_oid {
+        // With no base resolvable, no point is provable (`specs/forge-host.md`).
+        Some(head) if !bases.is_empty() => publication_points(repo, head, &bases)?,
+        _ => (Vec::new(), Vec::new()),
     };
-    let candidates = candidate_order(push_dest.as_deref(), &tips, &branch);
-    Ok(PrLocalState { head_oid, candidates })
+    let head_nominates = match &head_oid {
+        Some(head) if !bases.is_empty() => beyond_all_bases(repo, head, &bases)?,
+        _ => false,
+    };
+    let upstream = recorded_upstream(repo, &branch, base_flag, config_bases)?;
+    Ok(PrLocalState {
+        head_oid,
+        base_oid: bases.into_iter().next(),
+        points,
+        absorbed,
+        head_nominates,
+        upstream,
+        detached: false,
+    })
 }
 
-/// Resolve from a readable supported `upstream`; unusable identities fall back, read errors do not.
-pub(crate) fn repository_identity(
+/// Every resolved base OID in precedence order, deduped: the `--base` flag (verbatim rev
+/// first, then as a canonical entry), each canonical `config_bases` entry, then the default
+/// branch `origin/HEAD` names (`specs/review-model.md`). Points must lie beyond all of them.
+fn resolve_bases(
+    repo: &Path,
+    base_flag: Option<&str>,
+    config_bases: &[String],
+) -> Result<Vec<String>, GitFail> {
+    let mut out: Vec<String> = Vec::new();
+    let push = |oid: Option<String>, out: &mut Vec<String>| {
+        if let Some(oid) = oid
+            && !out.contains(&oid)
+        {
+            out.push(oid);
+        }
+    };
+    if let Some(flag) = base_flag.filter(|b| !b.is_empty()) {
+        // The flag is the power-user escape hatch: any rev works verbatim (a SHA, a tag,
+        // `upstream/main`), and a branch-entry spelling falls back to canonical resolution.
+        let probe = format!("{flag}^{{commit}}");
+        let verbatim = git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])?;
+        if let Some(oid) = verbatim {
+            push(Some(oid), &mut out);
+        } else {
+            let entry = crate::config::canonical_base(flag);
+            push(resolve_base_entry(repo, &entry)?, &mut out);
+        }
+    }
+    for entry in config_bases {
+        push(resolve_base_entry(repo, entry)?, &mut out);
+    }
+    let default_branch = git_tristate(
+        repo,
+        &["rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD^{commit}"],
+    )?;
+    push(default_branch, &mut out);
+    Ok(out)
+}
+
+/// The `origin` remote-tracking tips as `(OID, bare name)`, `origin/HEAD` excluded — one
+/// listing per pass serves every point's names and the published-at-all short-circuit.
+fn origin_tips(repo: &Path) -> Result<Vec<(String, String)>, GitFail> {
+    let out = git_strict(
+        repo,
+        &["for-each-ref", "refs/remotes/origin", "--format=%(objectname) %(refname)"],
+    )?;
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let (oid, refname) = line.split_once(' ')?;
+            let name = refname.strip_prefix("refs/remotes/origin/")?;
+            (name != "HEAD").then(|| (oid.to_string(), name.to_string()))
+        })
+        .collect())
+}
+
+/// The publication points: the boundary of the unpushed range — the nearest ancestors of
+/// `head` present on any `origin/*` ref — or `head` itself when nothing is unpushed. Points
+/// that are ancestors of any resolved base prove nothing for an open PR and become
+/// `absorbed` candidates instead, kept only when no point survives — a merged PR whose
+/// head is exactly one of them is still this worktree's epilogue. Capped at 8 survivors
+/// and 4 absorbed from at most 32 boundary commits, so a merge-heavy frontier stays bounded.
+fn publication_points(
+    repo: &Path,
+    head: &str,
+    bases: &[String],
+) -> Result<(Vec<PublicationPoint>, Vec<String>), GitFail> {
+    let tips = origin_tips(repo)?;
+    if tips.is_empty() {
+        // Nothing is published at all; skip the history walk, which `--not
+        // --remotes=origin` would otherwise run unbounded.
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let out = git_strict(repo, &["rev-list", "--boundary", head, "--not", "--remotes=origin"])?;
+    let mut oids: Vec<String> = Vec::new();
+    let mut saw_unpushed = false;
+    for line in out.lines() {
+        match line.strip_prefix('-') {
+            Some(boundary) => oids.push(boundary.to_string()),
+            None if !line.is_empty() => saw_unpushed = true,
+            None => {}
+        }
+    }
+    if !saw_unpushed && oids.is_empty() {
+        // Nothing is unpushed: HEAD itself is published.
+        oids.push(head.to_string());
+    }
+    oids.truncate(32);
+    let mut points = Vec::new();
+    let mut absorbed = Vec::new();
+    for oid in oids {
+        if points.len() >= 8 {
+            break;
+        }
+        if !beyond_all_bases(repo, &oid, bases)? {
+            if absorbed.len() < 4 {
+                absorbed.push(oid);
+            }
+            continue;
+        }
+        let names =
+            tips.iter().filter(|(tip, _)| tip == &oid).map(|(_, name)| name.clone()).collect();
+        points.push(PublicationPoint { oid, names });
+    }
+    // Absorbed candidates matter only when nothing provable remains; a live point
+    // owns the resolution outright.
+    if !points.is_empty() {
+        absorbed.clear();
+    }
+    Ok((points, absorbed))
+}
+
+/// Whether `commit` is an ancestor of (or equal to) `of`.
+fn is_ancestor(repo: &Path, commit: &str, of: &str) -> Result<bool, GitFail> {
+    Ok(git_tristate(repo, &["merge-base", "--is-ancestor", commit, of])?.is_some())
+}
+
+/// Whether `oid` lies beyond every resolved base — an ancestor of none of them. A point
+/// filter and the `HEAD` nomination both ask this one question, so they never disagree.
+fn beyond_all_bases(repo: &Path, oid: &str, bases: &[String]) -> Result<bool, GitFail> {
+    for base in bases {
+        if is_ancestor(repo, oid, base)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The target and origin identities from one read of each remote. The target resolves from
+/// a readable supported `upstream`, falling back to `origin`; unusable identities fall
+/// back, read errors do not. The origin identity rides along for the association query —
+/// the worktree's commits live where it pushes (`specs/forge-host.md`). A usable `upstream`
+/// already fixes the target, so an `origin` read that fails then costs only that fetch's
+/// association source, not the whole read.
+pub(crate) fn remote_identities(
     repo: &Path,
     github_host: Option<&str>,
-) -> Result<RepositoryIdentity, GitFail> {
+) -> Result<(RepositoryIdentity, Option<RepoTarget>), GitFail> {
     let upstream = remote_identity(repo, "upstream", github_host)?;
-    if matches!(upstream, RepositoryIdentity::Repository(_)) {
-        return Ok(upstream);
-    }
-    remote_identity(repo, "origin", github_host)
+    let origin = remote_identity(repo, "origin", github_host);
+    let origin_target = match &origin {
+        Ok(RepositoryIdentity::Repository(target)) => Some(target.clone()),
+        _ => None,
+    };
+    let repository =
+        if matches!(upstream, RepositoryIdentity::Repository(_)) { upstream } else { origin? };
+    Ok((repository, origin_target))
 }
 
 /// Classify one rewritten primary fetch URL. A missing remote is a clean state; every other
@@ -305,34 +478,11 @@ fn remote_identity(
     Err(GitFail(format!("git {args:?}: {}", stderr.trim())))
 }
 
-/// The base-branch names candidates are excluded against: the `--base` flag plus the
-/// fetch's `config_bases` snapshot, each normalised to its bare branch name (`origin/`
-/// stripped).
-fn base_names(base_flag: Option<&str>, config_bases: &[String]) -> HashSet<String> {
-    base_flag
-        .into_iter()
-        .filter(|b| !b.is_empty())
-        .chain(config_bases.iter().map(String::as_str))
-        .map(|b| {
-            b.strip_prefix("refs/remotes/origin/")
-                .or_else(|| b.strip_prefix("refs/heads/"))
-                .or_else(|| b.strip_prefix("origin/"))
-                .unwrap_or(b)
-                .to_string()
-        })
-        .collect()
-}
-
-/// The base ref pinned to an OID: the `--base` flag then each `config_bases` entry, first
-/// hit wins. `None` when no base ref resolves — step 2 then keeps only equal/descendant tips.
-fn pin_base(
-    repo: &Path,
-    base_flag: Option<&str>,
-    config_bases: &[String],
-) -> Result<Option<String>, GitFail> {
-    let flag = base_flag.filter(|b| !b.is_empty());
-    for cand in flag.into_iter().chain(config_bases.iter().map(String::as_str)) {
-        let probe = format!("{cand}^{{commit}}");
+/// One canonical `base_branches` entry pinned to an OID: `refs/remotes/origin/<name>`,
+/// then `refs/heads/<name>` (`specs/config.md`).
+fn resolve_base_entry(repo: &Path, name: &str) -> Result<Option<String>, GitFail> {
+    for prefix in ["refs/remotes/origin/", "refs/heads/"] {
+        let probe = format!("{prefix}{name}^{{commit}}");
         if let Some(oid) = git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])? {
             return Ok(Some(oid));
         }
@@ -340,17 +490,18 @@ fn pin_base(
     Ok(None)
 }
 
-/// git's recorded upstream for `branch` — the record `git push -u` / `--track` writes
-/// (`branch.<name>.remote`/`merge`) — as a bare branch name, or `None` when unset, not
-/// under a remote, or naming a base. `for-each-ref` exits 0 with an empty field when
-/// unset, so absence never reads as failure (`rev-parse @{u}` exits 128 for both).
-/// `%(push)` is deliberately not consulted: with any remote present git *computes* a
-/// destination equal to the local branch name even with nothing recorded, which would
-/// shadow a real upstream and adds nothing beyond the local-name candidate.
-fn push_destination(
+/// git's recorded upstream for `branch` (`branch.<name>.remote`/`merge`) as a bare branch
+/// name, or `None` when unset, not under a remote, or naming a configured base — the record
+/// `git switch -c work origin/main` auto-writes is tracking, not publication. `for-each-ref`
+/// exits 0 with an empty field when unset, so absence never reads as failure (`rev-parse
+/// @{u}` exits 128 for both). `%(push)` is deliberately not consulted: with any remote
+/// present git *computes* a destination even with nothing recorded, which would shadow a
+/// real record.
+fn recorded_upstream(
     repo: &Path,
     branch: &str,
-    bases: &HashSet<String>,
+    base_flag: Option<&str>,
+    config_bases: &[String],
 ) -> Result<Option<String>, GitFail> {
     let out = git_strict(
         repo,
@@ -359,83 +510,9 @@ fn push_destination(
     let dest = out.lines().next().unwrap_or("").trim();
     let Some(rest) = dest.strip_prefix("refs/remotes/") else { return Ok(None) };
     let Some((_, name)) = rest.split_once('/') else { return Ok(None) };
-    Ok((!name.is_empty() && !bases.contains(name)).then(|| name.to_string()))
-}
-
-/// Step-2 candidates: `origin` remote-tracking branches whose tip is ancestry-comparable
-/// with the pinned `head` — equal, an ancestor carrying non-base work, or a descendant —
-/// as `(bare name, HEAD...tip distance)`. Three batched `for-each-ref` calls (descendants
-/// ∪ equal via `--contains`, ancestors via `--merged head` minus `--merged base`), then one
-/// `rev-list --count` per survivor — fine for the handful of branches that ever qualify.
-fn remote_candidates(
-    repo: &Path,
-    head: &str,
-    base_oid: Option<&str>,
-    bases: &HashSet<String>,
-) -> Result<Vec<(String, u32)>, GitFail> {
-    let list = |extra: &[&str]| -> Result<HashSet<String>, GitFail> {
-        let mut args = vec!["for-each-ref", "refs/remotes/origin", "--format=%(refname)"];
-        args.extend_from_slice(extra);
-        Ok(git_strict(repo, &args)?.lines().map(str::to_string).collect())
-    };
-    let descendants = list(&["--contains", head])?;
-    let survivors: HashSet<String> = match base_oid {
-        Some(base) => {
-            let ancestors = list(&["--merged", head])?;
-            let on_base = list(&["--merged", base])?;
-            descendants.union(&(&ancestors - &on_base)).cloned().collect()
-        }
-        // With no base, "an ancestor carrying non-base work" is undefined; keep only
-        // the equal and descendant tips (specs/forge-host.md).
-        None => descendants,
-    };
-    let mut out = Vec::new();
-    for refname in survivors {
-        let Some(name) = refname.strip_prefix("refs/remotes/origin/") else { continue };
-        if name == "HEAD" || bases.contains(name) {
-            continue;
-        }
-        let count = git_strict(repo, &["rev-list", "--count", &format!("{head}...{refname}")])?;
-        let dist = count.trim().parse().map_err(|_| {
-            GitFail(format!("rev-list --count returned non-numeric output for {refname}"))
-        })?;
-        out.push((name.to_string(), dist));
-    }
-    Ok(out)
-}
-
-/// Assemble the derivation-ordered candidate set: the push destination, then remote tips
-/// nearest-first (distance, then name), then the local branch. Dedup keeps the first
-/// occurrence. The set caps at 8 by evicting remote tips farthest-first; the push
-/// destination and the local name are never evicted (`specs/forge-host.md`).
-fn candidate_order(
-    push_dest: Option<&str>,
-    remote_tips: &[(String, u32)],
-    local_branch: &str,
-) -> Vec<String> {
-    const CAP: usize = 8;
-    let mut tips: Vec<&(String, u32)> = remote_tips.iter().collect();
-    tips.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-    let mut out: Vec<String> = Vec::new();
-    for name in push_dest
-        .into_iter()
-        .chain(tips.iter().map(|(n, _)| n.as_str()))
-        .chain(std::iter::once(local_branch))
-    {
-        if !out.iter().any(|have| have == name) {
-            out.push(name.to_string());
-        }
-    }
-    // Evict from the tail (the farthest tips), skipping the protected names wherever
-    // dedup left them.
-    let mut i = out.len();
-    while out.len() > CAP && i > 0 {
-        i -= 1;
-        if Some(out[i].as_str()) != push_dest && out[i] != local_branch {
-            out.remove(i);
-        }
-    }
-    out
+    let names_a_base = config_bases.iter().any(|entry| entry == name)
+        || base_flag.is_some_and(|flag| crate::config::canonical_base(flag) == name);
+    Ok((!name.is_empty() && !names_a_base).then(|| name.to_string()))
 }
 
 /// Commits `local` (the pinned `HEAD` OID) is ahead and behind `other` (the PR head OID).
@@ -463,27 +540,10 @@ pub fn ahead_behind_oids(
     Ok(Some((ahead, behind)))
 }
 
-/// Whether `git_ref` resolves in `repo`.
-fn ref_exists(repo: &Path, git_ref: &str) -> bool {
-    git_ok(repo, &["rev-parse", "--verify", "--quiet", git_ref])
-}
-
-/// The base ref for branch scope: the `--base` flag if it resolves, otherwise the first
-/// `candidates` entry that resolves (`specs/review-model.md`). A flag that names no existing
-/// ref is skipped, falling through to the candidates.
-fn base_ref(repo: &Path, base: Option<&str>, candidates: &[String]) -> Option<String> {
-    if let Some(b) = base
-        && !b.is_empty()
-        && ref_exists(repo, b)
-    {
-        return Some(b.to_string());
-    }
-    candidates.iter().find(|cand| ref_exists(repo, cand)).cloned()
-}
-
-/// The merge-base commit of `base` and `HEAD` using one base-config snapshot.
+/// The merge-base commit of the winning base and `HEAD` using one base-config snapshot.
+/// Base entries resolve per `specs/review-model.md` precedence, `origin/HEAD` last.
 pub fn merge_base(repo: &Path, base: Option<&str>, config_bases: &[String]) -> Option<String> {
-    let base = base_ref(repo, base, config_bases)?;
+    let base = resolve_bases(repo, base, config_bases).ok()?.into_iter().next()?;
     git_line(repo, &["merge-base", &base, "HEAD"])
 }
 
@@ -660,23 +720,21 @@ pub struct WorktreeEntry {
     pub is_dir: bool,
 }
 
-/// Every entry in the worktree for the `All files` tab (specs/file-list.md): tracked files
-/// (`git ls-files`), untracked-not-ignored files, and the ignored entries from
-/// `git status --ignored` — a wholly-ignored directory collapsed to one `is_dir` placeholder,
-/// an individually-ignored file as itself. `.git` is never reported. Deduped and sorted; `-z`
-/// keeps paths with spaces or special characters verbatim.
+/// Every entry in the worktree for the `All files` tab (specs/file-list.md): tracked and
+/// untracked-not-ignored files from one `ls-files --cached --others` pass, and the ignored
+/// entries from [`ignored_entries`] — a wholly-ignored directory collapsed to one `is_dir`
+/// placeholder, an individually-ignored file as itself. `.git` is never reported. Deduped and
+/// sorted; `-z` keeps paths with spaces or special characters verbatim.
 pub fn all_files(repo: &Path) -> Result<Vec<WorktreeEntry>> {
-    let tracked = git(repo, &["ls-files", "-z"])?;
+    // One spawn for tracked + untracked. `--others --exclude-standard` applies the same
+    // standard exclude rules as the `status` untracked pass `changed_files` runs, so the
+    // untracked sets match without a status walk.
+    let listed = git(repo, &["ls-files", "--cached", "--others", "--exclude-standard", "-z"])?;
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for path in tracked.split('\0').filter(|s| !s.is_empty()) {
+    for path in listed.split('\0').filter(|s| !s.is_empty()) {
         if seen.insert(path.to_string()) {
             out.push(WorktreeEntry { path: path.to_string(), ignored: false, is_dir: false });
-        }
-    }
-    for path in untracked(repo)? {
-        if seen.insert(path.clone()) {
-            out.push(WorktreeEntry { path, ignored: false, is_dir: false });
         }
     }
     for (path, is_dir) in ignored_entries(repo)? {
@@ -688,16 +746,29 @@ pub fn all_files(repo: &Path) -> Result<Vec<WorktreeEntry>> {
     Ok(out)
 }
 
-/// The ignored entries from `git status --ignored`: a wholly-ignored directory comes back as
-/// `dir/` (mapped to `is_dir = true`), an individually-ignored file as itself.
+/// The ignored entries: a wholly-ignored directory comes back as `dir/` (mapped to
+/// `is_dir = true`), an individually-ignored file as itself.
+///
+/// `ls-files --directory` prunes at each ignored directory instead of walking inside it, where
+/// `git status --ignored` enumerates the whole tree — seconds against a large `node_modules`.
+/// `--no-empty-directory` matches `status`'s output exactly, which skips empty ignored dirs.
 fn ignored_entries(repo: &Path) -> Result<Vec<(String, bool)>> {
-    let status = git(repo, &["status", "--ignored=traditional", "--porcelain", "-z"])?;
-    // Only `!!` records; tracked/untracked come from the passes above. A trailing `/` marks a
-    // wholly-ignored directory (mapped to `is_dir`), anything else an individually-ignored file.
-    Ok(porcelain_records(&status)
-        .into_iter()
-        .filter(|(xy, _)| *xy == "!!")
-        .map(|(_, path)| match path.strip_suffix('/') {
+    let out = git(
+        repo,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "--no-empty-directory",
+            "-z",
+        ],
+    )?;
+    Ok(out
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(|path| match path.strip_suffix('/') {
             Some(dir) => (dir.to_string(), true),
             None => (path.to_string(), false),
         })
@@ -741,8 +812,13 @@ fn assemble(
     }
 
     if include_untracked {
-        // Untracked-not-ignored files list as additions.
-        for path in untracked(repo)? {
+        // Untracked-not-ignored files list as additions. One `ls-files --others` pass — the
+        // same definition of untracked `all_files` uses, so the two views can't disagree.
+        // `-z` keeps paths with spaces or special characters verbatim, and files inside a
+        // brand-new directory list individually (.gitignore still applies).
+        let others = git(repo, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+        for path in others.split('\0').filter(|s| !s.is_empty()) {
+            let path = path.to_string();
             if seen.insert(path.clone()) {
                 let additions = untracked_additions(repo, &path);
                 files.push(ChangedFile {
@@ -758,40 +834,6 @@ fn assemble(
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
-}
-
-/// Untracked file paths from `git status --porcelain -z --untracked-files=all`. The `-z`
-/// form is NUL-delimited and never quotes or escapes a path, so names with spaces or special
-/// characters survive verbatim — no trimming or unquoting. `--untracked-files=all` lists each
-/// file inside a brand-new directory instead of collapsing it to one `dir/` entry, so the
-/// files in a freshly-created folder are reviewable individually (.gitignore still applies).
-fn untracked(repo: &Path) -> Result<Vec<String>> {
-    let status = git(repo, &["status", "--porcelain", "-z", "--untracked-files=all"])?;
-    Ok(porcelain_records(&status)
-        .into_iter()
-        .filter(|(xy, _)| *xy == "??")
-        .map(|(_, path)| path.to_string())
-        .collect())
-}
-
-/// The `(xy, path)` of each `git status --porcelain -z` record. Each record is `XY␠PATH`; the
-/// first three bytes (status + space) are ASCII, so the slices land on char boundaries. A
-/// rename/copy carries its source in a second NUL field, consumed here so records stay aligned.
-/// Callers keep the status codes they want (`??` for untracked, `!!` for ignored).
-fn porcelain_records(status: &str) -> Vec<(&str, &str)> {
-    let mut out = Vec::new();
-    let mut it = status.split('\0');
-    while let Some(entry) = it.next() {
-        if entry.len() < 3 {
-            continue; // trailing empty field, or a malformed short record
-        }
-        let xy = &entry[..2];
-        if xy.contains('R') || xy.contains('C') {
-            it.next();
-        }
-        out.push((xy, &entry[3..]));
-    }
-    out
 }
 
 /// Addition count of an untracked file: its line count, which is what `git diff` against
@@ -878,48 +920,9 @@ fn parse_name_status(out: &str) -> Vec<(ChangeKind, String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeKind, RepoTarget, RepositoryIdentity, candidate_order, classify_remote,
-        parse_name_status, parse_numstat,
+        ChangeKind, RepoTarget, RepositoryIdentity, classify_remote, parse_name_status,
+        parse_numstat,
     };
-
-    #[test]
-    fn candidates_order_push_dest_then_nearest_tips_then_local() {
-        let tips = vec![("far".to_string(), 9), ("near".to_string(), 1), ("mid".to_string(), 4)];
-        assert_eq!(
-            candidate_order(Some("pub"), &tips, "work"),
-            ["pub", "near", "mid", "far", "work"]
-        );
-        // No push destination — tips lead; equal distances order lexicographically.
-        let tied = vec![("b".to_string(), 2), ("a".to_string(), 2)];
-        assert_eq!(candidate_order(None, &tied, "work"), ["a", "b", "work"]);
-    }
-
-    #[test]
-    fn candidates_dedup_keeps_the_first_occurrence() {
-        // The push destination, a tip, and the local branch can all name one branch.
-        let tips = vec![("pub".to_string(), 0), ("other".to_string(), 3)];
-        assert_eq!(candidate_order(Some("pub"), &tips, "pub"), ["pub", "other"]);
-    }
-
-    #[test]
-    fn candidates_cap_evicts_farthest_tips_never_the_protected_names() {
-        // 10 tips + push dest + local = 12 names; the cap keeps the 6 nearest tips.
-        let tips: Vec<(String, u32)> = (0..10).map(|i| (format!("t{i}"), i)).collect();
-        let out = candidate_order(Some("pub"), &tips, "work");
-        assert_eq!(out.len(), 8);
-        assert_eq!(out[0], "pub");
-        assert_eq!(out.last().unwrap(), "work");
-        assert_eq!(&out[1..7], ["t0", "t1", "t2", "t3", "t4", "t5"]);
-        // The local name survives even when dedup folded it into the tip segment as the
-        // farthest entry — eviction must skip it, not treat it as a tip.
-        let tips: Vec<(String, u32)> = (0..9).map(|i| (format!("t{i}"), i)).collect();
-        let mut tips = tips;
-        tips.push(("work".to_string(), 99));
-        let out = candidate_order(None, &tips, "work");
-        assert_eq!(out.len(), 8);
-        assert!(out.contains(&"work".to_string()));
-        assert_eq!(&out[..7], ["t0", "t1", "t2", "t3", "t4", "t5", "t6"]);
-    }
 
     #[test]
     fn repository_identity_parses_github_and_enterprise_remote_forms() {
@@ -1035,17 +1038,6 @@ mod tests {
         assert!(RepoTarget::new("github.com", "owner/name", "repo").is_none());
         assert!(RepoTarget::new("github.com", "owner", "bad\nname").is_none());
         assert!(RepoTarget::new("github.com", "owner", "bad\u{202e}name").is_none());
-    }
-
-    #[test]
-    fn configured_base_refs_normalize_to_bare_names() {
-        assert_eq!(
-            super::base_names(
-                Some("refs/heads/release"),
-                &["refs/remotes/origin/main".to_string(), "origin/develop".to_string(),],
-            ),
-            ["release", "main", "develop"].into_iter().map(str::to_string).collect()
-        );
     }
 
     #[test]

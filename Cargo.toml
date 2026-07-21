@@ -1,6 +1,6 @@
 [package]
 name = "herdr-reviewr"
-version = "0.18.1"
+version = "0.21.0"
 edition = "2024"
 rust-version = "1.97"
 description = "A herdr-native review sidebar: browse an agent's changes and send comments back to chat, in the terminal."
@@ -13,13 +13,17 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"
+dirs = "5"
+fff-search = "0.10.0"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = { version = "3.1.1", features = ["text"] }
-syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
-toml = "0.8"
+# Dumps + fancy-regex only: no yaml-load (we read prebuilt binary syntax dumps, so the
+# unmaintained yaml-rust never enters the tree), no onig (pure-Rust regex engine).
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy", "dump-load", "plist-load"] }
+toml = "1.1"
 two-face = "0.5.1"
 unicode-width = "0.2"
 
