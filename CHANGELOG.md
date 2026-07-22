@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Windows support.** The binary runs natively on Windows (needs herdr's Windows build). Platform
+  glue is split per-OS in the manifest: the sidebar pane launches via `cmd` (the `sidebar-win`
+  entrypoint), and the toggle / open / close / auto-open glue runs a PowerShell port
+  (`herdr/sidebar.ps1`) with native JSON parsing — no `jq`. `herdr/install.ps1` downloads the
+  Windows release for `plugin install`, and the release workflow now builds
+  `x86_64-pc-windows-msvc`. On Windows the actions carry a `-win` suffix (`toggle-win`, `open-win`,
+  `close-win`) since herdr rejects duplicate ids across platforms.
+- **Windows clipboard export** via `clip`, alongside macOS `pbcopy` and Linux `wl-copy`/`xclip`/`xsel`.
+
+### Fixed
+- **`on_path` is `PATHEXT`-aware on Windows** (finds `.exe`/`.cmd`/… tools), and the PR-tab URL
+  opener uses `rundll32` there instead of `open`/`xdg-open`.
+- A `.gitattributes` keeps `*.sh` LF-only so Windows checkouts don't feed CR-terminated scripts to
+  a shell.
+
 ## [0.22.1] — 2026-07-22
 
 ### Fixed

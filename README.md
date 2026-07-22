@@ -44,10 +44,12 @@ baseline ref under `refs/reviewr/`. The **PR** tab reads GitHub and never posts.
 
 - **herdr ≥ 0.7.0** (the plugin system).
 - **git** on `PATH`.
-- A **truecolor** terminal with Unicode box-drawing. Pick a theme matching its background
-  ([Theme](#theme)).
-- **macOS or Linux.**
-- **`gh`**, authenticated — only the **PR** tab needs it.
+- A **truecolor (24-bit)** terminal with Unicode box-drawing support. Pick a theme that matches
+  its light or dark background (see [Theme](#theme)).
+- **macOS, Linux, or Windows** (Windows needs herdr's Windows build; `cmd` and PowerShell — both
+  present by default — drive the plugin's glue).
+- **`gh`** (the GitHub CLI), authenticated. Optional, only the **PR** tab needs it. Everything
+  else works without it.
 
 ## Install
 
@@ -106,7 +108,13 @@ type = "plugin_action"
 command = "persiyanov.reviewr.toggle"   # <plugin_id>.<action_id> — note the id, not the name
 ```
 
-`cmd+…` chords reach herdr. Many macOS terminals swallow `alt+…` themselves.
+**On Windows the action ids carry a `-win` suffix** (herdr rejects duplicate ids across platforms,
+so the Windows entries are suffixed): bind `command = "persiyanov.reviewr.toggle-win"` instead, and
+likewise `open-win` / `close-win`.
+
+`cmd+…` chords reach herdr. In many macOS terminal setups, `alt+…` is reserved by the terminal.
+With no key bound, run it once with `herdr plugin action invoke toggle --plugin persiyanov.reviewr`
+(`toggle-win` on Windows).
 
 ## Controls
 
@@ -422,9 +430,12 @@ This is a focused, young tool. The known constraints:
   needed.
 
 **Platform**
-- **macOS and Linux only** — no Windows.
-- **Clipboard export** uses `pbcopy`, `wl-copy`, `xclip`, or `xsel`. With none installed it
-  says so, and **Send** still works. OSC 52 and Windows are on the roadmap.
+- **macOS, Linux, and Windows.** Windows runs the same binary natively (needs herdr's Windows
+  build); the plugin's glue is `cmd`/PowerShell there instead of `sh`. One caveat: the Windows
+  pane launcher isn't quoted, so a plugin path containing a space won't launch — install under a
+  space-free path.
+- **Clipboard export** uses `pbcopy` (macOS), `wl-copy` / `xclip` / `xsel` (Linux), or `clip`
+  (Windows); if none is found it says so and you use **Send** instead. (OSC 52 is roadmap.)
 
 **herdr coupling**
 - **Send needs a findable agent pane** — the agent in your tab, or the sole agent in the
