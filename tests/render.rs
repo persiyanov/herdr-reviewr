@@ -666,7 +666,10 @@ fn pr_empty_states_are_calm_and_keep_the_ambiguity_count() {
     app.pr = PrView::GitError("git remote get-url upstream failed".to_string());
     let out = render(&app);
     assert!(out.contains("Git read failed"), "local failures stay factual:\n{out}");
-    assert!(!out.contains("GitHub unavailable"), "a local failure is not blamed on GitHub:\n{out}");
+    assert!(
+        !out.contains("Forge unavailable"),
+        "a local failure is not blamed on the forge:\n{out}"
+    );
 }
 
 #[test]

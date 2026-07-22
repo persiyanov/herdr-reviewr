@@ -79,6 +79,8 @@ impl PrView {
 /// One pull request's state, read fresh from the forge each poll.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrSnapshot {
+    /// The forge this snapshot was read from — names the remote surface in UI chrome.
+    pub forge: crate::git::Forge,
     pub number: u64,
     pub title: String,
     pub url: String,
@@ -98,7 +100,7 @@ pub struct PrSnapshot {
     pub checks: Vec<Check>,
     pub comments: Vec<Comment>,
     /// A capped surface (reviews/comments/threads/checks) had more rows than the 100-row fetch
-    /// returned — the lists shown are a prefix, not the whole set. Drives a "more on GitHub" marker.
+    /// returned — the lists shown are a prefix, not the whole set. Drives a "more on the forge" marker.
     pub truncated: bool,
 }
 
@@ -809,6 +811,7 @@ mod tests {
     #[test]
     fn rollup_fails_on_any_failure_else_running_else_success() {
         let snap = |statuses: &[CheckStatus]| PrSnapshot {
+            forge: crate::git::Forge::GitHub,
             number: 1,
             title: String::new(),
             url: String::new(),

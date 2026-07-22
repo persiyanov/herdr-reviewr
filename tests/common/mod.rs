@@ -89,6 +89,7 @@ pub fn typed(app: &mut App, text: &str) {
 pub fn pr_snapshot() -> herdr_reviewr::forge::PrSnapshot {
     use herdr_reviewr::forge::{Merge, PrSnapshot, PrState, Sync};
     PrSnapshot {
+        forge: herdr_reviewr::git::Forge::GitHub,
         number: 1,
         title: "t".into(),
         body: String::new(),

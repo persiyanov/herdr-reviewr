@@ -287,6 +287,7 @@ pub(super) fn build_snapshot(node: &Value, sync: Sync) -> PrSnapshot {
         || more(&node["comments"])
         || more(&node["reviewThreads"]);
     PrSnapshot {
+        forge: Forge::GitHub,
         number: node["number"].as_u64().unwrap_or_default(),
         title: node["title"].as_str().unwrap_or_default().to_string(),
         url: node["url"].as_str().unwrap_or_default().to_string(),

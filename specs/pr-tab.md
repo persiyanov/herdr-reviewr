@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-17
-Last edited: 2026-07-21
+Last edited: 2026-07-22
 ---
 
 # PR tab
@@ -10,7 +10,7 @@ A read-only mirror of the pull request in the sidebar's two-pane frame: identity
 
 ## Overview
 
-The navigator shows checks and selects the description or a comment. The read pane shows that selection. The header carries the PR's identity and state. The tab reads GitHub through `forge-host.md` and writes nothing. Its only outward action opens a link in the browser.
+The navigator shows checks and selects the description or a comment. The read pane shows that selection. The header carries the PR's identity and state. The tab reads the forge through `forge-host.md` and writes nothing. Its only outward action opens a link in the browser.
 
 ```
  1 Changes  2 All files  3 PR    Deep research: GPT-5.5/5.4-mini upgrade…  deep-research  merged #226 ↗
@@ -37,14 +37,14 @@ The navigator shows checks and selects the description or a comment. The read pa
 
 - The header right-anchors a clickable `status #226 ↗` chip, status colored by lifecycle: `open` green, `draft` yellow, `merged` mauve, `closed` red. The PR title sits to its left, truncated to fit.
 - Between title and chip sits the resolved head branch (`head_ref`, `forge-host.md`), dim, prefixed `⑂ ` when the head lives in a fork. On a narrow bar the branch drops first.
-- The footer leads with merge, sync, checks, and comment counts, then `o open ↗` and the `?`. Merge and sync show only while the PR is open. A capped surface appends `+more on GitHub ↗` (`forge-host.md`).
+- The footer leads with merge, sync, checks, and comment counts, then `o open ↗` and the `?`. Merge and sync show only while the PR is open. A capped surface appends `+more on <forge> ↗`, named per the snapshot's forge (`forge-host.md`).
 - The `?` expands to the `go` band and a `move` band of down, up, and the page keys. The `PR` tab has no hunk or file steps (`input.md`).
 - The ordinary no-PR body says only `No pull request yet. Ready to ship?` A detached HEAD says `No pull request found — HEAD is detached.`
 
 ### Navigator and read pane
 
 - The navigator, titled `Checks & comments`, shows a status-only checks section above the comments list. The cursor walks the description row and the comments.
-- Comments list newest first, each row `@author anchor age`, with `outdated` or `resolved` markers where GitHub receded the thread.
+- Comments list newest first, each row `@author anchor age`, with `outdated` or `resolved` markers where the forge receded the thread.
 - A non-empty PR description pins a `description` row at the top of the navigator, above the checks. An emptied description vanishes like a comment: the cursor clamps, the read pane resets.
 - The read pane shows the selected comment: a finding shows its `snippet` then the body, a review or plain comment shows its prose, the description row shows the PR description.
 - Bodies render as markdown (`markdown.md`). A finding's `snippet` stays plain `+`/`−`-colored lines.
@@ -56,7 +56,7 @@ The navigator shows checks and selects the description or a comment. The read pa
 - A retry notice for a preserved snapshot stays fixed above the read body, so it remains visible without resetting the reader's scroll.
 - The authoring keys (`s`, `c`, `v`, `d`, `e`) do nothing here.
 - A merged or closed PR shows the same mirror, read-only.
-- No usable `gh` shows the matching failure state from `forge-host.md`, naming the command that unblocks it.
+- No usable forge CLI (`gh`/`glab`) shows the matching failure state from `forge-host.md`, naming the command that unblocks it.
 
 ### Refresh
 

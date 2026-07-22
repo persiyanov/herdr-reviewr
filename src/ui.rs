@@ -2442,10 +2442,10 @@ fn pr_state_line(s: &forge::PrSnapshot) -> String {
     }
     parts.push(checks_summary(s));
     parts.push(format!("{} comments", s.comments.len()));
-    // A capped surface means the lists are a prefix; point at GitHub for the rest rather than
-    // showing the partial counts as if complete (specs/forge-host.md).
+    // A capped surface means the lists are a prefix; point at the forge for the rest rather
+    // than showing the partial counts as if complete (specs/forge-host.md).
     if s.truncated {
-        parts.push("+more on GitHub ↗".into());
+        parts.push(format!("+more on {} ↗", s.forge.name()));
     }
     parts.join(" · ")
 }
@@ -2733,9 +2733,10 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
         body_meta = Some((offset, rendered));
         if cm.reply_count > 0 {
             let plural = if cm.reply_count == 1 { "reply" } else { "replies" };
+            let forge = app.pr_snapshot().map_or("the forge", |s| s.forge.name());
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
-                format!("↳ {} {plural} — open on GitHub to read", cm.reply_count),
+                format!("↳ {} {plural} — open on {forge} to read", cm.reply_count),
                 Style::default().fg(p.overlay0),
             )));
         }

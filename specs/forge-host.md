@@ -23,6 +23,7 @@ The snapshot:
 
 | field                  | type   | meaning                                                                     |
 | ---------------------- | ------ | --------------------------------------------------------------------------- |
+| `forge`                | enum   | `github` or `gitlab` — names the remote surface in the tab's chrome        |
 | `number`               | int?   | PR number (a GitLab MR's `iid`), `null` when no PR resolves                 |
 | `title`, `url`         | string | identity                                                                    |
 | `body`                 | string | the PR description as the forge returns it, empty when none                 |

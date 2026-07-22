@@ -282,6 +282,7 @@ pub(super) fn build_snapshot(node: &Value, sync: Sync) -> PrSnapshot {
     let source_project = node["sourceProject"]["id"].as_str().unwrap_or_default();
     let target_project = node["targetProject"]["id"].as_str().unwrap_or_default();
     PrSnapshot {
+        forge: Forge::GitLab,
         // GraphQL returns `iid` as a string.
         number: node["iid"].as_str().and_then(|iid| iid.parse().ok()).unwrap_or_default(),
         title: node["title"].as_str().unwrap_or_default().to_string(),
