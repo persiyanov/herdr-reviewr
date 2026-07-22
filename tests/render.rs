@@ -1514,7 +1514,10 @@ fn a_short_narrow_pr_pane_keeps_the_retry_action_and_one_body_row() {
     app.set_tab(Tab::Pr).unwrap();
     app.pr =
         PrView::Pr(Box::new(PrSnapshot { body: "steady body".into(), ..common::pr_snapshot() }));
-    app.apply_pr(PrView::NotAuthed("github.example.com".to_string()));
+    app.apply_pr(PrView::NotAuthed(
+        herdr_reviewr::git::Forge::GitHub,
+        "github.example.com".to_string(),
+    ));
 
     let out = dump(&render_size(&app, 30, 7));
     assert!(out.contains("Not signed"), "the failure state remains visible:\n{out}");

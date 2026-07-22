@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-10
-Last edited: 2026-07-21
+Last edited: 2026-07-22
 ---
 
 # Configuration
@@ -21,6 +21,7 @@ toggle_placement = "overlay"
 toggle_direction = "down"
 auto_open = false
 github_host = "github.example.com"
+gitlab_host = "gitlab.example.com"
 
 [keybindings]
 comment = ["c", "ㅊ"]
@@ -37,7 +38,8 @@ find    = ["ctrl+f"]
 | `toggle_placement`   | `split`, `overlay`, `zoomed`, or `tab`                                             |
 | `toggle_direction`   | `right` or `down`                                                                  |
 | `auto_open`          | boolean                                                                            |
-| `github_host`        | bare hostname other than `github.com`                                              |
+| `github_host`        | bare hostname other than `github.com` or `gitlab.com`                              |
+| `gitlab_host`        | bare hostname other than `github.com` or `gitlab.com`, distinct from `github_host` |
 | `keybindings`        | table of actions from the keymap in `input.md`, each a non-empty array of keys     |
 
 ## Behavior

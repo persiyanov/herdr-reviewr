@@ -1084,7 +1084,9 @@ fn reconcile_plugin_config(
 
     let bases_changed = previous.base_branches() != current.base_branches();
     let file_changed = bases_changed || previous.theme() != current.theme();
-    let pr_changed = bases_changed || previous.github_host() != current.github_host();
+    let pr_changed = bases_changed
+        || previous.github_host() != current.github_host()
+        || previous.gitlab_host() != current.gitlab_host();
     if pr_changed {
         pr.config_changed(app.tab == crate::app::Tab::Pr);
     }
@@ -1150,6 +1152,7 @@ fn apply_plugin_config_observation(
                 let current = app.plugin_config().expect("ready config");
                 if current.base_branches() != next.base_branches()
                     || current.github_host() != next.github_host()
+                    || current.gitlab_host() != next.gitlab_host()
                 {
                     *epoch = epoch.wrapping_add(1);
                 }
@@ -1666,7 +1669,7 @@ mod refresh_tests {
     fn input_with(host: &str, owner: &str, name: &str, head: &str) -> PrFetchInput {
         PrFetchInput {
             repository: RepositoryIdentity::Repository(
-                crate::git::RepoTarget::new(host, owner, name).unwrap(),
+                crate::git::RepoTarget::new(crate::git::Forge::GitHub, host, owner, name).unwrap(),
             ),
             origin_repository: None,
             local: crate::git::PrLocalState {
@@ -2035,7 +2038,13 @@ mod refresh_tests {
             &mut app,
             &mut coordinator,
             Err(crate::forge::PrInputError::BranchState {
-                target: crate::git::RepoTarget::new("github.com", "acme", "widgets").unwrap(),
+                target: crate::git::RepoTarget::new(
+                    crate::git::Forge::GitHub,
+                    "github.com",
+                    "acme",
+                    "widgets"
+                )
+                .unwrap(),
                 message: "HEAD read failed".to_string(),
             }),
             0,
@@ -2058,7 +2067,13 @@ mod refresh_tests {
             &mut app,
             &mut coordinator,
             Err(crate::forge::PrInputError::BranchState {
-                target: crate::git::RepoTarget::new("github.com", "other", "widgets").unwrap(),
+                target: crate::git::RepoTarget::new(
+                    crate::git::Forge::GitHub,
+                    "github.com",
+                    "other",
+                    "widgets"
+                )
+                .unwrap(),
                 message: "HEAD read failed".to_string(),
             }),
             0,

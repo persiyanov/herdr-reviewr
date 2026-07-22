@@ -71,7 +71,7 @@ pub(crate) fn canonical_base(entry: &str) -> String {
         .to_string()
 }
 
-const PLUGIN_CONFIG_KEYS: [&str; 9] = [
+const PLUGIN_CONFIG_KEYS: [&str; 10] = [
     "theme",
     "base_branches",
     "default_scope",
@@ -80,6 +80,7 @@ const PLUGIN_CONFIG_KEYS: [&str; 9] = [
     "toggle_direction",
     "auto_open",
     "github_host",
+    "gitlab_host",
     "keybindings",
 ];
 
@@ -168,6 +169,7 @@ pub struct PluginConfig {
     toggle_direction: ToggleDirection,
     auto_open: bool,
     github_host: Option<String>,
+    gitlab_host: Option<String>,
     keymap: crate::keymap::Keymap,
 }
 
@@ -182,6 +184,7 @@ impl Default for PluginConfig {
             toggle_direction: ToggleDirection::Right,
             auto_open: true,
             github_host: None,
+            gitlab_host: None,
             keymap: crate::keymap::Keymap::default(),
         }
     }
@@ -222,6 +225,15 @@ impl PluginConfig {
         self.github_host.as_deref()
     }
 
+    pub fn gitlab_host(&self) -> Option<&str> {
+        self.gitlab_host.as_deref()
+    }
+
+    /// Both configured self-managed hosts, as remote classification consumes them.
+    pub fn forge_hosts(&self) -> crate::git::ForgeHosts<'_> {
+        crate::git::ForgeHosts { github: self.github_host(), gitlab: self.gitlab_host() }
+    }
+
     /// The resolved keymap: the defaults with this snapshot's `[keybindings]` applied.
     pub fn keymap(&self) -> &crate::keymap::Keymap {
         &self.keymap
@@ -247,6 +259,7 @@ impl PluginConfig {
             "toggle_direction": self.toggle_direction.as_str(),
             "auto_open": self.auto_open,
             "github_host": self.github_host,
+            "gitlab_host": self.gitlab_host,
             "keybindings": keybindings,
         })
     }
@@ -423,12 +436,25 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         config.auto_open =
             value.as_bool().ok_or_else(|| value_error(path, "auto_open", "a boolean"))?;
     }
-    if let Some(value) = table.get("github_host") {
-        let host = string_value(path, "github_host", value, "a bare hostname outside github.com")?;
-        if !valid_enterprise_host(host) {
-            return Err(value_error(path, "github_host", "a bare hostname other than github.com"));
+    for (key, slot) in
+        [("github_host", &mut config.github_host), ("gitlab_host", &mut config.gitlab_host)]
+    {
+        if let Some(value) = table.get(key) {
+            let expected = "a bare hostname other than github.com or gitlab.com";
+            let host = string_value(path, key, value, expected)?;
+            if !valid_selfmanaged_host(host) {
+                return Err(value_error(path, key, expected));
+            }
+            *slot = Some(host.to_ascii_lowercase());
         }
-        config.github_host = Some(host.to_ascii_lowercase());
+    }
+    if let (Some(github), Some(gitlab)) = (&config.github_host, &config.gitlab_host)
+        && github == gitlab
+    {
+        return Err(PluginConfigError::new(
+            path,
+            format!("invalid value for `gitlab_host`: `github_host` already names {github:?}"),
+        ));
     }
     if let Some(value) = table.get("keybindings") {
         config.keymap = parse_keybindings(path, value)?;
@@ -535,9 +561,11 @@ fn unknown_key_error(path: &Path, key: &str, options: &str) -> PluginConfigError
     PluginConfigError::new(path, format!("unknown key {key:?}; expected one of {options}"))
 }
 
-fn valid_enterprise_host(host: &str) -> bool {
+/// A configured self-managed host must sit outside both built-in hosts, which already
+/// classify to their forges.
+fn valid_selfmanaged_host(host: &str) -> bool {
     let lower = host.to_ascii_lowercase();
-    lower != "github.com" && valid_host_syntax(host)
+    lower != "github.com" && lower != "gitlab.com" && valid_host_syntax(host)
 }
 
 /// The bare ASCII DNS-name grammar shared by configured and selected canonical hosts.
@@ -636,6 +664,7 @@ mod tests {
         assert_eq!(config.toggle_direction(), ToggleDirection::Right);
         assert!(config.auto_open());
         assert_eq!(config.github_host(), None);
+        assert_eq!(config.gitlab_host(), None);
     }
 
     #[test]
@@ -652,6 +681,7 @@ mod tests {
                 "toggle_direction = \"down\"\n",
                 "auto_open = false\n",
                 "github_host = \"GitHub.Example.COM\"\n",
+                "gitlab_host = \"GitLab.Example.COM\"\n",
             ),
         )
         .unwrap();
@@ -665,6 +695,7 @@ mod tests {
         assert_eq!(config.toggle_direction(), ToggleDirection::Down);
         assert!(!config.auto_open());
         assert_eq!(config.github_host(), Some("github.example.com"));
+        assert_eq!(config.gitlab_host(), Some("gitlab.example.com"));
     }
 
     #[test]
@@ -716,6 +747,10 @@ mod tests {
             ("auto_open = \"yes\"\n", "`auto_open`"),
             ("github_host = \"https://github.example.com\"\n", "`github_host`"),
             ("github_host = \"github.com\"\n", "`github_host`"),
+            ("github_host = \"gitlab.com\"\n", "`github_host`"),
+            ("gitlab_host = \"https://gitlab.example.com\"\n", "`gitlab_host`"),
+            ("gitlab_host = \"gitlab.com\"\n", "`gitlab_host`"),
+            ("gitlab_host = \"github.com\"\n", "`gitlab_host`"),
         ];
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -734,6 +769,18 @@ mod tests {
             .unwrap();
         let config = super::plugin_config_in(dir.path()).expect("valid literal Enterprise host");
         assert_eq!(config.github_host(), Some("github.com-work"));
+    }
+
+    #[test]
+    fn one_host_cannot_serve_both_forges() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "github_host = \"git.example.com\"\ngitlab_host = \"Git.Example.COM\"\n",
+        )
+        .unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("`gitlab_host`") && error.contains("`github_host`"), "{error}");
     }
 
     #[test]
@@ -887,6 +934,7 @@ mod tests {
         assert_eq!(object["toggle_direction"], "right");
         assert_eq!(object["auto_open"], true);
         assert!(object["github_host"].is_null());
+        assert!(object["gitlab_host"].is_null());
         let keybindings = object["keybindings"].as_object().unwrap();
         assert_eq!(
             keybindings.len(),

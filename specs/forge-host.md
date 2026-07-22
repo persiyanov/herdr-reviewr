@@ -1,16 +1,16 @@
 ---
 Status: Current
 Created: 2026-06-27
-Last edited: 2026-07-18
+Last edited: 2026-07-22
 ---
 
 # forge host
 
-How reviewr reads one pull request from GitHub — identity, state, checks, comments — through the `gh` CLI, for the read-only `PR` tab (`pr-tab.md`). It never writes back.
+How reviewr reads one pull request — identity, state, checks, comments — from GitHub through `gh` or from GitLab through `glab`, for the read-only `PR` tab (`pr-tab.md`). It never writes back. A GitLab merge request reads as a PR throughout.
 
 ## Overview
 
-reviewr resolves the worktree's pull request through its commits, then reads a snapshot of it through `gh` on each poll. Every shown PR provably belongs to this worktree's work. The snapshot is the single value the `PR` tab renders.
+reviewr resolves the worktree's pull request through its commits, then reads a snapshot of it through the forge's CLI on each poll. Every shown PR provably belongs to this worktree's work. The snapshot is the single value the `PR` tab renders.
 
 ```
 PR #226  open  persiyanov/deep-research-benchmark → main   ⇡ 2 unpushed
@@ -23,13 +23,13 @@ The snapshot:
 
 | field                  | type   | meaning                                                                     |
 | ---------------------- | ------ | --------------------------------------------------------------------------- |
-| `number`               | int?   | PR number, `null` when no PR resolves                                       |
+| `number`               | int?   | PR number (a GitLab MR's `iid`), `null` when no PR resolves                 |
 | `title`, `url`         | string | identity                                                                    |
-| `body`                 | string | the PR description as GitHub returns it, empty when none                    |
+| `body`                 | string | the PR description as the forge returns it, empty when none                 |
 | `state`                | enum   | `open`, `merged`, or `closed`                                               |
 | `is_draft`             | bool   | draft flag                                                                  |
 | `head_ref`             | string | the PR's head branch name, which may differ from the local branch           |
-| `head_is_fork`         | bool   | the head lives in another repository (GitHub's `isCrossRepository`)         |
+| `head_is_fork`         | bool   | the head lives in another repository                                        |
 | `base_ref`             | string | the merge target                                                            |
 | `merge`                | enum   | `clean`, `conflicting`, or `blocked`                                        |
 | `sync`                 | enum   | `in_sync`, `unpushed`, `behind`, or `unknown`, with a count when known      |
@@ -44,43 +44,46 @@ A `comments` row:
 | `kind`                       | enum   | `review` (a review's body), `comment` (conversation), `finding` (inline) |
 | `author`, `author_is_bot`    | string, bool | the `@login` and whether it is a bot                              |
 | `anchor`                     | string | `path:line` for a `finding`, the literal kind word otherwise            |
-| `body`, `snippet`            | string | the text as GitHub returns it, no chrome-stripping or format parsing; only a `finding` carries a snippet |
+| `body`, `snippet`            | string | the text as the forge returns it, no chrome-stripping or format parsing; only a `finding` carries a snippet |
 | `created_at`                 | time   | post time, the newest-first sort key                                    |
 | `is_resolved`, `is_outdated` | bool   | thread state for a `finding`, always false otherwise                    |
 | `reply_count`                | int    | replies on a `finding`'s thread beyond the root                         |
 
 ## Behavior
 
-### GitHub hosts
+### Forge hosts
 
-`github_host` in reviewr's `config.toml` adds one GitHub Enterprise hostname. Its value contract lives in `config.md`.
+`github.com` and `gitlab.com` are supported without configuration. Each config key adds one self-managed hostname; the value contracts live in `config.md`.
 
 ```toml
 github_host = "github.example.com"
+gitlab_host = "gitlab.example.com"
 ```
 
-Host matching is case-insensitive. A missing setting adds no Enterprise host. `github.com` remains supported when the setting is present.
+Host matching is case-insensitive. A missing setting adds no self-managed host. The built-in hosts remain supported when a setting is present. The host decides the forge, and the forge decides the CLI: `gh` for GitHub, `glab` for GitLab.
+
+A GitHub repository path is exactly `owner/repository`. A GitLab repository path nests: every segment before the repository name is its namespace (`group/sub/team/repository`).
 
 Both remotes use the primary fetch URL after Git's `url.*.insteadOf` rewrite. A separate push URL does not affect PR reads.
 
-| remote state                                                               | outcome                                                                  |
-| -------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `upstream` names `github.com` or exact `github_host` with `owner/repository` | reviewr reads that repository                                            |
-| `upstream` is absent, hostless, unsupported, or malformed                  | `origin` determines the repository                                       |
-| reading `upstream` fails                                                   | reviewr shows the retryable Git error and never falls through            |
-| `origin` names `github.com` or exact `github_host` with `owner/repository`   | reviewr reads that repository                                            |
-| `origin` names another hosted repository                                   | reviewr names the unsupported host and points Enterprise users to config |
-| `origin` is missing or hostless                                            | reviewr says the PR tab needs a supported GitHub `upstream` or `origin`   |
-| `origin` names a supported host without `owner/repository`                  | reviewr says the GitHub origin is malformed                              |
-| reading `origin` fails                                                     | reviewr shows the retryable Git error                                    |
+| remote state                                                | outcome                                                                     |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `upstream` names a supported host with a repository path    | reviewr reads that repository                                               |
+| `upstream` is absent, hostless, unsupported, or malformed   | `origin` determines the repository                                          |
+| reading `upstream` fails                                    | reviewr shows the retryable Git error and never falls through               |
+| `origin` names a supported host with a repository path      | reviewr reads that repository                                               |
+| `origin` names another hosted repository                    | reviewr names the unsupported host and points self-managed users to config  |
+| `origin` is missing or hostless                             | reviewr says the PR tab needs a supported `upstream` or `origin`            |
+| `origin` names a supported host without a repository path   | reviewr says the origin is malformed                                        |
+| reading `origin` fails                                      | reviewr shows the retryable Git error                                       |
 
 A fork clone with `origin` pointed at the fork and a supported `upstream` pointed at the base
 repository resolves the base repository's PR without setup.
 
 Canonical SSH remotes work in scp-style (`git@host:owner/repository.git`) and `ssh://` forms. Hosted
-URL forms use `http://`, `https://`, or `git://`. File URLs and other schemes are not GitHub
-repository identities. SSH aliases are not inferred as canonical GitHub hosts. `GH_HOST` cannot
-redirect a fetch.
+URL forms use `http://`, `https://`, or `git://`. File URLs and other schemes are not forge
+repository identities. SSH aliases are not inferred as canonical forge hosts. Neither `GH_HOST` nor
+`GITLAB_HOST` can redirect a fetch.
 
 ### Resolution
 
@@ -118,20 +121,24 @@ What a user observes:
 
 - `merge` folds GitHub's fields to the blockers worth surfacing: `CONFLICTING`/`DIRTY` → `conflicting`, `BLOCKED` → `blocked`, and everything else (`CLEAN`, `BEHIND`, `UNSTABLE`, still-computing `UNKNOWN`) → `clean`, which the footer shows as nothing.
 - `mergeable=UNKNOWN` is GitHub computing lazily. It folds to `clean` unless `mergeStateStatus` is `DIRTY`.
+- On GitLab, `merge` folds the same way: conflicts → `conflicting`; the reviewer-actionable gates (approvals, unresolved discussions, requested changes, policies, external status checks) → `blocked`; everything else (mergeable, still-checking, a running pipeline, need-rebase) → `clean`.
 - `sync` compares the pinned `HEAD` OID to the PR's `head_oid`: equal is `in_sync`, `HEAD` ahead is `unpushed` with a `git rev-list --count` count, and `head_oid` ahead is `behind`. If the PR head object is unavailable locally, the relation is `unknown`; reviewr never guesses `in_sync`.
 - `unpushed` means the checks and comments on screen describe an older commit than the local tree.
 
 ### Checks
 
 - A check row is the latest run for its name. A passed re-run replaces an earlier failure.
-- Check runs and commit statuses normalize into one list.
+- On GitHub, check runs and commit statuses normalize into one list.
+- On GitLab, the head pipeline's jobs are the list. A manual gate reads as skipped; a canceled job as failed.
 - A top-level rollup gives the overall pass or fail.
 
 ### Comments
 
-- Three surfaces merge into one list: submitted reviews, inline threads, and conversation comments.
-- A bot's PR-level posts collapse to its latest. A human's are each kept.
-- `is_resolved` and `is_outdated` come from GitHub, never recomputed against the worktree.
+- On GitHub, three surfaces merge into one list: submitted reviews, inline threads, and conversation comments.
+- On GitLab, the discussion roots are the list: a positioned root is a `finding`, an unpositioned one a `comment`. The `review` kind never occurs. System notes (assignments, review requests) are dropped.
+- A GitLab `finding` carries no snippet and never marks outdated — GitLab exposes neither.
+- A bot's PR-level posts collapse to its latest. A human's are each kept. GitHub marks a bot by its `[bot]` login suffix; GitLab by the account's own bot marker, whatever its username.
+- `is_resolved` and `is_outdated` come from the forge, never recomputed against the worktree.
 - Outdated and resolved threads stay in the list with their marker.
 - Each surface reads its newest 100 rows, never paged to exhaustion. A further page on any surface — reviews, comments, threads, or checks — sets `truncated`, and `pr-tab.md` marks the capped list, so it is never presented as complete.
 
@@ -145,47 +152,47 @@ What a user observes:
 - Every other observed change keeps the snapshot painted and refetches behind it. The same pull request with newer work is stale, not wrong. The in-flight glyph covers the gap (`tui.md`).
 - Either observation starts the replacement fetch at once, on or off the tab, so entering the tab finds fresh work already underway.
 - One fetch is in flight at a time. One or more triggers arriving mid-flight supersede its result and start one fresh fetch when it completes.
-- A GitHub change during a fetch can appear on the following fetch.
+- A forge change during a fetch can appear on the following fetch.
 - Each fetch uses one validated config snapshot for host and base selection (→ CFG-ONE-SNAPSHOT, `config.md`).
-- A GitHub result paints only if the current config, repository target, pinned `HEAD`, pinned base, and
+- A forge result paints only if the current config, repository target, pinned `HEAD`, pinned base, and
   publication points still match the input that produced it. If reviewr cannot prove that match, the
   result never paints, and one replacement fetch starts against the current input.
 - If the repository target is proven unchanged before a later branch-state read fails, the visible
-  same-target snapshot stays with a retry notice; the next refresh performs a fresh GitHub fetch.
+  same-target snapshot stays with a retry notice; the next refresh performs a fresh forge fetch.
 - The snapshot re-derives in full each fetch. reviewr keeps no hidden or historical PR cache beyond the visible snapshot.
 - Exiting reviewr stops scheduling and restores the terminal immediately. No later PR completion
   can paint.
 
 ## Failure semantics
 
-reviewr reads GitHub and never writes it, so every failure degrades to a clear state. `Changes` and `All files` are unaffected.
+reviewr reads the forge and never writes it, so every failure degrades to a clear state. `Changes` and `All files` are unaffected.
 
 - A same-input failure preserves the visible snapshot and shows its remedy. With no same-input snapshot, the remedy fills the tab.
 
-| failure               | remedy shown                      |
-| --------------------- | --------------------------------- |
-| missing `gh`          | the install step                  |
-| unauthenticated fetch | `gh auth login --hostname <host>` |
+| failure                       | remedy shown                                 |
+| ----------------------------- | -------------------------------------------- |
+| missing forge CLI             | the install step for `gh` or `glab`          |
+| unauthenticated fetch         | `<cli> auth login --hostname <host>`         |
 | any other fetch error | the retry error                   |
 
 - A failure before the repository target resolves replaces any snapshot with the retryable Git error. reviewr cannot prove that the snapshot still belongs to the current target.
 - A branch-state Git failure after the same repository target resolves preserves the visible
   same-target snapshot with the retryable Git error.
-- An unsupported origin names the host and points Enterprise users to `github_host`.
+- An unsupported origin names the host and points self-managed users to `github_host` / `gitlab_host`.
 - No PR at any lifecycle state shows a calm empty state. The next poll lights the tab up when a PR appears.
 - Every read is side-effect-free.
 - Two active PR tabs on one worktree converge within one poll interval. An inactive tab catches up when entered.
 
 ## Non-goals
 
-- No writes to GitHub. reviewr never posts, resolves a thread, re-runs a check, or merges. It never routes PR feedback to the agent.
+- No writes to the forge. reviewr never posts, resolves a thread, re-runs a check, or merges. It never routes PR feedback to the agent.
 - No repository selector or cross-repository search.
 - No different parent repositories across sibling worktrees from one clone. Use a separate clone for each parent.
 - No SSH host-alias normalization. An alias-only repository needs a canonical-host remote.
 - No discovery of an unrecorded publication name on a non-`origin` remote.
-- No event subscription. The snapshot polls `gh`, no webhook or socket.
-- No server-version compatibility layer for Enterprise schemas.
-- No second forge. GitHub via `gh` only.
+- No event subscription. The snapshot polls the forge CLI, no webhook or socket.
+- No server-version compatibility layer for self-managed schemas.
+- No third forge. GitHub via `gh` and GitLab via `glab` only.
 
 ## Related specs
 

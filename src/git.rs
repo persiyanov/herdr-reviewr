@@ -64,22 +64,64 @@ pub fn toplevel(path: &Path) -> Option<PathBuf> {
     git_line(path, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
-/// A canonical GitHub API and repository target.
+/// Which forge a canonical host belongs to — decides the CLI and API dialect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Forge {
+    GitHub,
+    GitLab,
+}
+
+impl Forge {
+    /// The user-facing forge name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::GitHub => "GitHub",
+            Self::GitLab => "GitLab",
+        }
+    }
+
+    /// The CLI this forge is read through.
+    pub fn cli(self) -> &'static str {
+        match self {
+            Self::GitHub => "gh",
+            Self::GitLab => "glab",
+        }
+    }
+}
+
+/// The configured self-managed hosts, one per forge kind (`specs/forge-host.md`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ForgeHosts<'a> {
+    pub github: Option<&'a str>,
+    pub gitlab: Option<&'a str>,
+}
+
+/// A canonical forge API and repository target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoTarget {
+    forge: Forge,
     host: String,
     owner: String,
     name: String,
 }
 
 impl RepoTarget {
-    /// Build one canonical repository target from a hostname and GitHub owner/name pair.
-    pub(crate) fn new(host: &str, owner: &str, name: &str) -> Option<Self> {
+    /// Build one canonical repository target from a hostname and owner/name pair. A GitHub
+    /// owner is one path segment; a GitLab owner is the full namespace path, whose groups
+    /// may nest (`a/b/c`).
+    pub(crate) fn new(forge: Forge, host: &str, owner: &str, name: &str) -> Option<Self> {
         let host = host.to_ascii_lowercase();
-        (crate::config::valid_host_syntax(&host)
-            && valid_repository_component(owner)
-            && valid_repository_component(name))
-        .then(|| Self { host, owner: owner.to_owned(), name: name.to_owned() })
+        let owner_valid = match forge {
+            Forge::GitHub => valid_repository_component(owner),
+            Forge::GitLab => owner.split('/').all(valid_repository_component),
+        };
+        (crate::config::valid_host_syntax(&host) && owner_valid && valid_repository_component(name))
+            .then(|| Self { forge, host, owner: owner.to_owned(), name: name.to_owned() })
+    }
+
+    /// The forge this target is read through.
+    pub fn forge(&self) -> Forge {
+        self.forge
     }
 
     /// The lowercase canonical forge hostname.
@@ -87,12 +129,12 @@ impl RepoTarget {
         &self.host
     }
 
-    /// The repository owner used at the GitHub API boundary.
+    /// The repository owner used at the forge API boundary — the full namespace path on GitLab.
     pub fn owner(&self) -> &str {
         &self.owner
     }
 
-    /// The repository name used at the GitHub API boundary.
+    /// The repository name used at the forge API boundary.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -124,8 +166,8 @@ enum RemoteTransport {
     Unsupported,
 }
 
-/// Classify one repository URL against GitHub.com and the configured Enterprise host.
-fn classify_remote(url: &str, enterprise: Option<&str>) -> RepositoryIdentity {
+/// Classify one repository URL against the built-in hosts and the configured self-managed hosts.
+fn classify_remote(url: &str, hosts: ForgeHosts<'_>) -> RepositoryIdentity {
     let Some((transport, host, path, has_port)) = split_remote(url) else {
         return RepositoryIdentity::Hostless;
     };
@@ -138,25 +180,44 @@ fn classify_remote(url: &str, enterprise: Option<&str>) -> RepositoryIdentity {
     {
         return RepositoryIdentity::Unsupported(host);
     }
-    let Some(canonical) = canonical_supported_host(&host, enterprise) else {
+    let Some((canonical, forge)) = canonical_supported_host(&host, hosts) else {
         return RepositoryIdentity::Unsupported(host);
     };
     let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
-    let mut parts = path.split('/');
-    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
-        return RepositoryIdentity::Malformed(canonical);
+    let (owner, name) = match forge {
+        // A GitHub identity is exactly `owner/repository`.
+        Forge::GitHub => {
+            let mut parts = path.split('/');
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some(owner), Some(name), None) => (owner, name),
+                _ => return RepositoryIdentity::Malformed(canonical),
+            }
+        }
+        // GitLab groups nest, so the namespace is every segment before the repository name.
+        Forge::GitLab => match path.rsplit_once('/') {
+            Some((namespace, name)) => (namespace, name),
+            None => return RepositoryIdentity::Malformed(canonical),
+        },
     };
-    match RepoTarget::new(&canonical, owner, name) {
+    match RepoTarget::new(forge, &canonical, owner, name) {
         Some(target) => RepositoryIdentity::Repository(target),
         None => RepositoryIdentity::Malformed(canonical),
     }
 }
 
-/// Return the exact GitHub.com or configured Enterprise host, lowercased.
-fn canonical_supported_host(host: &str, enterprise: Option<&str>) -> Option<String> {
+/// Return the exact supported host, lowercased, with its forge: `github.com` / `gitlab.com`
+/// built in, plus the configured self-managed host of each forge.
+fn canonical_supported_host(host: &str, hosts: ForgeHosts<'_>) -> Option<(String, Forge)> {
     let host = host.to_ascii_lowercase();
-    (host == "github.com" || enterprise == Some(host.as_str())).then_some(host)
+    let forge = if host == "github.com" || hosts.github == Some(host.as_str()) {
+        Forge::GitHub
+    } else if host == "gitlab.com" || hosts.gitlab == Some(host.as_str()) {
+        Forge::GitLab
+    } else {
+        return None;
+    };
+    Some((host, forge))
 }
 
 /// Split a Git remote URL into transport, host, and path for scheme and scp-style forms.
@@ -444,10 +505,10 @@ fn beyond_all_bases(repo: &Path, oid: &str, bases: &[String]) -> Result<bool, Gi
 /// association source, not the whole read.
 pub(crate) fn remote_identities(
     repo: &Path,
-    github_host: Option<&str>,
+    hosts: ForgeHosts<'_>,
 ) -> Result<(RepositoryIdentity, Option<RepoTarget>), GitFail> {
-    let upstream = remote_identity(repo, "upstream", github_host)?;
-    let origin = remote_identity(repo, "origin", github_host);
+    let upstream = remote_identity(repo, "upstream", hosts)?;
+    let origin = remote_identity(repo, "origin", hosts);
     let origin_target = match &origin {
         Ok(RepositoryIdentity::Repository(target)) => Some(target.clone()),
         _ => None,
@@ -462,14 +523,14 @@ pub(crate) fn remote_identities(
 fn remote_identity(
     repo: &Path,
     remote: &str,
-    github_host: Option<&str>,
+    hosts: ForgeHosts<'_>,
 ) -> Result<RepositoryIdentity, GitFail> {
     let args = ["remote", "get-url", "--", remote];
     let out = run_git(repo, &args)?;
     if out.status.success() {
         let url = std::str::from_utf8(&out.stdout)
             .map_err(|_| GitFail(format!("git remote get-url {remote}: invalid UTF-8")))?;
-        return Ok(classify_remote(url.trim(), github_host));
+        return Ok(classify_remote(url.trim(), hosts));
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.to_lowercase().contains("no such remote") {
@@ -920,124 +981,178 @@ fn parse_name_status(out: &str) -> Vec<(ChangeKind, String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeKind, RepoTarget, RepositoryIdentity, classify_remote, parse_name_status,
-        parse_numstat,
+        ChangeKind, Forge, ForgeHosts, RepoTarget, RepositoryIdentity, classify_remote,
+        parse_name_status, parse_numstat,
     };
+
+    fn none() -> ForgeHosts<'static> {
+        ForgeHosts::default()
+    }
+
+    fn github(host: &'static str) -> ForgeHosts<'static> {
+        ForgeHosts { github: Some(host), gitlab: None }
+    }
+
+    fn gitlab(host: &'static str) -> ForgeHosts<'static> {
+        ForgeHosts { github: None, gitlab: Some(host) }
+    }
 
     #[test]
     fn repository_identity_parses_github_and_enterprise_remote_forms() {
         let repo = |host: &str, owner: &str, name: &str| {
-            RepositoryIdentity::Repository(RepoTarget::new(host, owner, name).unwrap())
+            RepositoryIdentity::Repository(
+                RepoTarget::new(Forge::GitHub, host, owner, name).unwrap(),
+            )
         };
         // HTTPS, with and without `.git` and a trailing slash.
         assert_eq!(
-            classify_remote("https://github.com/owner/repo.git", None),
+            classify_remote("https://github.com/owner/repo.git", none()),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("https://github.com/owner/repo", None),
+            classify_remote("https://github.com/owner/repo", none()),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("https://github.com/owner/repo/", None),
+            classify_remote("https://github.com/owner/repo/", none()),
             repo("github.com", "owner", "repo")
         );
         // scp-like SSH, and the `ssh://` scheme form with a port.
         assert_eq!(
-            classify_remote("git@github.com:owner/repo.git", None),
+            classify_remote("git@github.com:owner/repo.git", none()),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("ssh://git@github.com/owner/repo.git", None),
+            classify_remote("ssh://git@github.com/owner/repo.git", none()),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("ssh://git@github.com:22/owner/repo.git", None),
+            classify_remote("ssh://git@github.com:22/owner/repo.git", none()),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("git://github.com/owner/repo", None),
+            classify_remote("git://github.com/owner/repo", none()),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
             classify_remote(
                 "https://github.company.com/owner/repo.git",
-                Some("github.company.com")
+                github("github.company.com")
             ),
             repo("github.company.com", "owner", "repo")
         );
     }
 
     #[test]
+    fn repository_identity_parses_gitlab_remote_forms_with_nested_namespaces() {
+        let repo = |host: &str, owner: &str, name: &str| {
+            RepositoryIdentity::Repository(
+                RepoTarget::new(Forge::GitLab, host, owner, name).unwrap(),
+            )
+        };
+        assert_eq!(
+            classify_remote("https://gitlab.com/owner/repo.git", none()),
+            repo("gitlab.com", "owner", "repo")
+        );
+        // Groups nest: everything before the repository name is the namespace.
+        assert_eq!(
+            classify_remote("git@gitlab.com:group/sub/team/repo.git", none()),
+            repo("gitlab.com", "group/sub/team", "repo")
+        );
+        assert_eq!(
+            classify_remote(
+                "https://gitlab.example.test/a/b/c/d/repo.git",
+                gitlab("gitlab.example.test")
+            ),
+            repo("gitlab.example.test", "a/b/c/d", "repo")
+        );
+        // A GitLab path still needs a namespace and a repository name.
+        assert_eq!(
+            classify_remote("https://gitlab.com/repo-only", none()),
+            RepositoryIdentity::Malformed("gitlab.com".to_string())
+        );
+        assert_eq!(
+            classify_remote("https://gitlab.com", none()),
+            RepositoryIdentity::Malformed("gitlab.com".to_string())
+        );
+        // A self-managed GitLab host is unsupported until configured.
+        assert_eq!(
+            classify_remote("https://gitlab.example.test/group/repo.git", none()),
+            RepositoryIdentity::Unsupported("gitlab.example.test".to_string())
+        );
+    }
+
+    #[test]
     fn repository_identity_rejects_aliases_and_keeps_failure_states_distinct() {
         assert_eq!(
-            classify_remote("git@github.com-work:owner/repo.git", None),
+            classify_remote("git@github.com-work:owner/repo.git", none()),
             RepositoryIdentity::Unsupported("github.com-work".to_string())
         );
         assert_eq!(
             classify_remote(
                 "git@github.company.com-work:owner/repo.git",
-                Some("github.company.com")
+                github("github.company.com")
             ),
             RepositoryIdentity::Unsupported("github.company.com-work".to_string())
         );
         assert_eq!(
-            classify_remote("https://github.com-attacker/owner/repo", None),
+            classify_remote("https://github.com-attacker/owner/repo", none()),
             RepositoryIdentity::Unsupported("github.com-attacker".to_string())
         );
         assert_eq!(
             classify_remote(
                 "https://github.company.com-work/owner/repo",
-                Some("github.company.com")
+                github("github.company.com")
             ),
             RepositoryIdentity::Unsupported("github.company.com-work".to_string())
         );
         assert_eq!(
-            classify_remote("git@gitlab.com:owner/repo.git", Some("github.company.com")),
-            RepositoryIdentity::Unsupported("gitlab.com".to_string())
+            classify_remote("git@bitbucket.org:owner/repo.git", github("github.company.com")),
+            RepositoryIdentity::Unsupported("bitbucket.org".to_string())
         );
         assert_eq!(
-            classify_remote("https://github.com/owner", None),
+            classify_remote("https://github.com/owner", none()),
             RepositoryIdentity::Malformed("github.com".to_string())
         );
         assert_eq!(
-            classify_remote("https://github.com", None),
+            classify_remote("https://github.com", none()),
             RepositoryIdentity::Malformed("github.com".to_string())
-        );
-        assert_eq!(
-            classify_remote("https://gitlab.com", None),
-            RepositoryIdentity::Unsupported("gitlab.com".to_string())
         );
         assert_eq!(
             classify_remote(
                 "https://github.company.com:8443/owner/repo.git",
-                Some("github.company.com")
+                github("github.company.com")
             ),
             RepositoryIdentity::Unsupported("github.company.com".to_string())
         );
-        assert_eq!(classify_remote("/tmp/repo", None), RepositoryIdentity::Hostless);
-        assert_eq!(classify_remote("file:///tmp/repo", None), RepositoryIdentity::Hostless);
+        assert_eq!(classify_remote("/tmp/repo", none()), RepositoryIdentity::Hostless);
+        assert_eq!(classify_remote("file:///tmp/repo", none()), RepositoryIdentity::Hostless);
         assert_eq!(
-            classify_remote("file://github.com/owner/repo", None),
+            classify_remote("file://github.com/owner/repo", none()),
             RepositoryIdentity::Unsupported("github.com".to_string())
         );
         assert_eq!(
-            classify_remote("ftp://github.com/owner/repo", None),
+            classify_remote("ftp://github.com/owner/repo", none()),
             RepositoryIdentity::Unsupported("github.com".to_string())
         );
     }
 
     #[test]
     fn repository_target_enforces_its_canonical_shape() {
-        let target = RepoTarget::new("GitHub.COM", "owner", "repo").unwrap();
+        let target = RepoTarget::new(Forge::GitHub, "GitHub.COM", "owner", "repo").unwrap();
         assert_eq!(target.host(), "github.com");
         assert_eq!(target.owner(), "owner");
         assert_eq!(target.name(), "repo");
-        assert!(RepoTarget::new("bad host", "owner", "repo").is_none());
-        assert!(RepoTarget::new("github.com", ".", "repo").is_none());
-        assert!(RepoTarget::new("github.com", "owner/name", "repo").is_none());
-        assert!(RepoTarget::new("github.com", "owner", "bad\nname").is_none());
-        assert!(RepoTarget::new("github.com", "owner", "bad\u{202e}name").is_none());
+        assert!(RepoTarget::new(Forge::GitHub, "bad host", "owner", "repo").is_none());
+        assert!(RepoTarget::new(Forge::GitHub, "github.com", ".", "repo").is_none());
+        assert!(RepoTarget::new(Forge::GitHub, "github.com", "owner/name", "repo").is_none());
+        assert!(RepoTarget::new(Forge::GitHub, "github.com", "owner", "bad\nname").is_none());
+        assert!(RepoTarget::new(Forge::GitHub, "github.com", "owner", "bad\u{202e}name").is_none());
+        // A GitLab namespace admits nesting; each segment still validates.
+        assert!(RepoTarget::new(Forge::GitLab, "gitlab.com", "group/sub", "repo").is_some());
+        assert!(RepoTarget::new(Forge::GitLab, "gitlab.com", "group//sub", "repo").is_none());
+        assert!(RepoTarget::new(Forge::GitLab, "gitlab.com", "group/..", "repo").is_none());
+        assert!(RepoTarget::new(Forge::GitLab, "gitlab.com", "group", "sub/repo").is_none());
     }
 
     #[test]

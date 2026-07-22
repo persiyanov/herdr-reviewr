@@ -2743,7 +2743,10 @@ fn same_input_failure_preserves_any_visible_pr_snapshot_and_remedy() {
     let no_pr = PrView::NoPr;
     app.apply_pr(no_pr.clone());
 
-    app.apply_pr(PrView::NotAuthed("github.example.com".to_string()));
+    app.apply_pr(PrView::NotAuthed(
+        herdr_reviewr::git::Forge::GitHub,
+        "github.example.com".to_string(),
+    ));
 
     assert_eq!(app.pr, no_pr);
     assert_eq!(
@@ -3175,7 +3178,10 @@ fn the_pr_remedy_names_the_rebound_refresh_key() {
     app.set_plugin_config(config);
     app.apply_pr(PrView::NoPr);
 
-    app.apply_pr(PrView::NotAuthed("github.example.com".to_string()));
+    app.apply_pr(PrView::NotAuthed(
+        herdr_reviewr::git::Forge::GitHub,
+        "github.example.com".to_string(),
+    ));
 
     assert!(
         app.pr_notice().is_some_and(|notice| notice.ends_with("then press R.")),

@@ -15,6 +15,7 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod github;
+mod gitlab;
 
 /// What the `PR` tab shows: the resolved snapshot, or a degraded state with its own remedy.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,21 +31,21 @@ pub enum PrView {
     /// `HEAD` is detached, so there is no branch identity to query.
     Detached,
     /// Two or more open PRs contain the published work and no tiebreak decides; the
-    /// count, so the user knows to pick on GitHub.
+    /// count, so the user knows to pick on the forge.
     Ambiguous(usize),
-    /// `gh` is not on `PATH`.
-    NoGh,
-    /// `gh` is installed but not authenticated for this canonical host.
-    NotAuthed(String),
+    /// The target forge's CLI (`gh`/`glab`) is not on `PATH`.
+    NoCli(crate::git::Forge),
+    /// The forge CLI is installed but not authenticated for this canonical host.
+    NotAuthed(crate::git::Forge, String),
     /// Neither `upstream` nor `origin` names a supported hosted Git repository.
-    NeedsGitHubRemote,
-    /// The fallback `origin` names a hosted forge outside the supported GitHub hosts.
+    NeedsForgeRemote,
+    /// The fallback `origin` names a hosted forge outside the supported hosts.
     UnsupportedHost(String),
     /// The fallback `origin` names a supported host but not an owner/repository path.
     MalformedOrigin(String),
-    /// A local Git read failed before the GitHub fetch could start.
+    /// A local Git read failed before the forge fetch could start.
     GitError(String),
-    /// Any other `gh` failure (rate limit, offline, …); the app freezes the last good view.
+    /// Any other forge-CLI failure (rate limit, offline, …); the app freezes the last good view.
     Error(String),
 }
 
@@ -55,17 +56,20 @@ impl PrView {
     /// active `refresh` binding's hint key, so the advertised retry key follows a rebind.
     pub fn retry_remedy(&self, refresh: crate::keymap::Key) -> Option<String> {
         match self {
-            Self::NoGh => {
-                Some(format!("GitHub CLI not found. Install `gh`, then press {refresh}."))
-            }
-            Self::NotAuthed(host) => Some(format!(
-                "Not signed in to {host}. Run `gh auth login --hostname {host}`, then press {refresh}."
+            Self::NoCli(forge) => Some(format!(
+                "{} CLI not found. Install `{}`, then press {refresh}.",
+                forge.name(),
+                forge.cli()
+            )),
+            Self::NotAuthed(forge, host) => Some(format!(
+                "Not signed in to {host}. Run `{} auth login --hostname {host}`, then press {refresh}.",
+                forge.cli()
             )),
             Self::GitError(message) => {
                 Some(format!("Git read failed: {message}. Press {refresh} to retry."))
             }
             Self::Error(message) => {
-                Some(format!("GitHub unavailable: {message}. Press {refresh} to retry."))
+                Some(format!("Forge unavailable: {message}. Press {refresh} to retry."))
             }
             _ => None,
         }
@@ -274,20 +278,20 @@ fn run_cli(
 
 /// A classified forge-CLI failure, mapped to a [`PrView`] degraded state.
 #[derive(Debug, PartialEq, Eq)]
-enum GhError {
-    NoGh,
-    NotAuthed(String),
+enum CliError {
+    Missing(crate::git::Forge),
+    NotAuthed(crate::git::Forge, String),
     LocalGit(String),
     Other(String),
 }
 
-impl From<GhError> for PrView {
-    fn from(e: GhError) -> Self {
+impl From<CliError> for PrView {
+    fn from(e: CliError) -> Self {
         match e {
-            GhError::NoGh => PrView::NoGh,
-            GhError::NotAuthed(host) => PrView::NotAuthed(host),
-            GhError::LocalGit(message) => PrView::GitError(message),
-            GhError::Other(m) => PrView::Error(m),
+            CliError::Missing(forge) => PrView::NoCli(forge),
+            CliError::NotAuthed(forge, host) => PrView::NotAuthed(forge, host),
+            CliError::LocalGit(message) => PrView::GitError(message),
+            CliError::Other(m) => PrView::Error(m),
         }
     }
 }
@@ -328,7 +332,7 @@ fn fetch_input_inner(
     config: &crate::config::PluginConfig,
     verify_repository: bool,
 ) -> Result<PrFetchInput, PrInputError> {
-    let (repository, origin_repository) = crate::git::remote_identities(repo, config.github_host())
+    let (repository, origin_repository) = crate::git::remote_identities(repo, config.forge_hosts())
         .map_err(|error| PrInputError::TargetRead(error.0))?;
     let crate::git::RepositoryIdentity::Repository(target) = &repository else {
         return Ok(PrFetchInput {
@@ -340,7 +344,7 @@ fn fetch_input_inner(
     let local = match crate::git::pr_local(repo, base, config.base_branches()) {
         Ok(local) => local,
         Err(error) => {
-            let (current, _) = crate::git::remote_identities(repo, config.github_host())
+            let (current, _) = crate::git::remote_identities(repo, config.forge_hosts())
                 .map_err(|read_error| PrInputError::TargetRead(read_error.0))?;
             if current != repository {
                 return Err(PrInputError::TargetRead(
@@ -351,7 +355,7 @@ fn fetch_input_inner(
         }
     };
     let (repository, origin_repository) = if verify_repository {
-        crate::git::remote_identities(repo, config.github_host())
+        crate::git::remote_identities(repo, config.forge_hosts())
             .map_err(|error| PrInputError::TargetRead(error.0))?
     } else {
         (repository, origin_repository)
@@ -382,11 +386,11 @@ fn fetch_inner(
     repo: &Path,
     input: &PrFetchInput,
     cancelled: &AtomicBool,
-) -> Result<PrView, GhError> {
+) -> Result<PrView, CliError> {
     let repository = match &input.repository {
         crate::git::RepositoryIdentity::Repository(target) => target,
         crate::git::RepositoryIdentity::Missing | crate::git::RepositoryIdentity::Hostless => {
-            return Ok(PrView::NeedsGitHubRemote);
+            return Ok(PrView::NeedsForgeRemote);
         }
         crate::git::RepositoryIdentity::Unsupported(host) => {
             return Ok(PrView::UnsupportedHost(host.clone()));
@@ -408,6 +412,7 @@ fn fetch_inner(
         // (`specs/forge-host.md`).
         return Ok(PrView::NoPr);
     }
+    let forge = repository.forge();
     let target = FetchTarget {
         repo,
         host: repository.host(),
@@ -417,13 +422,22 @@ fn fetch_inner(
     };
     let source = select_source(input.origin_repository.as_ref(), repository);
     let head = nominated_head(&input.local);
-    let assoc = github::associate_points(
-        &target,
-        source,
-        &input.local.points,
-        &input.local.absorbed,
-        head,
-    )?;
+    let assoc = match forge {
+        crate::git::Forge::GitHub => github::associate_points(
+            &target,
+            source,
+            &input.local.points,
+            &input.local.absorbed,
+            head,
+        )?,
+        crate::git::Forge::GitLab => gitlab::associate_points(
+            &target,
+            source,
+            &input.local.points,
+            &input.local.absorbed,
+            head,
+        )?,
+    };
     let number = match pick_open(&assoc.open, input) {
         Pick::One(n) => n,
         Pick::Ambiguous(count) => {
@@ -436,22 +450,26 @@ fn fetch_inner(
             }
         },
     };
-    let detail = github::pr_detail(&target, number)?;
-    let node = &detail["data"]["repository"]["pullRequest"];
-    if node.is_null() {
+    let detail = match forge {
+        crate::git::Forge::GitHub => github::pr_detail(&target, number)?,
+        crate::git::Forge::GitLab => gitlab::pr_detail(&target, number)?,
+    };
+    let Some((node, pr_head)) = detail else {
         return Ok(PrView::NoPr);
-    }
+    };
     // Sync compares the fetch's pinned HEAD to the PR head, so a checkout or commit landing
     // mid-fetch never pairs one branch's PR with another branch's count.
-    let pr_head = node["headRefOid"].as_str().unwrap_or_default();
     let sync = match input.local.head_oid.as_deref() {
         Some(pin) if !pr_head.is_empty() => derive_sync(
-            crate::git::ahead_behind_oids(repo, pin, pr_head)
-                .map_err(|error| GhError::LocalGit(error.0))?,
+            crate::git::ahead_behind_oids(repo, pin, &pr_head)
+                .map_err(|error| CliError::LocalGit(error.0))?,
         ),
         _ => Sync::Unknown,
     };
-    Ok(PrView::Pr(Box::new(github::build_snapshot(node, sync))))
+    Ok(PrView::Pr(Box::new(match forge {
+        crate::git::Forge::GitHub => github::build_snapshot(&node, sync),
+        crate::git::Forge::GitLab => gitlab::build_snapshot(&node, sync),
+    })))
 }
 
 /// The local branch's position relative to the PR head, from `git`'s ahead/behind counts. A
@@ -698,14 +716,16 @@ mod tests {
         let gated = |input: &PrFetchInput| fetch(Path::new("."), input);
         let mut missing = input("head", vec![], None);
         missing.repository = crate::git::RepositoryIdentity::Missing;
-        assert_eq!(gated(&missing), PrView::NeedsGitHubRemote);
+        assert_eq!(gated(&missing), PrView::NeedsForgeRemote);
 
         let mut unsupported = input("head", vec![], None);
-        unsupported.repository = crate::git::RepositoryIdentity::Unsupported("gitlab.com".into());
-        assert_eq!(gated(&unsupported), PrView::UnsupportedHost("gitlab.com".into()));
+        unsupported.repository =
+            crate::git::RepositoryIdentity::Unsupported("bitbucket.org".into());
+        assert_eq!(gated(&unsupported), PrView::UnsupportedHost("bitbucket.org".into()));
 
         let repo = crate::git::RepositoryIdentity::Repository(
-            crate::git::RepoTarget::new("github.com", "owner", "repo").unwrap(),
+            crate::git::RepoTarget::new(crate::git::Forge::GitHub, "github.com", "owner", "repo")
+                .unwrap(),
         );
         let mut detached = input("head", vec![], None);
         detached.repository = repo.clone();
@@ -759,9 +779,12 @@ mod tests {
 
     #[test]
     fn source_selection_prefers_a_same_host_origin_else_the_target() {
-        let target = crate::git::RepoTarget::new("github.com", "acme", "widgets").unwrap();
-        let fork = crate::git::RepoTarget::new("github.com", "contributor", "widgets").unwrap();
-        let foreign = crate::git::RepoTarget::new("ghe.corp.test", "me", "widgets").unwrap();
+        let github = |host: &str, owner: &str, name: &str| {
+            crate::git::RepoTarget::new(crate::git::Forge::GitHub, host, owner, name).unwrap()
+        };
+        let target = github("github.com", "acme", "widgets");
+        let fork = github("github.com", "contributor", "widgets");
+        let foreign = github("ghe.corp.test", "me", "widgets");
         assert_eq!(select_source(Some(&fork), &target), &fork);
         assert_eq!(select_source(Some(&foreign), &target), &target);
         assert_eq!(select_source(None, &target), &target);
@@ -828,7 +851,7 @@ mod tests {
     #[test]
     fn local_git_failures_degrade_to_the_git_error_view() {
         assert_eq!(
-            PrView::from(GhError::LocalGit("rev-list failed".into())),
+            PrView::from(CliError::LocalGit("rev-list failed".into())),
             PrView::GitError("rev-list failed".into())
         );
     }

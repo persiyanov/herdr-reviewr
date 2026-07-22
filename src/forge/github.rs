@@ -10,27 +10,28 @@ use std::sync::atomic::AtomicBool;
 use serde_json::Value;
 
 use super::{
-    AssocPr, Association, Check, CheckStatus, Comment, CommentKind, FetchTarget, GhError, Merge,
+    AssocPr, Association, Check, CheckStatus, CliError, Comment, CommentKind, FetchTarget, Merge,
     PrSnapshot, PrState, Sync,
 };
+use crate::git::Forge;
 
 /// Run explicitly targeted `gh` arguments in `repo` and return stdout or a classified failure.
-fn gh(repo: &Path, host: &str, args: &[&str], cancelled: &AtomicBool) -> Result<String, GhError> {
+fn gh(repo: &Path, host: &str, args: &[&str], cancelled: &AtomicBool) -> Result<String, CliError> {
     super::run_cli("gh", repo, args, cancelled).map_err(|failure| match failure {
-        super::CliFailure::Missing => GhError::NoGh,
-        super::CliFailure::Other(message) => GhError::Other(message),
+        super::CliFailure::Missing => CliError::Missing(Forge::GitHub),
+        super::CliFailure::Other(message) => CliError::Other(message),
         super::CliFailure::Stderr(stderr) => classify_failure(&stderr, host),
     })
 }
 
 /// Map a failed `gh`'s stderr to a degraded state by its wording — `gh` has no stable exit
 /// codes for these. An unrecognised failure is `Other` → a transient `Error` view.
-fn classify_failure(stderr: &str, host: &str) -> GhError {
+fn classify_failure(stderr: &str, host: &str) -> CliError {
     let s = stderr.to_lowercase();
     if s.contains("not logged") || s.contains("authentication") || s.contains("gh auth login") {
-        GhError::NotAuthed(host.to_owned())
+        CliError::NotAuthed(Forge::GitHub, host.to_owned())
     } else {
-        GhError::Other(stderr.trim().to_string())
+        CliError::Other(stderr.trim().to_string())
     }
 }
 
@@ -62,7 +63,7 @@ pub(super) fn associate_points(
     points: &[crate::git::PublicationPoint],
     absorbed: &[String],
     head: Option<&str>,
-) -> Result<Association, GhError> {
+) -> Result<Association, CliError> {
     let closed = closed_aliases(points);
     let query =
         build_association_query(points.len() + absorbed.len() + head.iter().count(), &closed);
@@ -200,14 +201,24 @@ fn parse_association(
 /// reviews, plain comments, and review threads. Each list surface reads its newest 100 rows
 /// (`last:100`, flagged by `hasPreviousPage`) — ample for any real PR in a review sidebar —
 /// and flags a fuller surface so the UI can mark it, rather than paging to exhaustion
-/// (`specs/forge-host.md`). Checks keep `first:100`/`hasNextPage`.
-pub(super) fn pr_detail(target: &FetchTarget<'_>, number: u64) -> Result<Value, GhError> {
+/// (`specs/forge-host.md`). Checks keep `first:100`/`hasNextPage`. Returns the PR node and
+/// its head OID, or `None` when the PR vanished between the association and this read.
+pub(super) fn pr_detail(
+    target: &FetchTarget<'_>,
+    number: u64,
+) -> Result<Option<(Value, String)>, CliError> {
     let q = build_detail_query(number);
     let vars = vec![
         ("o".to_string(), target.owner.to_string()),
         ("n".to_string(), target.name.to_string()),
     ];
-    graphql(target.repo, target.host, &q, &vars, target.cancelled)
+    let mut v = graphql(target.repo, target.host, &q, &vars, target.cancelled)?;
+    let node = v["data"]["repository"]["pullRequest"].take();
+    if node.is_null() {
+        return Ok(None);
+    }
+    let head = node["headRefOid"].as_str().unwrap_or_default().to_string();
+    Ok(Some((node, head)))
 }
 
 /// Project one PR directly, including fork identity and capped check/comment surfaces.
@@ -235,11 +246,11 @@ fn graphql(
     query: &str,
     vars: &[(String, String)],
     cancelled: &AtomicBool,
-) -> Result<Value, GhError> {
+) -> Result<Value, CliError> {
     let args = graphql_args(host, query, vars);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = gh(repo, host, &arg_refs, cancelled)?;
-    serde_json::from_str(&out).map_err(|e| GhError::Other(e.to_string()))
+    serde_json::from_str(&out).map_err(|e| CliError::Other(e.to_string()))
 }
 
 fn graphql_args(host: &str, query: &str, vars: &[(String, String)]) -> Vec<String> {
@@ -776,15 +787,15 @@ mod tests {
     fn gh_failure_classifies_by_stderr_wording() {
         assert_eq!(
             classify_failure("gh auth login required", "github.example.com"),
-            GhError::NotAuthed("github.example.com".to_string())
+            CliError::NotAuthed(Forge::GitHub, "github.example.com".to_string())
         );
         assert_eq!(
             classify_failure("You are not logged into any GitHub hosts", "github.com"),
-            GhError::NotAuthed("github.com".to_string())
+            CliError::NotAuthed(Forge::GitHub, "github.com".to_string())
         );
         assert_eq!(
             classify_failure("HTTP 500 something", "github.com"),
-            GhError::Other("HTTP 500 something".into())
+            CliError::Other("HTTP 500 something".into())
         );
     }
 

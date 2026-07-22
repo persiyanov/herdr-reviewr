@@ -77,7 +77,7 @@ fn an_unusable_upstream_falls_back_to_origin() {
     repo.git(&["remote", "add", "upstream", repo.path().to_str().unwrap()]);
     assert_target(&selected().repository, "github.com", "acme", "widgets");
 
-    repo.git(&["remote", "set-url", "upstream", "https://gitlab.com/other/widgets.git"]);
+    repo.git(&["remote", "set-url", "upstream", "https://bitbucket.org/other/widgets.git"]);
     assert_target(&selected().repository, "github.com", "acme", "widgets");
 
     repo.git(&["remote", "set-url", "upstream", "https://github.com/acme"]);
@@ -112,6 +112,31 @@ fn a_github_com_prefixed_host_is_only_supported_when_configured_literally() {
     let config = plugin_config_in(config_dir.path()).unwrap();
     let input = fetch_input(repo.path(), None, &config).unwrap();
     assert_target(&input.repository, "github.com-work", "enterprise", "widgets");
+}
+
+#[test]
+fn a_gitlab_origin_resolves_with_its_nested_namespace() {
+    let repo = worktree();
+    repo.git(&["remote", "set-url", "origin", "https://gitlab.com/group/sub/widgets.git"]);
+    let input = fetch_input(repo.path(), None, &defaults()).unwrap();
+    assert_target(&input.repository, "gitlab.com", "group/sub", "widgets");
+
+    // A self-managed GitLab host resolves only when configured, like GitHub Enterprise.
+    repo.git(&["remote", "set-url", "origin", "git@gitlab.example.test:a/b/c/widgets.git"]);
+    let input = fetch_input(repo.path(), None, &defaults()).unwrap();
+    assert!(
+        matches!(&input.repository, RepositoryIdentity::Unsupported(host) if host == "gitlab.example.test")
+    );
+
+    let config_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        "gitlab_host = \"gitlab.example.test\"\n",
+    )
+    .unwrap();
+    let config = plugin_config_in(config_dir.path()).unwrap();
+    let input = fetch_input(repo.path(), None, &config).unwrap();
+    assert_target(&input.repository, "gitlab.example.test", "a/b/c", "widgets");
 }
 
 #[test]

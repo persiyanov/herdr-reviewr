@@ -2786,20 +2786,20 @@ fn pr_empty_msg(view: &forge::PrView, refresh: crate::keymap::Key) -> String {
         forge::PrView::Ambiguous(n) => {
             format!("Found {n} open PRs containing this work. Keep one open, then press {refresh}.")
         }
-        forge::PrView::NoGh
-        | forge::PrView::NotAuthed(_)
+        forge::PrView::NoCli(_)
+        | forge::PrView::NotAuthed(_, _)
         | forge::PrView::GitError(_)
         | forge::PrView::Error(_) => {
             unreachable!("retry failures returned above")
         }
-        forge::PrView::NeedsGitHubRemote => {
-            "PRs need a GitHub remote named upstream or origin.".into()
+        forge::PrView::NeedsForgeRemote => {
+            "PRs need a GitHub or GitLab remote named upstream or origin.".into()
         }
         forge::PrView::UnsupportedHost(host) => {
-            format!("Unsupported host: {host}. Using GitHub Enterprise? Set `github_host`.")
+            format!("Unsupported host: {host}. Self-managed? Set `github_host` or `gitlab_host`.")
         }
         forge::PrView::MalformedOrigin(host) => {
-            format!("The origin remote must point to a GitHub owner/repository on {host}.")
+            format!("The origin remote must point to a repository path on {host}.")
         }
     }
 }
