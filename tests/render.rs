@@ -451,20 +451,126 @@ fn the_footer_shows_the_action_for_the_context() {
 }
 
 #[test]
-fn the_footer_drops_to_fit_and_marks_the_clip() {
+fn the_footer_trims_trailing_actions_to_fit_keeping_the_primary_and_the_more_hint() {
     let mut app = edited_app();
-    on_changed_line(&mut app); // diff focus, content line → c comment · v select · …
-    // Wide: every action fits, nothing is clipped.
+    on_changed_line(&mut app); // diff focus, content line → c comment · v select … ?
+    // Wide: every cursor action fits, and the `?` closes the row.
     let wide = footer_line(&render_at(&app, 120));
     assert!(
-        wide.contains("c comment") && wide.contains("v select") && !wide.contains('…'),
-        "wide footer shows all actions, no clip marker:\n{wide}"
+        wide.contains("c comment") && wide.contains("v select") && wide.trim_end().ends_with('?'),
+        "wide footer shows all actions and the `?`:\n{wide}"
     );
-    // Narrow: the primary survives, the least-relevant actions are trimmed, and `…` marks it.
+    // Narrow: the primary survives, the trailing action drops, and the `?` stays at the right.
     let narrow = footer_line(&render_at(&app, 18));
     assert!(narrow.contains("c comment"), "the primary action is never dropped:\n{narrow}");
-    assert!(narrow.contains('…'), "the clip is marked with …:\n{narrow}");
-    assert!(!narrow.contains("v select"), "the least-relevant action is trimmed:\n{narrow}");
+    assert!(narrow.trim_end().ends_with('?'), "the `?` never drops:\n{narrow}");
+    assert!(!narrow.contains("v select"), "the trailing action is trimmed off row 1:\n{narrow}");
+    // Too narrow for the primary and the `?` together: the primary sheds its label to its key, and
+    // the `?` still survives at the right.
+    let tiny = footer_line(&render_at(&app, 11));
+    assert!(tiny.contains(" c "), "the primary keeps its key:\n{tiny}");
+    assert!(!tiny.contains("comment"), "the primary sheds its label:\n{tiny}");
+    assert!(tiny.trim_end().ends_with('?'), "the `?` still survives:\n{tiny}");
+}
+
+#[test]
+fn a_narrow_row_keeps_send_and_the_more_hint_by_shedding_the_primary_label() {
+    let mut app = edited_app();
+    on_changed_line(&mut app);
+    app.start_comment();
+    for ch in "n".chars() {
+        app.input_push(ch);
+    }
+    app.submit_comment(); // a written comment adds `s send 1` to row 1
+    // A pane too narrow for the full primary alongside `send` and `?` keeps all three by shedding
+    // the primary's label — `send` and the `?` must never clip off the right edge.
+    let narrow = footer_line(&render_at(&app, 16));
+    assert!(narrow.contains("s send 1"), "send never drops:\n{narrow}");
+    assert!(narrow.trim_end().ends_with('?'), "the `?` never drops:\n{narrow}");
+    assert!(narrow.chars().count() <= 16, "the row never overflows its width:\n{narrow}");
+}
+
+#[test]
+fn the_expansion_aligns_row_one_into_the_labeled_grid() {
+    let mut app = edited_app();
+    on_changed_line(&mut app);
+    app.toggle_keys();
+    let out = render(&app);
+    // Search only the footer rows, so a stray `move`/`go` in the diff or file list can't stand in.
+    let footer_start = ui::body_rect(Rect::new(0, 0, 140, 40), &app);
+    let footer_start = (footer_start.y + footer_start.height) as usize;
+    let line_of = |lbl: &str| {
+        out.lines()
+            .skip(footer_start)
+            .find(|l| l.trim_start().starts_with(lbl))
+            .unwrap_or("")
+            .to_string()
+    };
+    let (do_line, go_line, move_line) = (line_of("do"), line_of("go"), line_of("move"));
+
+    // Row 1 is now the `do` band: the primary, and the `?` still at the right.
+    assert!(
+        do_line.contains("c comment") && do_line.trim_end().ends_with('?'),
+        "row 1 is the `do` line with the primary and `?`:\n{do_line}"
+    );
+    assert!(go_line.contains("scope"), "the go band lists the always-there keys:\n{go_line}");
+    assert!(
+        move_line.contains("hunk") && move_line.contains("file"),
+        "the move band names the hunk and file steps:\n{move_line}"
+    );
+    // The three labels share one gutter column, and their content aligns in the next.
+    let at = |l: &str, s: &str| l.find(s).expect("token present");
+    assert_eq!(at(&do_line, "do"), at(&go_line, "go"), "labels share a gutter column");
+    assert_eq!(at(&go_line, "go"), at(&move_line, "move"), "labels share a gutter column");
+    assert_eq!(
+        at(&do_line, "c comment"),
+        at(&go_line, "u/b/t"),
+        "the primary aligns under the same column as the band keys"
+    );
+    assert_eq!(at(&go_line, "u/b/t"), at(&move_line, "j k"), "band keys align in one column");
+}
+
+#[test]
+fn the_collapsed_footer_stays_a_flush_action_bar() {
+    let mut app = edited_app();
+    on_changed_line(&mut app); // collapsed: no expansion
+    let footer = footer_line(&render(&app));
+    assert!(
+        footer.trim_start().starts_with("c comment"),
+        "no `do` gutter when collapsed:\n{footer}"
+    );
+    assert!(!footer.contains(" do "), "the `do` label appears only when expanded:\n{footer}");
+}
+
+#[test]
+fn the_expanded_row_one_never_drops_send_or_the_more_hint_on_a_narrow_pane() {
+    let mut app = edited_app();
+    on_changed_line(&mut app);
+    app.start_comment();
+    for ch in "n".chars() {
+        app.input_push(ch);
+    }
+    app.submit_comment(); // a written comment puts `s send 1` on row 1
+    app.toggle_keys(); // expanded — the fixed `do` gutter cannot shed
+    for w in [14u16, 16, 18, 20, 22, 30] {
+        let out = dump(&render_size(&app, w, 40));
+        let row1 = out.lines().find(|l| l.contains("send")).expect("row 1 carries send");
+        let row1 = row1.trim_end();
+        assert!(row1.contains("s send 1"), "send survives at w={w}: [{row1}]");
+        assert!(row1.ends_with('?'), "the `?` survives at w={w}: [{row1}]");
+        assert!(row1.chars().count() <= w as usize, "row 1 never overflows at w={w}: [{row1}]");
+    }
+}
+
+#[test]
+fn the_expansion_caps_so_the_body_keeps_its_rows() {
+    let mut app = edited_app();
+    on_changed_line(&mut app);
+    app.toggle_keys();
+    // On a short pane the wrapped bands would want more rows than fit, but the footer is capped so
+    // the body keeps its Min(3) (specs/tui.md).
+    let body = ui::body_rect(Rect::new(0, 0, 40, 6), &app);
+    assert!(body.height >= 3, "the body keeps at least three rows: got {}", body.height);
 }
 
 #[test]
@@ -715,7 +821,7 @@ fn file_and_diff_clicks_map_to_row_indices() {
 #[test]
 fn navigator_layout_rects_cover_every_position_and_tiny_axis() {
     let mut app = edited_app();
-    let body = ui::body_rect(AREA);
+    let body = ui::body_rect(AREA, &app);
 
     for position in [
         NavigatorPosition::Right,
@@ -794,23 +900,23 @@ fn navigator_layout_rects_cover_every_position_and_tiny_axis() {
 
     app.navigator_position = NavigatorPosition::Right;
     let six = Rect::new(0, 0, 6, 10);
-    let row = ui::body_rect(six).y;
+    let row = ui::body_rect(six, &app).y;
     assert_eq!((0..6).filter(|&col| ui::in_files_pane(six, &app, col, row)).count(), 3);
     assert_eq!((0..6).filter(|&col| ui::in_diff_pane(six, &app, col, row)).count(), 3);
 
     let five = Rect::new(0, 0, 5, 10);
-    let row = ui::body_rect(five).y;
+    let row = ui::body_rect(five, &app).y;
     assert_eq!((0..5).filter(|&col| ui::in_files_pane(five, &app, col, row)).count(), 2);
     assert_eq!((0..5).filter(|&col| ui::in_diff_pane(five, &app, col, row)).count(), 3);
 
     app.navigator_position = NavigatorPosition::Top;
     let eight = Rect::new(0, 0, 10, 10); // body height 8
-    let col = ui::body_rect(eight).x;
+    let col = ui::body_rect(eight, &app).x;
     assert_eq!((1..9).filter(|&row| ui::in_files_pane(eight, &app, col, row)).count(), 3);
     assert_eq!((1..9).filter(|&row| ui::in_diff_pane(eight, &app, col, row)).count(), 5);
 
     let seven = Rect::new(0, 0, 10, 7); // body height 5: navigator gets floor(5 / 2)
-    let col = ui::body_rect(seven).x;
+    let col = ui::body_rect(seven, &app).x;
     assert_eq!((1..6).filter(|&row| ui::in_files_pane(seven, &app, col, row)).count(), 2);
     assert_eq!((1..6).filter(|&row| ui::in_diff_pane(seven, &app, col, row)).count(), 3);
 }
@@ -820,7 +926,7 @@ fn pr_focus_border_tracks_tab_between_navigator_and_read_pane() {
     let mut app = edited_app();
     app.set_tab(Tab::Pr).unwrap();
     app.focus = Focus::Files;
-    let body = ui::body_rect(AREA);
+    let body = ui::body_rect(AREA, &app);
     let nav_x = (body.x..body.x + body.width)
         .find(|&x| ui::in_files_pane(AREA, &app, x, body.y + 4))
         .unwrap();
@@ -967,11 +1073,19 @@ fn all_files_tab_bar_footer_and_count_read_for_the_tab() {
         "the changed count stays in the header on All files:\n{out}"
     );
     let footer = footer_line(&out);
-    assert!(footer.contains("scope"), "the footer shows context actions on All files:\n{footer}");
+    assert!(
+        footer.trim_end().ends_with('?'),
+        "the collapsed footer closes with the `?`:\n{footer}"
+    );
     assert!(
         !footer.contains("changed"),
         "the changed count is not repeated in the footer:\n{footer}"
     );
+    // `scope` is a `go` key now, revealed by the `?` expansion rather than crowding row 1.
+    app.toggle_keys();
+    let expanded = render(&app);
+    assert!(expanded.contains("scope"), "the `?` expansion lists the scope keys:\n{expanded}");
+    assert!(expanded.contains("move"), "and labels the movement band:\n{expanded}");
 }
 
 #[test]
@@ -1240,7 +1354,7 @@ fn pr_navigator_scroll_is_independent_and_preserved() {
 
     let selected = app.pr_selected_comment().map(|c| c.author.clone());
     let area = Rect::new(0, 0, 140, 40);
-    let body = ui::body_rect(area);
+    let body = ui::body_rect(area, &app);
     let (column, row) = (body.y..body.y + body.height)
         .flat_map(|row| (body.x..body.x + body.width).map(move |column| (column, row)))
         .find(|&(column, row)| ui::in_files_pane(area, &app, column, row))
@@ -1617,6 +1731,40 @@ fn an_anchor_in_a_comment_body_jumps_past_the_snippet_offset() {
     assert!(!out.contains("jump go"), "the body's top scrolled away:\n{out}");
 }
 
+// In-file find rendering (specs/find-in-file.md).
+#[test]
+fn the_find_band_and_match_highlight_paint() {
+    let r = Repo::init();
+    r.write("base.txt", "x\n");
+    r.commit_all("init");
+    r.write("m.rs", "let total = 1;\ncompute();\ntotal += 2;\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.diff_cursor = 0; // the first "total" row
+    let keymap = Keymap::default();
+    let area = Rect::new(0, 0, 140, 40);
+
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL), area, &keymap)
+        .unwrap();
+    for ch in "total".chars() {
+        handle_key(&mut app, KeyEvent::from(KeyCode::Char(ch)), area, &keymap).unwrap();
+    }
+
+    let buf = render_buffer(&app);
+    let out = dump(&buf);
+    // The band carries the label, the query, and the count: two matches, the cursor on the first.
+    assert!(out.contains("find"), "the band shows the find label:\n{out}");
+    assert!(out.contains("1/2"), "the band shows the cursor's ordinal over the total:\n{out}");
+
+    // A matched character reverses to the bright fill with dark text, so it reads over any row.
+    let fill = app.palette().yellow;
+    let ink = app.palette().surface0;
+    let highlighted = (0..40u16).flat_map(|y| (0..140u16).map(move |x| (x, y))).any(|(x, y)| {
+        buf.cell((x, y)).is_some_and(|c| c.symbol() == "t" && c.bg == fill && c.fg == ink)
+    });
+    assert!(highlighted, "a matched character reverses to the bright find highlight");
+}
+
 // Search screen rendering (specs/search.md).
 mod search_screen_render {
     use super::{common, dump, render, render_size};
@@ -1780,7 +1928,7 @@ mod search_screen_render {
         // A chip click flips the mode.
         let mut app = open_on_all_files(&repo);
         let _ = dump(&render_size(&app, 140, 40));
-        let band_y = ui::body_rect(AREA).y;
+        let band_y = ui::body_rect(AREA, &app).y;
         let chip_x = (0..140u16)
             .find(|&x| ui::search_target(&app, AREA, x, band_y) == Some(ui::SearchTarget::Chips))
             .expect("the chips are clickable");

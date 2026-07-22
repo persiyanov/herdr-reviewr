@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-17
-Last edited: 2026-07-17
+Last edited: 2026-07-21
 ---
 
 # PR tab
@@ -28,7 +28,7 @@ The navigator shows checks and selects the description or a comment. The read pa
 │                                                       ││ @claude manager.py:39    2h  │
 │                                                       ││ @claude parse.py:187 outdated│
 ╰───────────────────────────────────────────────────────╯╰─────────────────────────────╯
- ⚠ conflicts with main · ⇡ 2 unpushed · ✗ 1 failing · 5 comments   o open ↗   │ p position · 1·2·3 · r · q
+ ⚠ conflicts with main · ⇡ 2 unpushed · ✗ 1 failing · 5 comments   o open ↗                            ?
 ```
 
 ## Behavior
@@ -37,7 +37,8 @@ The navigator shows checks and selects the description or a comment. The read pa
 
 - The header right-anchors a clickable `status #226 ↗` chip, status colored by lifecycle: `open` green, `draft` yellow, `merged` mauve, `closed` red. The PR title sits to its left, truncated to fit.
 - Between title and chip sits the resolved head branch (`head_ref`, `forge-host.md`), dim, prefixed `⑂ ` when the head lives in a fork. On a narrow bar the branch drops first.
-- The footer leads with merge, sync, checks, and comment counts. Merge and sync show only while the PR is open. A capped surface appends `+more on GitHub ↗` (`forge-host.md`).
+- The footer leads with merge, sync, checks, and comment counts, then `o open ↗` and the `?`. Merge and sync show only while the PR is open. A capped surface appends `+more on GitHub ↗` (`forge-host.md`).
+- The `?` expands to the `go` band and a `move` band of down, up, and the page keys. The `PR` tab has no hunk or file steps (`input.md`).
 - The ordinary no-PR body says only `No pull request yet. Ready to ship?` A detached HEAD says `No pull request found — HEAD is detached.`
 
 ### Navigator and read pane

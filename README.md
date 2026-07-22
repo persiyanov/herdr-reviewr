@@ -28,6 +28,8 @@ One persistent pane, pointed at a git worktree:
 - **Search** — `/` from any tab opens one screen over the worktree: fuzzy file names and live
   code grep, powered by [fff](https://github.com/dmtrKovalenko/fff).
   Pick a result and land on its line.
+- **Find in file** — `Ctrl+F` searches the open file. Every match lights up, and `enter` and the
+  arrows step the cursor between them.
 - **PR view** — the branch's pull request without leaving the pane, read-only, rendered as
   styled markdown.
 - **Markdown preview** — one key flips a `.md` file between source and rendered view, code
@@ -94,7 +96,7 @@ Open the sidebar next to your agent:
 5. **Send.** `s` drops every comment into the agent's input as `path:start-end — comment`. Add
    context, send.
 
-The footer always shows the keys that work right now, so you learn it by using it.
+The footer shows the next step to take. Press `?` to see every key that works right now.
 
 For a shortcut, bind a key to the toggle in your herdr config. Keybindings live in user config,
 not the plugin manifest:
@@ -133,11 +135,13 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | `Tab` | Switch focus between the navigator and read pane |
 | `→` `←` | Expand or collapse a directory or fold, or scroll the diff sideways |
 | `/` | Search files and code from any tab — type to filter, then pick a result with `↑` `↓` and open it with `enter` |
+| `Ctrl+F` | Find in the open file — every match lights up, `enter` and the arrows step between them |
 | `w` | Toggle line wrap |
 | `m` | Toggle the markdown preview of a `.md` file (Changes or All files) |
 | `p` | Move the navigator clockwise: right / bottom / left / top |
 | `<` `>` | Grow / shrink the navigator |
 | `r` | Refresh now |
+| `?` | Show every shortcut that works in the current context |
 | `q` | Quit |
 
 **Reviewing** (in the diff)
@@ -328,15 +332,19 @@ The action names and their defaults:
 | `edit` / `delete` | `e` / `d` |
 | `next-comment` / `prev-comment` | `n` / `N` |
 | `comments` | `l` |
+| `search` | `/` |
+| `find` | `ctrl+f` |
+| `keys` | `?` |
 | `send` | `s`, `S` |
 | `copy` | `y`, `Y` |
 | `open-pr` | `o` |
 | `refresh` | `r` |
 | `quit` | `q` |
 
-A key is one printable character. The arrows, `Tab`, `Esc`, `Enter`, and the page keys are
-fixed and always work. Keys still type normally in the comment box. Two actions can never share
-a key — a collision invalidates the whole file, and the error names both actions.
+A key is one printable character, or a `ctrl+`/`alt+` chord like `ctrl+f`. The arrows, `Tab`,
+`Esc`, `Enter`, and the page keys are fixed and always work. Keys still type normally in the
+comment box. Two actions can never share a key — a collision invalidates the whole file, and the
+error names both actions.
 
 `list-wider` and `list-narrower` remain accepted aliases for `navigator-grow` and
 `navigator-shrink`. Normalized config output uses the canonical names.
@@ -483,8 +491,8 @@ herdr plugin link .
 
 ## Roadmap
 
-Structured (JSON) export, in-diff search, a side-by-side split view, mark-file-reviewed,
-modifier and named-key notation for keybindings, OSC light/dark theme autodetect, more themes
+Structured (JSON) export, a side-by-side split view, mark-file-reviewed,
+named-key notation for keybindings, OSC light/dark theme autodetect, more themes
 (`kanagawa`, `vesper`, `everforest`, `ayu`, a dark `github`), a `terminal`-following palette,
 and OSC 52 clipboard.
 

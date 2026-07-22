@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-17
-Last edited: 2026-07-19
+Last edited: 2026-07-21
 ---
 
 # Input
@@ -15,8 +15,8 @@ Every action has a key. The mouse-relevant ones also work by click or drag.
 The keymap is rebindable per action through `[keybindings]` in the plugin config (`config.md`):
 
 - The `action` column names the action for `[keybindings]`.
-- The character keys are defaults.
-- A key that is not a bare character (the arrows, `tab`, `esc`, `enter`, the page keys) is fixed.
+- The keys shown are defaults: a bare character, or a `ctrl+`/`alt+` chord (`config.md`).
+- The arrows, `tab`, `esc`, `enter`, and the page keys are structural. They are fixed and never rebind.
 - A key hint in the header or the footer shows its action's first bound key.
 - The comments list acts through the same bindings and closes on `esc` and the `comments` binding.
 - Prose and mockups elsewhere show the default keys.
@@ -47,6 +47,8 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | `next-comment` / `prev-comment`                          | jump to next / previous comment             | `n` / `N`                                   | —                             |
 | `comments`                                               | list and manage all comments                | `l`                                         | —                             |
 | `search`                                                 | open the search screen (`search.md`)        | `/`                                         | —                             |
+| `find`                                                   | open in-file find (`find-in-file.md`)       | `ctrl+f`                                    | —                             |
+| `keys`                                                   | toggle the footer's full shortcut list      | `?`                                         | —                             |
 | `send`                                                   | send all comments to the agent              | `s` / `S`                                   | click `Send`                  |
 | `copy`                                                   | copy all comments to the clipboard          | `y` / `Y`                                   | —                             |
 | `open-pr`                                                | open the PR in the browser (`pr-tab.md`)    | `o`                                         | click the status chip         |
@@ -61,7 +63,7 @@ These three navigator actions work from either main pane on every tab. While the
 
 A divider drag belongs to the navigator position and split axis at mouse-down. A keypress, terminal resize, or config-driven layout change cancels it. After cancellation, drag events are consumed until mouse-up rather than becoming a selection in the read pane.
 
-Writing a comment: select a range or land on a line, press `c`, type into the inline box, `enter` saves and `esc` cancels. A saved comment renders as a read-only card spliced under its line, titled with its location, so written feedback stays on screen. `e` reopens the card as an edit box in place, hiding the card while editing. `d` deletes it. A successful send reports that the comments were added to the agent input; a successful copy reports that they were copied. The transient status pluralizes `comment` and fades.
+Writing a comment: select a range or land on a line, press `c`, type into the inline box, `enter` saves and `esc` cancels. A saved comment renders as a read-only card spliced under its line, titled with its location, so written feedback stays on screen. `e` reopens the card as an edit box in place, hiding the card while editing. `d` deletes it. A successful send reports that the comments were added to the agent input; a successful copy reports that they were copied. The transient status shows on the footer, pluralizes `comment`, and fades without covering the primary action.
 
 ## Behavior
 
@@ -93,23 +95,62 @@ The steps and the skips share the rest:
 
 ### Footer
 
-The footer is a live action bar. It shows the actions available right now, the most likely one highlighted, and drops the least relevant when the line fills. It never lists a key that would not work in the current state.
+The footer is one row: the primary next step, the cursor's own actions, and `send` once a comment
+exists, closing with a `?`. Pressing `?` expands it to every shortcut that works here, and it stays
+until `?` or `esc`. It never lists a key that would not work in the current state.
 
 ```
- c comment · v select lines                 │ ⇥ files · p position · 1·2·3 · q
+ e edit · d delete · n/N jump · s send 2                                      ?
 ```
 
-The bar fills by priority until the width runs out, and a trailing `…` marks anything clipped:
+Opening it turns the one-row action bar into a labeled grid. Row 1 becomes the `do` band under a
+dim `do` label: the primary and the cursor's actions. Two bands follow it, `go` (the always-there
+keys) and `move` (cursor movement). Every band's content aligns in one column. The `?` stays at the
+right of the `do` row.
 
-| slot       | content                                                                        |
-| ---------- | ------------------------------------------------------------------------------ |
-| primary    | the most likely next step, in a bright accent, always shown                    |
-| send       | `s send N`, present once any comment is written, just below the primary        |
-| actions    | what else works here, in normal text                                           |
-| navigation | dim, stable: pane toggle, navigator position, tab digits, quit; dropped first  |
-| status     | a transient message (`comment added`) that fades, never replacing actions      |
+```
+ do    e edit · d delete · n/N jump · s send 2                                ?
+ go    u/b/t scope · / search · ctrl+f find · w wrap · l list · y copy · r refresh · 1·2·3 tabs
+       tab files · p position · q quit
+ move  j k · ] [ hunk · f F file · PageUp PageDown
+```
 
-The actions follow the cursor:
+A band wraps to as many rows as its keys need. The label sits on the first row, and continuation
+rows indent under the keys. A cursor action that does not fit row 1 continues under the `do` label
+on its own indented row.
+
+Row 1 is always shown:
+
+| slot    | content                                                                           |
+| ------- | --------------------------------------------------------------------------------- |
+| primary | the most likely next step, in a bright accent, never dropped                      |
+| send    | `s send N`, present once any comment is written, after the primary, never dropped |
+| actions | the cursor's other actions, in normal text, trimmed to fit                        |
+| more    | a `?` at the right, muted but legible — always present, and expands the rest      |
+
+A narrow row drops trailing actions to fit. The primary, `send`, and the `?` never drop. On a pane
+too narrow even for those, the primary truncates before the `?` does.
+
+The `?` expansion:
+
+- It lists every shortcut applicable in the current context that is not already on row 1, wrapped
+  below row 1 in three labeled bands, each a dim label then its keys. `do`: the cursor's actions.
+  `go`: the keys that work anywhere — scope, search, find, wrap, the comments list, copy, refresh, the
+  tabs, the pane toggle, the navigator-position key, quit. `move`: down and up, the hunk and file
+  steps, the page keys. An empty band is dropped, and a key that would not work in the current state
+  never appears. The hunk step shows only where it works, the `Changes` diff and never a preview
+  (see Changeset traversal). `PR` has no hunk or file steps.
+- Row 1 wears the `do` label and aligns into the grid only while the panel is open. Collapsed, it is
+  the flush action bar with no label. The `?` sits at its right in both states.
+- It takes body rows down to the read pane's minimum (`tui.md`). A context that needs more rows than
+  that shows only what fits, and row 1 always survives.
+- Its open state is place state (`overview.md`). `?` and `esc` move it. A world event only re-derives
+  its content in place, reconciled by identity, never the toggle. It opens collapsed, is never saved,
+  and config recovery preserves it.
+- `?` toggles it. `esc` closes it, one step behind a live selection and an armed crossing — each `esc`
+  consumes exactly one.
+
+Row 1's primary and actions follow the cursor:
 
 | cursor on                                | primary                        | also                              |
 | ---------------------------------------- | ------------------------------ | --------------------------------- |
@@ -120,18 +161,18 @@ The actions follow the cursor:
 | a commented line                         | `e edit`                       | `d delete · n/N jump`   |
 | a fold                                   | `→ expand fold`                | —                       |
 | an open markdown preview                 | `m source`                     | —                       |
-| a file (file list)                       | `⇥ diff`                       | —                       |
+| a file (file list)                       | `tab diff`                     | —                       |
 | a collapsed directory                    | `→ expand`                     | —                       |
 | an expanded directory                    | `← collapse`                   | —                       |
 | nothing to review (awaiting turn)        | `u/b/t scope`                  | `r refresh`             |
 
-- An armed crossing outranks the cursor's own action, since only the footer says the next press leaves the file.
-- `u/b/t scope` shows in every `Changes` and `All files` context, except where it is itself the primary.
-- `search` shows in every context, on every tab (`search.md`).
-- Movement keys are never shown. The armed crossing is the one exception.
-- The comment editor, the comments list, and the search screen show their own actions.
+- An armed crossing outranks the cursor's own action and leads row 1, since only the footer says the next press leaves the file. It is the one movement key on row 1 (see Changeset traversal). While it is armed, the `move` band drops the hunk step, whose key row 1 now shows.
+- `scope`, `search`, and `find` are global, not cursor actions, so the `go` band carries them, never row 1 — `search` in every context, `find` wherever the read pane has content (`search.md`, `find-in-file.md`). `scope` leads row 1 only where nothing else does, an empty or notice diff.
+- Movement keys never sit on row 1. The `move` band shows them.
+- The comment editor, the comments list, the search screen, and the find band show their own one-row footer, without `?`. The expansion's open state is kept and restored when they close.
+- `?` (the `keys` action) toggles the expansion in `Normal` mode only. It is text in the comment editor and the search and find inputs, and inert in the comments list.
 - The changed-file count and line totals live in the header. The footer carries only the comment count, inside `s send N`.
-- On `PR` the bar carries the PR state line and `o open ↗` per `pr-tab.md`, then navigation.
+- On `PR` row 1 carries the PR state line and `o open ↗` per `pr-tab.md`, and `?` expands to the rest.
 
 ### Comment editor
 
@@ -165,8 +206,9 @@ A plain-text field that edits at the caret, not only at the end. The search inpu
 ## Non-goals
 
 - No text selection, cut/copy, undo/redo, markdown rendering, or click-to-place-caret in the comment editor.
-- No modifier, named-key, or sequence notation in the keymap. Single characters are the v1 surface.
+- No named-key or multi-key sequence bindings. A binding is one key, alone or with a `ctrl+`/`alt+` prefix.
 - No `down` / `up` crossing at a file's edges. The line cursor clamps there.
+- The `?` expansion omits the navigator-resize keys and the horizontal-diff-scroll keys. Resizing is a divider drag first, and horizontal scroll is one of the `←` / `→` keys' several meanings.
 
 ## Related specs
 
@@ -176,3 +218,4 @@ A plain-text field that edits at the caret, not only at the end. The search inpu
 - [review-model](./review-model.md)
 - [pr-tab](./pr-tab.md)
 - [search](./search.md)
+- [find-in-file](./find-in-file.md)

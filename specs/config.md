@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-10
-Last edited: 2026-07-18
+Last edited: 2026-07-21
 ---
 
 # Configuration
@@ -25,6 +25,7 @@ github_host = "github.example.com"
 [keybindings]
 comment = ["c", "ㅊ"]
 select  = ["v", "ㅍ"]
+find    = ["ctrl+f"]
 ```
 
 | key                  | value                                                                              |
@@ -80,7 +81,7 @@ Config writers must build a complete file beside `config.toml`, then replace it 
 
 ### Keybindings
 
-`[keybindings]` rebinds the character shortcuts. The resolved keymap is the default keymap with each bound action's characters replaced by its binding.
+`[keybindings]` rebinds the action shortcuts. The resolved keymap is the default keymap with each bound action's keys replaced by its binding. A key is a bare character or a `ctrl+`/`alt+` chord (`CFG-KEY-FORM`), so an action reachable only by a chord, like `find`, rebinds like any other (`input.md`).
 
 `list-wider` and `list-narrower` remain accepted aliases for `navigator-grow` and `navigator-shrink`. A config that names an action and its alias is invalid as a duplicate action. Resolved config output uses the canonical names.
 
@@ -88,12 +89,12 @@ An existing custom binding does not displace a newly added default. If an upgrad
 
 The sidebar validates before drawing each frame. That frame and the next input event use the resulting config and layout snapshot. A file change after drawing affects the following frame.
 
-| code                | Always true                                                          |
-| ------------------- | -------------------------------------------------------------------- |
-| `CFG-KEY-PRINTABLE` | A key is one codepoint, printable and not whitespace.                |
-| `CFG-KEY-UNIQUE`    | A character appears at most once across the resolved keymap's lists. |
+| code             | Always true                                                                              |
+| ---------------- | ---------------------------------------------------------------------------------------- |
+| `CFG-KEY-FORM`   | A key is one printable, non-whitespace codepoint, alone or with a `ctrl+`/`alt+` prefix. |
+| `CFG-KEY-UNIQUE` | A key appears at most once across the resolved keymap's lists.                           |
 
-A binding never displaces a fixed key (`input.md`). An unknown action name is an unknown key (→ CFG-WHOLE-FILE). A `CFG-KEY-PRINTABLE` or `CFG-KEY-UNIQUE` violation is an invalid value (→ CFG-WHOLE-FILE). A collision error names each action involved.
+A binding never displaces a fixed key (`input.md`). An unknown action name is an unknown key (→ CFG-WHOLE-FILE). A `CFG-KEY-FORM` or `CFG-KEY-UNIQUE` violation is an invalid value (→ CFG-WHOLE-FILE). A collision error names each action involved.
 
 A blocked sidebar answers only the default `quit` key.
 

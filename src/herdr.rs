@@ -138,24 +138,12 @@ fn candidates<'a>(
 
 /// Write literal text into the agent pane's input, without submitting.
 ///
-/// herdr 0.7.5 replaced `agent send` with `agent send-keys`. The new name goes first; an
-/// older herdr refuses it with its command listing, and only that shape falls back to the
-/// old name — a real send failure propagates untouched (`specs/herdr-host.md`).
+/// Uses `pane send-text`, not the agent-level send: herdr 0.7.5 replaced `agent send` with
+/// the logical-key `agent send-keys`, while `pane send-text` has carried the literal-text,
+/// no-Enter semantics unchanged since 0.7.0 (`docs/herdr-api-notes.md`).
 pub fn send_text(pane: &str, text: &str) -> Result<()> {
-    match herdr(&["agent", "send-keys", pane, text]) {
-        Ok(_) => Ok(()),
-        Err(err) if is_unknown_subcommand(&err) => {
-            herdr(&["agent", "send", pane, text])?;
-            Ok(())
-        }
-        Err(err) => Err(err),
-    }
-}
-
-/// An unknown-subcommand refusal: the CLI answers with its command listing instead of
-/// acting, so the failure text carries the `herdr agent commands:` usage header.
-fn is_unknown_subcommand(err: &anyhow::Error) -> bool {
-    err.to_string().contains("commands:")
+    herdr(&["pane", "send-text", pane, text])?;
+    Ok(())
 }
 
 /// Focus the agent pane so the reviewer can add context and submit.
@@ -166,7 +154,7 @@ pub fn focus(pane: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentPane, Refusal, Status, is_unknown_subcommand, parse_agents, pick_agent};
+    use super::{AgentPane, Refusal, Status, parse_agents, pick_agent};
 
     /// One agent entry shaped like the real `herdr agent list` output (api notes).
     fn agent(pane: &str, tab: &str, ws: &str) -> AgentPane {
@@ -265,18 +253,6 @@ mod tests {
         // Two agents share our tab and no workspace id is available to widen the scope —
         // still a several-agents refusal, not a missing-agent one (HH-SOLE-OR-REFUSE, HH-REFUSE-SAYS-CLIPBOARD).
         assert_eq!(pick(&agents, Some("w8:t1"), None, None), Err(Refusal::Several));
-    }
-
-    #[test]
-    fn only_the_usage_listing_reads_as_an_unknown_subcommand() {
-        // A pre-0.7.5 herdr answers `agent send-keys` with its command listing (exit 2) —
-        // that shape falls back to `agent send`. A real failure must not.
-        let unknown = anyhow::anyhow!(
-            "herdr [\"agent\", \"send-keys\"] failed: herdr agent commands:\n  herdr agent list"
-        );
-        assert!(is_unknown_subcommand(&unknown));
-        let real = anyhow::anyhow!("herdr [\"agent\", \"send-keys\"] failed: no such pane w9:p9");
-        assert!(!is_unknown_subcommand(&real));
     }
 
     #[test]

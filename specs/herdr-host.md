@@ -166,8 +166,7 @@ Send and tracking:
 
 - Browsing and the clipboard export work without the herdr CLI. Sending and turn tracking need it. Without it, `last-turn` stays empty and `uncommitted` and `branch` are unaffected.
 - Turn tracking resolves the agent under the same candidate rules (`HH-AGENT-PANES`, `HH-NOT-SELF`, `HH-TAB-WINS`), so a plugin sidebar or shell in the tab never pauses tracking.
-- Sending targets `agent send-keys` (herdr 0.7.5 renamed `agent send`). An older herdr refuses the new name with its command listing, and only that refusal falls back to `agent send` — a real send failure never falls back, so its error is never masked.
-- A failed clipboard utility or send reports the error. The comments stay in the list.
+- A failed clipboard utility or `herdr pane send-text` reports the error. The comments stay in the list.
 - A turn shorter than one poll interval, or one whose start is masked by a transient `unknown` status, is missed. `last-turn` then shows the changes since the last observed turn start. It never shows lines the agent did not write.
 - A crash mid-snapshot costs at most one failed refresh. Ref updates are atomic. Leftover locks are cleared before the next snapshot and on every exit path.
 - Two sidebars on one worktree write the same baseline ref. Each samples on its own clock, so their snapshots of one turn start can differ by the edits between them. Last-writer-wins keeps the baseline within one poll interval of the turn start.

@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-18
+Last edited: 2026-07-21
 ---
 
 # TUI
@@ -22,7 +22,7 @@ The terminal frame: the two-pane layout, the tabs, and how the view stays curren
 │  └─────────────────────────────────────────┘ │                            │
 │ 42    return registry[name]                   │                            │
 ├───────────────────────────────────────────────┴──────────────────────────┤
-│ enter save · ⇧⏎ newline · esc cancel                                       │
+│ enter save · shift+enter newline · esc cancel                              │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -61,7 +61,7 @@ Every layout change preserves the focused pane and each pane's cursor or selecti
 
 ### Tabs
 
-- Each tab owns its content state: the open file or card, scroll, cursor, expansions, and preview choice. Nothing carries between tabs.
+- Each tab owns its content state: the open file or card, scroll, cursor, fold expansions, and preview choice. Nothing carries between tabs. The footer's shortcut expansion is not tab state — it is one global toggle (`input.md`).
 - Switching away and back restores the tab exactly.
 - A first visit opens the tab's first file or card. A collapsed tree with the cursor on a directory opens nothing until a pick.
 - A tab switch keeps the focused pane. An empty read pane focuses the navigator.
@@ -84,7 +84,7 @@ Every layout change preserves the focused pane and each pane's cursor or selecti
 ## Failure semantics
 
 - A poll never touches the comment input or saved comments. Draft text and caret survive every refresh.
-- A config error and its automatic-reload remedy replace the view. Saved comments always survive. An open composer or comments list survives with its tab's state. Recovery restores them.
+- A config error and its automatic-reload remedy replace the view. Saved comments always survive. An open composer or comments list survives with its tab's state, as does the footer's shortcut expansion. Recovery restores them.
 - A poll that finds no change makes no visible update: no flicker, no lost selection or scroll.
 - A refresh in flight never delays input or a paint.
 - Opening a file builds its diff on the paint path. A first open of a very large file can briefly block.

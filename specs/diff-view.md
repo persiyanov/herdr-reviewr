@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-24
-Last edited: 2026-07-13
+Last edited: 2026-07-20
 ---
 
 # Diff view
@@ -166,3 +166,4 @@ The viewer is read-only and recomputed on every refresh. It degrades rather than
 - [tui](./tui.md)
 - [theme](./theme.md)
 - [markdown](./markdown.md)
+- [find-in-file](./find-in-file.md)

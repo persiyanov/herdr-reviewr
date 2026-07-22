@@ -112,7 +112,7 @@ fn select_tool(
     tools.iter().copied().find(|(cmd, _)| present(cmd))
 }
 
-/// The agent pane: fill its input via `herdr agent send`, then focus it.
+/// The agent pane: fill its input via `herdr pane send-text`, then focus it.
 #[derive(Debug)]
 pub struct Agent;
 

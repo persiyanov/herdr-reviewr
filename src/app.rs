@@ -121,6 +121,9 @@ pub enum Mode {
     /// The search screen, replacing the body from any tab (specs/search.md). Its state
     /// lives in [`App::search`].
     Search,
+    /// The in-file find band over the read pane (specs/find-in-file.md). Its state lives in
+    /// [`App::find`].
+    Find,
 }
 
 /// The search screen's mode: which result set the list shows (specs/search.md).
@@ -218,8 +221,55 @@ pub enum PickedResult<'a> {
     Code(&'a crate::search::CodeHit),
 }
 
+/// The in-file find band's state while `mode == Mode::Find` (specs/find-in-file.md). The current
+/// match is the read-pane cursor when its row matches, so only the query is stored — the matches,
+/// count, and highlight all derive from the query against the open file each frame.
+#[derive(Clone, Debug, Default)]
+pub struct Find {
+    pub query: String,
+    /// The caret into `query`: a char index, edited by the shared caret ops (`input.md`).
+    pub caret: usize,
+}
+
+/// A found match in file order: how the cursor moves onto it (specs/find-in-file.md).
+enum FindHit {
+    /// A visible row, at this `visible` index.
+    Visible(usize),
+    /// A row hidden in the collapsed fold `anchor`; `new_no` is its context line, unique within
+    /// the fold, so it is found again once the fold expands.
+    Folded { anchor: u32, new_no: u32 },
+}
+
+/// The char-index ranges of every non-overlapping occurrence of `query` in `text`, honoring
+/// `case_sensitive` (pass [`find_case_sensitive`]'s result for smart-case). Char indices, so the
+/// diff renderer overlays the highlight the same way it does word emphasis (specs/find-in-file.md).
+pub fn find_match_ranges(text: &str, query: &str, case_sensitive: bool) -> Vec<(u32, u32)> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let q: Vec<char> = query.chars().collect();
+    let eq = |a: char, b: char| if case_sensitive { a == b } else { a.eq_ignore_ascii_case(&b) };
+    let chars: Vec<char> = text.chars().collect();
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i + q.len() <= chars.len() {
+        if (0..q.len()).all(|j| eq(chars[i + j], q[j])) {
+            ranges.push((i as u32, (i + q.len()) as u32));
+            i += q.len();
+        } else {
+            i += 1;
+        }
+    }
+    ranges
+}
+
+/// Whether `query` is case-sensitive under smart-case: any uppercase character makes it so.
+pub fn find_case_sensitive(query: &str) -> bool {
+    query.chars().any(char::is_uppercase)
+}
+
 /// A footer action — what the bar offers for the current context. Semantic only: the renderer
-/// maps each to its key glyph and label and styles it by [`Tier`] (`specs/input.md`).
+/// maps each to its key glyph and label and styles it by [`Band`] (`specs/input.md`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FooterAction {
     Comment,
@@ -234,22 +284,35 @@ pub enum FooterAction {
     CrossFile {
         forward: bool,
     },
+    /// The `move` band's cursor-movement pairs, each rendered as its two keys (`specs/input.md`).
+    /// `MovePage` names the fixed page keys, which are not rebindable.
+    MoveLine,
+    MoveHunk,
+    MoveFile,
+    MovePage,
     ExpandDir,
     CollapseDir,
     /// Open the search screen — offered in every context, on every tab (specs/search.md).
     Search,
+    /// Open the in-file find band — offered wherever the read pane has content
+    /// (specs/find-in-file.md).
+    Find,
     /// The search screen's own bar: flip, pick, open, close (specs/search.md). The flip
     /// label names the destination mode, derived from the current mode at render time.
     FlipSearchMode,
     PickResult,
     OpenResult,
     CloseSearch,
+    /// The find band's own bar: step between matches, and close (specs/find-in-file.md).
+    FindStep,
+    CloseFind,
     /// Switch focus between the file list and the diff; the label names the destination pane.
     TogglePane,
     /// Toggle the markdown preview; the label names the destination view (`m preview`
     /// on source, `m source` in the preview).
     Preview,
     NavigatorPosition,
+    Wrap,
     Scope,
     Send,
     List,
@@ -264,13 +327,16 @@ pub enum FooterAction {
     Quit,
 }
 
-/// A footer action's visual weight, and its survival priority when the line is too narrow:
-/// `Orientation` is dropped first, then trailing `Normal` actions; `Primary` is never dropped.
+/// Where a footer action sits: on row 1 (`Primary`, `Send`, or a `Do` cursor action), or in one of
+/// the `?`-expansion bands (`Do` overflow, `Go`, `Move`). Row 1 keeps the primary, `send`, and the
+/// `?`, trimming trailing `Do` actions to fit and spilling them into the `do` band (`specs/input.md`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Tier {
+pub enum Band {
     Primary,
-    Normal,
-    Orientation,
+    Send,
+    Do,
+    Go,
+    Move,
 }
 
 /// The full state of the review session.
@@ -385,6 +451,10 @@ pub struct App {
     /// The comment editor's caret: a char index into `input` (`0..=chars().count()`).
     pub caret: usize,
     pub status: String,
+    /// Whether the footer's `?` shortcut list is expanded. Global place state, not tab-stashed: one
+    /// toggle across every tab, moved only by `?` and `esc`, preserved through a poll and config
+    /// recovery (`specs/input.md`, `overview.md` Continuity).
+    pub keys_expanded: bool,
     pub should_quit: bool,
     /// The read-only `PR` tab's view of the pull request (`specs/forge-host.md`).
     pub pr: forge::PrView,
@@ -415,6 +485,9 @@ pub struct App {
     pub search_dirty: bool,
     /// A picked path awaiting its frecency record; the event loop hands it to the worker.
     pub search_track: Option<String>,
+    /// The in-file find band's state while `mode == Mode::Find`, `None` otherwise
+    /// (specs/find-in-file.md).
+    pub find: Option<Find>,
     /// Whether the tab-strip glyph paints this frame — maintained by the event loop's
     /// appear-delay and minimum-display clocks (specs/tui.md).
     pub refresh_indicator: bool,
@@ -523,6 +596,7 @@ impl App {
             input: String::new(),
             caret: 0,
             status: String::new(),
+            keys_expanded: false,
             should_quit: false,
             pr: forge::PrView::Pending,
             pr_notice: None,
@@ -537,6 +611,7 @@ impl App {
             search: None,
             search_dirty: false,
             search_track: None,
+            find: None,
             refresh_indicator: false,
             refresh_commanded: false,
             tab_visited: false,
@@ -602,9 +677,11 @@ impl App {
     /// Block the sidebar on one whole-file configuration failure.
     pub fn set_config_error(&mut self, error: String) {
         self.cancel_divider_drag();
-        // The search overlay closes when the config view takes over; recovery restores
-        // the tab beneath it, and the query is not restored (specs/search.md).
+        // The search overlay and the find band close when the config view takes over; recovery
+        // restores the tab beneath them, and the query is not restored (specs/search.md,
+        // specs/find-in-file.md).
         self.close_search();
+        self.close_find();
         self.config = PluginConfigState::Blocked { error };
         self.pr_pending = false;
     }
@@ -633,6 +710,9 @@ impl App {
     pub(crate) fn carry_authored_state_from(&mut self, old: &mut Self) {
         self.store = std::mem::take(&mut old.store);
         self.list_cursor = old.list_cursor;
+        // The footer expansion is one global toggle, carried regardless of the recovered mode
+        // (`specs/input.md`).
+        self.keys_expanded = old.keys_expanded;
         self.navigator_side_pct = old.navigator_side_pct;
         self.navigator_stack_pct = old.navigator_stack_pct;
         self.search_pct = old.search_pct;
@@ -642,9 +722,10 @@ impl App {
         self.world_request = old.world_request.take();
         let old_mode = old.mode.clone();
         match old_mode {
-            // `set_config_error` closes the search overlay before the mode is stored, so
-            // `Search` never reaches recovery; the query is not restored (specs/search.md).
-            Mode::Normal | Mode::Search => {}
+            // `set_config_error` closes the search overlay and the find band before the mode is
+            // stored, so neither reaches recovery; their query is not restored (specs/search.md,
+            // specs/find-in-file.md).
+            Mode::Normal | Mode::Search | Mode::Find => {}
             Mode::List | Mode::Composing { .. } => {
                 self.scope = old.scope;
                 self.tab = old.tab;
@@ -864,6 +945,12 @@ impl App {
         // A landed poll repaints the search preview in place — never the results, which
         // describe the worktree when their query ran (specs/search.md).
         self.refresh_search_preview();
+        // The find band closes if its file lost its searchable rows or changed identity under the
+        // poll — a forced return, like the markdown preview (specs/find-in-file.md). The current
+        // match otherwise follows the reconciled cursor, so nothing else to do.
+        if self.mode == Mode::Find && (open != self.diff_path || !self.find_available()) {
+            self.close_find();
+        }
         self.tab_visited = true;
     }
 
@@ -1980,6 +2067,31 @@ impl App {
         self.armed_cross = None;
     }
 
+    /// Toggle the footer's `?` shortcut list. Called only from `Normal` mode, so a modal's `?` stays
+    /// text or inert (`specs/input.md`).
+    pub fn toggle_keys(&mut self) {
+        self.keys_expanded = !self.keys_expanded;
+    }
+
+    /// The `esc` ladder in `Normal` mode: peel exactly one layer per press — a live selection, then
+    /// an armed crossing, then the footer expansion (`specs/input.md`). The selection and crossing
+    /// are file-tab place state, frozen in place while `PR` is active, so `esc` on `PR` closes only
+    /// the expansion and never disturbs the file tab the reviewer will return to (`overview.md`
+    /// Continuity).
+    pub fn escape(&mut self) {
+        if self.tab != Tab::Pr {
+            if self.select_anchor.is_some() {
+                self.clear_selection();
+                return;
+            }
+            if self.armed_cross.is_some() {
+                self.armed_cross = None;
+                return;
+            }
+        }
+        self.keys_expanded = false;
+    }
+
     /// Whether the traversal keys act at all: a live selection holds the cursor still, since a
     /// jump would silently drop the selection under it (`specs/input.md`).
     fn can_traverse(&self) -> bool {
@@ -2267,6 +2379,7 @@ impl App {
         match self.mode {
             Mode::Composing { .. } => Some((&mut self.input, &mut self.caret)),
             Mode::Search => self.search.as_mut().map(|s| (&mut s.query, &mut s.caret)),
+            Mode::Find => self.find.as_mut().map(|f| (&mut f.query, &mut f.caret)),
             Mode::Normal | Mode::List => None,
         }
     }
@@ -2312,7 +2425,7 @@ impl App {
     /// The single-line search input takes newlines as spaces (specs/search.md).
     pub fn input_paste(&mut self, text: &str) {
         let mut norm = text.replace("\r\n", "\n").replace('\r', "\n");
-        if self.mode == Mode::Search {
+        if matches!(self.mode, Mode::Search | Mode::Find) {
             norm = norm.replace('\n', " ");
         }
         let norm: Vec<char> = norm.chars().collect();
@@ -2482,7 +2595,7 @@ impl App {
                 };
                 Some(c.location())
             }
-            Mode::Normal | Mode::List | Mode::Search => None,
+            Mode::Normal | Mode::List | Mode::Search | Mode::Find => None,
         }
     }
 
@@ -2613,6 +2726,147 @@ impl App {
         }
         self.search = None;
         self.search_dirty = false;
+    }
+
+    /// Whether the find band opens: the read pane shows searchable content rows — a file tab, not
+    /// the markdown preview, at least one content row. A notice (binary, too large) and an empty
+    /// file carry no content rows, so `any(is_content)` excludes them (specs/find-in-file.md).
+    pub fn find_available(&self) -> bool {
+        self.tab.is_file_tab() && !self.preview && self.visible.iter().any(Row::is_content)
+    }
+
+    /// `ctrl+f`: open the find band over the read pane, inert with nothing to search. Opening is a
+    /// fresh gesture — it cancels a held drag, clears a live selection, and focuses the read pane
+    /// so the steps land there (specs/find-in-file.md, specs/diff-view.md).
+    pub fn open_find(&mut self) {
+        if !self.find_available() {
+            return;
+        }
+        self.cancel_divider_drag();
+        self.clear_selection();
+        self.focus = Focus::Diff;
+        self.mode = Mode::Find;
+        self.find = Some(Find::default());
+        // The band steals the pane's bottom row, so pull the cursor above it — otherwise a cursor
+        // on the old last row hides behind the band until the first step (specs/find-in-file.md).
+        self.reveal_diff = true;
+    }
+
+    /// `esc`: close the band, dropping the query. The cursor stays where the last step left it
+    /// (specs/find-in-file.md).
+    pub fn close_find(&mut self) {
+        if self.mode == Mode::Find {
+            self.mode = Mode::Normal;
+        }
+        self.find = None;
+    }
+
+    /// Every match of `query` over the open file in file order, the runs hidden inside folds
+    /// included, with the cursor's rank among them (matches strictly before it) and whether the
+    /// cursor's own row matches. The current match is the cursor's row when it matches, so both
+    /// the count and stepping derive from this walk (specs/find-in-file.md).
+    fn find_hits(&self, query: &str) -> (Vec<FindHit>, usize, bool) {
+        let cs = find_case_sensitive(query);
+        let is_hit = |row: &Row| !find_match_ranges(&row.text(), query, cs).is_empty();
+        let mut hits = Vec::new();
+        let mut vis = 0usize;
+        let mut cursor_rank = 0usize;
+        let mut on_match = false;
+        for row in &self.diff.rows {
+            let expanded = row.fold_anchor().is_some_and(|a| self.expanded_folds.contains(&a));
+            match row {
+                Row::Fold { lines } if !expanded => {
+                    // The collapsed marker sits at `vis`; its lines are hidden, still searched.
+                    if vis == self.diff_cursor {
+                        cursor_rank = hits.len();
+                        on_match = false;
+                    }
+                    let anchor = row.fold_anchor().expect("a fold has a first hidden line");
+                    for line in lines {
+                        if is_hit(line) {
+                            // Folds hold only context runs, so a folded line has a new-side number.
+                            let new_no = line.new_no().expect("a folded row is context");
+                            hits.push(FindHit::Folded { anchor, new_no });
+                        }
+                    }
+                    vis += 1;
+                }
+                Row::Fold { lines } => {
+                    // Expanded: its lines are visible rows, inline at `vis`.
+                    for line in lines {
+                        let m = is_hit(line);
+                        if vis == self.diff_cursor {
+                            cursor_rank = hits.len();
+                            on_match = m;
+                        }
+                        if m {
+                            hits.push(FindHit::Visible(vis));
+                        }
+                        vis += 1;
+                    }
+                }
+                content => {
+                    let m = is_hit(content);
+                    if vis == self.diff_cursor {
+                        cursor_rank = hits.len();
+                        on_match = m;
+                    }
+                    if m {
+                        hits.push(FindHit::Visible(vis));
+                    }
+                    vis += 1;
+                }
+            }
+        }
+        (hits, cursor_rank, on_match)
+    }
+
+    /// `enter`/`↓` (`delta > 0`) and `↑` (`delta < 0`): move the cursor to the nearest matching
+    /// row below or above it, wrapping. A match in a collapsed fold expands it first, then the
+    /// cursor lands on the revealed row. Inert while nothing matches (specs/find-in-file.md).
+    pub fn find_step(&mut self, delta: i32) {
+        let Some(query) = self.find.as_ref().map(|f| f.query.clone()) else { return };
+        if query.is_empty() {
+            return;
+        }
+        let (hits, cursor_rank, on_match) = self.find_hits(&query);
+        if hits.is_empty() {
+            return;
+        }
+        let len = hits.len();
+        // `cursor_rank` counts matches strictly before the cursor, so a forward step adds `1` to
+        // skip a match the cursor already sits on; a backward step never lands on it.
+        let target = if delta > 0 {
+            (cursor_rank + usize::from(on_match)) % len
+        } else {
+            (cursor_rank + len - 1) % len
+        };
+        match hits[target] {
+            FindHit::Visible(v) => self.diff_cursor = v,
+            FindHit::Folded { anchor, new_no } => {
+                self.expanded_folds.insert(anchor);
+                self.rebuild_visible();
+                // Expanding the fold reveals the context row that held this new-side line number.
+                self.diff_cursor = self
+                    .visible
+                    .iter()
+                    .position(|r| r.new_no() == Some(new_no))
+                    .expect("the expanded fold reveals the row for this new_no");
+            }
+        }
+        self.reveal_diff = true;
+    }
+
+    /// The find band's count: the current match's 1-based ordinal (`None` off a match) and the
+    /// total. `None` while the query is empty — the band shows a blank count then
+    /// (specs/find-in-file.md).
+    pub fn find_count(&self) -> Option<(Option<usize>, usize)> {
+        let query = &self.find.as_ref()?.query;
+        if query.is_empty() {
+            return None;
+        }
+        let (hits, cursor_rank, on_match) = self.find_hits(query);
+        Some((on_match.then_some(cursor_rank + 1), hits.len()))
     }
 
     /// `tab`: flip the mode, keeping the query. The held results paint at once and the
@@ -2803,30 +3057,29 @@ impl App {
         }
     }
 
-    /// The actions the footer offers for the current context, most-relevant first, each tagged
-    /// with its visual tier. Pure — a context → action mapping, unit-tested without a terminal.
-    /// The renderer maps each to a key+label, styles it by tier, and drops the least relevant
-    /// (orientation first) to fit one line (`specs/input.md`).
+    /// The footer's actions for the current context, tagged with their [`Band`] — row 1 (primary,
+    /// send, the cursor's `Do` actions) and the `?`-expansion bands (`Go`, `Move`). Pure: a context
+    /// → action mapping, unit-tested without a terminal. The renderer packs row 1, spills trimmed
+    /// `Do` actions into the `do` band, and wraps the bands below (`specs/input.md`).
     #[must_use]
-    pub fn footer_actions(&self) -> Vec<(FooterAction, Tier)> {
+    pub fn footer_bands(&self) -> Vec<(FooterAction, Band)> {
+        use Band::{Do, Go, Move, Primary, Send};
         use FooterAction as A;
-        use Tier::{Normal, Orientation, Primary};
 
-        // A modal sub-task owns the whole bar — no tab/quit orientation while you're in one.
-        // The escape action comes right after the primary so the exit hint survives a
-        // narrow-width trim (trailing actions are dropped first); modals have no orientation
-        // cluster to carry it otherwise.
+        // A modal sub-task owns the whole bar: one row, the primary then its own actions, no `?`
+        // and no bands. The escape action comes right after the primary so the exit hint survives a
+        // narrow-width trim (trailing `Do` actions drop first).
         match self.mode {
             Mode::Composing { .. } => {
-                return vec![(A::Save, Primary), (A::Cancel, Normal), (A::Newline, Normal)];
+                return vec![(A::Save, Primary), (A::Cancel, Do), (A::Newline, Do)];
             }
             Mode::List => {
                 return vec![
                     (A::Send, Primary),
-                    (A::CloseList, Normal),
-                    (A::Copy, Normal),
-                    (A::EditComment, Normal),
-                    (A::DeleteComment, Normal),
+                    (A::CloseList, Do),
+                    (A::Copy, Do),
+                    (A::EditComment, Do),
+                    (A::DeleteComment, Do),
                 ];
             }
             Mode::Search => {
@@ -2840,53 +3093,67 @@ impl App {
                 return if pickable {
                     vec![
                         (A::FlipSearchMode, Primary),
-                        (A::PickResult, Normal),
-                        (A::OpenResult, Normal),
-                        (A::CloseSearch, Normal),
+                        (A::PickResult, Do),
+                        (A::OpenResult, Do),
+                        (A::CloseSearch, Do),
                     ]
                 } else {
-                    vec![(A::FlipSearchMode, Primary), (A::CloseSearch, Normal)]
+                    vec![(A::FlipSearchMode, Primary), (A::CloseSearch, Do)]
+                };
+            }
+            Mode::Find => {
+                // The steps show only with a match to step to, so the bar never lists a key that
+                // would not work (specs/find-in-file.md).
+                let has_match = self.find_count().is_some_and(|(_, total)| total > 0);
+                return if has_match {
+                    vec![(A::FindStep, Primary), (A::CloseFind, Do)]
+                } else {
+                    vec![(A::CloseFind, Primary)]
                 };
             }
             Mode::Normal => {}
         }
 
-        // The read-only PR tab: the state summary leads (rendered separately); `o open` is the
+        // The read-only PR tab: the state summary leads row 1 (rendered separately); `o open` is the
         // act — available for any resolved PR, not only while a comment is selected, since `o`
-        // opens the PR URL itself (`pr_open`).
+        // opens the PR URL itself (`pr_open`). The `go` band carries the always-there keys; `move`
+        // carries only the steps the tab has — the PR has no hunk or file steps (`specs/pr-tab.md`).
         if self.tab == Tab::Pr {
             let mut out = Vec::new();
             if self.pr_snapshot().is_some() {
                 out.push((A::OpenPr, Primary));
             }
-            out.push((A::Search, Normal));
-            out.push((A::NavigatorPosition, Orientation));
-            out.push((A::Tabs, Orientation));
-            out.push((A::Refresh, Orientation));
-            out.push((A::Quit, Orientation));
+            out.push((A::Search, Go));
+            out.push((A::TogglePane, Go));
+            out.push((A::NavigatorPosition, Go));
+            out.push((A::Tabs, Go));
+            out.push((A::Refresh, Go));
+            out.push((A::Quit, Go));
+            out.push((A::MoveLine, Move));
+            out.push((A::MovePage, Move));
             return out;
         }
 
-        let mut out: Vec<(FooterAction, Tier)> = Vec::new();
-        // Whether the diff-jump is already the primary, so orientation doesn't repeat the toggle.
+        let mut out: Vec<(FooterAction, Band)> = Vec::new();
+        // Whether the diff-jump is already the primary, so the `go` band doesn't repeat the toggle.
         let mut pane_is_primary = false;
 
         if self.preview_active() && self.focus == Focus::Diff {
             // The read-only preview: the way back to the commentable source leads, and
             // no comment key is offered (specs/input.md); the shared tail below adds the
-            // scope, send, and orientation actions. With the file list focused, the
-            // tree's own actions apply instead.
+            // scope, send, and band actions. With the file list focused, the tree's own
+            // actions apply instead.
             out.push((A::Preview, Primary));
         } else if self.file_rows.is_empty() {
             // Nothing in scope to review: only switching scope or refreshing is useful.
             out.push((A::Scope, Primary));
-            out.push((A::Refresh, Normal));
+            out.push((A::Refresh, Do));
         } else if self.focus == Focus::Files {
             match self.file_rows.get(self.file_cursor).map(|r| &r.kind) {
                 Some(RowKind::Dir { expanded: true, .. }) => out.push((A::CollapseDir, Primary)),
                 Some(RowKind::Dir { expanded: false, .. }) => out.push((A::ExpandDir, Primary)),
                 _ => {
-                    out.push((A::TogglePane, Primary)); // ⇥ into the diff to review
+                    out.push((A::TogglePane, Primary)); // tab into the diff to review
                     pane_is_primary = true;
                 }
             }
@@ -2897,54 +3164,74 @@ impl App {
             out.push((A::ExpandFold, Primary));
         } else if self.select_anchor.is_some() {
             out.push((A::Comment, Primary));
-            out.push((A::ClearSelection, Normal));
+            out.push((A::ClearSelection, Do));
         } else if self.comment_under_cursor().is_some() {
             out.push((A::EditComment, Primary));
-            out.push((A::DeleteComment, Normal));
-            out.push((A::JumpComment, Normal));
+            out.push((A::DeleteComment, Do));
+            out.push((A::JumpComment, Do));
         } else {
             out.push((A::Comment, Primary));
-            out.push((A::Select, Normal));
+            out.push((A::Select, Do));
             // On a markdown file's source line that previews, surface the way in —
             // otherwise the rendered view is undiscoverable (specs/input.md). A deleted
             // file, holding no current content, offers nothing.
             if self.previewable() {
-                out.push((A::Preview, Normal));
+                out.push((A::Preview, Do));
             }
         }
 
-        // An armed crossing leads the bar: nothing else on screen says the next press leaves the
+        // An armed crossing leads row 1: nothing else on screen says the next press leaves the
         // file. The cursor's own action stays, demoted — commenting still works here
         // (specs/input.md).
         if let Some(forward) = self.armed_cross() {
-            out[0].1 = Normal;
+            out[0].1 = Do;
             out.insert(0, (A::CrossFile { forward }, Primary));
         }
 
-        // Switching scope is always available while reviewing, so it shows in every context on
-        // the file tabs — unless it's already the primary (the empty / no-diff states above).
-        if !out.iter().any(|&(a, _)| a == A::Scope) {
-            out.push((A::Scope, Normal));
-        }
-
-        // Search opens from any tab, so its hint rides every context (specs/search.md).
-        out.push((A::Search, Normal));
-
-        // Once a comment is written, sending is the next relevant move — just below the primary
-        // (every branch above pushed a primary, so index 1 is in range).
+        // `send` closes row 1 once a comment is written, after the cursor's actions and before the
+        // `?` (the renderer keeps it when a narrow row trims the actions before it).
         if !self.store.is_empty() {
-            out.insert(1, (A::Send, Normal));
-            out.push((A::List, Normal));
+            out.push((A::Send, Send));
         }
 
-        // The dim, stable orientation cluster: the pane toggle (unless it is already the
-        // primary), the tabs, quit.
-        if !pane_is_primary && !self.file_rows.is_empty() {
-            out.push((A::TogglePane, Orientation));
+        // The `go` band: the keys that work anywhere. `scope` and `refresh` only when they are not
+        // already row-1 actions (the empty / no-diff states above lead with them), and the pane
+        // toggle only when it is not the primary — so a band never repeats a row-1 key.
+        if !out.iter().any(|&(a, _)| a == A::Scope) {
+            out.push((A::Scope, Go));
         }
-        out.push((A::NavigatorPosition, Orientation));
-        out.push((A::Tabs, Orientation));
-        out.push((A::Quit, Orientation));
+        out.push((A::Search, Go));
+        // In-file find shows wherever the read pane has content to search (specs/find-in-file.md).
+        if self.find_available() {
+            out.push((A::Find, Go));
+        }
+        out.push((A::Wrap, Go));
+        if !self.store.is_empty() {
+            out.push((A::List, Go));
+            out.push((A::Copy, Go));
+        }
+        if !out.iter().any(|&(a, _)| a == A::Refresh) {
+            out.push((A::Refresh, Go));
+        }
+        out.push((A::Tabs, Go));
+        if !pane_is_primary && !self.file_rows.is_empty() {
+            out.push((A::TogglePane, Go));
+        }
+        out.push((A::NavigatorPosition, Go));
+        out.push((A::Quit, Go));
+
+        // The `move` band: the cursor-movement pairs, shown only when there is a changeset to
+        // traverse. The hunk step follows `step_hunk`'s own reach — the `Changes` diff only, never a
+        // preview — and drops while a crossing is armed, since the armed primary already owns that
+        // key (`specs/input.md`).
+        if !self.file_rows.is_empty() {
+            out.push((A::MoveLine, Move));
+            if self.tab == Tab::Changes && !self.preview_active() && self.armed_cross().is_none() {
+                out.push((A::MoveHunk, Move));
+            }
+            out.push((A::MoveFile, Move));
+            out.push((A::MovePage, Move));
+        }
         out
     }
 
@@ -3206,6 +3493,18 @@ mod tests {
         assert!(recovered.preview, "the preview choice survives config recovery");
         assert_eq!(recovered.preview_scroll, 7);
         assert_eq!(recovered.preview_text(), "# doc");
+    }
+
+    #[test]
+    fn config_recovery_carries_the_footer_expansion() {
+        // The `?` expansion is one global toggle, carried whatever mode recovery finds.
+        let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        old.keys_expanded = true;
+
+        let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
+        assert!(!recovered.keys_expanded, "a fresh app opens collapsed");
+        recovered.carry_authored_state_from(&mut old);
+        assert!(recovered.keys_expanded, "the expansion survives config recovery");
     }
 
     #[test]

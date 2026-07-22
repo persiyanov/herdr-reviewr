@@ -990,8 +990,11 @@ fn event_loop(
 fn handle_blocked_event(app: &mut App, event: &Event) {
     match event {
         Event::Key(k) if k.kind == KeyEventKind::Press => {
+            // The blocked screen's escape hatch stays modifier-agnostic: a stuck user's `q` quits
+            // whatever the modifiers, exactly as before the keymap gained chords.
             if let KeyCode::Char(c) = k.code
-                && keymap::default_keymap().action_for(c) == Some(keymap::Action::Quit)
+                && keymap::default_keymap().action_for(keymap::Key::plain(c))
+                    == Some(keymap::Action::Quit)
             {
                 app.should_quit = true;
             }
@@ -1252,12 +1255,29 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
         return Ok(());
     }
 
-    // The bound character shortcuts dispatch through the frame's keymap; a `ctrl` chord is
-    // never a bound key. `↓`/`↑` are fixed synonyms of the `down`/`up` actions, folded in here
-    // so every context pairs them exactly once. The other fixed keys (`tab`, `esc`, the page
-    // keys, `←`/`→`) stay hardcoded per context below (`specs/input.md`).
+    // The in-file find band: printable keys edit the query, the steps move the cursor between
+    // matches (`↑`/`↓` are the steps, so the single-line query has no vertical caret), `esc`
+    // closes. Every other key is inert (specs/find-in-file.md).
+    if app.mode == Mode::Find {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let word = alt || ctrl;
+        match key.code {
+            Esc => app.close_find(),
+            Enter | Down => app.find_step(1),
+            Up => app.find_step(-1),
+            code => apply_text_edit(app, code, ctrl, alt, word),
+        }
+        return Ok(());
+    }
+
+    // The bound shortcuts dispatch through the frame's keymap, a bare character or a `ctrl+`/`alt+`
+    // chord (`find` is `ctrl+f`). An unbound chord — `ctrl+u`/`ctrl+d` — resolves to no action and
+    // falls through to the fixed keys below. `↓`/`↑` are fixed synonyms of the `down`/`up` actions,
+    // folded in here so every context pairs them exactly once. The other fixed keys (`tab`, `esc`,
+    // the page keys, `←`/`→`) stay hardcoded per context below (`specs/input.md`).
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
     let action = match key.code {
-        Char(c) if !ctrl => keymap.action_for(c),
+        Char(c) => keymap.action_for(crate::keymap::Key { ctrl, alt, ch: c }),
         Down => Some(K::Down),
         Up => Some(K::Up),
         _ => None,
@@ -1265,8 +1285,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
 
     // An armed crossing waits for a repeat of the hunk step that armed it. Every other key drops
     // it, and still does its own work (`specs/input.md`). The steps themselves settle their arm in
-    // `step_hunk`, which is what makes the other direction disarm too.
-    if !matches!(action, Some(K::NextHunk | K::PrevHunk)) {
+    // `step_hunk`, which is what makes the other direction disarm too. `esc` is exempt: the `esc`
+    // ladder drops the crossing as its own explicit step, so a later layer is not also consumed.
+    if !matches!(action, Some(K::NextHunk | K::PrevHunk)) && key.code != Esc {
         app.disarm_cross();
     }
 
@@ -1287,6 +1308,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             (Some(K::NavigatorShrink), _) => app.resize_navigator(-4),
             (Some(K::Down), _) => app.pr_move(1),
             (Some(K::Up), _) => app.pr_move(-1),
+            (Some(K::Keys), _) => app.toggle_keys(),
+            (_, Esc) => app.escape(),
             (_, Tab) => app.toggle_focus(),
             (_, PageDown) if app.focus == Focus::Files => app.pr_scroll_nav(PAGE),
             (_, PageUp) if app.focus == Focus::Files => app.pr_scroll_nav(-PAGE),
@@ -1350,6 +1373,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::PrevComment => app.jump_comment(-1),
             K::Comments => app.open_list(),
             K::Search => app.open_search(),
+            K::Find => app.open_find(),
+            K::Keys => app.toggle_keys(),
             // `edit`/`delete` off the diff, and `open-pr` off the `PR` tab, are inert.
             K::Edit | K::Delete | K::OpenPr => {}
         }
@@ -1374,8 +1399,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
         }
         Right => app.scroll_h(8),
         Left => app.scroll_h(-8),
-        // `esc` clears an in-progress line selection (the footer's `esc clear`).
-        Esc => app.clear_selection(),
+        // `esc` peels one layer: a live selection, then an armed crossing, then the footer
+        // expansion (the `esc` ladder, `specs/input.md`).
+        Esc => app.escape(),
         _ => {}
     }
     Ok(())
@@ -1406,7 +1432,7 @@ pub fn handle_mouse(
             MouseEventKind::Drag(MouseButton::Left) if app.divider_drag_active() => {
                 // The share maps the pointer's row into the band-to-footer span the two
                 // panes divide, matching `search_layout`'s geometry.
-                let l = ui::search_layout(ui::body_rect(area), app);
+                let l = ui::search_layout(ui::body_rect(area, app), app);
                 let axis_len = l.results.height + l.preview.height;
                 let offset = m.row.saturating_sub(l.results.y);
                 app.drag_search_divider(axis_len, offset);
@@ -1473,7 +1499,7 @@ pub fn handle_mouse(
             return Ok(());
         }
         MouseEventKind::Drag(MouseButton::Left) if app.divider_drag_active() => {
-            let body = ui::body_rect(area);
+            let body = ui::body_rect(area, app);
             let (axis_len, offset) = if app.navigator_position.stacked() {
                 (body.height, m.row.saturating_sub(body.y))
             } else {

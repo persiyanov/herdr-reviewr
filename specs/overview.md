@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-20
+Last edited: 2026-07-21
 ---
 
 # herdr-reviewr
@@ -49,6 +49,7 @@ to move the work forward.
 - Poll-based refresh plus a manual refresh key.
 - Keyboard and mouse input (`input.md`).
 - Full-screen search over the worktree: fuzzy file names and literal code with a live preview, ranking owned by the engine (`search.md`).
+- In-file find in the read pane: literal match highlighting and match-to-match stepping (`find-in-file.md`).
 
 ## Roadmap
 
@@ -58,7 +59,7 @@ Named so the architecture stays open to them. None is part of this design.
 - Hopping between the agent's changed files while browsing `All files`.
 - A side-by-side split diff view for wide panes.
 - Search on `Changes`, scoped to the changeset.
-- Search within the diff, and live theme switching.
+- Live theme switching.
 
 ## Continuity
 
@@ -69,7 +70,7 @@ State divides into three kinds:
 
 - Authored state is what the reviewer wrote: comments and the draft being typed.
 - Place state is where the reviewer's attention is: the active tab and scope, the open file, every
-  cursor and scroll, folds, a selection, the layout.
+  cursor and scroll, folds, a selection, the layout, the footer's shortcut expansion.
 - Derived state is everything recomputed from git or GitHub: changesets, trees, diffs, the PR
   snapshot.
 
@@ -103,6 +104,7 @@ Newer content paints over the old in place, reconciling the reviewer's place as 
 - [file-list](./file-list.md)
 - [input](./input.md)
 - [search](./search.md)
+- [find-in-file](./find-in-file.md)
 - [tui](./tui.md)
 - [pr-tab](./pr-tab.md)
 - [herdr-host](./herdr-host.md)

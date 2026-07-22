@@ -883,7 +883,7 @@ dependencies = [
 
 [[package]]
 name = "herdr-reviewr"
-version = "0.21.0"
+version = "0.22.1"
 dependencies = [
  "anyhow",
  "dirs",

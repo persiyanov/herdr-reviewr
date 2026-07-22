@@ -76,10 +76,13 @@ command = "persiyanov.reviewr.toggle"   # <plugin_id>.<action_id> — plugin_id 
 - **Caveat:** the reviewr pane itself is listed as an agent — exclude `HERDR_PANE_ID` or the real agent looks ambiguous.
 
 ```
-herdr agent send-keys <agent_pane> "<literal text>"  # writes input, no Enter (0.7.5+)
-herdr agent send      <agent_pane> "<literal text>"  # pre-0.7.5 name; used as the fallback
-herdr agent focus     <agent_pane>                   # focus so the reviewer submits
+herdr pane send-text <agent_pane> "<literal text>"   # writes input, no Enter
+herdr agent focus    <agent_pane>                    # focus so the reviewer submits
 ```
+
+- `pane send-text` writes the literal bytes to the pane without Enter, unchanged since 0.7.0.
+- herdr 0.7.5 removed `agent send` (replaced by the logical-key `agent send-keys`). On 0.7.0 both
+  commands dispatched to the same server write, so `pane send-text` covers the whole range.
 
 ## Diff scopes (plain git, no herdr)
 

@@ -234,7 +234,7 @@ impl PluginConfig {
             .bindings()
             .iter()
             .map(|(action, keys)| {
-                let keys: Vec<String> = keys.iter().map(char::to_string).collect();
+                let keys: Vec<String> = keys.iter().map(|k| k.config_str()).collect();
                 (action.name().to_owned(), serde_json::json!(keys))
             })
             .collect();
@@ -436,8 +436,33 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
     Ok(config)
 }
 
-/// Parse and resolve the `[keybindings]` table (`specs/config.md` `CFG-KEY-PRINTABLE`/`CFG-KEY-UNIQUE`): action names from the
-/// keymap table in `specs/input.md`, each bound to a non-empty array of one-character keys.
+/// One `[keybindings]` key string → a [`Key`](crate::keymap::Key): a bare character, or a
+/// character behind a `ctrl+`/`alt+` prefix (`specs/config.md` `CFG-KEY-FORM`). The character is
+/// one visible cell — a positive display width also rejects the zero-width class `is_control`
+/// misses (format chars, combining marks).
+fn parse_key(text: &str) -> Option<crate::keymap::Key> {
+    let (ctrl, alt, rest) = if let Some(rest) = text.strip_prefix("ctrl+") {
+        (true, false, rest)
+    } else if let Some(rest) = text.strip_prefix("alt+") {
+        (false, true, rest)
+    } else {
+        (false, false, text)
+    };
+    let mut it = rest.chars();
+    match (it.next(), it.next()) {
+        (Some(ch), None)
+            if !ch.is_whitespace()
+                && unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) > 0 =>
+        {
+            Some(crate::keymap::Key { ctrl, alt, ch })
+        }
+        _ => None,
+    }
+}
+
+/// Parse and resolve the `[keybindings]` table (`specs/config.md` `CFG-KEY-FORM`/`CFG-KEY-UNIQUE`):
+/// action names from the keymap table in `specs/input.md`, each bound to a non-empty array of
+/// keys, a bare character or a `ctrl+`/`alt+` chord.
 fn parse_keybindings(
     path: &Path,
     value: &toml::Value,
@@ -468,32 +493,24 @@ fn parse_keybindings(
         }
         names_by_action.push((action, name.as_str()));
         let entry_key = format!("keybindings.{name}");
-        let expected = "a non-empty array of one-character keys, printable and not whitespace";
+        let expected = "a non-empty array of keys, each a character or a ctrl+/alt+ chord";
         let Some(values) = keys.as_array() else {
             return Err(value_error(path, &entry_key, expected));
         };
         if values.is_empty() {
             return Err(value_error(path, &entry_key, expected));
         }
-        let mut chars = Vec::with_capacity(values.len());
+        let mut keys = Vec::with_capacity(values.len());
         for value in values {
             let Some(text) = value.as_str() else {
                 return Err(value_error(path, &entry_key, expected));
             };
-            let mut it = text.chars();
-            match (it.next(), it.next()) {
-                // `CFG-KEY-PRINTABLE`'s "printable" is one visible cell: a positive display width also rejects
-                // the zero-width class `is_control` misses (format chars, combining marks).
-                (Some(key), None)
-                    if !key.is_whitespace()
-                        && unicode_width::UnicodeWidthChar::width(key).unwrap_or(0) > 0 =>
-                {
-                    chars.push(key);
-                }
-                _ => return Err(value_error(path, &entry_key, expected)),
+            match parse_key(text) {
+                Some(key) => keys.push(key),
+                None => return Err(value_error(path, &entry_key, expected)),
             }
         }
-        overrides.push((action, chars));
+        overrides.push((action, keys));
     }
     Keymap::resolve(&overrides).map_err(|detail| {
         PluginConfigError::new(path, format!("invalid value for `keybindings`: {detail}"))
@@ -721,7 +738,7 @@ mod tests {
 
     #[test]
     fn keybindings_alias_and_replace_per_action() {
-        use crate::keymap::Action;
+        use crate::keymap::{Action, Key};
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("config.toml"),
@@ -730,24 +747,54 @@ mod tests {
         .unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         let keymap = config.keymap();
-        assert_eq!(keymap.action_for('ㅊ'), Some(Action::Comment));
-        assert_eq!(keymap.action_for('c'), Some(Action::Comment));
-        assert_eq!(keymap.action_for('x'), Some(Action::Send));
-        assert_eq!(keymap.action_for('s'), None, "a binding replaces its action's defaults");
-        assert_eq!(keymap.action_for('S'), None);
-        assert_eq!(keymap.action_for('v'), Some(Action::Select), "unbound actions keep theirs");
+        assert_eq!(keymap.action_for(Key::plain('ㅊ')), Some(Action::Comment));
+        assert_eq!(keymap.action_for(Key::plain('c')), Some(Action::Comment));
+        assert_eq!(keymap.action_for(Key::plain('x')), Some(Action::Send));
+        assert_eq!(keymap.action_for(Key::plain('s')), None, "a binding replaces its defaults");
+        assert_eq!(keymap.action_for(Key::plain('S')), None);
+        assert_eq!(keymap.action_for(Key::plain('v')), Some(Action::Select), "unbound keep theirs");
+    }
+
+    #[test]
+    fn find_binds_to_a_chord_and_round_trips() {
+        use crate::keymap::{Action, Key};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // The default `find` chord resolves and serializes in config syntax.
+        std::fs::write(&path, "theme = \"catppuccin\"\n").unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.keymap().action_for(Key::ctrl('f')), Some(Action::Find));
+        let bindings = config.to_json()["keybindings"].as_object().unwrap().clone();
+        assert_eq!(bindings["find"], serde_json::json!(["ctrl+f"]));
+
+        // A rebind to another chord takes, and the old default frees.
+        std::fs::write(&path, "[keybindings]\nfind = [\"alt+x\"]\n").unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(
+            config.keymap().action_for(Key { ctrl: false, alt: true, ch: 'x' }),
+            Some(Action::Find)
+        );
+        assert_eq!(config.keymap().action_for(Key::ctrl('f')), None);
+        // The `alt+` chord serializes back in config syntax, not the glyph.
+        assert_eq!(config.to_json()["keybindings"]["find"], serde_json::json!(["alt+x"]));
+
+        // A malformed chord fails `CFG-KEY-FORM`.
+        std::fs::write(&path, "[keybindings]\nfind = [\"ctrl+\"]\n").unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("`keybindings.find`") && error.contains("expected"), "{error}");
     }
 
     #[test]
     fn legacy_navigator_actions_resolve_to_canonical_actions() {
-        use crate::keymap::Action;
+        use crate::keymap::{Action, Key};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[keybindings]\nlist-wider = [\"g\"]\nlist-narrower = [\"h\"]\n")
             .unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
-        assert_eq!(config.keymap().action_for('g'), Some(Action::NavigatorGrow));
-        assert_eq!(config.keymap().action_for('h'), Some(Action::NavigatorShrink));
+        assert_eq!(config.keymap().action_for(Key::plain('g')), Some(Action::NavigatorGrow));
+        assert_eq!(config.keymap().action_for(Key::plain('h')), Some(Action::NavigatorShrink));
         let json = config.to_json();
         let bindings = json["keybindings"].as_object().unwrap();
         assert!(bindings.contains_key("navigator-grow"));
@@ -769,7 +816,7 @@ mod tests {
             .unwrap();
         let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
         assert!(error.contains("`preview`") && error.contains("`navigator-position`"), "{error}");
-        assert!(error.contains("'p'"), "{error}");
+        assert!(error.contains("p is bound"), "{error}");
     }
 
     #[test]

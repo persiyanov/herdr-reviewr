@@ -28,7 +28,7 @@ above a full-width live preview. `tab` flips between the two search modes, keepi
 │ │ 41 ▌   from .z import w                                                 │ │
 │ │ 42     return registry[name]                                            │ │
 │ └─────────────────────────────────────────────────────────────────────────┘ │
-│ ⇥ files · ↑↓ pick · enter open · esc close                                   │
+│ tab files · ↑↓ pick · enter open · esc close                                 │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -55,7 +55,7 @@ results.
 - In the comment editor `/` is text. In the comments list it is inert.
 - The header stays. The input band sits under it: the query with its caret, then the mode
   chips `files │ code`, the active one lit like the active header tab, the inactive one
-  quiet. An empty query shows a dim placeholder. The footer carries the `⇥` flip key, so
+  quiet. An empty query shows a dim placeholder. The footer carries the `tab` flip key, so
   the chips carry no glyph.
 - Below the band, the results pane sits above the preview pane, both full width, whatever
   the navigator position. The pane is rarely wide enough to split into readable columns.
@@ -165,7 +165,7 @@ file's current length. Focus lands on the read pane.
 ## Non-goals
 
 - No changeset-scoped search. Roadmap (`overview.md`).
-- No search within the open diff. Also roadmap.
+- No find within a single open file. That surface is `find-in-file.md`.
 - No symbol table or definition classification.
 - No regex or fuzzy code search. Code matching is literal.
 - No keyboard resize of the search split. The divider drags the share.
@@ -178,6 +178,7 @@ file's current length. Focus lands on the read pane.
 
 - [file-list](./file-list.md)
 - [diff-view](./diff-view.md)
+- [find-in-file](./find-in-file.md)
 - [input](./input.md)
 - [tui](./tui.md)
 - [overview](./overview.md)

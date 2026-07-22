@@ -22,6 +22,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A `.gitattributes` keeps `*.sh` LF-only so Windows checkouts don't feed CR-terminated scripts to
   a shell.
 
+## [0.22.1] — 2026-07-22
+
+### Fixed
+- **Send works on herdr 0.7.5.** herdr 0.7.5 removed `agent send`, so pressing send failed and
+  the comments stayed put (#28). Comments now go through `pane send-text` — the same
+  literal-text, no-Enter write — which works on every supported herdr from 0.7.0 up.
+
+## [0.22.0] — 2026-07-21
+
+### Added
+- **Find in file.** `Ctrl+F` searches the open file. Every match lights up, and `enter` and the
+  arrows step the cursor between them, expanding a fold to reveal a hidden match. The query is a
+  literal, smart-case substring. `esc` closes the band and leaves you on the match.
+- **Modifier chords in keybindings.** `[keybindings]` now binds an action to a `ctrl+`/`alt+`
+  chord, not only a bare character. `find` defaults to `ctrl+f` and rebinds like any other action.
+
+### Changed
+- **The footer expands on demand.** By default it shows one row — the next step, the cursor's
+  actions, and `send` — closing with a `?` at the right. Press `?` to open every shortcut that works
+  here, grouped into `do`, `go`, and `move` bands. Press `?` or `esc` to close it. The always-on
+  cluster of muted keys is gone. `keys` binds the toggle, default `?`.
+- **Footer hints spell out named keys.** `shift+enter` and `tab` replace the `⇧⏎` and `⇥` glyphs, so
+  a hint reads the same on screen as in the config.
+
 ## [0.21.0] — 2026-07-20
 
 ### Added

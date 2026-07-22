@@ -7,10 +7,10 @@ use std::cell::RefCell;
 
 use anyhow::{Result, bail};
 use common::{Repo, app_on, enter_tab, typed};
-use herdr_reviewr::app::{App, Focus, FooterAction, Mode, Tier};
+use herdr_reviewr::app::{App, Band, Focus, FooterAction, Mode};
 use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::export::ExportTarget;
-use herdr_reviewr::keymap::{Action, Keymap};
+use herdr_reviewr::keymap::{Action, Key, Keymap};
 use herdr_reviewr::model::{Scope, Side};
 use herdr_reviewr::turn::Status;
 use herdr_reviewr::{handle_key, handle_mouse};
@@ -311,20 +311,25 @@ fn an_armed_crossing_takes_the_footer_and_dies_on_any_other_input() {
     app.next_hunk();
     app.next_hunk();
 
-    // Arm the crossing at a.rs's last hunk: the footer leads with the offer, the one movement
-    // key it ever names, and the comment key stays on the bar because it still works here.
+    // Arm the crossing at a.rs's last hunk: row 1 leads with the offer as its primary, and the
+    // comment key stays on the bar (demoted to a `Do` action) because it still works here. The
+    // hunk pair drops from the `move` band so the armed key is never listed twice.
     press(&mut app, &keymap, KeyCode::Char(']'));
     assert_eq!(app.armed_cross(), Some(true));
-    let bar = app.footer_actions();
-    assert_eq!(bar.first(), Some(&(FooterAction::CrossFile { forward: true }, Tier::Primary)));
-    assert!(bar.iter().any(|&(a, t)| a == FooterAction::Comment && t == Tier::Normal));
+    let bar = app.footer_bands();
+    assert_eq!(bar.first(), Some(&(FooterAction::CrossFile { forward: true }, Band::Primary)));
+    assert!(bar.iter().any(|&(a, b)| a == FooterAction::Comment && b == Band::Do));
+    assert!(
+        !bar.iter().any(|&(a, _)| a == FooterAction::MoveHunk),
+        "the armed hunk key is not repeated"
+    );
 
     // Any other key drops the arm and still does its own work — here `j` moves the cursor.
     let cursor = app.diff_cursor;
     press(&mut app, &keymap, KeyCode::Char('j'));
     assert_eq!(app.armed_cross(), None, "another key disarms");
     assert_eq!(app.diff_cursor, cursor + 1, "and still moves the cursor");
-    assert!(!app.footer_actions().iter().any(|(a, _)| matches!(a, FooterAction::CrossFile { .. })));
+    assert!(!app.footer_bands().iter().any(|(a, _)| matches!(a, FooterAction::CrossFile { .. })));
 
     // Disarmed, `]` arms again rather than crossing, so the file boundary always costs two.
     press(&mut app, &keymap, KeyCode::Char(']'));
@@ -667,7 +672,7 @@ fn comment_on(app: &mut App, marker: char, text: &str) {
     app.diff_cursor = row_with(app, marker);
     app.start_comment();
     assert!(
-        !app.footer_actions().iter().any(|&(a, _)| a == FooterAction::NavigatorPosition),
+        !app.footer_bands().iter().any(|&(a, _)| a == FooterAction::NavigatorPosition),
         "the composer owns its footer"
     );
     for ch in text.chars() {
@@ -741,7 +746,7 @@ fn a_paste_outside_the_editor_is_ignored() {
 
 /// The primary (first) footer action for the current context.
 fn primary(app: &App) -> FooterAction {
-    app.footer_actions().first().expect("a footer action").0
+    app.footer_bands().first().expect("a footer action").0
 }
 
 #[test]
@@ -753,7 +758,7 @@ fn the_footer_offers_the_action_for_what_the_cursor_is_on() {
     app.toggle_select();
     assert_eq!(primary(&app), FooterAction::Comment, "a live selection still leads with comment");
     assert!(
-        app.footer_actions().iter().any(|&(a, _)| a == FooterAction::ClearSelection),
+        app.footer_bands().iter().any(|&(a, _)| a == FooterAction::ClearSelection),
         "and offers to clear the selection"
     );
     app.toggle_select();
@@ -762,7 +767,7 @@ fn the_footer_offers_the_action_for_what_the_cursor_is_on() {
     // The cursor now sits on the line it just commented.
     assert_eq!(primary(&app), FooterAction::EditComment, "a commented line offers edit");
     assert!(
-        app.footer_actions().iter().any(|&(a, _)| a == FooterAction::Send),
+        app.footer_bands().iter().any(|&(a, _)| a == FooterAction::Send),
         "a written comment surfaces send wherever the cursor is"
     );
 }
@@ -781,7 +786,7 @@ fn esc_clears_a_live_selection() {
 fn the_footer_offers_scope_everywhere_on_a_file_tab() {
     let mut app = composing_app();
     app.cancel_comment(); // diff focus, on a content line
-    let has_scope = |a: &App| a.footer_actions().iter().any(|&(x, _)| x == FooterAction::Scope);
+    let has_scope = |a: &App| a.footer_bands().iter().any(|&(x, _)| x == FooterAction::Scope);
     assert!(has_scope(&app), "scope shows while reviewing a diff line");
     app.focus = Focus::Files;
     assert!(has_scope(&app), "scope shows in the file list too");
@@ -797,7 +802,7 @@ fn the_pr_footer_offers_open_for_any_resolved_pr() {
     app.set_tab(Tab::Pr).unwrap();
     // No resolved PR (still loading): nothing to open.
     assert!(
-        !app.footer_actions().iter().any(|&(a, _)| a == FooterAction::OpenPr),
+        !app.footer_bands().iter().any(|&(a, _)| a == FooterAction::OpenPr),
         "no resolved PR → no open action"
     );
 
@@ -805,7 +810,7 @@ fn the_pr_footer_offers_open_for_any_resolved_pr() {
     app.pr = PrView::Pr(Box::new(PrSnapshot { number: 7, ..common::pr_snapshot() }));
     assert!(app.pr_selected_comment().is_none(), "zero comments → nothing selected");
     assert_eq!(
-        app.footer_actions().first().map(|&(a, _)| a),
+        app.footer_bands().first().map(|&(a, _)| a),
         Some(FooterAction::OpenPr),
         "a resolved PR offers open even with no comments"
     );
@@ -816,14 +821,146 @@ fn the_footer_offers_send_only_once_a_comment_exists() {
     let mut app = composing_app();
     app.cancel_comment();
     assert!(
-        !app.footer_actions().iter().any(|&(a, _)| a == FooterAction::Send),
+        !app.footer_bands().iter().any(|&(a, _)| a == FooterAction::Send),
         "no comments yet → no send action"
     );
     comment_on(&mut app, '+', "note");
     assert!(
-        app.footer_actions().iter().any(|&(a, _)| a == FooterAction::Send),
+        app.footer_bands().iter().any(|&(a, _)| a == FooterAction::Send),
         "a comment written → send appears"
     );
+}
+
+#[test]
+fn the_expansion_toggles_from_normal_and_survives_a_poll() {
+    let mut app = composing_app();
+    app.cancel_comment(); // Normal mode, diff focus
+    let keymap = Keymap::default();
+    assert!(!app.keys_expanded, "the footer opens collapsed");
+    press(&mut app, &keymap, KeyCode::Char('?'));
+    assert!(app.keys_expanded, "`?` opens the expansion");
+    // A poll re-derives the footer's content but never moves the toggle (overview.md Continuity).
+    common::land_world(&mut app);
+    assert!(app.keys_expanded, "a refresh keeps the expansion open");
+    press(&mut app, &keymap, KeyCode::Char('?'));
+    assert!(!app.keys_expanded, "`?` again collapses it");
+}
+
+#[test]
+fn the_expansion_is_inert_in_the_comments_list() {
+    let mut app = composing_app();
+    app.cancel_comment();
+    comment_on(&mut app, '+', "note");
+    let keymap = Keymap::default();
+    app.open_list();
+    assert_eq!(app.mode, Mode::List);
+    press(&mut app, &keymap, KeyCode::Char('?'));
+    assert!(!app.keys_expanded, "`?` is inert while the comments list owns the bar");
+}
+
+#[test]
+fn the_keys_char_is_text_in_the_comment_editor() {
+    // `?` is the `keys` binding, but the editor's mode-check runs before the keymap dispatch, so it
+    // types a literal `?` and never toggles the expansion (specs/input.md).
+    let mut app = composing_app(); // composing
+    let keymap = Keymap::default();
+    press(&mut app, &keymap, KeyCode::Char('?'));
+    assert!(app.input.contains('?'), "`?` types into the comment editor");
+    assert!(!app.keys_expanded, "and never toggles the footer expansion");
+}
+
+#[test]
+fn esc_peels_one_layer_per_press() {
+    let r = traversal_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+
+    // A live selection sits above the open expansion: the first esc clears the selection, the
+    // next closes the expansion — one layer per press.
+    app.keys_expanded = true;
+    app.toggle_select();
+    assert!(app.select_anchor.is_some(), "v starts a selection");
+    press(&mut app, &keymap, KeyCode::Esc);
+    assert!(app.select_anchor.is_none(), "the first esc clears the selection");
+    assert!(app.keys_expanded, "and leaves the expansion open");
+    press(&mut app, &keymap, KeyCode::Esc);
+    assert!(!app.keys_expanded, "the next esc closes the expansion");
+
+    // An armed crossing is the middle rung: esc drops the arm before the expansion.
+    app.keys_expanded = true;
+    app.next_hunk();
+    app.next_hunk();
+    press(&mut app, &keymap, KeyCode::Char(']')); // arm at the file's last hunk
+    assert_eq!(app.armed_cross(), Some(true));
+    press(&mut app, &keymap, KeyCode::Esc);
+    assert_eq!(app.armed_cross(), None, "esc drops the armed crossing");
+    assert!(app.keys_expanded, "and leaves the expansion open");
+    press(&mut app, &keymap, KeyCode::Esc);
+    assert!(!app.keys_expanded, "the next esc closes the expansion");
+}
+
+#[test]
+fn esc_on_pr_closes_the_expansion_and_spares_the_frozen_file_tab() {
+    use herdr_reviewr::app::Tab;
+    let r = traversal_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+
+    // Select on a file tab and open the expansion, then move to PR — the selection freezes in place.
+    app.focus = Focus::Diff;
+    app.toggle_select();
+    assert!(app.select_anchor.is_some(), "v starts a selection on the file tab");
+    app.keys_expanded = true;
+    app.set_tab(Tab::Pr).unwrap();
+
+    // `esc` on PR closes the expansion and never disturbs the frozen file-tab selection.
+    press(&mut app, &keymap, KeyCode::Esc);
+    assert!(!app.keys_expanded, "esc closes the expansion on PR");
+    assert!(app.select_anchor.is_some(), "the frozen file-tab selection is spared");
+}
+
+#[test]
+fn the_pr_move_band_drops_the_hunk_and_file_steps() {
+    use herdr_reviewr::app::Tab;
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    let acts: Vec<_> = app.footer_bands().into_iter().map(|(a, _)| a).collect();
+    assert!(acts.contains(&FooterAction::MoveLine), "the PR moves line by line");
+    assert!(acts.contains(&FooterAction::MovePage), "and pages the read pane");
+    assert!(!acts.contains(&FooterAction::MoveHunk), "the PR has no hunk step");
+    assert!(!acts.contains(&FooterAction::MoveFile), "and no file step");
+}
+
+#[test]
+fn the_all_files_move_band_drops_the_inert_hunk_step() {
+    use herdr_reviewr::app::Tab;
+    // Hunk stepping is inert outside the Changes diff (`step_hunk` early-returns), so the move band
+    // must not advertise `] [ hunk` on All files, where file stepping still works.
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    let acts: Vec<_> = app.footer_bands().into_iter().map(|(a, _)| a).collect();
+    assert!(acts.contains(&FooterAction::MoveFile), "file stepping still works on All files");
+    assert!(!acts.contains(&FooterAction::MoveHunk), "but hunk stepping is inert there");
+}
+
+#[test]
+fn the_go_band_never_repeats_the_empty_scope_primary() {
+    // An empty changeset leads row 1 with `scope`; the `go` band must not list it a second time.
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("c"); // nothing uncommitted → the empty state
+    let app = app_on(&r);
+    let bands = app.footer_bands();
+    assert_eq!(
+        bands.first().map(|&(a, _)| a),
+        Some(FooterAction::Scope),
+        "scope leads the empty state"
+    );
+    let scopes = bands.iter().filter(|&&(a, _)| a == FooterAction::Scope).count();
+    assert_eq!(scopes, 1, "scope is not repeated in the go band");
 }
 
 /// A repo whose `big.rs` has 40 lines with one change in the middle, so the head and
@@ -1242,7 +1379,7 @@ fn divider_drag_math_and_keyboard_clamps_follow_all_four_positions() {
     let r = edited_repo();
     let mut app = app_on(&r);
     let area = Rect::new(0, 0, 100, 102); // a 100-cell split axis in either direction
-    let body = herdr_reviewr::ui::body_rect(area);
+    let body = herdr_reviewr::ui::body_rect(area, &app);
     let heights = vec![1usize; app.visible.len()];
     let keymap = Keymap::default();
     let event = |kind, column, row| MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE };
@@ -1357,7 +1494,7 @@ fn navigator_actions_cycle_remember_shares_and_respect_modes() {
 
     app.mode = Mode::List;
     assert!(
-        !app.footer_actions().iter().any(|&(a, _)| a == FooterAction::NavigatorPosition),
+        !app.footer_bands().iter().any(|&(a, _)| a == FooterAction::NavigatorPosition),
         "the comments list owns its footer"
     );
     press(&mut app, &keymap, KeyCode::Char('p'));
@@ -1367,7 +1504,7 @@ fn navigator_actions_cycle_remember_shares_and_respect_modes() {
     press(&mut app, &keymap, KeyCode::Char('p'));
     assert_eq!(app.navigator_position, NavigatorPosition::Bottom, "the action works on PR");
     assert!(
-        app.footer_actions().iter().any(|&(a, _)| a == FooterAction::NavigatorPosition),
+        app.footer_bands().iter().any(|&(a, _)| a == FooterAction::NavigatorPosition),
         "the PR footer exposes the position action"
     );
 }
@@ -1378,7 +1515,7 @@ fn divider_drag_cancels_until_mouse_up() {
     let mut app = app_on(&r);
     let keymap = Keymap::default();
     let area = Rect::new(0, 0, 120, 40);
-    let body = herdr_reviewr::ui::body_rect(area);
+    let body = herdr_reviewr::ui::body_rect(area, &app);
     let row = body.y + body.height / 2;
     let divider = (body.x..body.x + body.width)
         .find(|&col| herdr_reviewr::ui::hit_divider(area, &app, col, row))
@@ -2680,7 +2817,7 @@ fn the_traversal_keys_dispatch_and_rebind() {
     assert_eq!(app.navigator_side_pct, start, "`>` shrinks it again");
 
     // Every traversal action is rebindable, like the rest of the keymap.
-    let rebound = Keymap::resolve(&[(Action::NextFile, vec!['ㅁ'])]).unwrap();
+    let rebound = Keymap::resolve(&[(Action::NextFile, vec![Key::plain('ㅁ')])]).unwrap();
     press(&mut app, &rebound, KeyCode::Char('ㅁ'));
     assert_eq!(app.diff_path.as_deref(), Some("bin.dat"));
     press(&mut app, &rebound, KeyCode::Char('f'));
@@ -2691,7 +2828,7 @@ fn the_traversal_keys_dispatch_and_rebind() {
 fn rebound_keys_dispatch_and_replaced_defaults_go_inert() {
     let r = edited_repo();
     let mut app = app_on(&r);
-    let keymap = Keymap::resolve(&[(Action::Comment, vec!['ㅊ'])]).unwrap();
+    let keymap = Keymap::resolve(&[(Action::Comment, vec![Key::plain('ㅊ')])]).unwrap();
     app.focus = Focus::Diff;
     app.diff_cursor = row_with(&app, '+');
 
@@ -2706,7 +2843,11 @@ fn rebound_keys_dispatch_and_replaced_defaults_go_inert() {
 fn fixed_keys_survive_rebinding() {
     let r = edited_repo();
     let mut app = app_on(&r);
-    let keymap = Keymap::resolve(&[(Action::Down, vec!['x']), (Action::Up, vec!['z'])]).unwrap();
+    let keymap = Keymap::resolve(&[
+        (Action::Down, vec![Key::plain('x')]),
+        (Action::Up, vec![Key::plain('z')]),
+    ])
+    .unwrap();
     app.focus = Focus::Diff;
     app.diff_cursor = 0;
 
@@ -2715,6 +2856,275 @@ fn fixed_keys_survive_rebinding() {
 
     press(&mut app, &keymap, KeyCode::Tab);
     assert_eq!(app.focus, Focus::Files, "tab still switches focus");
+}
+
+// ---- in-file find (specs/find-in-file.md) -----------------------------------------------
+
+/// A repo whose only change is a new `m.rs`: it renders as all-insertion rows, so the diff has
+/// no context and no folds — one row per line, matching is straightforward.
+fn find_repo() -> Repo {
+    let r = Repo::init();
+    r.write("base.txt", "x\n");
+    r.commit_all("init");
+    r.write("m.rs", "let total = 1;\ncompute();\ntotal += 2;\nprint(total);\n");
+    r
+}
+
+fn open_find(app: &mut App, keymap: &Keymap) {
+    let ev = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+    handle_key(app, ev, Rect::new(0, 0, 120, 40), keymap).unwrap();
+}
+
+fn find_type(app: &mut App, keymap: &Keymap, text: &str) {
+    for ch in text.chars() {
+        press(app, keymap, KeyCode::Char(ch));
+    }
+}
+
+#[test]
+fn find_match_ranges_is_smart_case_and_non_overlapping() {
+    use herdr_reviewr::app::find_match_ranges;
+    // A lowercase query ignores case; the ranges are char indices.
+    assert_eq!(find_match_ranges("Total total", "total", false), vec![(0, 5), (6, 11)]);
+    // Any uppercase makes it case-sensitive.
+    assert_eq!(find_match_ranges("Total total", "Total", true), vec![(0, 5)]);
+    // Occurrences are non-overlapping.
+    assert_eq!(find_match_ranges("aaaa", "aa", false), vec![(0, 2), (2, 4)]);
+    assert!(find_match_ranges("abc", "", false).is_empty());
+}
+
+#[test]
+fn ctrl_f_opens_the_find_band_and_esc_closes_it_empty() {
+    let r = find_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    assert_eq!(app.diff_path.as_deref(), Some("m.rs"));
+
+    open_find(&mut app, &keymap);
+    assert_eq!(app.mode, Mode::Find);
+    assert_eq!(app.focus, Focus::Diff, "find focuses the read pane");
+
+    find_type(&mut app, &keymap, "total");
+    assert_eq!(app.find.as_ref().unwrap().query, "total");
+
+    press(&mut app, &keymap, KeyCode::Esc);
+    assert_eq!(app.mode, Mode::Normal, "esc closes the band");
+    assert!(app.find.is_none());
+
+    open_find(&mut app, &keymap);
+    assert_eq!(app.find.as_ref().unwrap().query, "", "reopening starts empty");
+}
+
+#[test]
+fn find_counts_matches_with_the_cursor_ordinal() {
+    let r = find_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+    app.diff_cursor = 0; // "let total = 1;" — a match
+    open_find(&mut app, &keymap);
+    find_type(&mut app, &keymap, "total");
+    assert_eq!(app.diff_cursor, 0, "typing lights matches but never moves the cursor");
+
+    // "total" is on rows 0, 2, 3 → three matching rows; the cursor sits on the first.
+    assert_eq!(app.find_count(), Some((Some(1), 3)));
+
+    // Off a match, the count shows the total alone.
+    app.diff_cursor = 1; // "compute()" — no match
+    assert_eq!(app.find_count(), Some((None, 3)));
+
+    // A query with no matches says so; an empty query blanks the count.
+    app.find.as_mut().unwrap().query = "zzz".to_string();
+    assert_eq!(app.find_count(), Some((None, 0)));
+    app.find.as_mut().unwrap().query = String::new();
+    assert_eq!(app.find_count(), None);
+}
+
+#[test]
+fn find_steps_between_matches_and_wraps() {
+    let r = find_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+    app.diff_cursor = 0;
+    open_find(&mut app, &keymap);
+    find_type(&mut app, &keymap, "total"); // rows 0, 2, 3
+
+    press(&mut app, &keymap, KeyCode::Enter); // next → row 2
+    assert_eq!(app.diff_cursor, 2);
+    press(&mut app, &keymap, KeyCode::Down); // next → row 3
+    assert_eq!(app.diff_cursor, 3);
+    press(&mut app, &keymap, KeyCode::Down); // next wraps → row 0
+    assert_eq!(app.diff_cursor, 0);
+    press(&mut app, &keymap, KeyCode::Up); // prev wraps → row 3
+    assert_eq!(app.diff_cursor, 3);
+}
+
+#[test]
+fn find_opens_on_a_match_reading_its_ordinal_at_once() {
+    // The motivating scenario: land on a symbol, `ctrl+f` it, see its ordinal with no step.
+    let r = find_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+    app.diff_cursor = 2; // the second "total"
+    open_find(&mut app, &keymap);
+    find_type(&mut app, &keymap, "total");
+    assert_eq!(app.find_count(), Some((Some(2), 3)));
+}
+
+#[test]
+fn find_searches_folded_content_and_a_step_expands_the_fold() {
+    use herdr_reviewr::diff::Row;
+    use std::fmt::Write as _;
+    let r = Repo::init();
+    let mut base = String::from("total = 0\n");
+    for i in 0..10 {
+        writeln!(base, "filler{i}").unwrap();
+    }
+    base.push_str("last = 1\n");
+    r.write("m.rs", &base);
+    r.commit_all("init");
+    r.write("m.rs", &base.replace("last = 1", "last = total"));
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+
+    // A leading fold hides line 1 ("total = 0"); the change at line 12 shows "last = total".
+    assert!(app.visible.iter().any(|row| matches!(row, Row::Fold { .. })), "a fold hides the head");
+
+    open_find(&mut app, &keymap);
+    find_type(&mut app, &keymap, "total");
+    // The folded match and the visible one both count.
+    assert_eq!(app.find_count().unwrap().1, 2);
+
+    // From the visible match, a prev step reaches the folded one, expanding its fold.
+    let visible = app.visible.iter().position(|row| row.text().contains("last = total")).unwrap();
+    app.diff_cursor = visible;
+    let before = app.visible.len();
+    press(&mut app, &keymap, KeyCode::Up);
+    assert!(app.visible.len() > before, "the step expanded the fold");
+    assert!(app.visible[app.diff_cursor].text().contains("total = 0"), "the cursor lands on it");
+}
+
+#[test]
+fn find_is_inert_in_wrong_contexts() {
+    use herdr_reviewr::app::Tab;
+    let r = find_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+
+    // While composing a comment.
+    app.diff_cursor = row_with(&app, '+');
+    press(&mut app, &keymap, KeyCode::Char('c'));
+    assert!(app.composing());
+    open_find(&mut app, &keymap);
+    assert!(app.composing() && app.mode != Mode::Find, "inert while composing");
+    app.cancel_comment();
+
+    // In the comments list.
+    comment_on(&mut app, '+', "note");
+    app.open_list();
+    assert_eq!(app.mode, Mode::List);
+    open_find(&mut app, &keymap);
+    assert_eq!(app.mode, Mode::List, "inert in the comments list");
+    app.close_list();
+
+    // On the `PR` tab, which has no read-pane file.
+    app.set_tab(Tab::Pr).unwrap();
+    open_find(&mut app, &keymap);
+    assert_ne!(app.mode, Mode::Find, "no find on the PR tab");
+}
+
+#[test]
+fn find_is_inert_without_content_rows() {
+    use herdr_reviewr::diff::Row;
+    // An empty file has no content rows, so `find_available` is false (specs/find-in-file.md).
+    let r = Repo::init();
+    r.write("base.txt", "x\n");
+    r.commit_all("init");
+    r.write("empty.rs", "");
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    assert_eq!(app.diff_path.as_deref(), Some("empty.rs"));
+    app.focus = Focus::Diff;
+    assert!(!app.visible.iter().any(Row::is_content), "the empty file has no content rows");
+    open_find(&mut app, &keymap);
+    assert_ne!(app.mode, Mode::Find, "find is inert on a file with no content rows");
+}
+
+#[test]
+fn find_is_inert_in_the_markdown_preview() {
+    let r = Repo::init();
+    r.write("base.txt", "x\n");
+    r.commit_all("init");
+    r.write("doc.md", "# Title\n\nthe word total appears here\n");
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
+    app.focus = Focus::Diff;
+    press(&mut app, &keymap, KeyCode::Char('m')); // open the markdown preview
+    assert!(app.preview_active(), "the preview is open");
+    open_find(&mut app, &keymap);
+    assert_ne!(app.mode, Mode::Find, "find is inert in the markdown preview");
+}
+
+#[test]
+fn a_poll_that_drops_the_open_file_force_closes_find() {
+    let r = find_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+    open_find(&mut app, &keymap);
+    find_type(&mut app, &keymap, "total");
+    assert_eq!(app.mode, Mode::Find);
+
+    // The agent removes `m.rs`: it leaves the changeset, so the read pane reconciles away.
+    r.remove("m.rs");
+    let snapshot = herdr_reviewr::world::build(&app.world_input()).unwrap();
+    app.reconcile_world(snapshot);
+    assert_ne!(app.mode, Mode::Find, "the band force-closes when its file is gone");
+    assert!(app.find.is_none());
+}
+
+#[test]
+fn a_poll_keeping_the_open_file_leaves_find_open_and_re_derives() {
+    let r = find_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+    open_find(&mut app, &keymap);
+    find_type(&mut app, &keymap, "total");
+    let before = app.find_count().unwrap().1; // 3 matches
+
+    // The agent edits `m.rs` but keeps it in the changeset, adding another `total`.
+    r.write("m.rs", "let total = 1;\ncompute();\ntotal += 2;\nprint(total);\nreturn total;\n");
+    let snapshot = herdr_reviewr::world::build(&app.world_input()).unwrap();
+    app.reconcile_world(snapshot);
+
+    assert_eq!(app.mode, Mode::Find, "a same-file poll keeps the band open (specs O6)");
+    assert_eq!(app.find_count().unwrap().1, before + 1, "the count re-derives from new content");
+}
+
+#[test]
+fn find_opens_on_a_rebound_alt_chord_through_the_dispatcher() {
+    let r = find_repo();
+    let mut app = app_on(&r);
+    let keymap =
+        Keymap::resolve(&[(Action::Find, vec![Key { ctrl: false, alt: true, ch: 'x' }])]).unwrap();
+    app.focus = Focus::Diff;
+    let area = Rect::new(0, 0, 120, 40);
+
+    // The freed default chord no longer opens find.
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL), area, &keymap)
+        .unwrap();
+    assert_ne!(app.mode, Mode::Find, "the freed default does not open find");
+
+    // A real `alt+x` event dispatched through `handle_key` does.
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT), area, &keymap)
+        .unwrap();
+    assert_eq!(app.mode, Mode::Find, "the rebound alt chord opens find through the dispatcher");
 }
 
 #[test]
@@ -2743,7 +3153,7 @@ fn the_comments_list_acts_through_the_same_bindings() {
     let r = edited_repo();
     let mut app = app_on(&r);
     comment_on(&mut app, '+', "note");
-    let keymap = Keymap::resolve(&[(Action::Delete, vec!['x'])]).unwrap();
+    let keymap = Keymap::resolve(&[(Action::Delete, vec![Key::plain('x')])]).unwrap();
 
     app.open_list();
     press(&mut app, &keymap, KeyCode::Char('d'));
@@ -3353,7 +3763,7 @@ mod search_overlay {
         // Every tab's footer carries the hint, and `/` opens from each (specs/search.md).
         for tab in [Tab::Changes, Tab::Pr, Tab::AllFiles] {
             enter_tab(&mut app, tab);
-            let actions: Vec<_> = app.footer_actions().into_iter().map(|(a, _)| a).collect();
+            let actions: Vec<_> = app.footer_bands().into_iter().map(|(a, _)| a).collect();
             assert!(
                 actions.contains(&herdr_reviewr::app::FooterAction::Search),
                 "the {tab:?} footer carries the search hint: {actions:?}"
@@ -3622,7 +4032,7 @@ mod search_overlay {
     /// that would not work (specs/input.md, specs/search.md).
     #[test]
     fn footer_offers_only_esc_when_nothing_pickable() {
-        use herdr_reviewr::app::{FooterAction, Tier};
+        use herdr_reviewr::app::{Band, FooterAction};
         let repo = Repo::init();
         repo.write("a.rs", "one\n");
         repo.commit_all("c");
@@ -3634,20 +4044,20 @@ mod search_overlay {
         let flip = FooterAction::FlipSearchMode;
         // Warming: the mode flip and esc only.
         assert_eq!(
-            app.footer_actions(),
-            vec![(flip, Tier::Primary), (FooterAction::CloseSearch, Tier::Normal)],
+            app.footer_bands(),
+            vec![(flip, Band::Primary), (FooterAction::CloseSearch, Band::Do)],
             "indexing offers only the flip and esc"
         );
         // Ready but empty: the same.
         land_search_completion(&mut app, done(1, results(Vec::new(), Vec::new())), 1);
         assert_eq!(
-            app.footer_actions(),
-            vec![(flip, Tier::Primary), (FooterAction::CloseSearch, Tier::Normal)],
+            app.footer_bands(),
+            vec![(flip, Band::Primary), (FooterAction::CloseSearch, Band::Do)],
             "no matches offers only the flip and esc"
         );
         // Ready with results: the full bar.
         land_search_completion(&mut app, done(2, results(vec![file_hit("a.rs")], Vec::new())), 2);
-        let actions: Vec<_> = app.footer_actions().into_iter().map(|(a, _)| a).collect();
+        let actions: Vec<_> = app.footer_bands().into_iter().map(|(a, _)| a).collect();
         assert_eq!(
             actions,
             vec![
@@ -3673,7 +4083,7 @@ mod search_overlay {
         enter_tab(&mut app, Tab::AllFiles);
 
         let area = Rect::new(0, 0, 120, 40);
-        let body = herdr_reviewr::ui::body_rect(area);
+        let body = herdr_reviewr::ui::body_rect(area, &app);
         let row = body.y + body.height / 2;
         let divider = (body.x..body.x + body.width)
             .find(|&col| herdr_reviewr::ui::hit_divider(area, &app, col, row))

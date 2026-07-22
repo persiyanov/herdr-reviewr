@@ -52,7 +52,7 @@ impl PrView {
     /// Both snapshot preservation and the empty-state renderer consume this projection so a
     /// newly added retryable failure cannot diverge between those surfaces. `refresh` is the
     /// active `refresh` binding's hint key, so the advertised retry key follows a rebind.
-    pub fn retry_remedy(&self, refresh: char) -> Option<String> {
+    pub fn retry_remedy(&self, refresh: crate::keymap::Key) -> Option<String> {
         match self {
             Self::NoGh => {
                 Some(format!("GitHub CLI not found. Install `gh`, then press {refresh}."))
