@@ -320,6 +320,9 @@ pub enum FooterAction {
     MovePage,
     ExpandDir,
     CollapseDir,
+    /// Open the file under the cursor in an editor (Files pane, `specs/input.md` "Open in
+    /// editor"). Shares the `edit` key with `EditComment`, offered in a different context.
+    OpenEditor,
     /// Open the search screen — offered in every context, on every tab (specs/search.md).
     Search,
     /// Open the in-file find band — offered wherever the read pane has content
@@ -531,6 +534,10 @@ pub struct App {
     /// The world refresh request awaiting dispatch, if any; the event loop hands it to
     /// the worker after the frame paints (specs/tui.md).
     pub world_request: Option<crate::world::WorldRequest>,
+    /// The absolute path of a file the Files pane asked to open in an editor; the event loop
+    /// owns the terminal, so it services this after the frame paints — suspending, spawning,
+    /// resuming, then requesting a world refresh (specs/input.md "Open in editor").
+    pub editor_request: Option<PathBuf>,
     /// The search overlay's state while `mode == Mode::Search`, `None` otherwise.
     pub search: Option<SearchOverlay>,
     /// Set by every query edit (and the open); the event loop dispatches the query to the
@@ -674,6 +681,7 @@ impl App {
             reveal_pr_nav: std::cell::Cell::new(true),
             pr_pending: None,
             world_request: None,
+            editor_request: None,
             search: None,
             search_dirty: false,
             search_track: None,
@@ -2347,6 +2355,15 @@ impl App {
             && self.visible.get(self.diff_cursor).and_then(Row::fold_anchor).is_some()
     }
 
+    /// Request the file under the cursor open in an editor (`e`, Files pane). A no-op on a
+    /// directory row — deferred to the event loop, which owns the terminal
+    /// (specs/input.md "Open in editor").
+    pub fn request_open_editor(&mut self) {
+        if let Some(entry) = self.current_entry() {
+            self.editor_request = Some(self.repo.join(&entry.path));
+        }
+    }
+
     /// Expand the directory under the cursor (`→`); a no-op if it is a file or already open.
     pub fn expand_dir(&mut self) {
         if self.plugin_config().is_none() {
@@ -3327,6 +3344,9 @@ impl App {
                 _ => {
                     out.push((A::TogglePane, Primary)); // tab into the diff to review
                     pane_is_primary = true;
+                    if self.current_entry().is_some() {
+                        out.push((A::OpenEditor, Do));
+                    }
                 }
             }
             // The files pane's calm row 1 has the room for the hide key (specs/input.md).

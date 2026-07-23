@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-17
-Last edited: 2026-07-31
+Last edited: 2026-08-02
 ---
 
 # Input
@@ -169,7 +169,7 @@ Row 1's primary and actions follow the cursor:
 | a commented line                         | `e edit`                       | `d delete · n/N jump`             |
 | a fold                                   | `→ expand fold`                | —                                 |
 | an open markdown preview                 | `m source`                     | —                                 |
-| a file (file list)                       | `tab diff`                     | `z hide`                          |
+| a file (file list)                       | `tab diff`                     | `e edit file · z hide`            |
 | a collapsed directory                    | `→ expand`                     | `z hide`                          |
 | an expanded directory                    | `← collapse`                   | `z hide`                          |
 | nothing to review (awaiting turn)        | `u/b/t scope`                  | `r refresh`                       |
@@ -184,6 +184,18 @@ Row 1's primary and actions follow the cursor:
 - `?` (the `keys` action) toggles the expansion in `Normal` mode only. It is text in the comment editor and the search and find inputs, and inert in the comments list and the agent picker.
 - The changed-file count and line totals live in the header. The footer carries only the comment count, inside `s send N`.
 - On `PR` row 1 carries the PR state line and `o open ↗` per `pr-tab.md`, and `?` expands to the rest.
+
+### Open in editor
+
+On a file row in the file list, `e` opens that file in an editor. The editor takes the whole
+screen. reviewr's own display returns when it exits. Inert on a directory row. Inert on the diff
+pane too, where `e` edits the comment under the cursor instead (see above).
+
+The editor command is `config.md`'s `editor` key, or `$EDITOR` when unset. Neither set reports a
+status error and opens nothing.
+
+Closing the editor refreshes the file list and diff, so an edit made there becomes visible. The
+cursor and scroll position hold (`overview.md` Continuity).
 
 ### Comment editor
 

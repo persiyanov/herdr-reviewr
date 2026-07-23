@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`e` opens a file in your editor from the Files pane.** On a file row in either file tab, `e`
+  opens it full-screen in the editor from the new `editor` config key (or `$EDITOR`); closing it
+  refreshes the file list and diff. Inert on a directory row. `e` on the diff pane is unchanged —
+  it still edits the comment under the cursor.
+
 ## [0.29.0] — 2026-08-01
 
 ### Changed

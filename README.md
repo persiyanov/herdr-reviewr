@@ -113,6 +113,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | `Ctrl+U` `Ctrl+D` | Move a half-page |
 | `Tab` | Switch focus |
 | `→` `←` | Expand / collapse, or scroll sideways |
+| `e` | Open file in editor (Files pane) — see [Editor](#editor) |
 | `/` | Search files and code |
 | `Ctrl+F` | Find in file |
 | `w` | Toggle line wrap |
@@ -218,6 +219,7 @@ toggle_placement = "overlay"
 toggle_direction = "down"
 auto_open = false
 github_host = "github.example.com"
+editor = "code --wait"
 
 [keybindings]
 comment = ["c", "ㅊ"]
@@ -273,6 +275,19 @@ base_branches = ["develop", "main", "master"]
 
 `--base <ref>` wins over the list and takes any rev (a branch, a tag, a SHA). When nothing in
 the list resolves, the branch `origin/HEAD` names is the fallback.
+
+### Editor
+
+`e` on a file row in the Files pane (Changes or All files) opens it full-screen in your editor:
+
+```toml
+editor = "code --wait"
+```
+
+Unset, it falls back to `$EDITOR`. Neither set, `e` reports a status error and opens nothing.
+The command is split on whitespace and the file path appended. No shell is involved. `e` does
+nothing on a directory row. `e` on the diff pane still edits the comment under the cursor.
+Closing the editor refreshes the file list and diff.
 
 ### Keybindings
 
