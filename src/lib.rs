@@ -176,6 +176,10 @@ enum PrEffect {
 /// can paint. An off-tab input change clears stale state but defers its replacement fetch.
 #[derive(Debug)]
 struct PrRefresh {
+    /// The last attached checked-out branch name. A change is an identity change — a new
+    /// branch is a new PR story — while a transient detach keeps it, so a rebase never
+    /// reads as a switch (`specs/forge-host.md` Refresh).
+    last_branch: Option<String>,
     generation: u64,
     current_input: Option<crate::forge::PrFetchInput>,
     pending: Option<TaggedPr>,
@@ -379,6 +383,30 @@ impl ConfigGate {
     }
 }
 
+/// The hold gate: a resolution that found nothing keeps the painted story while the
+/// pinned `HEAD` still is or contains the shown PR's head commit
+/// (`specs/forge-host.md` Refresh). `contains(pin, oid)` answers that ancestry question;
+/// its failure is a retryable branch-state Git error, never proof of absence
+/// (`specs/forge-host.md` failure table — a same-target failure preserves the snapshot).
+fn hold_gate(
+    view: crate::forge::PrView,
+    held: Option<&str>,
+    pin: Option<&str>,
+    contains: impl FnOnce(&str, &str) -> Result<bool, crate::git::GitFail>,
+) -> crate::forge::PrView {
+    if matches!(view, crate::forge::PrView::NoPr)
+        && let (Some(held), Some(pin)) = (held, pin)
+        && !held.is_empty()
+    {
+        return match contains(pin, held) {
+            Ok(true) => crate::forge::PrView::Held,
+            Ok(false) => view,
+            Err(error) => crate::forge::PrView::GitError(error.0),
+        };
+    }
+    view
+}
+
 impl PrRefresh {
     fn new(ready: bool) -> Self {
         Self {
@@ -387,6 +415,7 @@ impl PrRefresh {
             pending: None,
             fetch_needed: ready,
             trailing: false,
+            last_branch: None,
         }
     }
 
@@ -403,6 +432,7 @@ impl PrRefresh {
         self.pending = None;
         self.fetch_needed = false;
         self.trailing = false;
+        self.last_branch = None;
     }
 
     fn config_changed(&mut self, active: bool) {
@@ -422,20 +452,28 @@ impl PrRefresh {
     }
 
     fn observed(&mut self, input: crate::forge::PrFetchInput, epoch: u64) -> Option<PrEffect> {
-        // Two tiers (forge-host.md). Identity is where the pull request lives: the resolved
-        // repository target and the origin the association query runs against — a change
-        // there clears, because the snapshot may describe the wrong pull request. Everything
-        // locally derived — the pinned `HEAD` and base, the publication points, the
-        // tiebreak — moves on a mere commit or push, so it is freshness: the snapshot stays
-        // painted while the replacement fetches behind it, stale, never wrong
-        // (`overview.md` Continuity). Both tiers start that fetch at once, on or off the
-        // tab, so entering the tab finds fresh work already underway.
+        // Two tiers (forge-host.md). Identity is whose story the tab tells: the resolved
+        // repository target, the origin, and the checked-out branch — a change there
+        // clears, because the snapshot belongs to another branch's story. Everything
+        // locally derived — the pinned `HEAD` and base, the branch's forge names — moves
+        // on a mere commit or push, so it is freshness: the snapshot stays painted while
+        // the replacement fetches behind it, stale, never wrong (`overview.md`
+        // Continuity). Both tiers start that fetch at once, on or off the tab, so
+        // entering the tab finds fresh work already underway.
+        let branch =
+            (!input.local.detached).then(|| input.local.names.first().cloned().unwrap_or_default());
+        let branch_changed = matches!((&self.last_branch, &branch),
+            (Some(previous), Some(current)) if previous != current);
+        if let Some(branch) = branch {
+            self.last_branch = Some(branch);
+        }
         let Some(previous) = self.current_input.as_ref() else {
             self.current_input = Some(input.clone());
             return self.take_pending(&input, epoch);
         };
         let identity_changed = previous.repository != input.repository
-            || previous.origin_repository != input.origin_repository;
+            || previous.origin_repository != input.origin_repository
+            || branch_changed;
         let freshness_changed = previous.local != input.local;
         if identity_changed || freshness_changed {
             self.generation = self.generation.wrapping_add(1);
@@ -914,8 +952,21 @@ fn event_loop(
                     cancelled: cancelled.clone(),
                     started: Instant::now(),
                 });
+                let held = match &app.pr {
+                    crate::forge::PrView::Pr(snapshot) => Some(snapshot.head_oid.clone()),
+                    _ => None,
+                };
                 thread::spawn(move || {
                     let view = crate::forge::fetch_cancellable(&repo, &input, &cancelled);
+                    // Checked here, on the worker, so the event loop never runs git.
+                    // Re-proving each poll is the accepted cost of keeping the snapshot
+                    // the only state.
+                    let view = hold_gate(
+                        view,
+                        held.as_deref(),
+                        input.local.head_oid.as_deref(),
+                        |pin, oid| crate::git::contains_commit(&repo, pin, oid),
+                    );
                     let _ = tx.send(TaggedPr { generation, config_epoch: epoch, input, view });
                 });
             }
@@ -1742,13 +1793,7 @@ mod refresh_tests {
             local: crate::git::PrLocalState {
                 head_oid: Some(head.to_string()),
                 base_oid: Some("base".to_string()),
-                points: vec![crate::git::PublicationPoint {
-                    oid: head.to_string(),
-                    names: vec!["feature".to_string()],
-                }],
-                absorbed: Vec::new(),
-                head_nominates: true,
-                upstream: None,
+                names: vec!["feature".to_string()],
                 detached: false,
             },
         }
@@ -2042,16 +2087,88 @@ mod refresh_tests {
     }
 
     #[test]
+    fn the_hold_gate_promotes_only_a_proven_contained_no_pr() {
+        use super::hold_gate;
+        use crate::forge::PrView;
+        let held = |view, held: Option<&str>, pin: Option<&str>, contained: bool| {
+            matches!(
+                hold_gate(view, held, pin, |p, o| {
+                    assert_eq!((p, o), (pin.unwrap(), held.unwrap()), "pin and oid never swap");
+                    Ok(contained)
+                }),
+                PrView::Held
+            )
+        };
+        assert!(held(PrView::NoPr, Some("oid"), Some("pin"), true));
+        assert!(!held(PrView::NoPr, Some("oid"), Some("pin"), false));
+        // No painted PR, no pin, or an empty oid never holds; a resolved view passes through.
+        let yes = |_: &str, _: &str| Ok(true);
+        assert!(!matches!(hold_gate(PrView::NoPr, None, Some("pin"), yes), PrView::Held));
+        assert!(!matches!(hold_gate(PrView::NoPr, Some("oid"), None, yes), PrView::Held));
+        assert!(!matches!(hold_gate(PrView::NoPr, Some(""), Some("pin"), yes), PrView::Held));
+        assert!(matches!(
+            hold_gate(PrView::Detached, Some("oid"), Some("pin"), yes),
+            PrView::Detached
+        ));
+    }
+
+    #[test]
+    fn a_failed_hold_ancestry_read_is_a_git_error_never_proof_of_absence() {
+        // A transient Git failure during the hold's containment read must surface as the
+        // retryable Git error, which preserves the same-target snapshot — never read as
+        // "not contained", which would blank it (`specs/forge-host.md` failure table).
+        use super::hold_gate;
+        use crate::forge::PrView;
+        let fail = |_: &str, _: &str| Err(crate::git::GitFail("rev-list failed".to_string()));
+        assert!(matches!(
+            hold_gate(PrView::NoPr, Some("oid"), Some("pin"), fail),
+            PrView::GitError(message) if message.contains("rev-list failed")
+        ));
+        // The read runs only when a NoPr could promote: a resolved view, or nothing
+        // held, never pays it and never fails on it.
+        assert!(matches!(hold_gate(PrView::NoPr, None, Some("pin"), fail), PrView::NoPr));
+        assert!(matches!(
+            hold_gate(PrView::Detached, Some("oid"), Some("pin"), fail),
+            PrView::Detached
+        ));
+    }
+
+    #[test]
+    fn a_branch_switch_clears_but_a_transient_detach_never_does() {
+        // The checked-out branch is identity: a new branch is a new PR story
+        // (`specs/forge-host.md` Refresh). A detach in between is freshness.
+        let mut on_a = input("head");
+        on_a.local.names = vec!["branch-a".to_string()];
+        let mut on_b = input("head2");
+        on_b.local.names = vec!["branch-b".to_string()];
+        let mut detached = input("head");
+        detached.local.names = Vec::new();
+        detached.local.detached = true;
+
+        let mut refresh = PrRefresh::new(true);
+        assert!(refresh.observed(on_a.clone(), 0).is_none());
+        assert!(matches!(refresh.observed(on_b.clone(), 0), Some(PrEffect::Clear)));
+
+        // Detach after B: freshness, never a clear.
+        assert!(matches!(refresh.observed(detached.clone(), 0), Some(PrEffect::Refetch)));
+        // Reattach to the same branch: still the same story.
+        assert!(matches!(refresh.observed(on_b.clone(), 0), Some(PrEffect::Refetch)));
+        // Reattach to a different branch through a detach: a new story, clears.
+        assert!(matches!(refresh.observed(detached, 0), Some(PrEffect::Refetch)));
+        assert!(matches!(refresh.observed(on_a, 0), Some(PrEffect::Clear)));
+    }
+
+    #[test]
     fn local_state_churn_keeps_the_snapshot_and_refetches_behind_it() {
-        // The locally derived state — pins, points, tiebreak — moves on a mere commit or
+        // The locally derived state — pins, branch names — moves on a mere commit or
         // push, so it is freshness, not identity (forge-host.md): the snapshot stays
         // painted while the replacement fetch runs.
         let original = input("head");
-        let mut renamed_point = input("head");
-        renamed_point.local.points[0].names.push("published".to_string());
+        let mut renamed = input("head");
+        renamed.local.names.push("published".to_string());
         let mut moved_base = input("head");
         moved_base.local.base_oid = Some("advanced".to_string());
-        let changes = [input("moved-head"), renamed_point, moved_base];
+        let changes = [input("moved-head"), renamed, moved_base];
 
         for changed in changes {
             let mut refresh = PrRefresh::new(true);

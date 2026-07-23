@@ -1,8 +1,8 @@
 //! Read-only GitLab access: the merge request's identity, state, pipelines, and discussions.
 //!
 //! The GitLab provider behind `src/forge.rs` (`specs/forge-providers.md`). It follows the
-//! neutral resolution contract in `specs/forge-host.md` — publication points nominate,
-//! containment or exact head identity admits — through `glab api` REST calls, and fills the
+//! neutral resolution contract in `specs/forge-host.md` — the branch's forge names list
+//! merge requests by `source_branch` — through `glab api` REST calls, and fills the
 //! same normalized [`PrSnapshot`] the GitHub provider does. It never writes to GitLab.
 
 use std::path::Path;
@@ -13,8 +13,7 @@ use serde_json::Value;
 
 use crate::forge::{
     AssocPr, Association, Check, CheckStatus, Comment, CommentKind, Merge, PrFetchInput,
-    PrSnapshot, PrState, PrView, Sync, finish_comments, nominated_head, prose_row, push_unique,
-    upsert_latest,
+    PrSnapshot, PrState, PrView, Sync, finish_comments, prose_row, push_unique, upsert_latest,
 };
 
 /// Read GitLab for one already-derived input. Degradation stays in-band for the PR tab.
@@ -112,8 +111,7 @@ fn glab_api(
 }
 
 /// Run several `glab api` reads concurrently, returning their results in call order. Wall-clock
-/// is the slowest single read. Callers stay bounded: publication points, absorbed commits, and
-/// branch names are all capped upstream.
+/// is the slowest single read. Callers stay bounded: the branch names are capped upstream.
 fn glab_api_fan_out(
     repo: &Path,
     host: &str,
@@ -190,15 +188,26 @@ fn fetch_inner(
     let host = target.host();
     let target_path = crate::forge::urlencode(&target.full_path());
 
-    let head = nominated_head(&input.local);
-    let assoc = associate_points(repo, host, &target_path, input, head, cancelled)?;
-    let iid = match crate::forge::resolve_pick(&assoc, input) {
-        Ok(iid) => iid,
-        Err(view) => return Ok(view),
+    let head = input.local.head_oid.as_deref();
+    // A fork clone: `origin` is the fork, the target is upstream. Both projects are
+    // asked, and upstream's pick outranks the fork's own (`specs/forge-host.md`).
+    let fork_path = crate::forge::fork_repository(input.origin_repository.as_ref(), target)
+        .map(|origin| crate::forge::urlencode(&origin.full_path()));
+    let Some((iid, project_path)) = associate_by_branch(
+        repo,
+        host,
+        &target_path,
+        fork_path.as_deref(),
+        &input.local.names,
+        head,
+        cancelled,
+    )?
+    else {
+        return Ok(PrView::NoPr);
     };
 
     let mr =
-        glab_api(repo, host, &format!("projects/{target_path}/merge_requests/{iid}"), cancelled)?;
+        glab_api(repo, host, &format!("projects/{project_path}/merge_requests/{iid}"), cancelled)?;
     if mr["iid"].as_u64().is_none() {
         return Ok(PrView::NoPr);
     }
@@ -210,7 +219,7 @@ fn fetch_inner(
 
     // The three detail surfaces are independent reads; they run concurrently so the
     // fetch's wall clock is the slowest call, not the sum.
-    let target_path = target_path.as_str();
+    let target_path = project_path.as_str();
     let (discussions, approvals, checks) = std::thread::scope(|scope| {
         let discussions =
             scope.spawn(|| newest_discussions(repo, host, target_path, iid, cancelled));
@@ -313,147 +322,127 @@ fn assemble_discussions(page1: Vec<Value>, total: u64, later: Vec<Value>) -> (Ve
     (crate::forge::newest_capped(pool), truncated)
 }
 
-/// Where a nominated OID comes from — the three mutually exclusive origins with distinct
-/// admission rules (`specs/forge-host.md`).
-enum OidKind {
-    /// A publication point: containment admits an open or merged MR.
-    Published,
-    /// An absorbed base-history commit: only an exact-head merged MR is its epilogue.
-    Absorbed,
-    /// The pinned HEAD: admits only an MR whose head is exactly it.
-    Head,
-}
-
-/// Ask GitLab which merge requests contain each nominated OID — the commit-to-merge-requests
-/// containment query, one call per OID, plus the closed-unmerged name lookup
-/// (`specs/forge-host.md`). Every call addresses the target project: GitLab scopes
-/// merge-request lookup to the target, and an open fork MR's commits are present there
-/// through the merge-request refs (`specs/forge-providers.md`).
-fn associate_points(
+/// Ask GitLab for the branch's merge requests: one `source_branch` listing per name
+/// against the target project — and the fork project on a fork clone — with the project
+/// lookups that prove each MR's source, all in one concurrent wave
+/// (`specs/forge-providers.md`). Returns the picked MR and the project path it lives in;
+/// the target's pick outranks the fork's.
+fn associate_by_branch(
     repo: &Path,
     host: &str,
     target_path: &str,
-    input: &PrFetchInput,
+    fork_path: Option<&str>,
+    names: &[String],
     head: Option<&str>,
     cancelled: &AtomicBool,
-) -> Result<Association, GlabError> {
-    let points = &input.local.points;
-    let absorbed = &input.local.absorbed;
-    let mut assoc = Association::default();
-    let oid_kinds: Vec<(&str, OidKind)> = points
-        .iter()
-        .map(|p| (p.oid.as_str(), OidKind::Published))
-        .chain(absorbed.iter().map(|o| (o.as_str(), OidKind::Absorbed)))
-        .chain(head.map(|h| (h, OidKind::Head)))
-        .collect();
-    // One containment query per OID, fanned out so wall-clock is the slowest single call. The
-    // project lookup leads the same wave: its endpoint needs no OID, so fanning it out
-    // alongside them costs no extra latency.
+) -> Result<Option<(u64, String)>, GlabError> {
     let mut endpoints: Vec<String> = vec![format!("projects/{target_path}")];
-    endpoints.extend(oid_kinds.iter().map(|(oid, _)| {
-        format!("projects/{target_path}/repository/commits/{oid}/merge_requests?per_page=100")
-    }));
+    if let Some(fork) = fork_path {
+        endpoints.push(format!("projects/{fork}"));
+    }
+    endpoints.extend(branch_listings(target_path, names));
+    if let Some(fork) = fork_path {
+        endpoints.extend(branch_listings(fork, names));
+    }
     let mut responses = glab_api_fan_out(repo, host, &endpoints, cancelled).into_iter();
-    // The target project's numeric id — the base filter every association node must match
-    // (`specs/forge-host.md`: only PRs based on the resolved repository target count).
+    // The target project's numeric id — the source filter every listed MR must match
+    // (`specs/forge-host.md`: a stranger's same-named fork branch never attaches).
     let project = responses.next().transpose()?.unwrap_or(Value::Null);
     let Some(target_id) = project["id"].as_u64() else {
         return Err(GlabError::Other("project lookup returned no id".to_string()));
     };
-    for ((oid, kind), result) in oid_kinds.into_iter().zip(responses) {
-        // A 404 means the project does not know this commit — an unpushed nominating HEAD
-        // is the everyday case. An unknown commit proves nothing; it never fails the fetch.
-        let v = match result {
-            Ok(v) => v,
-            Err(GlabError::Unavailable(_)) => continue,
-            Err(error) => return Err(error),
-        };
-        for node in v.as_array().into_iter().flatten() {
-            if node["target_project_id"].as_u64() != Some(target_id) {
-                continue;
-            }
-            let Some(mr) = assoc_mr(node) else { continue };
-            let state = node["state"].as_str().unwrap_or_default();
-            match kind {
-                // An absorbed commit is base history, which proves nothing by containment.
-                // Only the exact parked epilogue is admissible (`specs/forge-host.md`).
-                OidKind::Absorbed => {
-                    if mr.head_oid == oid && state == "merged" {
-                        push_unique(&mut assoc.merged, mr);
-                    }
-                }
-                // The pinned HEAD is not published; only exact identity admits.
-                OidKind::Head if mr.head_oid != oid => {}
-                OidKind::Head | OidKind::Published => match state {
-                    "opened" => push_unique(&mut assoc.open, mr),
-                    "merged" => push_unique(&mut assoc.merged, mr),
-                    _ => {}
-                },
-            }
+    let fork_id = match fork_path {
+        // An unreadable fork project proves nothing and never fails the fetch: the
+        // upstream lookup still runs, it just cannot admit anything fork-sourced.
+        Some(_) => match responses.next() {
+            Some(Ok(project)) => project["id"].as_u64(),
+            Some(Err(GlabError::Unavailable(_))) | None => None,
+            Some(Err(error)) => return Err(error),
+        },
+        None => None,
+    };
+    let target_rows: Vec<_> = responses.by_ref().take(2 * names.len()).collect();
+    // On a fork clone the upstream lookup keeps only fork-sourced MRs — upstream's own
+    // same-named branch is a stranger's (`specs/forge-providers.md` GitLab).
+    let assoc = collect_assoc(target_rows, |source| match fork_path {
+        Some(_) => fork_id.is_some() && source == fork_id,
+        None => source == Some(target_id),
+    })?;
+    let pick = crate::forge::resolve_pick(repo, &assoc, head)
+        .map_err(|error| GlabError::LocalGit(error.0))?;
+    if let Some(iid) = pick {
+        return Ok(Some((iid, target_path.to_string())));
+    }
+    if let Some(fork) = fork_path {
+        let assoc =
+            collect_assoc(responses.collect(), |source| fork_id.is_some() && source == fork_id)?;
+        let pick = crate::forge::resolve_pick(repo, &assoc, head)
+            .map_err(|error| GlabError::LocalGit(error.0))?;
+        if let Some(iid) = pick {
+            return Ok(Some((iid, fork.to_string())));
         }
     }
-    // The name epilogue: a branch tip at a publication point names the MR, and identity
-    // (its head equals that point) admits it — never the name alone (`specs/forge-host.md`).
-    // It recovers the closed-unmerged MR, and the open fork MR whose commits the target's
-    // commit lookup cannot prove (`specs/forge-providers.md`). An open merge request outranks
-    // a merged one, so a merged hit never stands in for the open one this may still find.
-    if !assoc.open.is_empty() {
-        return Ok(assoc);
-    }
-    // Two names per point before the overall cap, so one commit carrying many refs — release
-    // tags, stale branch tips — cannot starve the point that holds the feature branch.
-    let pairs: Vec<(&crate::git::PublicationPoint, &String)> = points
+    Ok(None)
+}
+
+/// The per-name merge-request listings against `project`: an opened page apart from the
+/// created-ordered all-state page, both newest-created-first and capped at 20. The opened
+/// page keeps the shared resolver's open-before-history precedence whole when a reused
+/// branch name's history runs past the cap (`specs/forge-providers.md` GitLab).
+fn branch_listings(project: &str, names: &[String]) -> Vec<String> {
+    names
         .iter()
-        .flat_map(|point| point.names.iter().take(2).map(move |name| (point, name)))
-        .take(8)
-        .collect();
-    let endpoints: Vec<String> = pairs
-        .iter()
-        .map(|(_, name)| {
-            format!(
-                "projects/{target_path}/merge_requests?source_branch={}&per_page=10",
-                crate::forge::urlencode(name)
-            )
+        .flat_map(|name| {
+            let listing = |state: &str| {
+                format!(
+                    "projects/{project}/merge_requests?source_branch={}{state}&per_page=20\
+                     &order_by=created_at&sort=desc",
+                    crate::forge::urlencode(name)
+                )
+            };
+            [listing("&state=opened"), listing("")]
         })
-        .collect();
-    for ((point, _), result) in
-        pairs.into_iter().zip(glab_api_fan_out(repo, host, &endpoints, cancelled))
-    {
-        // A branch the project will not list proves nothing, exactly as an unknown commit does
-        // in the containment loop above. It never fails the fetch (`specs/forge-providers.md`).
+        .collect()
+}
+
+/// Fold one project's listings into an association, keeping only MRs whose source project
+/// `allowed` admits. A 404 listing proves nothing and never fails the fetch
+/// (`specs/forge-providers.md`).
+fn collect_assoc(
+    rows: Vec<Result<Value, GlabError>>,
+    allowed: impl Fn(Option<u64>) -> bool,
+) -> Result<Association, GlabError> {
+    let mut assoc = Association::default();
+    for result in rows {
         let v = match result {
             Ok(v) => v,
             Err(GlabError::Unavailable(_)) => continue,
             Err(error) => return Err(error),
         };
         for node in v.as_array().into_iter().flatten() {
-            if node["target_project_id"].as_u64() != Some(target_id) {
-                continue;
-            }
-            // Identity decides admission, so compare the raw head before building an `AssocPr`.
-            if node["sha"].as_str() != Some(point.oid.as_str()) {
+            if !allowed(node["source_project_id"].as_u64()) {
                 continue;
             }
             let Some(mr) = assoc_mr(node) else { continue };
             match node["state"].as_str().unwrap_or_default() {
                 "opened" => push_unique(&mut assoc.open, mr),
-                "merged" => push_unique(&mut assoc.merged, mr),
-                _ => push_unique(&mut assoc.closed, mr),
+                _ => push_unique(&mut assoc.history, mr),
             }
         }
     }
     Ok(assoc)
 }
 
-/// One association node reduced to the pick-relevant fields shared with the GitHub provider.
+/// One listing node reduced to the pick-relevant fields shared with the other providers.
 fn assoc_mr(node: &Value) -> Option<AssocPr> {
+    let closed_at = node["merged_at"].as_str().or(node["closed_at"].as_str()).unwrap_or_default();
     Some(AssocPr {
         number: node["iid"].as_u64()?,
         head_oid: node["sha"].as_str().unwrap_or_default().to_string(),
         head_ref: node["source_branch"].as_str().unwrap_or_default().to_string(),
-        merged_at: node["merged_at"].as_str().unwrap_or_default().to_string(),
         created_at: node["created_at"].as_str().unwrap_or_default().to_string(),
-        // A containment/name node is a reduced row, never the full merge request.
+        closed_at: closed_at.to_string(),
+        // A listing node is a reduced row, never the full merge request.
         raw: None,
     })
 }
@@ -564,6 +553,7 @@ fn build_snapshot(
         is_draft: mr["draft"].as_bool().unwrap_or(false),
         head_ref: mr["source_branch"].as_str().unwrap_or_default().to_string(),
         head_is_fork: is_cross_project(mr),
+        head_oid: mr["sha"].as_str().unwrap_or_default().to_string(),
         base_ref: mr["target_branch"].as_str().unwrap_or_default().to_string(),
         merge: derive_merge(mr),
         sync,
@@ -766,6 +756,42 @@ mod tests {
         let mut mr = mr_node();
         mr["source_project_id"] = json!(9);
         assert!(is_cross_project(&mr));
+    }
+
+    #[test]
+    fn branch_listings_pair_an_opened_page_with_the_finished_history_page() {
+        // The all-state page is created-ordered and capped at 20, so on a reused branch
+        // name it could bury an older still-open MR behind newer finished rows. The
+        // opened page keeps the shared resolver's open-before-history promise whole.
+        let listings = branch_listings("group%2Frepo", &["feat".to_string()]);
+        assert_eq!(listings.len(), 2);
+        assert!(listings[0].contains("source_branch=feat") && listings[0].contains("state=opened"));
+        assert!(listings[1].contains("source_branch=feat") && !listings[1].contains("state="));
+        for listing in &listings {
+            assert!(listing.starts_with("projects/group%2Frepo/merge_requests?"));
+            // Newest-created-first is what lets the finished page serve as history.
+            assert!(listing.contains("order_by=created_at") && listing.contains("sort=desc"));
+        }
+    }
+
+    #[test]
+    fn collect_assoc_filters_by_source_project_and_skips_unavailable_listings() {
+        let node = |iid: u64, state: &str, source: u64| {
+            json!({"iid": iid, "state": state, "sha": "abc", "source_branch": "feat",
+                "created_at": "2026-07-01T00:00:00Z", "merged_at": null, "closed_at": null,
+                "source_project_id": source})
+        };
+        let rows: Vec<Result<Value, GlabError>> = vec![
+            Ok(json!([node(1, "opened", 7), node(2, "merged", 7), node(3, "opened", 9)])),
+            // An unavailable listing proves nothing and never fails the fold.
+            Err(GlabError::Unavailable("404".to_string())),
+        ];
+        let assoc = collect_assoc(rows, |source| source == Some(7)).unwrap();
+        assert_eq!(assoc.open.iter().map(|mr| mr.number).collect::<Vec<_>>(), [1]);
+        assert_eq!(assoc.history.iter().map(|mr| mr.number).collect::<Vec<_>>(), [2]);
+        // A hard error still fails.
+        let rows: Vec<Result<Value, GlabError>> = vec![Err(GlabError::Other("boom".to_string()))];
+        assert!(collect_assoc(rows, |_| true).is_err());
     }
 
     #[test]

@@ -1,12 +1,10 @@
 //! Read-only Azure DevOps access: the pull request's identity, state, policies, and threads.
 //!
 //! The Azure DevOps provider behind `src/forge.rs` (`specs/forge-providers.md`). It follows
-//! the neutral resolution contract in `specs/forge-host.md` — publication points nominate,
-//! exact head identity admits — through the `az` CLI with the `azure-devops` extension, and
-//! fills the same normalized [`PrSnapshot`] the other providers do. Azure DevOps has no
-//! containment query for the states worth resolving, so every pull request admits by exact
-//! source-tip identity over an enumeration (`specs/forge-providers.md`). It never writes to
-//! Azure DevOps.
+//! the neutral resolution contract in `specs/forge-host.md` — the branch's forge names
+//! filter an enumeration by `sourceRefName` — through the `az` CLI with the `azure-devops`
+//! extension, and fills the same normalized [`PrSnapshot`] the other providers do. It never
+//! writes to Azure DevOps.
 
 use std::path::Path;
 use std::process::Command;
@@ -16,8 +14,7 @@ use serde_json::Value;
 
 use crate::forge::{
     AssocPr, Association, Check, CheckStatus, Comment, CommentKind, Merge, PrFetchInput,
-    PrSnapshot, PrState, PrView, Sync, finish_comments, nominated_head, prose_row, push_unique,
-    upsert_latest,
+    PrSnapshot, PrState, PrView, Sync, finish_comments, prose_row, push_unique, upsert_latest,
 };
 
 /// Read Azure DevOps for one already-derived input. Degradation stays in-band for the PR tab.
@@ -131,7 +128,7 @@ fn classify_failure(stderr: &str) -> AzError {
         || crate::forge::reports_status(&s, 404)
         // TF401180: pull request not found. TF401019: repository not found. TF200016:
         // project not found. Unknown objects prove nothing; each call site decides whether
-        // its surface is optional (`specs/forge-providers.md` — Admission).
+        // its surface is optional (`specs/forge-providers.md` — Query).
         || s.contains("tf401180")
         || s.contains("tf401019")
         || s.contains("tf200016")
@@ -152,16 +149,17 @@ fn fetch_inner(
     let project = target.project();
     let repo_name = target.name();
 
-    let head = nominated_head(&input.local);
+    let head = input.local.head_oid.as_deref();
     let (mut assoc, project_guid) =
-        associate_points(repo, &org_url, project, repo_name, input, head, cancelled)?;
-    let id = match crate::forge::resolve_pick(&assoc, input) {
-        Ok(id) => id,
-        Err(view) => return Ok(view),
+        associate_by_branch(repo, &org_url, project, repo_name, input, cancelled)?;
+    let Some(id) = crate::forge::resolve_pick(repo, &assoc, head)
+        .map_err(|error| AzError::LocalGit(error.0))?
+    else {
+        return Ok(PrView::NoPr);
     };
     // Every pick is enumeration-admitted and arrived as the complete pull request
-    // (`tip_admitted`), so the fetch needs no detail read at all.
-    let picked = [&mut assoc.open, &mut assoc.merged]
+    // (`branch_admitted`), so the fetch needs no detail read at all.
+    let picked = [&mut assoc.open, &mut assoc.history]
         .into_iter()
         .flat_map(|bucket| bucket.iter_mut())
         .find(|pr| pr.number == id);
@@ -305,39 +303,23 @@ fn fetch_evaluations(
     ))
 }
 
-/// Ask Azure DevOps which pull requests this worktree's published work proves. An open pull
-/// request admits by exact source-tip identity over the active enumeration; a completed one
-/// admits the same way over the completed enumeration, an absorbed tip included — the
-/// parked branch tip is exactly the pull request's head, whatever merge strategy completed
-/// it (`specs/forge-providers.md`). Both enumerations run in one concurrent wave. Also
-/// returns the target's project GUID as the enumeration nodes report it, so the policy read
-/// need not wait for anything else.
-fn associate_points(
+/// Ask Azure DevOps for the branch's pull requests: the newest 100 active and newest 100
+/// completed enumerate in one concurrent wave, and a node joins when its source branch is
+/// one of the names (`specs/forge-providers.md`). A fork node has no provable source
+/// repository in the enumeration, so it joins only when the pinned `HEAD` contains its
+/// source tip. Also returns the target's project GUID as the enumeration nodes report it,
+/// so the policy read need not wait for anything else.
+fn associate_by_branch(
     repo: &Path,
     org_url: &str,
     project: &str,
     repo_name: &str,
     input: &PrFetchInput,
-    head: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Result<(Association, Option<String>), AzError> {
-    let points = &input.local.points;
-    let absorbed = &input.local.absorbed;
+    let names = &input.local.names;
+    let head = input.local.head_oid.as_deref();
     let mut assoc = Association::default();
-    let oids: Vec<&str> = points
-        .iter()
-        .map(|p| p.oid.as_str())
-        .chain(absorbed.iter().map(String::as_str))
-        .chain(head)
-        .collect();
-    if oids.is_empty() {
-        return Ok((assoc, None));
-    }
-    // The exact-identity set for open admission: a pull request whose reported source tip
-    // is one of these is provably this worktree's. Absorbed commits are base history and
-    // stay out here — an open pull request containing base history is not ours — but a
-    // completed one still admits on an absorbed tip, over the full `oids` set.
-    let identity_oids: Vec<&str> = points.iter().map(|p| p.oid.as_str()).chain(head).collect();
 
     let enumerate = |status: &'static str| {
         az_json(
@@ -378,35 +360,56 @@ fn associate_points(
     };
     for node in active.as_array().into_iter().flatten() {
         note_guid(node);
-        if let Some(pr) = tip_admitted(node, &identity_oids) {
+        if let Some(pr) = branch_admitted(repo, node, names, head)? {
             push_unique(&mut assoc.open, pr);
         }
     }
     for node in completed.as_array().into_iter().flatten() {
         note_guid(node);
-        if let Some(pr) = tip_admitted(node, &oids) {
-            push_unique(&mut assoc.merged, pr);
+        if let Some(pr) = branch_admitted(repo, node, names, head)? {
+            push_unique(&mut assoc.history, pr);
         }
     }
     Ok((assoc, project_guid))
 }
 
-/// The project GUID one enumeration node reports on its repository's project.
-fn project_guid_of(node: &Value) -> Option<String> {
-    node["repository"]["project"]["id"].as_str().map(str::to_string)
-}
-
-/// The enumeration node's pick fields when its reported source tip is exactly one of the
-/// nominated OIDs — the one admission proof enumeration carries (`specs/forge-providers.md`).
-fn tip_admitted(node: &Value, oids: &[&str]) -> Option<AssocPr> {
-    let mut pr = assoc_pr(node)?;
-    if !oids.iter().any(|oid| pr.head_oid == *oid) {
-        return None;
+/// The enumeration node's pick fields when its source branch is one of the names. A fork
+/// node's source branch lives in an unnamed repository, so it is admitted only when the
+/// pinned `HEAD` contains its source tip (`specs/forge-providers.md`).
+fn branch_admitted(
+    repo: &Path,
+    node: &Value,
+    names: &[String],
+    head: Option<&str>,
+) -> Result<Option<AssocPr>, AzError> {
+    let Some(mut pr) = assoc_pr(node) else { return Ok(None) };
+    if !names.contains(&pr.head_ref) {
+        return Ok(None);
+    }
+    // This containment check answers a different question than the shared history
+    // guard: whether a fork node — open ones included — is this clone's at all, since
+    // the enumeration cannot name the fork repository.
+    if !node["forkSource"].is_null() {
+        let contained = match head {
+            Some(head) if !pr.head_oid.is_empty() => {
+                crate::git::contains_commit(repo, head, &pr.head_oid)
+                    .map_err(|error| AzError::LocalGit(error.0))?
+            }
+            _ => false,
+        };
+        if !contained {
+            return Ok(None);
+        }
     }
     // An enumeration node is the complete pull request, so the pick it becomes needs no
     // detail read; the payload travels with the admission that proved it.
     pr.raw = Some(node.clone());
-    Some(pr)
+    Ok(Some(pr))
+}
+
+/// The project GUID one enumeration node reports on its repository's project.
+fn project_guid_of(node: &Value) -> Option<String> {
+    node["repository"]["project"]["id"].as_str().map(str::to_string)
 }
 
 /// One association node reduced to the pick-relevant fields shared with the other providers.
@@ -415,11 +418,11 @@ fn assoc_pr(node: &Value) -> Option<AssocPr> {
         number: node["pullRequestId"].as_u64()?,
         head_oid: source_tip(node).to_string(),
         head_ref: head_ref_of(node),
-        merged_at: match node["status"].as_str() {
+        created_at: node["creationDate"].as_str().unwrap_or_default().to_string(),
+        closed_at: match node["status"].as_str() {
             Some("completed") => node["closedDate"].as_str().unwrap_or_default().to_string(),
             _ => String::new(),
         },
-        created_at: node["creationDate"].as_str().unwrap_or_default().to_string(),
         raw: None,
     })
 }
@@ -474,6 +477,7 @@ fn build_snapshot(
         is_draft: pr["isDraft"].as_bool().unwrap_or(false),
         head_ref: head_ref_of(pr),
         head_is_fork: pr["forkSource"].is_object(),
+        head_oid: source_tip(pr).to_string(),
         base_ref: bare_ref(pr["targetRefName"].as_str().unwrap_or_default()),
         merge: derive_merge(pr, evaluations),
         sync,
@@ -791,7 +795,7 @@ mod tests {
         assert_eq!(pr.number, 5);
         assert_eq!(pr.head_oid, "3aae318f");
         assert_eq!(pr.head_ref, "invBootstrap");
-        assert_eq!(pr.merged_at, "2026-02-18T04:35:05Z");
+        assert_eq!(pr.closed_at, "2026-02-18T04:35:05Z");
         assert_eq!(pr.created_at, "2026-02-18T04:35:01Z");
         // A fork pull request reports the virtual source ref; the branch lives on forkSource.
         // An open pull request has no merge date.
@@ -803,22 +807,7 @@ mod tests {
         });
         let fork = assoc_pr(&node).unwrap();
         assert_eq!(fork.head_ref, "fork-feature");
-        assert_eq!(fork.merged_at, "");
-    }
-
-    #[test]
-    fn a_completed_enumeration_node_admits_by_exact_source_tip_only() {
-        // The parked branch tip is exactly the pull request's head, whatever merge strategy
-        // completed it; any other commit — the merge commit included — proves nothing here.
-        let node = json!({
-            "pullRequestId": 5,
-            "status": "completed",
-            "sourceRefName": "refs/heads/feature",
-            "lastMergeSourceCommit": {"commitId": "3aae318f"},
-            "lastMergeCommit": {"commitId": "af56d96f"},
-        });
-        assert_eq!(tip_admitted(&node, &["3aae318f"]).unwrap().number, 5);
-        assert!(tip_admitted(&node, &["af56d96f"]).is_none());
+        assert_eq!(fork.closed_at, "");
     }
 
     #[test]
@@ -868,6 +857,33 @@ mod tests {
         assert_eq!(votes.len(), 2, "a zero vote and a container render nothing");
         assert_eq!(votes[0].body, "Approved this pull request.");
         assert_eq!(votes[1].body, "Is waiting for the author.");
+    }
+
+    #[test]
+    fn an_enumeration_node_admits_by_source_branch_name() {
+        let node = json!({
+            "pullRequestId": 5,
+            "status": "completed",
+            "sourceRefName": "refs/heads/feature",
+            "lastMergeSourceCommit": {"commitId": "3aae318f"},
+            "lastMergeCommit": {"commitId": "af56d96f"},
+        });
+        let names = vec!["feature".to_string()];
+        let admitted = branch_admitted(Path::new("."), &node, &names, None).unwrap();
+        assert_eq!(admitted.unwrap().number, 5);
+        // A different branch name proves nothing.
+        let other = vec!["other".to_string()];
+        assert!(branch_admitted(Path::new("."), &node, &other, None).unwrap().is_none());
+        // A fork node has no provable source repository, so with no pinned HEAD to
+        // contain its tip it never admits.
+        let fork = json!({
+            "pullRequestId": 7,
+            "status": "active",
+            "sourceRefName": "refs/pull/7/source",
+            "lastMergeSourceCommit": {"commitId": "3aae318f"},
+            "forkSource": {"name": "refs/heads/feature", "repository": {"id": "b0bf"}},
+        });
+        assert!(branch_admitted(Path::new("."), &fork, &names, None).unwrap().is_none());
     }
 
     #[test]

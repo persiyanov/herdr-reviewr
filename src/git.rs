@@ -388,7 +388,7 @@ fn split_remote(url: &str) -> Option<(RemoteTransport, &str, &str, bool)> {
     }
 }
 
-// --- PR-fetch local reads (publication points) ------------------------------------
+// --- PR-fetch local reads (branch names) ------------------------------------
 //
 // See `specs/forge-host.md` "Resolution". Repository selection and
 // branch-state derivation both use the same failure contract: a git command that *fails* is a
@@ -442,50 +442,32 @@ fn git_strict(repo: &Path, args: &[&str]) -> Result<String, GitFail> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrFetchInput {
     pub repository: RepositoryIdentity,
-    /// The `origin` repository, when it is a usable GitHub identity — the home of the
-    /// worktree's published commits, so the association query runs there.
+    /// The `origin` repository, when it is a usable forge identity — on a fork clone it
+    /// is the fork, queried beside the target (`specs/forge-host.md`).
     pub origin_repository: Option<RepoTarget>,
-    /// The locally derived pins, points, and tiebreak, read in the same pass.
+    /// The locally derived pins and branch names, read in the same pass.
     pub local: PrLocalState,
 }
 
-/// One published commit that nominates PRs, with the `origin` branch names at its tip
-/// (the closed-unmerged epilogue's exact-identity lookup).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublicationPoint {
-    pub oid: String,
-    pub names: Vec<String>,
-}
-
-/// The local identity one PR fetch derives: pins, publication points, and the upstream name.
+/// The local identity one PR fetch derives: the pins and the branch's forge names.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PrLocalState {
     /// `HEAD` pinned to an OID at the start of the pass; every ancestry test, distance,
     /// and the `sync` count use this pin, so one fetch reads one consistent local state.
     pub head_oid: Option<String>,
     /// The winning base entry pinned to an OID — the paint guard keys on it, so a base
-    /// moving mid-fetch never paints a stale verdict. Point filtering uses every resolved
-    /// base, not this pin alone.
+    /// moving mid-fetch never paints a stale verdict.
     pub base_oid: Option<String>,
-    /// The publication points: the nearest ancestors of the pinned `HEAD` present on
-    /// `origin`, each beyond every resolved base. Empty means no reviewable work is published.
-    pub points: Vec<PublicationPoint>,
-    /// The published-but-absorbed candidates: base-history commits this worktree is
-    /// parked on, kept only when no point survives. A merged PR whose head is exactly
-    /// one of them still resolves as the epilogue (`specs/forge-host.md`).
-    pub absorbed: Vec<String>,
-    /// The pinned `HEAD` nominates by exact identity: it sits outside every resolved
-    /// base's history, so a PR whose head is exactly this commit is provably this
-    /// worktree's — the exact-identity epilogue (`specs/forge-host.md`).
-    pub head_nominates: bool,
-    /// The recorded upstream's bare branch name, the last open-PR tiebreak. A record
-    /// naming a configured base is tracking, not publication, and is dropped.
-    pub upstream: Option<String>,
-    /// `HEAD` is detached — post-merge cleanup, not a review seat.
+    /// The branch's forge names: the checked-out branch's own name, its recorded upstream,
+    /// and the `origin` branch names at the pushed frontier — the branch the work was
+    /// pushed to, whatever its local name (`specs/forge-host.md` Resolution).
+    pub names: Vec<String>,
+    /// `HEAD` is detached — no branch, no PR story.
     pub detached: bool,
 }
 
-/// Derive the pinned `HEAD`, pinned bases, and publication points (`specs/forge-host.md`).
+/// Derive the pinned `HEAD`, the pinned base, and the branch's forge names
+/// (`specs/forge-host.md` Resolution).
 pub fn pr_local(
     repo: &Path,
     base_flag: Option<&str>,
@@ -496,30 +478,30 @@ pub fn pr_local(
     };
     let head_oid = git_tristate(repo, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?;
     let bases = resolve_bases(repo, base_flag, config_bases)?;
-    let (points, absorbed) = match &head_oid {
-        // With no base resolvable, no point is provable (`specs/forge-host.md`).
-        Some(head) if !bases.is_empty() => publication_points(repo, head, &bases)?,
-        _ => (Vec::new(), Vec::new()),
+    let mut names = vec![branch.clone()];
+    let push_name = |name: String, names: &mut Vec<String>| {
+        if !names.contains(&name) {
+            names.push(name);
+        }
     };
-    let head_nominates = match &head_oid {
-        Some(head) if !bases.is_empty() => beyond_all_bases(repo, head, &bases)?,
-        _ => false,
-    };
-    let upstream = recorded_upstream(repo, &branch, base_flag, config_bases)?;
-    Ok(PrLocalState {
-        head_oid,
-        base_oid: bases.into_iter().next(),
-        points,
-        absorbed,
-        head_nominates,
-        upstream,
-        detached: false,
-    })
+    if let Some(upstream) = recorded_upstream(repo, &branch, base_flag, config_bases, &bases)? {
+        push_name(upstream, &mut names);
+    }
+    if let Some(head) = &head_oid
+        && !bases.is_empty()
+    {
+        for name in frontier_names(repo, head, &bases)? {
+            push_name(name, &mut names);
+        }
+    }
+    // A frontier of many refs stays bounded, so the per-name forge queries do.
+    names.truncate(8);
+    Ok(PrLocalState { head_oid, base_oid: bases.into_iter().next(), names, detached: false })
 }
 
 /// Every resolved base OID in precedence order, deduped: the `--base` flag (verbatim rev
 /// first, then as a canonical entry), each canonical `config_bases` entry, then the default
-/// branch `origin/HEAD` names (`specs/review-model.md`). Points must lie beyond all of them.
+/// branch `origin/HEAD` names (`specs/review-model.md`). Frontier names must lie beyond all of them.
 fn resolve_bases(
     repo: &Path,
     base_flag: Option<&str>,
@@ -557,7 +539,7 @@ fn resolve_bases(
 }
 
 /// The `origin` remote-tracking tips as `(OID, bare name)`, `origin/HEAD` excluded — one
-/// listing per pass serves every point's names and the published-at-all short-circuit.
+/// listing per pass serves the frontier names and the published-at-all short-circuit.
 fn origin_tips(repo: &Path) -> Result<Vec<(String, String)>, GitFail> {
     let out = git_strict(
         repo,
@@ -573,22 +555,16 @@ fn origin_tips(repo: &Path) -> Result<Vec<(String, String)>, GitFail> {
         .collect())
 }
 
-/// The publication points: the boundary of the unpushed range — the nearest ancestors of
-/// `head` present on any `origin/*` ref — or `head` itself when nothing is unpushed. Points
-/// that are ancestors of any resolved base prove nothing for an open PR and become
-/// `absorbed` candidates instead, kept only when no point survives — a merged PR whose
-/// head is exactly one of them is still this worktree's epilogue. Capped at 8 survivors
-/// and 4 absorbed from at most 32 boundary commits, so a merge-heavy frontier stays bounded.
-fn publication_points(
-    repo: &Path,
-    head: &str,
-    bases: &[String],
-) -> Result<(Vec<PublicationPoint>, Vec<String>), GitFail> {
+/// The `origin` branch names at the pushed frontier: the names of the tips at the boundary
+/// of the unpushed range — or at `head` itself when nothing is unpushed. A tip on base
+/// history carries no work of this branch and contributes no name. Bounded at 32 boundary
+/// commits, so a merge-heavy frontier stays cheap.
+fn frontier_names(repo: &Path, head: &str, bases: &[String]) -> Result<Vec<String>, GitFail> {
     let tips = origin_tips(repo)?;
     if tips.is_empty() {
         // Nothing is published at all; skip the history walk, which `--not
         // --remotes=origin` would otherwise run unbounded.
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(Vec::new());
     }
     let out = git_strict(repo, &["rev-list", "--boundary", head, "--not", "--remotes=origin"])?;
     let mut oids: Vec<String> = Vec::new();
@@ -605,28 +581,22 @@ fn publication_points(
         oids.push(head.to_string());
     }
     oids.truncate(32);
-    let mut points = Vec::new();
-    let mut absorbed = Vec::new();
+    let mut names = Vec::new();
     for oid in oids {
-        if points.len() >= 8 {
+        // The caller keeps at most 8 names, so stop paying git calls past that.
+        if names.len() >= 8 {
             break;
         }
         if !beyond_all_bases(repo, &oid, bases)? {
-            if absorbed.len() < 4 {
-                absorbed.push(oid);
-            }
             continue;
         }
-        let names =
-            tips.iter().filter(|(tip, _)| tip == &oid).map(|(_, name)| name.clone()).collect();
-        points.push(PublicationPoint { oid, names });
+        for (tip, name) in &tips {
+            if tip == &oid && !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
     }
-    // Absorbed candidates matter only when nothing provable remains; a live point
-    // owns the resolution outright.
-    if !points.is_empty() {
-        absorbed.clear();
-    }
-    Ok((points, absorbed))
+    Ok(names)
 }
 
 /// Whether `commit` is an ancestor of (or equal to) `of`.
@@ -634,8 +604,19 @@ fn is_ancestor(repo: &Path, commit: &str, of: &str) -> Result<bool, GitFail> {
     Ok(git_tristate(repo, &["merge-base", "--is-ancestor", commit, of])?.is_some())
 }
 
-/// Whether `oid` lies beyond every resolved base — an ancestor of none of them. A point
-/// filter and the `HEAD` nomination both ask this one question, so they never disagree.
+/// Whether the pinned `HEAD` contains `commit` — the merged/closed admission guard: a
+/// reused branch name never resurrects a PR whose commits this branch does not hold
+/// (`specs/forge-host.md` Resolution). A commit absent from the object database is not
+/// contained; an unfetched head proves nothing.
+pub fn contains_commit(repo: &Path, head: &str, commit: &str) -> Result<bool, GitFail> {
+    if git_tristate(repo, &["cat-file", "-e", commit])?.is_none() {
+        return Ok(false);
+    }
+    is_ancestor(repo, commit, head)
+}
+
+/// Whether `oid` lies beyond every resolved base — an ancestor of none of them. Decides which
+/// frontier tips carry provable work.
 fn beyond_all_bases(repo: &Path, oid: &str, bases: &[String]) -> Result<bool, GitFail> {
     for base in bases {
         if is_ancestor(repo, oid, base)? {
@@ -647,8 +628,8 @@ fn beyond_all_bases(repo: &Path, oid: &str, bases: &[String]) -> Result<bool, Gi
 
 /// The target and origin identities from one read of each remote. The target resolves from
 /// a readable supported `upstream`, falling back to `origin`; unusable identities fall
-/// back, read errors do not. The origin identity rides along for the association query —
-/// the worktree's commits live where it pushes (`specs/forge-host.md`). A usable `upstream`
+/// back, read errors do not. The origin identity rides along for the fork lookup —
+/// on a fork clone the fork's own PRs live there (`specs/forge-host.md`). A usable `upstream`
 /// already fixes the target, so an `origin` read that fails then costs only that fetch's
 /// association source, not the whole read.
 pub(crate) fn remote_identities(
@@ -700,17 +681,19 @@ fn resolve_base_entry(repo: &Path, name: &str) -> Result<Option<String>, GitFail
 }
 
 /// git's recorded upstream for `branch` (`branch.<name>.remote`/`merge`) as a bare branch
-/// name, or `None` when unset, not under a remote, or naming a configured base — the record
-/// `git switch -c work origin/main` auto-writes is tracking, not publication. `for-each-ref`
-/// exits 0 with an empty field when unset, so absence never reads as failure (`rev-parse
-/// @{u}` exits 128 for both). `%(push)` is deliberately not consulted: with any remote
-/// present git *computes* a destination even with nothing recorded, which would shadow a
-/// real record.
+/// name, or `None` when unset, not under a remote, or naming a resolved base — the record
+/// `git switch -c work origin/main` auto-writes is tracking, not publication. A base
+/// resolved without a configured name — through `origin/HEAD` or a verbatim `--base` rev —
+/// is recognized by its tip OID in `base_oids` instead. `for-each-ref` exits 0 with an empty
+/// field when unset, so absence never reads as failure (`rev-parse @{u}` exits 128 for
+/// both). `%(push)` is deliberately not consulted: with any remote present git *computes*
+/// a destination even with nothing recorded, which would shadow a real record.
 fn recorded_upstream(
     repo: &Path,
     branch: &str,
     base_flag: Option<&str>,
     config_bases: &[String],
+    base_oids: &[String],
 ) -> Result<Option<String>, GitFail> {
     let out = git_strict(
         repo,
@@ -719,9 +702,22 @@ fn recorded_upstream(
     let dest = out.lines().next().unwrap_or("").trim();
     let Some(rest) = dest.strip_prefix("refs/remotes/") else { return Ok(None) };
     let Some((_, name)) = rest.split_once('/') else { return Ok(None) };
-    let names_a_base = config_bases.iter().any(|entry| entry == name)
-        || base_flag.is_some_and(|flag| crate::config::canonical_base(flag) == name);
-    Ok((!name.is_empty() && !names_a_base).then(|| name.to_string()))
+    if name.is_empty()
+        || config_bases.iter().any(|entry| entry == name)
+        || base_flag.is_some_and(|flag| crate::config::canonical_base(flag) == name)
+    {
+        return Ok(None);
+    }
+    // A pruned upstream ref no longer resolves; the record still carries the name
+    // (`specs/forge-host.md` Resolution — a stale local record costs recall, never
+    // correctness).
+    let probe = format!("{dest}^{{commit}}");
+    if let Some(tip) = git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])?
+        && base_oids.contains(&tip)
+    {
+        return Ok(None);
+    }
+    Ok(Some(name.to_string()))
 }
 
 /// Commits `local` (the pinned `HEAD` OID) is ahead and behind `other` (the PR head OID).

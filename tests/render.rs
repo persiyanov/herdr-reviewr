@@ -639,7 +639,7 @@ fn pr_header_names_the_resolved_branch_and_marks_a_fork() {
 }
 
 #[test]
-fn pr_empty_states_are_calm_and_keep_the_ambiguity_count() {
+fn pr_empty_states_are_calm() {
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::forge::PrView;
     let r = Repo::init();
@@ -659,10 +659,6 @@ fn pr_empty_states_are_calm_and_keep_the_ambiguity_count() {
         out.contains("No pull request found — HEAD is detached."),
         "detached wording stays factual:\n{out}"
     );
-    app.pr = PrView::Ambiguous(3);
-    let out = render(&app);
-    assert!(out.contains("3 open PRs"), "the ambiguity count shows:\n{out}");
-    assert!(out.contains("Keep one open, then press r."), "the remedy shows:\n{out}");
     app.pr = PrView::GitError("git remote get-url upstream failed".to_string());
     let out = render(&app);
     assert!(out.contains("Git read failed"), "local failures stay factual:\n{out}");

@@ -1,6 +1,6 @@
 id = "persiyanov.reviewr"
 name = "reviewr"
-version = "0.23.0"
+version = "0.24.0"
 min_herdr_version = "0.7.0"
 platforms = ["macos", "linux"]
 description = "Review agent-written diffs beside the chat and add line comments to the agent input."

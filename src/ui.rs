@@ -2790,17 +2790,11 @@ fn pr_empty_msg(
         return message;
     }
     let noun = forge.noun();
-    let abbr = forge.abbr();
     match view {
         forge::PrView::Loading => "loading…".into(),
-        forge::PrView::Pending | forge::PrView::Pr(_) => String::new(),
+        forge::PrView::Pending | forge::PrView::Pr(_) | forge::PrView::Held => String::new(),
         forge::PrView::Detached => format!("No {noun} found — HEAD is detached."),
         forge::PrView::NoPr => format!("No {noun} yet. Ready to ship?"),
-        forge::PrView::Ambiguous(n) => {
-            format!(
-                "Found {n} open {abbr}s containing this work. Keep one open, then press {refresh}."
-            )
-        }
         forge::PrView::NoCli(_)
         | forge::PrView::NoExtension(_)
         | forge::PrView::NotAuthed(..)

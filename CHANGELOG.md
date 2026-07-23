@@ -11,6 +11,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   glibc ≥ 2.39 requirement that prevented installation on Amazon Linux 2023, Debian 12,
   Ubuntu 22.04, and other distributions.
 
+## [0.24.0] — 2026-07-23
+
+### Changed
+- **The PR tab resolves by branch name.** The tab shows the newest PR opened from the current
+  branch, the same answer `gh pr view` gives, on GitHub, GitLab, and Azure DevOps. A merged PR
+  stays visible until the branch's next PR replaces it. A new branch that reuses a deleted
+  branch's name starts empty. Work pushed from main as `HEAD:<side-branch>` shows the side
+  branch's PR. On a fork, a PR into upstream outranks the fork's own. The ambiguous
+  several-PRs state is gone, and so is the commit-identity machinery behind it.
+
 ## [0.23.0] — 2026-07-23
 
 ### Added

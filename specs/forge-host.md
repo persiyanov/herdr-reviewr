@@ -6,13 +6,13 @@ Last edited: 2026-07-23
 
 # forge host
 
-How reviewr reads one pull request from the repository's forge — identity, state, checks, comments — through that forge's official CLI, for the read-only `PR` tab (`pr-tab.md`). It never writes back.
+The `PR` tab shows the pull request for the branch you are on: its state, checks, and comments. reviewr reads it through the forge's own CLI and never writes back. Rendering lives in `pr-tab.md`.
 
 ## Overview
 
-reviewr resolves the worktree's pull request through its commits, then reads a snapshot of it through the forge's CLI on each poll. Every shown PR provably belongs to this worktree's work. The snapshot is the single value the `PR` tab renders.
+reviewr finds the branch's PR, then re-reads a snapshot of it on every poll. The tab follows one PR from open through merged, then switches to the branch's next PR. Until a PR exists, the tab is empty.
 
-The remote's hostname picks the forge. Three forges are supported — GitHub, GitLab, and Azure DevOps — each read through its own CLI. The per-forge contracts live in `forge-providers.md`. Everything below holds for every forge.
+The remote's hostname picks the forge: GitHub read via `gh`, GitLab via `glab`, Azure DevOps via `az`. Per-forge differences live in `forge-providers.md`. Everything below holds for all three.
 
 ```
 PR #226  open  persiyanov/deep-research-benchmark → main   ⇡ 2 unpushed
@@ -55,7 +55,7 @@ A `comments` row:
 
 ### Forge hosts
 
-Each forge recognizes its public hosts. One config key per forge adds one self-hosted hostname. The value contracts live in `config.md`.
+Each forge knows its public hosts. One config key per forge adds one self-hosted hostname (`config.md`). A key adds a host, never removes the built-in ones. Matching is case-insensitive.
 
 | forge        | built-in hosts                            | self-hosted key     |
 | ------------ | ----------------------------------------- | ------------------- |
@@ -63,13 +63,7 @@ Each forge recognizes its public hosts. One config key per forge adds one self-h
 | GitLab       | `gitlab.com`                              | `gitlab_host`       |
 | Azure DevOps | `dev.azure.com`, `*.visualstudio.com`     | `azure_devops_host` |
 
-Host matching is case-insensitive. A missing key adds no self-hosted host. The built-in hosts remain recognized when a key is present. Azure DevOps' ssh hosts, `ssh.dev.azure.com` and `vs-ssh.visualstudio.com`, fold into their https equivalents, so both clone forms name one target (`forge-providers.md`).
-
-A remote is recognized when its hostname matches a forge host and its path carries that forge's repository identity (`forge-providers.md`). The matching forge's CLI performs every read for that repository.
-
-A repository target is the forge, the hostname, and the repository identity together. The same path on a different forge or hostname is a different target.
-
-Both remotes use the primary fetch URL after Git's `url.*.insteadOf` rewrite. A separate push URL does not affect PR reads.
+A remote counts when its hostname matches a forge host and its path is a repository on that forge. `upstream` wins over `origin`, so a fork clone reads the base repository's PRs with no setup:
 
 | remote state                                                        | outcome                                                                     |
 | ------------------------------------------------------------------- | --------------------------------------------------------------------------- |
@@ -82,92 +76,67 @@ Both remotes use the primary fetch URL after Git's `url.*.insteadOf` rewrite. A 
 | `origin` names a recognized host without a repository identity      | reviewr says the forge origin is malformed                                  |
 | reading `origin` fails                                              | reviewr shows the retryable Git error                                       |
 
-A fork clone with `origin` pointed at the fork and a recognized `upstream` pointed at the base
-repository resolves the base repository's PR without setup.
-
-Canonical SSH remotes work in scp-style (`git@host:path.git`) and `ssh://` forms. Hosted URL forms
-use `http://`, `https://`, or `git://`. File URLs and other schemes are not forge repository
-identities. SSH aliases are not inferred as canonical forge hosts. A CLI's own host override
-environment variable, like `GH_HOST`, cannot redirect a fetch.
+The repository target is the forge, the hostname, and the repository path together. reviewr reads each remote's fetch URL after Git's `insteadOf` rewrite. Push URLs, SSH aliases, and CLI variables like `GH_HOST` never pick a repository. Azure DevOps' ssh hosts count as their https equivalents. SSH remotes work in `git@host:path` and `ssh://` forms, web remotes in `http(s)://` and `git://`. Other schemes are not repositories.
 
 ### Resolution
 
-The worktree's commits nominate pull requests. Containment or exact head identity admits them. A branch name never proves identity, so names play no part in resolution.
+The tab shows the newest PR opened from the current branch. No branch, or no PR, means the empty state.
 
-- Each fetch pins `HEAD` and the base ref to commit OIDs. Ancestry, distance, and sync calculations use those pins while the agent commits beside it.
-- The publication points are the nearest ancestors of the pinned `HEAD` present on `origin`. A point that is an ancestor of any resolved base entry proves nothing and is skipped.
-- The pinned `HEAD` also nominates by exact identity when it is not an ancestor of any resolved base entry. A PR admits through this path only when its head is exactly that commit. The PR may be open or merged.
-- With no publication point and no exact-identity admission, the tab shows the empty state. The worktree has published no provable work.
-- With no base resolvable, no nomination is provable and the tab shows the empty state.
-- Each publication point is asked of the forge: which pull requests contain this commit. The repository each forge queries, and its admission mechanics, live in `forge-providers.md`. Only PRs based on the resolved repository target count.
-- Every resolved PR therefore contains the worktree's published work or carries its parked commit as the exact head. There is no third admission path.
-- Exactly one open PR resolves when one contains a publication point.
-- Several open PRs disambiguate in order: a head equal to the pinned `HEAD`, a head equal to a publication point, the head named by the recorded upstream. A record naming a configured base is tracking, not publication, and never joins the tiebreak. Failing all three, reviewr surfaces the count, never a silent guess.
-- With no open PR, the newest-merged PR containing a publication point shows as historical state. A merged PR whose head is exactly the pinned `HEAD` resolves the same way, even with no publication point.
-- A worktree parked on published base history keeps its epilogue: the absorbed tip still nominates, and a merged PR whose head is exactly that commit resolves as history. Containment proves nothing for an absorbed commit.
-- A PR closed without merging does not associate. Where the forge lists closed pull requests, it still resolves as history through exact identity: an `origin` branch tip at a publication point names it, and its reported head equals that point. A forge that lists no closed pull requests has no such epilogue (`forge-providers.md`).
-- With none at all, the body shows the calm empty state (`pr-tab.md`).
-- A fork PR resolves through the same admission rules. Each provider queries the repository where its forge can prove the association (`forge-providers.md`). `pr-tab.md` marks the fork case.
-- Local staleness costs recall first: a stale `origin/*` ref can hide a publication point. A stale base ref can also admit mainline history as one, until a fetch heals it.
-- A detached `HEAD` has no pin and shows the empty state.
+A PR can live under a different branch name than the local one, so reviewr searches by up to three kinds of name:
 
-What a user observes:
+- the branch's own name,
+- the branch it tracks, unless that is a resolved base branch (tracking `main` is not publishing to it),
+- any `origin` branch pointing at this branch's work, so `git push origin HEAD:other-name` still finds the PR. A branch pointing at base history carries no work and does not count.
 
-- A worktree pushed as `git push origin HEAD:<other-name>` resolves its PR. The pushed commits are the publication point, whatever the name.
-- A teammate's PR parked at this worktree's exact `HEAD` never beats the PR on the recorded upstream.
-- A remote branch extending `HEAD` can be a colleague's continuation of this work. Its PR resolves when no better pick exists. The header names the resolved branch, and `sync` shows `behind`.
-- A worktree with no commits beyond the base shows the empty state. A sibling worktree's PR never attaches to it.
-- A reused branch name never resurrects an earlier, unrelated PR. Old PRs do not contain this worktree's commits.
-- The worktree's own merged PR shows as history while the space stays parked on its branch, even after the base absorbs the merge.
-- A squash-merged PR shows as history after the forge deletes its remote branch. The parked tip is exactly the PR's head, and that proves it.
-- A rebase discards the old publication points. Between the rebase and its force-push, the tab shows the empty state. The push restores it on the next poll.
+Among the PRs found under those names, in the resolved repository only:
+
+- The newest open PR wins. Open PRs match by name alone, so a branch sharing a busy branch's name adopts its open PR.
+- With none open, the newest merged or closed PR wins — but only if this branch contains its head commit. A reused branch name never resurrects an old PR, and a teammate's PR from a different branch never attaches, even when it builds on this branch's commits.
+- With neither, the tab is empty.
+
+Details:
+
+- Each fetch pins `HEAD` and the base to fixed commits up front. The agent committing mid-fetch cannot skew it.
+- On a fork, reviewr also asks about the fork's own PRs where the forge's query reaches them. A PR into upstream outranks the fork's own, and in upstream only fork-sourced PRs count.
+- A detached `HEAD` (mid-rebase, say) has no branch and shows the empty state, but never wipes a snapshot already on screen.
+- Finding a pushed name depends on local records. A pruned `origin/*` ref or a missing tracking record can hide one.
 
 ### Derived state
 
-- `merge` folds the forge's merge and policy state to the blockers worth surfacing: a conflicting merge is `conflicting`, a rule or policy block is `blocked`, and everything else — including a forge still computing mergeability — is `clean`, which the footer shows as nothing. The per-forge folding lives in `forge-providers.md`.
-- `sync` compares the pinned `HEAD` OID to the PR's `head_oid`: equal is `in_sync`, `HEAD` ahead is `unpushed` with a `git rev-list --count` count, and `head_oid` ahead is `behind`. If the PR head object is unavailable locally, the relation is `unknown`; reviewr never guesses `in_sync`.
+- `merge` surfaces only blockers: a conflict is `conflicting`, a rule or policy block is `blocked`, everything else is `clean` — including a forge still computing. The footer shows `clean` as nothing.
+- `sync` compares the pinned `HEAD` to the PR's head commit: equal is `in_sync`, `HEAD` ahead is `unpushed` with a count, PR head ahead is `behind`. A PR head missing locally is `unknown`, never a guessed `in_sync`.
 - `unpushed` means the checks and comments on screen describe an older commit than the local tree.
 
 ### Checks
 
-- A check row is the latest run for its name. A passed re-run replaces an earlier failure.
-- Each forge's check-like surfaces normalize into one list (`forge-providers.md`).
+- One row per check name, latest run only. A passed re-run replaces the earlier failure.
 - A top-level rollup gives the overall pass or fail.
 
 ### Comments
 
-- Each forge's comment surfaces merge into one list: submitted reviews, inline threads, and conversation comments (`forge-providers.md`).
-- A bot's PR-level posts collapse to its latest. A human's are each kept.
-- `is_resolved` and `is_outdated` come from the forge, never recomputed against the worktree.
-- Outdated and resolved threads stay in the list with their marker.
-- Each surface reads its newest 100 rows, never paged to exhaustion. A further page on any surface — reviews, comments, threads, or checks — sets `truncated`, and `pr-tab.md` marks the capped list, so it is never presented as complete. A forge that cannot identify its newest page serves the oldest page, marked truncated.
+- Reviews, inline threads, and conversation comments merge into one newest-first list.
+- A bot's PR-level posts collapse to its latest. A human's all stay.
+- `is_resolved` and `is_outdated` come from the forge, never recomputed locally. Resolved and outdated threads stay listed, marked.
+- Each surface reads its newest 100 rows, never paged to exhaustion. A further page sets `truncated` and `pr-tab.md` marks the capped list. A forge that cannot identify its newest page serves the oldest, marked truncated.
 
 ### Refresh
 
-- The first fetch starts when the panel opens, so the tab is populated before the user reaches it.
-- A refetch fires on entering the tab, on the `refresh` binding (default `r`), and on the agent's turn-end (a `working` → `idle`/`done` edge) on any tab. A turn may have pushed or merged, changing forge state with no other local signal, and one fetch per turn keeps the tab fresh before it is entered.
-- A fallback poll refetches every 60 seconds while the tab is active. Off the tab there is no polling.
-- The locally derived state — the pinned `HEAD` and base, the publication points, the tiebreak — moves on a mere commit or push, so it is freshness, never identity. Its churn alone never blanks the tab.
-- A refresh that observes a different repository target or origin clears the current PR. reviewr cannot prove the snapshot still describes the same pull request (`overview.md` Continuity).
-- Every other observed change keeps the snapshot painted and refetches behind it. The same pull request with newer work is stale, not wrong. The in-flight glyph covers the gap (`tui.md`).
-- Either observation starts the replacement fetch at once, on or off the tab, so entering the tab finds fresh work already underway.
-- One fetch is in flight at a time. The `refresh` binding cancels the fetch in flight and starts fresh. Any other trigger arriving mid-flight rides it: the result paints, then one fresh fetch supersedes it.
-- A forge-side change during a fetch can appear on the following fetch.
+- The first fetch starts when the panel opens.
+- A refetch fires on entering the tab, on the `refresh` binding (default `r`), and when the agent ends a turn — it may have pushed or merged with no local trace. On the tab, a fallback poll refetches every 60 seconds. Off the tab, no polling.
+- One fetch runs at a time. `refresh` cancels it and restarts. Any other trigger lets it finish and paint, then runs one fresh fetch.
+- A result shows only if everything it was fetched for — config, repository target, branch, pinned commits, branch names — still matches. Otherwise reviewr discards it and fetches again, on or off the tab.
+- Commits and pushes are freshness, never identity. They refetch behind the visible snapshot and never blank it: the same PR with newer work is stale, not wrong. The in-flight glyph covers the gap (`tui.md`).
+- The tab clears only when the repository target, origin, or checked-out branch changes. Then reviewr cannot prove the snapshot still belongs to this branch (`overview.md` Continuity).
+- A fetch that finds no PR keeps the snapshot while the pinned `HEAD` still is or contains the shown PR's head commit. A pruned remote branch never blanks the tab mid-session; pulling the merged base does.
 - Each fetch uses one validated config snapshot for host and base selection (→ CFG-ONE-SNAPSHOT, `config.md`).
-- A forge result paints only if the current config, repository target, pinned `HEAD`, pinned base, and
-  publication points still match the input that produced it. If reviewr cannot prove that match, the
-  result never paints, and one replacement fetch starts against the current input.
-- If the repository target is proven unchanged before a later branch-state read fails, the visible
-  same-target snapshot stays with a retry notice; the next refresh performs a fresh forge fetch.
-- The snapshot re-derives in full each fetch. reviewr keeps no hidden or historical PR cache beyond the visible snapshot.
-- Exiting reviewr stops scheduling and restores the terminal immediately. No later PR completion
-  can paint.
+- Every fetch re-derives the snapshot in full. There is no cache beyond what is on screen.
+- Exiting reviewr stops scheduling and restores the terminal immediately. Nothing paints afterward.
 
 ## Failure semantics
 
-reviewr reads the forge and never writes it, so every failure degrades to a clear state. `Changes` and `All files` are unaffected.
+reviewr only reads, so every failure degrades to a clear state. `Changes` and `All files` are unaffected.
 
-- A same-input failure preserves the visible snapshot and shows its remedy. With no same-input snapshot, the remedy fills the tab.
+- A failure on the same input keeps the visible snapshot and shows its remedy. With no snapshot, the remedy fills the tab.
 
 | failure                                 | remedy shown                                          |
 | --------------------------------------- | ----------------------------------------------------- |
@@ -175,24 +144,22 @@ reviewr reads the forge and never writes it, so every failure degrades to a clea
 | unauthenticated fetch                   | that CLI's login command (`forge-providers.md`)       |
 | any other fetch error                   | the retry error                                       |
 
-- A failure before the repository target resolves replaces any snapshot with the retryable Git error. reviewr cannot prove that the snapshot still belongs to the current target.
-- A branch-state Git failure after the same repository target resolves preserves the visible
-  same-target snapshot with the retryable Git error.
-- An unsupported origin names the host and points self-hosted users to the per-forge host keys.
-- An origin that stops being recognized, for example after its host key is removed, replaces any snapshot with the unsupported-host remedy.
+- A failure before the repository target resolves replaces any snapshot with the retryable Git error. A Git failure after the same target resolved keeps the snapshot, with the same error.
+- An origin that is not, or stops being, a recognized forge replaces any snapshot with the unsupported-host remedy and points to the host keys.
 - A host key naming a server that runs a different forge fails as the chosen CLI's fetch error.
-- No PR at any lifecycle state shows a calm empty state. The next poll lights the tab up when a PR appears.
-- Every read is side-effect-free.
-- Two active PR tabs on one worktree converge within one poll interval. An inactive tab catches up when entered.
+- No PR at all shows the calm empty state. The next poll lights the tab up when one appears.
+- Two active PR tabs on one worktree converge within one poll interval.
 
 ## Non-goals
 
-- No writes to any forge. reviewr never posts, resolves a thread, re-runs a check, or merges. It never routes PR feedback to the agent.
-- No transport of its own. Every forge read goes through that forge's CLI, which owns hosts, credentials, and TLS.
+- No writes to any forge: no posting, resolving, re-running checks, or merging. No routing PR feedback to the agent.
+- No transport of its own. The forge's CLI owns hosts, credentials, and TLS.
 - No repository selector or cross-repository search.
-- No different parent repositories across sibling worktrees from one clone. Use a separate clone for each parent.
+- No different parent repositories across sibling worktrees from one clone. Use a separate clone.
 - No SSH host-alias normalization. An alias-only repository needs a canonical-host remote.
 - No discovery of an unrecorded publication name on a non-`origin` remote.
+- No detection of forge-side renames or redirects. reviewr trusts the remote identity verbatim.
+- No remote-scoping of the tracked branch name. The bare name applies whichever remote it tracks.
 - No event subscription. The snapshot polls the CLI, no webhook or socket.
 - No server-version compatibility layer for self-hosted schemas.
 

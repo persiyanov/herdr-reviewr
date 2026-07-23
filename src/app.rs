@@ -1721,15 +1721,18 @@ impl App {
     pub fn apply_pr(&mut self, view: forge::PrView) {
         self.pr_refreshing = false;
         let retry = view.retry_remedy(self.keymap().hint(crate::keymap::Action::Refresh));
-        let has_snapshot = matches!(
-            self.pr,
-            forge::PrView::Pr(_)
-                | forge::PrView::NoPr
-                | forge::PrView::Detached
-                | forge::PrView::Ambiguous(_)
-        );
+        let has_snapshot =
+            matches!(self.pr, forge::PrView::Pr(_) | forge::PrView::NoPr | forge::PrView::Detached);
         if has_snapshot && let Some(message) = retry {
             self.pr_notice = Some(message);
+            return;
+        }
+        // A held resolution keeps the painted story, and so does a transient detach
+        // while a snapshot is on screen (`specs/forge-host.md` Refresh).
+        if matches!(view, forge::PrView::Held)
+            || (matches!(view, forge::PrView::Detached) && matches!(self.pr, forge::PrView::Pr(_)))
+        {
+            self.pr_notice = None;
             return;
         }
         self.pr_notice = None;

@@ -2735,6 +2735,34 @@ fn apply_pr_follows_the_selected_comment_across_a_refresh() {
 }
 
 #[test]
+fn a_held_resolution_and_a_transient_detach_keep_the_painted_pr() {
+    use herdr_reviewr::forge::{PrSnapshot, PrView};
+
+    let repo = Repo::init();
+    let mut app = app_on(&repo);
+    app.apply_pr(PrView::Pr(Box::new(PrSnapshot { number: 42, ..common::pr_snapshot() })));
+    assert!(matches!(&app.pr, PrView::Pr(s) if s.number == 42));
+
+    // A resolution that found nothing but proved the head still contained holds the story
+    // (`specs/forge-host.md` Refresh).
+    app.apply_pr(PrView::Held);
+    assert!(matches!(&app.pr, PrView::Pr(s) if s.number == 42), "held keeps the snapshot");
+
+    // A transient detach mid-rebase keeps it too.
+    app.apply_pr(PrView::Detached);
+    assert!(matches!(&app.pr, PrView::Pr(s) if s.number == 42), "detach keeps the snapshot");
+
+    // With nothing painted, a detached HEAD is its own calm state.
+    let mut fresh = app_on(&repo);
+    fresh.apply_pr(PrView::Detached);
+    assert!(matches!(fresh.pr, PrView::Detached));
+
+    // An honest empty resolution replaces the story.
+    app.apply_pr(PrView::NoPr);
+    assert!(matches!(app.pr, PrView::NoPr), "an unheld empty resolution paints");
+}
+
+#[test]
 fn same_input_failure_preserves_any_visible_pr_snapshot_and_remedy() {
     use herdr_reviewr::forge::PrView;
 

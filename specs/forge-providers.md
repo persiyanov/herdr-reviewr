@@ -6,11 +6,9 @@ Last edited: 2026-07-23
 
 # forge providers
 
-The per-forge contracts behind `forge-host.md`: repository identity, the CLI and its remedies, and how each forge's concepts fill the normalized snapshot.
+What differs per forge behind `forge-host.md`: repository identity, the CLI, and how each forge's concepts fill the one snapshot.
 
 ## Overview
-
-Every forge fills the same snapshot and renders through the same `PR` tab. Only the noun and the reference form differ on screen.
 
 | forge        | CLI                                 | noun          | abbreviation | reference |
 | ------------ | ----------------------------------- | ------------- | ------------ | --------- |
@@ -18,43 +16,41 @@ Every forge fills the same snapshot and renders through the same `PR` tab. Only 
 | GitLab       | `glab`                              | merge request | `MR`         | `!42`     |
 | Azure DevOps | `az` + the `azure-devops` extension | pull request  | `PR`         | `#12`     |
 
-User-facing strings use the resolved forge's vocabulary: its name, noun, abbreviation, and reference form (`pr-tab.md`).
-
-Each forge's section covers its repository identity, its CLI, its snapshot mappings, and an `Admission` bullet: which repository its queries address and any admission path of its own, under the neutral resolution rules (`forge-host.md`). A mapping not stated below is the identity.
+On screen, only the vocabulary differs: each forge's name, noun, abbreviation, and reference form (`pr-tab.md`). Branch names pass to each CLI verbatim. Each provider owns its whole read and degrades in-band: an unreadable optional surface contributes nothing instead of failing the fetch. A mapping not stated below is the identity.
 
 ## GitHub
 
 - Identity: `owner/repository`.
-- CLI: `gh`. The login remedy is `gh auth login --hostname <host>`.
-- Merge: `CONFLICTING`/`DIRTY` folds to `conflicting`, `BLOCKED` to `blocked`, everything else (`CLEAN`, `BEHIND`, `UNSTABLE`, still-computing `UNKNOWN`) to `clean`. `mergeable=UNKNOWN` is GitHub computing lazily and folds to `clean` unless `mergeStateStatus` is `DIRTY`.
-- Checks: check runs and commit statuses normalize into the one list.
-- Comments: submitted reviews are `review` rows, review threads are `finding` rows with GitHub's resolved and outdated flags, and conversation comments are `comment` rows.
-- Admission: the containment query runs against the `origin` repository, where the commits live — GitHub walks the fork network from there. An `origin` on another host proves nothing, so the target repository stands in.
+- CLI: `gh`. Login remedy: `gh auth login --hostname <host>`.
+- Merge: `CONFLICTING`/`DIRTY` is `conflicting`, `BLOCKED` is `blocked`, everything else is `clean`. `UNKNOWN` is GitHub still computing, so `clean` unless `mergeStateStatus` says `DIRTY`.
+- Checks: check runs and commit statuses, one list.
+- Comments: reviews are `review` rows, review threads are `finding` rows with GitHub's resolved and outdated flags, conversation comments are `comment` rows.
+- Query: PRs by head branch name in the target repository. Open PRs come on their own page beside the finished page, so a long finished history cannot hide one. On a fork, upstream results count only when their head lives in the fork — except a merged or closed PR whose fork was deleted, which the containment check vouches for.
 
 ## GitLab
 
-- Identity: the full namespace path. Groups nest, so the path may hold more than two segments.
-- CLI: `glab`. The login remedy is `glab auth login --hostname <host>`.
-- State: `opened` maps to `open`, `merged` to `merged`, and `closed` or `locked` to `closed`. A cross-project merge request sets `head_is_fork`.
-- Merge: a conflict folds to `conflicting`, a blocked status to `blocked`, and everything else to `clean`. A blocked status is unresolved blocking discussions, missing required approvals, or a denied policy. A still-checking status folds to `clean`.
-- Checks: the head pipeline's jobs, one row per job. A job allowed to fail contributes a skipped check, never a failing one. A jobs page past the row cap adds one `pipeline` row carrying the pipeline's own verdict. No pipeline, or a pipeline project the user cannot read, shows an empty checks list.
-- Comments: MR-level notes are `comment` rows, diff-position discussions are `finding` rows with GitLab's resolved flag, and an approval is a `review` row. A discussion carries no code context, so a GitLab `finding` has no snippet. An access-token service account (`project_…_bot…`, `group_…_bot…`) counts as a bot, as do the `[bot]` and `-bot` name suffixes. An unavailable approvals surface contributes no `review` rows. A discussion page total past GitLab's counting ceiling (~10,000 rows) serves the oldest page, marked truncated.
-- Admission: every query runs against the target project. GitLab scopes merge-request lookup to the target, and an open fork MR's commits reach it through the merge-request refs. A commit the target does not know proves nothing and never fails the fetch. When containment resolves nothing, a publication point's branch name nominates merge requests in any state, and exact head identity admits them.
+- Identity: the full namespace path, which may nest more than two segments.
+- CLI: `glab`. Login remedy: `glab auth login --hostname <host>`.
+- State: `opened` is `open`, `merged` is `merged`, `closed` and `locked` are `closed`. A cross-project MR sets `head_is_fork`.
+- Merge: a conflict is `conflicting`. Blocking discussions, missing required approvals, or a denied policy are `blocked`. Everything else, including still checking, is `clean`.
+- Checks: the head pipeline's jobs, one row each. A job allowed to fail counts as skipped, never failing. A jobs page past the cap adds one `pipeline` row with the pipeline's own verdict. No pipeline, or one the user cannot read, means an empty list.
+- Comments: MR notes are `comment` rows, diff discussions are `finding` rows with the resolved flag and no snippet (GitLab sends no code context), approvals are `review` rows. An unreadable approvals surface adds no `review` rows. Service accounts (`project_…_bot…`, `group_…_bot…`) and `[bot]`/`-bot` names count as bots. Past GitLab's ~10,000-row counting ceiling, reviewr serves the oldest page, marked truncated.
+- Query: MRs by `source_branch` in the target project. Opened MRs come on their own page beside the all-state page, so a long finished history cannot hide one. On a fork, upstream results count only when their source project is the fork.
 
 ## Azure DevOps
 
-- Identity: `organization/project/repository`. The accepted URL forms are `dev.azure.com/{organization}/{project}/_git/{repository}`, `ssh.dev.azure.com:v3/{organization}/{project}/{repository}`, and the legacy `{organization}.visualstudio.com` and `vs-ssh.visualstudio.com:v3` equivalents. A `DefaultCollection` filler segment on a legacy host drops, and a repository named after its project may omit the project segment. A project or repository name travels percent-encoded in the URL and is addressed decoded.
-- CLI: `az` with the `azure-devops` extension. A missing extension shows its own install step. The login remedy is `az login`, or `az devops login` for a personal access token.
-- State: `active` maps to `open`, `completed` to `merged`.
-- Merge: a merge status of conflicts folds to `conflicting`. A rejected required policy folds to `blocked`. Everything else, including a still-queued merge check, folds to `clean`.
-- Checks: policy evaluations and commit statuses normalize into the one list.
-- Comments: PR-level threads are `comment` rows, file-position threads are `finding` rows with the thread's resolved status, and a reviewer vote is a `review` row. A thread carries no code context, so an Azure DevOps `finding` has no snippet. The platform's service identities and build-service accounts count as bots, as do the shared name suffixes.
-- Admission: an open pull request admits when its reported source tip is exactly the pinned `HEAD` or a publication point. A completed pull request admits by the same exact source tip, an absorbed one included. The provider finds candidates by enumerating the repository's newest 100 active and newest 100 completed pull requests, and enumeration only nominates. An abandoned pull request never resolves, so Azure DevOps has no closed epilogue. An unreadable enumeration fails the fetch.
+- Identity: `organization/project/repository`. Accepted URL forms: `dev.azure.com/{organization}/{project}/_git/{repository}`, `ssh.dev.azure.com:v3/{organization}/{project}/{repository}`, and their legacy `{organization}.visualstudio.com` and `vs-ssh.visualstudio.com:v3` equivalents. A legacy `DefaultCollection` segment drops. A repository named after its project may omit the project segment. Names travel percent-encoded in the URL and are addressed decoded.
+- CLI: `az` with the `azure-devops` extension. A missing extension shows its install step. Login remedy: `az login`, or `az devops login` for a personal access token.
+- State: `active` is `open`, `completed` is `merged`.
+- Merge: conflicts are `conflicting`, a rejected required policy is `blocked`, everything else — including a still-queued merge check — is `clean`.
+- Checks: policy evaluations and commit statuses, one list.
+- Comments: PR-level threads are `comment` rows, file-position threads are `finding` rows with the thread's resolved status and no snippet, reviewer votes are `review` rows. Azure's service and build-service identities count as bots, as do the shared name suffixes.
+- Query: PRs by `sourceRefName` over the newest 100 active and 100 completed, in the target repository only. A fork PR into the target resolves through `forkSource` and counts only when the pinned `HEAD` contains its source tip. Beyond the lookup: a fork's own internal PRs, merged PRs older than the completed window, and abandoned PRs. An abandoned PR never counts as closed history. An unreadable enumeration fails the fetch.
 
 ## Non-goals
 
 - No forge beyond these three.
-- No per-forge rendering. The `PR` tab renders only the normalized snapshot.
+- No per-forge rendering. The `PR` tab renders only the snapshot.
 
 ## Related specs
 
