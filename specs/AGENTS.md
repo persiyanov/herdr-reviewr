@@ -14,12 +14,33 @@ Humans scan. They parse a sentence once, left to right, holding nothing on a sta
 
 ## The register
 
+Every spec passes the stop-slop skill in full.
+
 - One fact per sentence. Reading time scales with facts per line, not words per line.
-- Linear sentences. No nested asides, no semicolon splices, no em-dash chains. Parentheses rarely.
+- Linear sentences. No em dashes, no semicolons, no nested asides. Split into two sentences.
+  Parentheses carry citations only.
 - Subject first, present tense, active voice.
 - Plain words over compact jargon. Expand an acronym at first use.
+- Show, then cut the tell. One well-placed example replaces the sentences that explained the rule.
 
 A dense sentence is not concise. Packing four facts into one line saves words and costs the reader a stack. Split it.
+
+## Salience
+
+Not all facts weigh the same, and form must show the reader where the consequence is. A headline
+never hides as one bullet among equals.
+
+- Every behavior section leads with one to three sentences of prose stating the headline: the
+  behavior the reader must keep if they keep one thing. Lists and tables below it carry only
+  subordinate mechanics.
+- The promotion test: if breaking a line would change how a consumer uses the product, it is the
+  headline. If it would only mishandle an edge, it is a bullet.
+- The reader can verify a rule about time, money, or an irreversible effect only by simulation.
+  It carries a one-line scenario in place: "Pause a 2-day wait for 3 days, and the next message is
+  ready the moment you resume."
+- Surprise raises weight. The more likely the reader's prior guess is wrong, the higher the rule
+  sits and the more concrete its scenario. A deviation from comparable products with no locked
+  decision behind it is a process bug.
 
 ## Uniformity
 
@@ -31,6 +52,9 @@ Repeated elements share one grammatical template. Same subject class, same verb 
 - Pad table columns so the raw markdown aligns. Specs are read raw and in diffs, so alignment is part of readability. Pad by hand, every edit.
 
 The test: read the list aloud. If the melody changes mid-list, it is not uniform.
+
+Uniformity governs siblings inside a collection. Salience governs what leaves it. Promote the
+headline first, then make the remainder uniform.
 
 ## Information architecture
 
@@ -51,18 +75,26 @@ structure without the body text, restructure the spec before polishing it.
 
 ### Invariants
 
+An invariant is a named guarantee: a promise the whole system keeps, whose violation is a bug by
+definition, never a policy outcome. State predicates, history properties ("no action is ever enacted
+twice"), process orderings ("migrate runs before any rollout"), and liveness promises ("a stalled
+chain is always revived") all qualify on equal terms.
+
 A candidate joins the invariant collection only when all of these are true:
 
-- It holds before and after every operation in the spec's scope.
-- Breaking it creates invalid domain state, not merely a different response, ordering, or policy outcome.
-- Several operations or another spec rely on it.
-- Its local field or operation section cannot state it more clearly.
+- It is unconditional: stated without "usually" or "unless". A qualified promise is an operation
+  outcome and belongs in that operation's table.
+- It is load-bearing: another operation, spec, test, or consumer is correct only because it holds.
+- It is non-local: no single field or operation section can own it. Field semantics, validation
+  rules, retry policies, output ordering, writer procedures, and one operation's outcomes stay
+  beside what they govern.
+- It holds shape, never numbers. A tunable value is a parameter, changed by decision, not by bug.
 
-Give an invariant a citation code only when another section, spec, or test needs a stable citation. A
-code is the owning doc's prefix plus an uppercase kebab slug of the fact: `DM-BORN-WHOLE`,
-`API-AT-MOST-ONCE`. Register each doc's prefix in the README ownership map. A shipped code never changes
-its meaning: retire it, never reuse it for a different fact. Field semantics, validation rules, retry policies, output ordering, writer
-procedures, and one operation's outcomes do not qualify as invariants. Keep them beside what they govern.
+Admission mints the code: every invariant in the collection carries one, whether or not anything
+cites it yet. Never demote or delete an invariant because its code is currently uncited. A code is
+the owning doc's prefix plus an uppercase kebab slug of the fact: `DM-BORN-WHOLE`,
+`API-AT-MOST-ONCE`. Register each doc's prefix in the README ownership map. A shipped code never
+changes its meaning: retire it, never reuse it for a different fact.
 
 ## Contract only
 
@@ -86,7 +118,7 @@ content. Delete every section that does not earn its place.
 - Front matter carries `Status` (Draft, Current, Superseded), `Created`, and `Last edited`, ISO dates.
 - The Overview gives the smallest useful mental model. Use an example when it teaches faster.
 - Model sections define entities and fields. Operation sections use condition → outcome tables.
-- Code an invariant or trace only when another section, spec, or test needs a stable citation.
+- An admitted invariant always carries a code. A trace is coded only when something cites it.
 - Traces exist only for temporal contracts: the duplicate trigger, the concurrent run, the crash. Delete the section otherwise.
 - Failure semantics carries only what no table already states.
 - Non-goals bound the scope. They resolve more arguments than the goals.

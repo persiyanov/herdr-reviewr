@@ -9,7 +9,7 @@ A spec is a communication medium. The user reviews it. Contributors learn from i
 It is never a scratchpad. Optimize for reading speed, even in a one-line edit.
 The full bar lives in AGENTS.md. The essentials:
 - One concept per doc. End-state truth: what must be TRUE when the change is done.
-- Structure derives from the domain, not the history of the discussion or investigation.
+- Structure derives from the domain, never the history of the discussion or investigation.
 - One fact per sentence. Linear sentences, no asides.
 - One grammatical template per list or table. Schema-first tables, columns padded to align raw.
 - Every collection states one admission rule and contains the complete admitted set.
@@ -55,7 +55,7 @@ The full bar lives in AGENTS.md. The essentials:
 <Only for temporal contracts: the duplicate, the race, the crash. Delete otherwise.
 Steps share one shape: "actor does X. System does Y." -->
 
-**CHG-CRASH-MID-CAPTURE — crash between debit and record**
+**CHG-CRASH-MID-CAPTURE: crash between debit and record**
 
 1. The caller creates a charge. The row commits `pending`.
 2. The processor debits the card.
