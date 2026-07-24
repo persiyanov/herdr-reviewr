@@ -900,6 +900,89 @@ fn esc_peels_one_layer_per_press() {
     assert!(!app.keys_expanded, "the next esc closes the expansion");
 }
 
+/// A written comment, for the picker tests.
+fn note() -> herdr_reviewr::model::Comment {
+    herdr_reviewr::model::Comment {
+        file: "a.rs".into(),
+        side: Side::New,
+        start: 1,
+        end: 1,
+        lines: "+x".into(),
+        text: "note".into(),
+        diff_anchored: true,
+    }
+}
+
+/// A picker candidate on `pane`, otherwise a nameless idle claude.
+fn choice(pane: &str) -> herdr_reviewr::herdr::AgentChoice {
+    herdr_reviewr::herdr::AgentChoice {
+        pane_id: pane.into(),
+        kind: "claude".into(),
+        name: None,
+        tab_label: None,
+        status: Status::Idle,
+        title: String::new(),
+    }
+}
+
+#[test]
+fn send_with_no_comment_is_inert_and_opens_no_picker() {
+    // `s` routes through the keymap to `send_to_agent`, whose empty-store guard precedes agent
+    // resolution — so nothing shells out to herdr and no picker opens.
+    let r = traversal_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+
+    press(&mut app, &keymap, KeyCode::Char('s'));
+
+    assert_eq!(app.status, "no comments to send");
+    assert_eq!(app.mode, Mode::Normal);
+}
+
+#[test]
+fn the_agent_picker_moves_and_cancels_through_the_keymap() {
+    // The herdr-driven open (`send_to_agent` → `resolve_send_target`) is unit-tested; seeding the
+    // open picker keeps this test hermetic (no herdr subprocess) while still driving the move and
+    // cancel through the real key handler and its `Mode::SelectAgent` dispatch.
+    let r = traversal_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.store.add(note());
+    app.agent_choices = vec![choice("w:p1"), choice("w:p2"), choice("w:p3")];
+    app.mode = Mode::SelectAgent;
+
+    // `j`/`k` route through the rebindable down/up bindings and move the highlight, clamped.
+    press(&mut app, &keymap, KeyCode::Char('j'));
+    assert_eq!(app.agent_cursor, 1);
+    press(&mut app, &keymap, KeyCode::Char('k'));
+    assert_eq!(app.agent_cursor, 0);
+    for _ in 0..5 {
+        press(&mut app, &keymap, KeyCode::Char('j'));
+    }
+    assert_eq!(app.agent_cursor, 2, "the highlight clamps at the last row");
+
+    // `esc` cancels: back to Normal, the comment untouched — a cancel sends nothing.
+    press(&mut app, &keymap, KeyCode::Esc);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.store.len(), 1);
+}
+
+#[test]
+fn enter_on_an_empty_picker_closes_without_sending() {
+    // A confirm on a picker a race has emptied must not index out of bounds; it closes to Normal
+    // with the comment untouched and never reaches the send.
+    let r = traversal_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.store.add(note());
+    app.mode = Mode::SelectAgent; // agent_choices intentionally empty
+
+    press(&mut app, &keymap, KeyCode::Enter);
+
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.store.len(), 1);
+}
+
 #[test]
 fn esc_on_pr_closes_the_expansion_and_spares_the_frozen_file_tab() {
     use herdr_reviewr::app::Tab;
