@@ -102,9 +102,13 @@ fn select_tool(
     tools.iter().copied().find(|(cmd, _)| present(cmd))
 }
 
-/// The agent pane: fill its input via `herdr pane send-text`, then focus it.
+/// A resolved agent pane: fill its input via `herdr pane send-text`, then focus it. The
+/// caller resolves which pane (`herdr::resolve_send_target`, then either the sole agent or
+/// the reviewer's picker choice) and hands it here — this target never resolves.
 #[derive(Debug)]
-pub struct Agent;
+pub struct Agent {
+    pub pane: String,
+}
 
 impl ExportTarget for Agent {
     fn label(&self) -> &'static str {
@@ -116,11 +120,10 @@ impl ExportTarget for Agent {
     }
 
     fn export(&self, text: &str) -> Result<()> {
-        let pane = herdr::resolve_agent_pane()?;
-        herdr::send_text(&pane, text)?;
+        herdr::send_text(&self.pane, text)?;
         // Focus is a convenience once the text is delivered; a focus failure must NOT fail the
         // export, or the comments stay unconsumed and the next Send duplicates the whole review.
-        let _ = herdr::focus(&pane);
+        let _ = herdr::focus(&self.pane);
         Ok(())
     }
 }
@@ -150,8 +153,9 @@ mod tests {
 
     #[test]
     fn export_confirmations_name_the_actual_result_and_pluralize_comments() {
-        assert_eq!(Agent.success_message(1), "added 1 comment to agent input");
-        assert_eq!(Agent.success_message(2), "added 2 comments to agent input");
+        let agent = Agent { pane: "w8:p1".to_string() };
+        assert_eq!(agent.success_message(1), "added 1 comment to agent input");
+        assert_eq!(agent.success_message(2), "added 2 comments to agent input");
         assert_eq!(Clipboard.success_message(1), "copied 1 comment");
         assert_eq!(Clipboard.success_message(2), "copied 2 comments");
     }

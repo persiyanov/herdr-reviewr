@@ -1,13 +1,14 @@
-//! herdr host integration: resolve the agent pane and send to it.
+//! herdr host integration: resolve the send target and write to an agent pane.
 //!
 //! See `specs/herdr-host.md`. Uses the herdr CLI via `$HERDR_BIN_PATH`. Only the
 //! agent-send export depends on this module; browsing and clipboard do not.
 
+use std::collections::HashMap;
 use std::env;
 use std::process::Command;
 
 use crate::turn::Status;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -27,6 +28,74 @@ struct AgentPane {
     pane_id: String,
     tab_id: String,
     workspace_id: String,
+    /// The agent session name (`herdr agent start <name>` / `agent rename`). Usually absent —
+    /// unset for every `claude` session and most `codex` ones — so it is a lead label only
+    /// when present (`AgentChoice::lead`).
+    #[serde(default)]
+    name: Option<String>,
+    /// The pane's live terminal title — what the agent is working on. The one field that
+    /// reliably differs between same-kind agents in a worktree (`herdr-host.md` HH-MANY-PICK).
+    #[serde(default)]
+    terminal_title_stripped: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TabListResponse {
+    result: TabList,
+}
+
+#[derive(Debug, Deserialize)]
+struct TabList {
+    tabs: Vec<TabInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TabInfo {
+    tab_id: String,
+    /// The tab's user-assigned label, when it has one.
+    #[serde(default)]
+    label: Option<String>,
+}
+
+/// One agent the reviewer can send to, resolved for the picker. `pane_id` is the send
+/// target and is never displayed; the rest compose the row (`specs/herdr-host.md`
+/// HH-MANY-PICK, `specs/input.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentChoice {
+    /// The pane to write to. Internal — never shown.
+    pub pane_id: String,
+    /// The agent kind, `claude`/`codex` (the `agent` field).
+    pub kind: String,
+    /// The session name, when set — usually `None`.
+    pub name: Option<String>,
+    /// The tab's label, when the join found one — shown only when it differs from the kind.
+    pub tab_label: Option<String>,
+    pub status: Status,
+    /// The terminal title (`""` when the pane reports none).
+    pub title: String,
+}
+
+impl AgentChoice {
+    /// The row's lead label: the session name if set, else the agent kind.
+    pub fn lead(&self) -> &str {
+        self.name.as_deref().filter(|s| !s.is_empty()).unwrap_or(&self.kind)
+    }
+
+    /// The tab label to show as context — only when it adds information beyond the kind
+    /// (a tab literally named `codex` beside a `codex` agent says nothing).
+    pub fn tab_note(&self) -> Option<&str> {
+        self.tab_label.as_deref().filter(|l| !l.is_empty() && *l != self.kind)
+    }
+}
+
+/// Where a `Send` should go once the candidates are resolved (`specs/herdr-host.md`,
+/// HH-ONE-SENDS / HH-MANY-PICK / HH-ZERO-REFUSE): straight to the sole pane, to the picker
+/// over several, or nowhere.
+#[derive(Debug)]
+pub enum SendTarget {
+    One(String),
+    Many(Vec<AgentChoice>),
+    None,
 }
 
 fn herdr_bin() -> String {
@@ -39,7 +108,7 @@ fn herdr(args: &[&str]) -> Result<String> {
         .output()
         .with_context(|| format!("running herdr {args:?}"))?;
     if !out.status.success() {
-        bail!("herdr {args:?} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::bail!("herdr {args:?} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -54,22 +123,35 @@ fn agent_env() -> (Option<String>, Option<String>, Option<String>) {
 }
 
 /// The agents herdr currently lists. The one place the `agent list` call and its envelope
-/// parsing live, shared by pane and status resolution.
+/// parsing live, shared by send-target and status resolution.
 fn agent_list() -> Result<Vec<AgentPane>> {
     parse_agents(&herdr(&["agent", "list"])?)
 }
 
-/// The agent pane to send to: the sole agent in this tab, else the sole workspace agent.
-///
-/// A refusal says why and names the clipboard fallback (`specs/herdr-host.md`, HH-SOLE-OR-REFUSE/HH-REFUSE-SAYS-CLIPBOARD) —
-/// the status line renders it as `agent failed: <this message>`.
-pub fn resolve_agent_pane() -> Result<String> {
+/// `tab_id → label` for one workspace, best-effort: any tab without a label is skipped.
+fn tab_labels(ws: &str) -> Result<HashMap<String, String>> {
+    let json = herdr(&["tab", "list", "--workspace", ws])?;
+    let resp: TabListResponse = serde_json::from_str(&json).context("parsing tab list")?;
+    Ok(resp.result.tabs.into_iter().filter_map(|t| Some((t.tab_id, t.label?))).collect())
+}
+
+/// The send target for the written comments: the sole agent in this tab, else the sole
+/// workspace agent (`HH-ONE-SENDS`); several candidates go to the picker (`HH-MANY-PICK`);
+/// none refuses (`HH-ZERO-REFUSE`). Only the `Many` branch joins `tab list` for the row
+/// labels; `One`/`None` skip it.
+pub fn resolve_send_target() -> Result<SendTarget> {
     let (tab, ws, me) = agent_env();
-    match pick_agent(&agent_list()?, tab.as_deref(), ws.as_deref(), me.as_deref()) {
-        Ok(agent) => Ok(agent.pane_id.clone()),
-        Err(Refusal::NoAgent) => bail!("no agent here — copy to the clipboard instead"),
-        Err(Refusal::Several) => bail!("several agents here — copy to the clipboard instead"),
-    }
+    let agents = agent_list()?;
+    Ok(match pick(&agents, tab.as_deref(), ws.as_deref(), me.as_deref()) {
+        Pick::One(agent) => SendTarget::One(agent.pane_id.clone()),
+        Pick::None => SendTarget::None,
+        Pick::Many(panes) => {
+            // Best-effort labels: without a workspace id (or on a failed call) rows fall back
+            // to the kind. All candidates share the reviewer's workspace, so one call covers them.
+            let labels = ws.as_deref().and_then(|w| tab_labels(w).ok()).unwrap_or_default();
+            SendTarget::Many(panes.iter().map(|a| a.to_choice(&labels)).collect())
+        }
+    })
 }
 
 /// The documented `result.agents` array from `herdr agent list`.
@@ -79,41 +161,66 @@ fn parse_agents(json: &str) -> Result<Vec<AgentPane>> {
 }
 
 /// The resolved agent's `agent_status` (`idle`/`working`/`blocked`/`done`/`unknown`), for
-/// turn tracking (`specs/herdr-host.md`). `Ok(None)` when no agent resolves, so the caller
-/// treats an absent or ambiguous agent the same as a missing herdr — turn tracking pauses.
+/// turn tracking (`specs/herdr-host.md`). `Ok(None)` when no *single* agent resolves, so an
+/// absent or ambiguous agent is treated like a missing herdr — turn tracking pauses. The
+/// picker never changes this: an ambiguous send is still `None` here.
 pub fn resolved_agent_status() -> Result<Option<Status>> {
     let (tab, ws, me) = agent_env();
-    Ok(pick_agent(&agent_list()?, tab.as_deref(), ws.as_deref(), me.as_deref())
-        .ok()
-        .map(|agent| agent.agent_status))
+    let agents = agent_list()?;
+    Ok(match pick(&agents, tab.as_deref(), ws.as_deref(), me.as_deref()) {
+        Pick::One(agent) => Some(agent.agent_status),
+        Pick::Many(_) | Pick::None => None,
+    })
 }
 
-/// Why no agent resolved: none to send to, or too many to pick from.
-#[derive(Debug, PartialEq, Eq)]
-enum Refusal {
-    NoAgent,
-    Several,
+impl AgentPane {
+    /// Build the picker choice for this pane, looking its tab label up in the join map.
+    /// `agent` is always `Some` here — non-agent panes never become candidates.
+    fn to_choice(&self, labels: &HashMap<String, String>) -> AgentChoice {
+        AgentChoice {
+            pane_id: self.pane_id.clone(),
+            kind: self.agent.clone().unwrap_or_default(),
+            name: self.name.clone().filter(|s| !s.is_empty()),
+            tab_label: labels.get(&self.tab_id).cloned(),
+            status: self.agent_status,
+            title: self.terminal_title_stripped.clone().unwrap_or_default(),
+        }
+    }
 }
 
-/// The sole agent in this tab, else the sole workspace agent (`specs/herdr-host.md`, HH-AGENT-PANES through HH-SOLE-OR-REFUSE).
+/// The resolved send target: one agent, several to pick from, or none.
+enum Pick<'a> {
+    One(&'a AgentPane),
+    Many(Vec<&'a AgentPane>),
+    None,
+}
+
+/// Classify the candidates (`specs/herdr-host.md`, HH-AGENT-PANES / HH-NOT-SELF / HH-TAB-WINS
+/// / HH-ONE-SENDS / HH-MANY-PICK / HH-ZERO-REFUSE):
 ///
-/// The workspace candidates are a superset of the tab candidates whenever both env ids are
-/// present, so the refusal reason reads off the widest scope: no candidates anywhere is
-/// `NoAgent`, anything else is `Several`.
-fn pick_agent<'a>(
+/// - a sole tab agent wins outright (`HH-TAB-WINS`);
+/// - otherwise the **widest non-empty** candidate set decides — the workspace candidates when
+///   present, else the tab candidates: one → `One`, several → `Many(those)`;
+/// - `None` only when both sets are empty. So two agents sharing our tab with no workspace id
+///   are `Many`, never `None` — the picker still opens.
+fn pick<'a>(
     agents: &'a [AgentPane],
     tab: Option<&str>,
     ws: Option<&str>,
     me: Option<&str>,
-) -> Result<&'a AgentPane, Refusal> {
+) -> Pick<'a> {
     let in_tab = candidates(agents, tab, me, |agent| &agent.tab_id);
     if let &[agent] = in_tab.as_slice() {
-        return Ok(agent);
+        return Pick::One(agent);
     }
-    match candidates(agents, ws, me, |agent| &agent.workspace_id).as_slice() {
-        &[agent] => Ok(agent),
-        [] if in_tab.is_empty() => Err(Refusal::NoAgent),
-        _ => Err(Refusal::Several),
+    let in_ws = candidates(agents, ws, me, |agent| &agent.workspace_id);
+    match in_ws.as_slice() {
+        &[agent] => Pick::One(agent),
+        [] if in_tab.is_empty() => Pick::None,
+        // Workspace scope is empty (no workspace id) but the tab holds several — pick among them.
+        [] => Pick::Many(in_tab),
+        // Workspace scope is the widest ambiguous set (it is a superset of the tab candidates).
+        _ => Pick::Many(in_ws),
     }
 }
 
@@ -154,7 +261,7 @@ pub fn focus(pane: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentPane, Refusal, Status, parse_agents, pick_agent};
+    use super::{AgentChoice, AgentPane, Pick, Status, parse_agents, pick};
 
     /// One agent entry shaped like the real `herdr agent list` output (api notes).
     fn agent(pane: &str, tab: &str, ws: &str) -> AgentPane {
@@ -164,43 +271,62 @@ mod tests {
             pane_id: pane.to_string(),
             tab_id: tab.to_string(),
             workspace_id: ws.to_string(),
+            name: None,
+            terminal_title_stripped: None,
         }
     }
 
-    /// One non-agent pane as herdr 0.7.1 lists it live: `agent_status: unknown`, no `agent`
+    /// One non-agent pane as herdr lists it live: `agent_status: unknown`, no `agent`
     /// field — a plugin sidebar or a plain shell.
     fn non_agent_pane(pane: &str, tab: &str, ws: &str) -> AgentPane {
-        AgentPane {
-            agent: None,
-            agent_status: Status::Unknown,
-            pane_id: pane.to_string(),
-            tab_id: tab.to_string(),
-            workspace_id: ws.to_string(),
+        AgentPane { agent: None, agent_status: Status::Unknown, ..agent(pane, tab, ws) }
+    }
+
+    /// A choice for the row-compose tests.
+    fn choice(kind: &str, name: Option<&str>, tab_label: Option<&str>, title: &str) -> AgentChoice {
+        AgentChoice {
+            pane_id: "w:p1".to_string(),
+            kind: kind.to_string(),
+            name: name.map(str::to_string),
+            tab_label: tab_label.map(str::to_string),
+            status: Status::Idle,
+            title: title.to_string(),
         }
     }
 
-    /// [`pick_agent`] reduced to the picked `pane_id`, for terse assertions.
-    fn pick(
+    /// [`pick`] reduced to pane ids, for terse assertions.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Picked {
+        One(String),
+        Many(Vec<String>),
+        None,
+    }
+
+    fn picked(
         agents: &[AgentPane],
         tab: Option<&str>,
         ws: Option<&str>,
         me: Option<&str>,
-    ) -> Result<String, Refusal> {
-        pick_agent(agents, tab, ws, me).map(|agent| agent.pane_id.clone())
+    ) -> Picked {
+        match pick(agents, tab, ws, me) {
+            Pick::One(a) => Picked::One(a.pane_id.clone()),
+            Pick::Many(v) => Picked::Many(v.iter().map(|a| a.pane_id.clone()).collect()),
+            Pick::None => Picked::None,
+        }
     }
 
     #[test]
     fn pick_prefers_the_tab_agent_over_the_workspace() {
         let agents = vec![agent("w8:p1", "w8:t1", "w8"), agent("w8:p2", "w8:t2", "w8")];
         // Both share workspace w8; our tab is w8:t2, so its pane wins (HH-TAB-WINS).
-        assert_eq!(pick(&agents, Some("w8:t2"), Some("w8"), None), Ok("w8:p2".to_string()));
+        assert_eq!(picked(&agents, Some("w8:t2"), Some("w8"), None), Picked::One("w8:p2".into()));
     }
 
     #[test]
     fn pick_falls_back_to_the_sole_workspace_agent() {
         let agents = vec![agent("w8:p1", "w8:t1", "w8")];
-        // No agent shares our tab, but exactly one is in the workspace.
-        assert_eq!(pick(&agents, Some("w8:tX"), Some("w8"), None), Ok("w8:p1".to_string()));
+        // No agent shares our tab, but exactly one is in the workspace (HH-ONE-SENDS).
+        assert_eq!(picked(&agents, Some("w8:tX"), Some("w8"), None), Picked::One("w8:p1".into()));
     }
 
     #[test]
@@ -209,57 +335,88 @@ mod tests {
         // one (w8:p1), excluding our pane leaves the real agent unambiguous (HH-NOT-SELF).
         let agents = vec![agent("w8:p1", "w8:t1", "w8"), agent("w8:p5", "w8:t1", "w8")];
         assert_eq!(
-            pick(&agents, Some("w8:t1"), Some("w8"), Some("w8:p5")),
-            Ok("w8:p1".to_string())
+            picked(&agents, Some("w8:t1"), Some("w8"), Some("w8:p5")),
+            Picked::One("w8:p1".into())
         );
     }
 
     #[test]
     fn non_agent_panes_do_not_make_the_tab_ambiguous() {
         // A tab holding one real agent plus a non-agent pane (another plugin's sidebar, a
-        // plain shell) resolves to the agent, not an ambiguity refusal (HH-AGENT-PANES, #6).
+        // plain shell) resolves to the agent, not the picker (HH-AGENT-PANES).
         let agents = vec![agent("w3:p1", "w3:t1", "w3"), non_agent_pane("w3:p4", "w3:t1", "w3")];
         assert_eq!(
-            pick(&agents, Some("w3:t1"), Some("w3"), Some("w3:p5")),
-            Ok("w3:p1".to_string())
+            picked(&agents, Some("w3:t1"), Some("w3"), Some("w3:p5")),
+            Picked::One("w3:p1".into())
         );
     }
 
     #[test]
-    fn only_non_agent_panes_refuse_as_no_agent() {
-        // A tab and workspace holding nothing but non-agent panes has no one to send to (HH-AGENT-PANES, HH-SOLE-OR-REFUSE).
+    fn only_non_agent_panes_resolve_to_none() {
+        // A tab and workspace holding nothing but non-agent panes has no one to send to
+        // (HH-AGENT-PANES, HH-ZERO-REFUSE).
         let agents =
             vec![non_agent_pane("w3:p2", "w3:t1", "w3"), non_agent_pane("w3:p4", "w3:t1", "w3")];
-        assert_eq!(pick(&agents, Some("w3:t1"), Some("w3"), None), Err(Refusal::NoAgent));
+        assert_eq!(picked(&agents, Some("w3:t1"), Some("w3"), None), Picked::None);
     }
 
     #[test]
-    fn no_matching_agent_refuses_as_no_agent() {
+    fn no_matching_agent_resolves_to_none() {
         let agents = vec![agent("w9:p1", "w9:t1", "w9")];
-        // An agent exists, but in another workspace entirely (HH-SOLE-OR-REFUSE, HH-REFUSE-SAYS-CLIPBOARD).
-        assert_eq!(pick(&agents, Some("w8:t1"), Some("w8"), None), Err(Refusal::NoAgent));
+        // An agent exists, but in another workspace entirely (HH-ZERO-REFUSE).
+        assert_eq!(picked(&agents, Some("w8:t1"), Some("w8"), None), Picked::None);
     }
 
     #[test]
-    fn two_workspace_agents_refuse_as_several() {
+    fn two_workspace_agents_go_to_the_picker_with_the_exact_set() {
         let agents = vec![agent("w8:p1", "w8:t1", "w8"), agent("w8:p2", "w8:t2", "w8")];
-        // Neither shares our tab and the workspace has two — refuse to guess (HH-SOLE-OR-REFUSE, HH-REFUSE-SAYS-CLIPBOARD).
-        assert_eq!(pick(&agents, Some("w8:tZ"), Some("w8"), None), Err(Refusal::Several));
+        // Neither shares our tab and the workspace has two — the picker lists exactly them
+        // (HH-MANY-PICK), in list order.
+        assert_eq!(
+            picked(&agents, Some("w8:tZ"), Some("w8"), None),
+            Picked::Many(vec!["w8:p1".into(), "w8:p2".into()])
+        );
     }
 
     #[test]
-    fn two_tab_agents_refuse_as_several_even_without_a_workspace_id() {
+    fn two_tab_agents_go_to_the_picker_even_without_a_workspace_id() {
         let agents = vec![agent("w8:p1", "w8:t1", "w8"), agent("w8:p2", "w8:t1", "w8")];
-        // Two agents share our tab and no workspace id is available to widen the scope —
-        // still a several-agents refusal, not a missing-agent one (HH-SOLE-OR-REFUSE, HH-REFUSE-SAYS-CLIPBOARD).
-        assert_eq!(pick(&agents, Some("w8:t1"), None, None), Err(Refusal::Several));
+        // Two agents share our tab and no workspace id is available to widen the scope — still
+        // the picker over both, not a no-agent refusal (HH-MANY-PICK; preserves the pre-picker
+        // ambiguity boundary).
+        assert_eq!(
+            picked(&agents, Some("w8:t1"), None, None),
+            Picked::Many(vec!["w8:p1".into(), "w8:p2".into()])
+        );
     }
 
     #[test]
-    fn parse_agents_accepts_only_the_documented_envelope() {
+    fn parse_agents_accepts_the_envelope_and_defaults_absent_fields() {
         let wrapped = r#"{"result":{"agents":[{"agent":"claude","agent_status":"working","pane_id":"w8:p1","tab_id":"w8:t1","workspace_id":"w8"}]}}"#;
+        // name/terminal_title_stripped are absent → None (agent() sets both None).
         assert_eq!(parse_agents(wrapped).unwrap(), [agent("w8:p1", "w8:t1", "w8")]);
         assert!(parse_agents("[]").is_err());
         assert_eq!(serde_json::from_str::<Status>(r#""starting""#).unwrap(), Status::Unknown);
+    }
+
+    #[test]
+    fn row_lead_prefers_name_then_kind() {
+        assert_eq!(choice("codex", Some("fbig-import"), None, "t").lead(), "fbig-import");
+        assert_eq!(choice("claude", None, None, "t").lead(), "claude");
+        // An empty-string name is treated as unset.
+        assert_eq!(choice("codex", Some(""), None, "t").lead(), "codex");
+    }
+
+    #[test]
+    fn row_tab_note_is_shown_only_when_it_adds_over_the_kind() {
+        // A meaningful tab label shows.
+        assert_eq!(
+            choice("codex", None, Some("upgrade test"), "t").tab_note(),
+            Some("upgrade test")
+        );
+        // A tab label that just repeats the kind is omitted as redundant.
+        assert_eq!(choice("codex", None, Some("codex"), "t").tab_note(), None);
+        // No tab label (join missing / no workspace id) omits it.
+        assert_eq!(choice("claude", None, None, "t").tab_note(), None);
     }
 }

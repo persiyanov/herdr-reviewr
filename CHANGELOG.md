@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Agent picker on an ambiguous send.** When a worktree holds several agents, `Send` now opens a
+  picker to choose which one receives the comments, instead of refusing and pointing at the
+  clipboard. Each row shows the agent's name or kind, its tab label when that adds information, its
+  status, and what it is working on. `↑`/`↓` choose, `enter` sends, `esc` cancels. A single agent
+  still sends directly and no agent still refuses. This keeps the send on the herdr socket, which
+  works over SSH/mosh where the clipboard copy does not.
+
 ## [0.24.1] — 2026-07-23
 
 ### Changed

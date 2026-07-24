@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-07-18
+Last edited: 2026-07-24
 ---
 
 # herdr host
@@ -119,24 +119,26 @@ The binary reviews the pane's working directory, normalized to its git top level
 
 ## Sending to the agent
 
-`Send` hands over every written comment at once. The target is resolved in order:
+`Send` hands over every written comment at once. A single agent in scope receives them directly. Several agents open a picker to choose one. With no agent in scope the send refuses and the status names the clipboard copy.
 
-1. the sole agent in the sidebar's tab,
-2. else the sole agent in its workspace.
+The target resolves in order: the sole agent in the sidebar's tab, else the sole agent in its workspace. reviewr writes the comment blocks into the chosen agent pane without submitting, then focuses it. You add context and press enter.
 
-reviewr writes the comment blocks into the agent pane without submitting, then focuses it. You add context and press enter.
+Over several candidates the picker lists exactly that set. Each row shows the agent's name or kind, then its tab label when that label adds over the kind, then its status, then its terminal title. `input.md` holds the picker's keys.
 
 The candidate rules, coded for citation:
 
-| code                       | Always true                                                            |
-| -------------------------- | ---------------------------------------------------------------------- |
-| `HH-AGENT-PANES`           | Only panes carrying an `agent` field are candidates.                    |
-| `HH-NOT-SELF`              | The sidebar's own pane is never a candidate.                            |
-| `HH-TAB-WINS`              | A sole tab agent wins over the workspace fallback.                      |
-| `HH-SOLE-OR-REFUSE`        | Zero or several candidates refuse the send. Nothing is sent partially.  |
-| `HH-REFUSE-SAYS-CLIPBOARD` | A refusal says why and points at the clipboard copy.                    |
+| code                   | Always true                                                          |
+| ---------------------- | ------------------------------------------------------------------- |
+| `HH-AGENT-PANES`       | Only panes carrying an `agent` field are candidates.                |
+| `HH-NOT-SELF`          | The sidebar's own pane is never a candidate.                        |
+| `HH-TAB-WINS`          | A sole tab agent wins over the workspace fallback.                  |
+| `HH-ONE-SENDS`         | A single candidate receives the comments with no picker.            |
+| `HH-MANY-PICK`         | Several candidates open the picker over exactly that set.           |
+| `HH-ZERO-REFUSE`       | No candidate refuses the send and names the clipboard copy.         |
+| `HH-PICK-SENDS-CHOSEN` | The picker sends to the highlighted pane, not a re-resolved target. |
+| `HH-PICK-CANCEL-KEEPS` | Cancelling the picker sends nothing.                                |
 
-With `tab` placement the sidebar has its own tab, so resolution goes straight to the workspace fallback.
+With `tab` placement the sidebar has its own tab, so resolution skips to the workspace fallback, where several agents open the picker.
 
 ## Clipboard
 
@@ -144,7 +146,7 @@ The export copies through the OS clipboard utility on the machine where the bina
 
 ## Turn tracking
 
-The `last-turn` scope (`review-model.md`) needs to know when a turn starts. reviewr polls the agent's status on every worktree refresh. A turn starts when the status moves from resting (`idle` or `done`) to `working`. Moves from `blocked` or `unknown` to `working` do not start a turn.
+The `last-turn` scope (`review-model.md`) needs to know when a turn starts. reviewr polls the agent's status on every worktree refresh. A turn starts when the status moves from resting (`idle` or `done`) to `working`. Moves from `blocked` or `unknown` to `working` do not start a turn. Tracking follows a single agent only. Several agents in scope leave the resolution ambiguous, so tracking pauses like a missing agent, and the picker never auto-selects one for it.
 
 On a turn start, reviewr snapshots the worktree as a candidate baseline. The candidate becomes the live baseline on the first poll where that turn changed a file. A turn that changes nothing never moves the baseline. The live baseline is the old side of every `last-turn` diff until the next change-producing turn replaces it.
 
@@ -167,6 +169,7 @@ Send and tracking:
 - Browsing and the clipboard export work without the herdr CLI. Sending and turn tracking need it. Without it, `last-turn` stays empty and `uncommitted` and `branch` are unaffected.
 - Turn tracking resolves the agent under the same candidate rules (`HH-AGENT-PANES`, `HH-NOT-SELF`, `HH-TAB-WINS`), so a plugin sidebar or shell in the tab never pauses tracking.
 - A failed clipboard utility or `herdr pane send-text` reports the error. The comments stay in the list.
+- A picker send whose chosen agent has vanished reports the error and closes the picker. The comments stay, so a fresh `Send` re-lists the agents.
 - A turn shorter than one poll interval, or one whose start is masked by a transient `unknown` status, is missed. `last-turn` then shows the changes since the last observed turn start. It never shows lines the agent did not write.
 - A crash mid-snapshot costs at most one failed refresh. Ref updates are atomic. Leftover locks are cleared before the next snapshot and on every exit path.
 - Two sidebars on one worktree write the same baseline ref. Each samples on its own clock, so their snapshots of one turn start can differ by the edits between them. Last-writer-wins keeps the baseline within one poll interval of the turn start.

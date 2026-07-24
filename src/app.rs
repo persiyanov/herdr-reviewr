@@ -11,10 +11,11 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::diff::{DiffCache, FileDiff, Row, View};
-use crate::export::{ExportTarget, format_all};
+use crate::export::{Agent, ExportTarget, format_all};
 use crate::file_list::{self, Annotation, Entry, RowKind};
 use crate::forge;
 use crate::git;
+use crate::herdr::{AgentChoice, SendTarget, resolve_send_target};
 use crate::highlight::Highlighter;
 use crate::logln;
 use crate::model::{Comment, CommentStore, Scope, Side};
@@ -128,6 +129,10 @@ pub enum Mode {
     },
     /// Browsing the comments-list overlay.
     List,
+    /// Choosing which agent to send to when several are in scope, a centered-popup modal like
+    /// `List` (specs/herdr-host.md HH-MANY-PICK, specs/input.md). Candidates live in
+    /// [`App::agent_choices`], the highlight in [`App::agent_cursor`].
+    SelectAgent,
     /// The search screen, replacing the body from any tab (specs/search.md). Its state
     /// lives in [`App::search`].
     Search,
@@ -331,6 +336,10 @@ pub enum FooterAction {
     Newline,
     Cancel,
     CloseList,
+    /// Send the comments to the highlighted agent in the picker (`enter`).
+    ConfirmAgent,
+    /// Move the highlight in the agent picker (`↑`/`↓`).
+    ChooseAgent,
     OpenPr,
     Refresh,
     Tabs,
@@ -456,6 +465,11 @@ pub struct App {
     pub select_anchor: Option<usize>,
     pub store: CommentStore,
     pub list_cursor: usize,
+    /// The agent picker's candidates while `mode == SelectAgent`, empty otherwise. Snapshotted
+    /// when the picker opens (`send_to_agent`), consumed by cancel/confirm (`specs/herdr-host.md`).
+    pub agent_choices: Vec<AgentChoice>,
+    /// The highlighted row in the agent picker.
+    pub agent_cursor: usize,
     pub mode: Mode,
     pub input: String,
     /// The comment editor's caret: a char index into `input` (`0..=chars().count()`).
@@ -606,6 +620,8 @@ impl App {
             select_anchor: None,
             store: CommentStore::new(),
             list_cursor: 0,
+            agent_choices: Vec::new(),
+            agent_cursor: 0,
             mode: Mode::Normal,
             input: String::new(),
             caret: 0,
@@ -739,8 +755,10 @@ impl App {
         match old_mode {
             // `set_config_error` closes the search overlay and the find band before the mode is
             // stored, so neither reaches recovery; their query is not restored (specs/search.md,
-            // specs/find-in-file.md).
-            Mode::Normal | Mode::Search | Mode::Find => {}
+            // specs/find-in-file.md). The agent picker is likewise not preserved: recovery drops
+            // to `Normal` with comments intact (the store is carried above), and the reviewer
+            // re-presses `Send` — the candidate snapshot would otherwise be stale.
+            Mode::Normal | Mode::Search | Mode::Find | Mode::SelectAgent => {}
             Mode::List | Mode::Composing { .. } => {
                 self.scope = old.scope;
                 self.tab = old.tab;
@@ -810,6 +828,13 @@ impl App {
 
     pub fn composing(&self) -> bool {
         matches!(self.mode, Mode::Composing { .. })
+    }
+
+    /// Whether a centered-popup modal owns the screen — the comments list or the agent picker.
+    /// These freeze the diff under them and capture the mouse, unlike the body-replacing
+    /// `Search`/`Find` screens (`specs/herdr-host.md`, `specs/input.md`).
+    pub fn popup_modal(&self) -> bool {
+        matches!(self.mode, Mode::List | Mode::SelectAgent)
     }
 
     /// The entry under the cursor when the cursor is on a file row; `None` on a directory
@@ -944,10 +969,11 @@ impl App {
             .min(self.file_rows.len().saturating_sub(1));
         // A poll preserves the file-list wheel scroll — it does not reveal the cursor.
         // Explicit actions (navigation, a scope switch) request their own reveal.
-        // While a modal is open — composing a comment, or the comments-list overlay — the
-        // open diff is frozen, so a poll can't shift the anchor beneath the writer or reset
-        // the scroll/selection under the overlay. The file list still updates above.
-        if !self.composing() && self.mode != Mode::List {
+        // While a modal is open — composing a comment, or a centered-popup overlay (the
+        // comments list or the agent picker) — the open diff is frozen, so a poll can't shift
+        // the anchor beneath the writer or reset the scroll/selection under the overlay. The
+        // file list still updates above.
+        if !self.composing() && !self.popup_modal() {
             // A poll keeps the reader on the same file; only a different shown file resets
             // the diff view to the top. It also drops an armed crossing, which was armed at the
             // edge of a file that is no longer the one on screen (specs/input.md).
@@ -2404,7 +2430,8 @@ impl App {
             Mode::Composing { .. } => Some((&mut self.input, &mut self.caret)),
             Mode::Search => self.search.as_mut().map(|s| (&mut s.query, &mut s.caret)),
             Mode::Find => self.find.as_mut().map(|f| (&mut f.query, &mut f.caret)),
-            Mode::Normal | Mode::List => None,
+            // The agent picker has no editable field — it moves a highlight, not a caret.
+            Mode::Normal | Mode::List | Mode::SelectAgent => None,
         }
     }
 
@@ -2619,7 +2646,7 @@ impl App {
                 };
                 Some(c.location())
             }
-            Mode::Normal | Mode::List | Mode::Search | Mode::Find => None,
+            Mode::Normal | Mode::List | Mode::SelectAgent | Mode::Search | Mode::Find => None,
         }
     }
 
@@ -2693,7 +2720,7 @@ impl App {
             self.status = "comment deleted".to_string();
             // Don't strand the user in an empty "Comments (0)" overlay, matching `export`.
             if self.store.is_empty() {
-                self.close_list();
+                self.close_modal();
             }
         }
     }
@@ -3075,10 +3102,56 @@ impl App {
         }
     }
 
-    pub fn close_list(&mut self) {
-        if self.mode == Mode::List {
+    /// Close whichever centered-popup modal is open (the comments list or the agent picker),
+    /// returning to `Normal`. Touches only `mode`, so consume-on-success and comment retention
+    /// are unaffected. A no-op in any other mode.
+    pub fn close_modal(&mut self) {
+        if self.popup_modal() {
             self.mode = Mode::Normal;
         }
+    }
+
+    /// Send the written comments to an agent (`s` / the header `Send` click): straight to the
+    /// sole agent, to the picker over several, or refuse over none (`specs/herdr-host.md`
+    /// HH-ONE-SENDS / HH-MANY-PICK / HH-ZERO-REFUSE). The empty-store check precedes resolution,
+    /// so the picker never opens with nothing to send.
+    pub fn send_to_agent(&mut self) {
+        if self.store.is_empty() {
+            self.status = "no comments to send".to_string();
+            return;
+        }
+        match resolve_send_target() {
+            Ok(SendTarget::One(pane)) => self.export(&Agent { pane }),
+            Ok(SendTarget::Many(choices)) => {
+                self.agent_choices = choices;
+                self.agent_cursor = 0;
+                self.mode = Mode::SelectAgent;
+            }
+            Ok(SendTarget::None) => {
+                self.status = "no agent here — copy to the clipboard instead".to_string();
+            }
+            Err(e) => self.status = format!("agent failed: {e}"),
+        }
+    }
+
+    /// Move the highlight in the agent picker, clamping at both ends.
+    pub fn agent_move(&mut self, delta: isize) {
+        if self.mode == Mode::SelectAgent && !self.agent_choices.is_empty() {
+            self.agent_cursor = step(self.agent_cursor, delta, self.agent_choices.len());
+        }
+    }
+
+    /// Send every comment to the highlighted agent (`enter` in the picker), then close the
+    /// picker regardless of outcome. `export` consumes the comments only on success and reports
+    /// the result; on a failed send (the chosen agent has since vanished) the comments stay and
+    /// the error shows, but the picker still closes so the reviewer can re-press `Send` for a
+    /// fresh list (`specs/herdr-host.md` HH-PICK-SENDS-CHOSEN).
+    pub fn confirm_agent_pick(&mut self) {
+        if let Some(choice) = self.agent_choices.get(self.agent_cursor) {
+            let pane = choice.pane_id.clone();
+            self.export(&Agent { pane });
+        }
+        self.close_modal();
     }
 
     /// The footer's actions for the current context, tagged with their [`Band`] — row 1 (primary,
@@ -3105,6 +3178,9 @@ impl App {
                     (A::EditComment, Do),
                     (A::DeleteComment, Do),
                 ];
+            }
+            Mode::SelectAgent => {
+                return vec![(A::ConfirmAgent, Primary), (A::Cancel, Do), (A::ChooseAgent, Do)];
             }
             Mode::Search => {
                 // With nothing pickable — warming, errored, or no matches — only the
@@ -3289,7 +3365,7 @@ impl App {
         }
         self.clamp_list_cursor();
         if self.store.is_empty() {
-            self.close_list();
+            self.close_modal();
         }
     }
 
@@ -3623,5 +3699,109 @@ mod tests {
         assert!(app.set_tab(super::Tab::AllFiles).is_err());
         assert!(app.move_cursor(1).is_err());
         assert!(app.select_file(0).is_err());
+    }
+
+    // --- Agent picker (specs/herdr-host.md HH-MANY-PICK, specs/input.md) -----------------
+
+    fn with_comment(app: &mut App) {
+        app.store.add(Comment {
+            file: "a.rs".to_string(),
+            side: Side::New,
+            start: 1,
+            end: 1,
+            lines: "+x".to_string(),
+            text: "note".to_string(),
+            diff_anchored: true,
+        });
+    }
+
+    fn choice(pane: &str) -> crate::herdr::AgentChoice {
+        crate::herdr::AgentChoice {
+            pane_id: pane.to_string(),
+            kind: "claude".to_string(),
+            name: None,
+            tab_label: None,
+            status: crate::turn::Status::Idle,
+            title: String::new(),
+        }
+    }
+
+    #[test]
+    fn send_with_no_comments_reports_it_and_opens_no_picker() {
+        // The empty-store check precedes agent resolution, so nothing shells out and no picker
+        // opens over an empty review.
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        app.send_to_agent();
+        assert_eq!(app.status, "no comments to send");
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn popup_modal_covers_the_list_and_the_picker_only() {
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        assert!(!app.popup_modal());
+        app.mode = Mode::List;
+        assert!(app.popup_modal());
+        app.mode = Mode::SelectAgent;
+        assert!(app.popup_modal());
+        // The body-replacing search screen is not a centered-popup modal.
+        app.mode = Mode::Search;
+        assert!(!app.popup_modal());
+    }
+
+    #[test]
+    fn agent_move_clamps_within_the_choices_and_only_in_the_picker() {
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        app.agent_choices = vec![choice("w:p1"), choice("w:p2")];
+        // Inert outside the picker.
+        app.agent_move(1);
+        assert_eq!(app.agent_cursor, 0);
+        app.mode = Mode::SelectAgent;
+        app.agent_move(1);
+        assert_eq!(app.agent_cursor, 1);
+        app.agent_move(1); // clamps at the last row
+        assert_eq!(app.agent_cursor, 1);
+        app.agent_move(-5); // clamps at the first row
+        assert_eq!(app.agent_cursor, 0);
+    }
+
+    #[test]
+    fn cancelling_the_picker_returns_to_normal_and_keeps_comments() {
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        with_comment(&mut app);
+        app.agent_choices = vec![choice("w:p1")];
+        app.mode = Mode::SelectAgent;
+        app.close_modal();
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.store.len(), 1, "Esc sends nothing — the comment stays");
+    }
+
+    #[test]
+    fn confirm_with_no_choice_closes_without_sending_or_panicking() {
+        // A confirm on an empty picker (a race that emptied the list) must not index out of
+        // bounds; it closes to Normal with the comment untouched and never shells out.
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        with_comment(&mut app);
+        app.mode = Mode::SelectAgent; // agent_choices left empty
+        app.confirm_agent_pick();
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.store.len(), 1);
+    }
+
+    #[test]
+    fn config_recovery_does_not_preserve_the_picker() {
+        // The candidate snapshot would be stale after recovery, so the picker falls to Normal
+        // with comments intact; the reviewer re-presses Send (specs/herdr-host.md).
+        let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        with_comment(&mut old);
+        old.mode = Mode::SelectAgent;
+        old.agent_choices = vec![choice("w:p1")];
+
+        let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
+        recovered.carry_authored_state_from(&mut old);
+
+        assert_eq!(recovered.mode, Mode::Normal);
+        assert_eq!(recovered.store.len(), 1, "comments survive recovery");
+        assert!(recovered.agent_choices.is_empty());
     }
 }

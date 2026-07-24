@@ -1690,7 +1690,7 @@ fn finishing_an_edit_returns_to_its_origin() {
     assert_eq!(app.mode, Mode::List, "a list-initiated edit returns to the list");
 
     // Edit from the diff → returns to Normal.
-    app.close_list();
+    app.close_modal();
     app.focus = Focus::Diff;
     app.diff_cursor = row_with(&app, '+');
     app.start_edit();
@@ -3060,7 +3060,7 @@ fn find_is_inert_in_wrong_contexts() {
     assert_eq!(app.mode, Mode::List);
     open_find(&mut app, &keymap);
     assert_eq!(app.mode, Mode::List, "inert in the comments list");
-    app.close_list();
+    app.close_modal();
 
     // On the `PR` tab, which has no read-pane file.
     app.set_tab(Tab::Pr).unwrap();

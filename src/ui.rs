@@ -71,6 +71,10 @@ pub fn render(frame: &mut Frame, app: &App) {
     if app.mode == Mode::List {
         render_comments_list(frame, app, area);
     }
+
+    if app.mode == Mode::SelectAgent {
+        render_agent_picker(frame, app, area);
+    }
 }
 
 /// The vertical bands: tab bar, body, footer. The comment input is inline in the diff, not a band
@@ -1421,6 +1425,8 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::Newline => ("shift+enter".into(), "newline"),
         A::Cancel => ("esc".into(), "cancel"),
         A::CloseList | A::CloseSearch | A::CloseFind => ("esc".into(), "close"),
+        A::ConfirmAgent => ("enter".into(), "send"),
+        A::ChooseAgent => ("↑↓".into(), "choose"),
         A::Search => (hint(K::Search), "search"),
         A::Find => (hint(K::Find), "find"),
         A::Wrap => (hint(K::Wrap), "wrap"),
@@ -1721,6 +1727,65 @@ fn render_comments_list(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
     frame.render_widget(List::new(items), inner);
+}
+
+/// The agent picker popup (`specs/herdr-host.md` HH-MANY-PICK, `specs/input.md`): a centered
+/// list of the ambiguous candidates. Each row is composed and drops every empty part —
+/// `{name or kind} · {tab-label when it adds over the kind} · {status} — {title}` — with no
+/// pane id shown. Mirrors `render_comments_list`.
+fn render_agent_picker(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.palette();
+    let popup = centered(area, 80, 60);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p.mauve))
+        .title(format!("Send to agent ({})", app.agent_choices.len()));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let width = inner.width as usize;
+    let dim = Style::default().fg(p.overlay0);
+    let items: Vec<ListItem> = app
+        .agent_choices
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let mut spans = vec![Span::styled(
+                c.lead().to_string(),
+                Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+            )];
+            if let Some(tab) = c.tab_note() {
+                spans.push(Span::styled(" · ", dim));
+                spans.push(Span::styled(tab.to_string(), dim));
+            }
+            let (word, color) = agent_status_style(p, c.status);
+            spans.push(Span::styled(" · ", dim));
+            spans.push(Span::styled(word, Style::default().fg(color)));
+            if !c.title.is_empty() {
+                // Keep the row on one line: truncate the title to what's left after the rest.
+                let used: usize = spans.iter().map(Span::width).sum();
+                let budget = width.saturating_sub(used + 3);
+                spans.push(Span::styled(" — ", dim));
+                spans.push(Span::styled(truncate_width(&c.title, budget), dim));
+            }
+            selectable_row(spans, width, (i == app.agent_cursor).then_some(p.surface2))
+        })
+        .collect();
+    frame.render_widget(List::new(items), inner);
+}
+
+/// The status word and its colour for a picker row: a resting agent (idle/done) is dim, a
+/// working one takes the accent, a blocked one the alert colour.
+fn agent_status_style(p: &Palette, status: crate::turn::Status) -> (&'static str, Color) {
+    use crate::turn::Status;
+    match status {
+        Status::Idle => ("idle", p.overlay0),
+        Status::Done => ("done", p.overlay0),
+        Status::Working => ("working", p.green),
+        Status::Blocked => ("blocked", p.red),
+        Status::Unknown => ("…", p.overlay0),
+    }
 }
 
 // --- Search screen (specs/search.md) -------------------------------------------------------

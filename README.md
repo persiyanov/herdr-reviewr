@@ -23,7 +23,9 @@ One persistent pane, pointed at a git worktree:
 - **Line comments** — select a range, write a note. It stays visible as a card under the code,
   never hidden behind a marker.
 - **Send** — one keystroke drops every comment into the agent's input as
-  `path:start-end — comment`. Add context, hit enter.
+  `path:start-end — comment`. Add context, hit enter. With several agents in the worktree, a
+  picker asks which one — so the notes go over the herdr socket, not a clipboard that breaks over
+  SSH/mosh.
 - **File viewer** — the whole worktree, any file's current content in the pane.
 - **Search** — `/` from any tab opens one screen over the worktree: fuzzy file names and live
   code grep, powered by [fff](https://github.com/dmtrKovalenko/fff).
@@ -145,7 +147,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | `e` `d` | Edit / delete the comment under the cursor |
 | `n` `N` | Jump to the next / previous comment |
 | `l` | List every comment |
-| `s` | Send all comments to the agent |
+| `s` | Send all comments to the agent (or pick one when several are in the worktree) |
 | `y` | Copy all comments to the clipboard |
 | `esc` | Clear the selection |
 

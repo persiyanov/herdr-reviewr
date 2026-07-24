@@ -52,7 +52,7 @@ use ratatui::layout::Rect;
 
 use crate::app::{App, Focus, Mode};
 use crate::config::{Config, PluginConfig};
-use crate::export::{Agent, Clipboard};
+use crate::export::Clipboard;
 use crate::keymap::Keymap;
 use crate::model::Scope;
 
@@ -1443,13 +1443,26 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
     // `comments` binding (`specs/input.md`).
     if app.mode == Mode::List {
         match (action, key.code) {
-            (Some(K::Comments), _) | (_, Esc) => app.close_list(),
+            (Some(K::Comments), _) | (_, Esc) => app.close_modal(),
             (Some(K::Down), _) => app.list_move(1),
             (Some(K::Up), _) => app.list_move(-1),
-            (Some(K::Send), _) => app.export(&Agent),
+            (Some(K::Send), _) => app.send_to_agent(),
             (Some(K::Copy), _) => app.export(&Clipboard),
             (Some(K::Edit), _) => app.start_edit(),
             (Some(K::Delete), _) => app.delete_comment(),
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    // The agent picker acts through the same `down`/`up` bindings, sends the comments to the
+    // highlighted agent on `enter`, and cancels on `esc` (`specs/input.md`, `specs/herdr-host.md`).
+    if app.mode == Mode::SelectAgent {
+        match (action, key.code) {
+            (_, Esc) => app.close_modal(),
+            (_, Enter) => app.confirm_agent_pick(),
+            (Some(K::Down), _) => app.agent_move(1),
+            (Some(K::Up), _) => app.agent_move(-1),
             _ => {}
         }
         return Ok(());
@@ -1486,7 +1499,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             // off-screen cursor. (The comments-list overlay targets the highlighted row instead.)
             K::Edit if app.focus == Focus::Diff => app.start_edit(),
             K::Delete if app.focus == Focus::Diff => app.delete_comment(),
-            K::Send => app.export(&Agent),
+            K::Send => app.send_to_agent(),
             K::Copy => app.export(&Clipboard),
             K::NextComment => app.jump_comment(1),
             K::PrevComment => app.jump_comment(-1),
@@ -1590,7 +1603,7 @@ pub fn handle_mouse(
 
     // A modal captures new mouse gestures, but a divider gesture cancelled by the key that
     // opened it still owns its remaining drag and mouse-up events.
-    if app.composing() || app.mode == Mode::List {
+    if app.composing() || app.popup_modal() {
         match m.kind {
             MouseEventKind::Drag(MouseButton::Left) if app.divider_drag_captured() => {
                 return Ok(());
@@ -1677,7 +1690,7 @@ pub fn handle_mouse(
                 match hit {
                     ui::HeaderHit::Tab(tab) => app.set_tab(tab)?,
                     ui::HeaderHit::Scope => app.set_scope(app.scope.cycle())?,
-                    ui::HeaderHit::Send => app.export(&Agent),
+                    ui::HeaderHit::Send => app.send_to_agent(),
                 }
             } else if let Some(i) =
                 ui::hit_file(area, app, m.column, m.row, app.file_rows.len(), app.file_scroll)
