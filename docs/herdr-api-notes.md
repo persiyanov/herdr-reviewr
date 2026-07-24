@@ -71,9 +71,12 @@ command = "persiyanov.reviewr.toggle"   # <plugin_id>.<action_id> — plugin_id 
 
 ## Resolve the agent / send comments
 
-`herdr agent list` → `{"result":{"agents":[ {pane_id, tab_id, workspace_id, agent_status, ...} ]}}`.
-- Send target = the agent in the sidebar's `HERDR_TAB_ID`, else the sole agent in its `HERDR_WORKSPACE_ID`.
+`herdr agent list` → `{"result":{"agents":[ {pane_id, tab_id, workspace_id, agent_status, name?, terminal_title_stripped?, ...} ]}}`.
+- One candidate in the sidebar's `HERDR_TAB_ID` (else its `HERDR_WORKSPACE_ID`) sends directly. Several candidates open the agent picker to choose one. None refuses (`specs/herdr-host.md`).
+- The picker labels each row with `name` (usually absent), the agent kind, its `agent_status`, its `terminal_title_stripped`, and the tab label (below). All but the kind degrade to empty if the field is absent.
 - **Caveat:** the reviewr pane itself is listed as an agent — exclude `HERDR_PANE_ID` or the real agent looks ambiguous.
+
+`herdr tab list --workspace <ws>` → `{"result":{"tabs":[ {tab_id, label?} ]}}`. Joined on `tab_id` to label picker rows; best-effort, so a missing label or a failed call just drops that row's tab note.
 
 ```
 herdr pane send-text <agent_pane> "<literal text>"   # writes input, no Enter

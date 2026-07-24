@@ -28,14 +28,12 @@ struct AgentPane {
     pane_id: String,
     tab_id: String,
     workspace_id: String,
-    /// The agent session name (`herdr agent start <name>` / `agent rename`). Usually absent —
-    /// unset for every `claude` session and most `codex` ones — so it is a lead label only
-    /// when present (`AgentChoice::lead`).
-    #[serde(default)]
+    /// The agent session name (`herdr agent start <name>` / `agent rename`). Usually absent,
+    /// unset for every `claude` session and most `codex` ones, so it is a lead label only when
+    /// present (`AgentChoice::lead`). A missing field deserializes to `None`, like `agent`.
     name: Option<String>,
     /// The pane's live terminal title — what the agent is working on. The one field that
     /// reliably differs between same-kind agents in a worktree (`herdr-host.md` HH-MANY-PICK).
-    #[serde(default)]
     terminal_title_stripped: Option<String>,
 }
 
@@ -53,7 +51,6 @@ struct TabList {
 struct TabInfo {
     tab_id: String,
     /// The tab's user-assigned label, when it has one.
-    #[serde(default)]
     label: Option<String>,
 }
 
@@ -130,9 +127,13 @@ fn agent_list() -> Result<Vec<AgentPane>> {
 
 /// `tab_id → label` for one workspace, best-effort: any tab without a label is skipped.
 fn tab_labels(ws: &str) -> Result<HashMap<String, String>> {
-    let json = herdr(&["tab", "list", "--workspace", ws])?;
-    let resp: TabListResponse = serde_json::from_str(&json).context("parsing tab list")?;
-    Ok(resp.result.tabs.into_iter().filter_map(|t| Some((t.tab_id, t.label?))).collect())
+    parse_tab_labels(&herdr(&["tab", "list", "--workspace", ws])?)
+}
+
+/// The `tab_id → label` map from a `herdr tab list` envelope, tabs without a label skipped.
+fn parse_tab_labels(json: &str) -> Result<HashMap<String, String>> {
+    let resp: TabListResponse = serde_json::from_str(json).context("parsing tab list")?;
+    Ok(resp.result.tabs.into_iter().filter_map(|t| t.label.map(|l| (t.tab_id, l))).collect())
 }
 
 /// The send target for the written comments: the sole agent in this tab, else the sole
@@ -261,7 +262,7 @@ pub fn focus(pane: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentChoice, AgentPane, Pick, Status, parse_agents, pick};
+    use super::{AgentChoice, AgentPane, Pick, Status, parse_agents, parse_tab_labels, pick};
 
     /// One agent entry shaped like the real `herdr agent list` output (api notes).
     fn agent(pane: &str, tab: &str, ws: &str) -> AgentPane {
@@ -400,6 +401,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_agents_reads_the_name_and_title_fields_when_present() {
+        // Pins the exact `herdr agent list` key spelling the picker's labels depend on: a
+        // rename on herdr's side would otherwise deserialize silently to None and blank the
+        // row, with every other test still green.
+        let json = r#"{"result":{"agents":[{"agent":"codex","agent_status":"idle","pane_id":"w:p1","tab_id":"w:t1","workspace_id":"w","name":"fbig-import","terminal_title_stripped":"port to kotlin"}]}}"#;
+        let parsed = parse_agents(json).unwrap();
+        assert_eq!(parsed[0].name.as_deref(), Some("fbig-import"));
+        assert_eq!(parsed[0].terminal_title_stripped.as_deref(), Some("port to kotlin"));
+    }
+
+    #[test]
+    fn parse_tab_labels_reads_labels_and_skips_unlabeled_tabs() {
+        // Pins the `herdr tab list` key spelling (`tabs[].label`) the tab-note column depends on.
+        let json =
+            r#"{"result":{"tabs":[{"tab_id":"w:t1","label":"upgrade test"},{"tab_id":"w:t2"}]}}"#;
+        let labels = parse_tab_labels(json).unwrap();
+        assert_eq!(labels.get("w:t1").map(String::as_str), Some("upgrade test"));
+        assert!(!labels.contains_key("w:t2"), "a tab with no label is skipped");
+    }
+
+    #[test]
     fn row_lead_prefers_name_then_kind() {
         assert_eq!(choice("codex", Some("fbig-import"), None, "t").lead(), "fbig-import");
         assert_eq!(choice("claude", None, None, "t").lead(), "claude");
@@ -418,5 +440,7 @@ mod tests {
         assert_eq!(choice("codex", None, Some("codex"), "t").tab_note(), None);
         // No tab label (join missing / no workspace id) omits it.
         assert_eq!(choice("claude", None, None, "t").tab_note(), None);
+        // An empty-string label is treated as absent.
+        assert_eq!(choice("claude", None, Some(""), "t").tab_note(), None);
     }
 }

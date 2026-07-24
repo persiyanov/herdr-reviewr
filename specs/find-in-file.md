@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-20
-Last edited: 2026-07-21
+Last edited: 2026-07-24
 ---
 
 # Find in file
@@ -29,7 +29,7 @@ Literal search within the open file in the read pane, opened with `ctrl+f`: ever
 - The query is the search input's field: the comment editor's controls, newlines excluded, a paste's newlines flattened to spaces (`input.md`, `search.md`).
 - An empty query shows a dim placeholder, lights nothing, and leaves the count blank.
 - While the band is open it owns the keymap. Every printable key is query text, so the review keys (`n`, `u`, `1`, …) lose their review action. Only the steps and `esc` act. Every other key is inert.
-- The find key is inert while composing a comment and in the comments list (`input.md`).
+- The find key is inert while composing a comment, in the comments list, and in the agent picker (`input.md`).
 
 ## Matching
 

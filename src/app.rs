@@ -465,8 +465,9 @@ pub struct App {
     pub select_anchor: Option<usize>,
     pub store: CommentStore,
     pub list_cursor: usize,
-    /// The agent picker's candidates while `mode == SelectAgent`, empty otherwise. Snapshotted
-    /// when the picker opens (`send_to_agent`), consumed by cancel/confirm (`specs/herdr-host.md`).
+    /// The agent picker's candidates, valid while `mode == SelectAgent`. Snapshotted when the
+    /// picker opens (`send_to_agent`); left in place on close (inert outside the picker) and
+    /// replaced on the next open (`specs/herdr-host.md`).
     pub agent_choices: Vec<AgentChoice>,
     /// The highlighted row in the agent picker.
     pub agent_cursor: usize,
@@ -3141,14 +3142,20 @@ impl App {
         }
     }
 
+    /// The highlighted choice, the one `confirm_agent_pick` sends to. `None` when the list is
+    /// empty (a race that emptied it under the picker).
+    pub fn picked_agent(&self) -> Option<&AgentChoice> {
+        self.agent_choices.get(self.agent_cursor)
+    }
+
     /// Send every comment to the highlighted agent (`enter` in the picker), then close the
-    /// picker regardless of outcome. `export` consumes the comments only on success and reports
-    /// the result; on a failed send (the chosen agent has since vanished) the comments stay and
-    /// the error shows, but the picker still closes so the reviewer can re-press `Send` for a
-    /// fresh list (`specs/herdr-host.md` HH-PICK-SENDS-CHOSEN).
+    /// picker regardless of outcome. The send targets that row's pane, never a re-resolved one
+    /// (`specs/herdr-host.md` HH-PICK-SENDS-CHOSEN). `export` consumes the comments only on
+    /// success; on a failed send (the chosen agent has since vanished) the comments stay and the
+    /// error shows, and the picker still closes so the reviewer can re-press `Send` for a fresh
+    /// list (`specs/herdr-host.md`, Failure semantics).
     pub fn confirm_agent_pick(&mut self) {
-        if let Some(choice) = self.agent_choices.get(self.agent_cursor) {
-            let pane = choice.pane_id.clone();
+        if let Some(pane) = self.picked_agent().map(|c| c.pane_id.clone()) {
             self.export(&Agent { pane });
         }
         self.close_modal();
@@ -3786,6 +3793,17 @@ mod tests {
         app.confirm_agent_pick();
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.store.len(), 1);
+    }
+
+    #[test]
+    fn the_picker_targets_the_highlighted_row_not_the_first() {
+        // HH-PICK-SENDS-CHOSEN: confirm sends to agent_choices[agent_cursor], so moving the
+        // highlight changes which pane it would target.
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        app.agent_choices = vec![choice("w:p1"), choice("w:p2"), choice("w:p3")];
+        app.mode = Mode::SelectAgent;
+        app.agent_move(2);
+        assert_eq!(app.picked_agent().map(|c| c.pane_id.as_str()), Some("w:p3"));
     }
 
     #[test]
