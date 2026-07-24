@@ -83,6 +83,29 @@ impl AgentChoice {
     pub fn tab_note(&self) -> Option<&str> {
         self.tab_label.as_deref().filter(|l| !l.is_empty() && *l != self.kind)
     }
+
+    /// The short pane id (`p7` from `w…:p7`), the last colon segment. Shown only as the
+    /// collision fallback (`ambiguous_rows`), never otherwise.
+    pub fn short_pane(&self) -> &str {
+        self.pane_id.rsplit(':').next().unwrap_or(&self.pane_id)
+    }
+
+    /// The visible identity of a row: everything it shows except the hidden pane id. Two
+    /// choices with the same key render as look-alike rows.
+    fn row_key(&self) -> (&str, Option<&str>, Status, &str) {
+        (self.lead(), self.tab_note(), self.status, self.title.as_str())
+    }
+}
+
+/// For each choice, whether its composed row would be identical to another's. The picker
+/// appends the short pane id to exactly these, so several look-alike agents (same kind, no
+/// name, same tab note, same status, same title) are never a blind choice (`specs/herdr-host.md`
+/// HH-MANY-PICK).
+pub fn ambiguous_rows(choices: &[AgentChoice]) -> Vec<bool> {
+    choices
+        .iter()
+        .map(|c| choices.iter().filter(|other| other.row_key() == c.row_key()).count() > 1)
+        .collect()
 }
 
 /// Where a `Send` should go once the candidates are resolved (`specs/herdr-host.md`,
@@ -442,5 +465,29 @@ mod tests {
         assert_eq!(choice("claude", None, None, "t").tab_note(), None);
         // An empty-string label is treated as absent.
         assert_eq!(choice("claude", None, Some(""), "t").tab_note(), None);
+    }
+
+    fn choice_pane(pane: &str, kind: &str, title: &str) -> AgentChoice {
+        AgentChoice { pane_id: pane.to_string(), ..choice(kind, None, None, title) }
+    }
+
+    #[test]
+    fn ambiguous_rows_flags_look_alikes_and_spares_distinct_rows() {
+        // Two nameless same-kind agents with no tab note and no title render identically; a
+        // third with a title stands on its own.
+        let rows = [
+            choice_pane("w:p1", "claude", ""),
+            choice_pane("w:p2", "claude", ""),
+            choice_pane("w:p3", "claude", "porting invitations"),
+        ];
+        assert_eq!(super::ambiguous_rows(&rows), vec![true, true, false]);
+        // A lone agent is never ambiguous.
+        assert_eq!(super::ambiguous_rows(&rows[2..]), vec![false]);
+    }
+
+    #[test]
+    fn short_pane_is_the_last_colon_segment() {
+        assert_eq!(choice_pane("w656b5dd9e0ab31:p7", "codex", "").short_pane(), "p7");
+        assert_eq!(choice_pane("bare", "codex", "").short_pane(), "bare");
     }
 }

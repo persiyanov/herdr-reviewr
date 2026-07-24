@@ -46,11 +46,12 @@ Zero candidates still refuses with the clipboard hint; exactly one still sends d
   agents, pane `label` is `∅` on every agent pane (only plugin panes set it), and `cwd` is
   identical within a worktree. The row is composed and **omits every empty part**:
   `{name or kind} · {tab-label, shown only when it differs from the kind} · {status} — {title}`
-  (title = `terminal_title_stripped`, the live "what it's working on"). No pane id is shown;
-  `pane_id` is retained **internally** as the send target. The tab label needs a second
+  (title = `terminal_title_stripped`, the live "what it's working on"). The pane id is hidden;
+  `pane_id` is retained **internally** as the send target. **Exception:** rows that would
+  render byte-identical each show their short pane id (`ambiguous_rows`), so several
+  look-alike agents in one tab are never a blind choice. The tab label needs a second
   `herdr tab list --workspace <ws>` call joined on `tab_id` (cheap, synchronous between
-  frames like the agent list). Two agents identical in kind, tab-label, and title render as
-  look-alike rows but remain distinct selections addressing their own panes.
+  frames like the agent list).
 - A send whose chosen agent has since vanished fails gracefully: comments stay, the error
   shows, **the picker closes** (the reviewer re-presses `Send` for a fresh list).
 - **Turn tracking is unchanged.** `last-turn` still resolves only the *sole* agent; an
@@ -343,3 +344,9 @@ misfired and were re-spawned); their must-fixes are incorporated above:
 
 - If a future herdr drops `terminal_title_stripped` for some kind, the row falls back to
   `name`-or-kind + pane id, noted in the spec.
+
+## Replan Log
+
+- Row format settled with Ivan during implementation: drop the always-on pane id; key rows on
+  name-or-kind + tab label + status + title; show the short pane id only as a collision
+  fallback (`ambiguous_rows`) so several look-alike agents in one tab are never a blind choice.

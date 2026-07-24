@@ -123,7 +123,7 @@ The binary reviews the pane's working directory, normalized to its git top level
 
 The target resolves in order: the sole agent in the sidebar's tab, else the sole agent in its workspace. reviewr writes the comment blocks into the chosen agent pane without submitting, then focuses it. You add context and press enter.
 
-Over several candidates the picker lists exactly that set. Each row shows the agent's name or kind, then its tab label when that label adds over the kind, then its status, then its terminal title. `input.md` holds the picker's keys.
+Over several candidates the picker lists exactly that set. Each row shows the agent's name or kind, then its tab label when that label adds over the kind, then its status, then its terminal title. Rows that would otherwise be identical each show their short pane id, so the choice is never blind. `input.md` holds the picker's keys.
 
 The candidate rules, coded for citation:
 

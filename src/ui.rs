@@ -1731,8 +1731,9 @@ fn render_comments_list(frame: &mut Frame, app: &App, area: Rect) {
 
 /// The agent picker popup (`specs/herdr-host.md` HH-MANY-PICK, `specs/input.md`): a centered
 /// list of the ambiguous candidates. Each row is composed and drops every empty part —
-/// `{name or kind} · {tab-label when it adds over the kind} · {status} — {title}` — with no
-/// pane id shown. Mirrors `render_comments_list`.
+/// `{name or kind} · {tab-label when it adds over the kind} · {status} — {title}`. The pane id
+/// is hidden, except that any rows that would render identically each show their short pane id
+/// so the choice is never blind. Mirrors `render_comments_list`.
 fn render_agent_picker(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
     let popup = centered(area, 80, 60);
@@ -1746,6 +1747,7 @@ fn render_agent_picker(frame: &mut Frame, app: &App, area: Rect) {
 
     let width = inner.width as usize;
     let dim = Style::default().fg(p.overlay0);
+    let ambiguous = crate::herdr::ambiguous_rows(&app.agent_choices);
     let items: Vec<ListItem> = app
         .agent_choices
         .iter()
@@ -1762,6 +1764,12 @@ fn render_agent_picker(frame: &mut Frame, app: &App, area: Rect) {
             let (word, color) = agent_status_style(p, c.status);
             spans.push(Span::styled(" · ", dim));
             spans.push(Span::styled(word, Style::default().fg(color)));
+            // A collision fallback, before the title so its width is reserved: only rows that
+            // would otherwise be identical show their short pane id to tell them apart.
+            if ambiguous[i] {
+                spans.push(Span::styled(" · ", dim));
+                spans.push(Span::styled(c.short_pane().to_string(), dim));
+            }
             if !c.title.is_empty() {
                 // Keep the row on one line: truncate the title to what's left after the rest.
                 let used: usize = spans.iter().map(Span::width).sum();
