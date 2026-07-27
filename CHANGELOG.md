@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A `tab`-placement sidebar is now labeled in the tab bar.** herdr gives a fresh tab a bare
+  number, so the sidebar showed up as a stray like `4` and got closed as clutter. It now names
+  the tab `reviewr`. The rename is best-effort, so an open that already succeeded never fails
+  because the rename did.
+
 ## [0.26.0] — 2026-07-28
 
 ### Changed

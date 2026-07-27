@@ -38,6 +38,7 @@ herdr plugin pane close <pane_id>
 ```
 - A `split` (or `zoomed`) pane **must** pass `--target-pane` (it implies the workspace); `--workspace` alone errors.
 - New pane id: `.result.plugin_pane.pane.pane_id`. The pane is auto-labeled with the entrypoint `title`.
+- The same pane object carries `tab_id` (verified across 10 live plugin panes, 0.7.5). A `tab`-placement open reads `.result.plugin_pane.pane.tab_id` to rename the fresh tab.
 - **`plugin pane close` only closes panes in the in-memory plugin-pane registry** — after a herdr
   restart it refuses a still-live sidebar with `plugin_pane_not_found` (observed, 0.7.1). Plain
   `herdr pane close <pane_id>` closes any pane by id; prefer it for teardown.
@@ -97,6 +98,9 @@ workspace. No sample held two agents in one tab, so the order inside a tab is un
 `herdr tab list --workspace <ws>` → `{"result":{"tabs":[ {tab_id, label, number, pane_count} ]}}`.
 `label` and `number` differ: a tab with `number: 4` defaults to `label: "1"`, a per-workspace
 ordinal. The picker joins `label` on `tab_id`, best effort.
+
+`herdr tab rename <tab_id> <label>` sets a tab's `label` (0.7.5). A `tab`-placement open uses it to
+name the fresh tab `reviewr`.
 
 ```
 herdr pane send-text <agent_pane> "<literal text>"   # writes input, no Enter

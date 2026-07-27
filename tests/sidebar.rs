@@ -15,7 +15,7 @@ fn fake_herdr(dir: &Path) -> (PathBuf, PathBuf) {
     fs::write(
         &path,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  'pane list'*) printf '%s\\n' '{{\"result\":{{\"panes\":[{{\"pane_id\":\"agent-1\",\"label\":\"agent\"}}]}}}}' ;;\n  *) printf '%s\\n' '{{\"result\":{{\"plugin_pane\":{{\"pane\":{{\"pane_id\":\"reviewr-1\"}}}}}}}}' ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in\n  'pane list'*) printf '%s\\n' '{{\"result\":{{\"panes\":[{{\"pane_id\":\"agent-1\",\"label\":\"agent\"}}]}}}}' ;;\n  *) printf '%s\\n' '{{\"result\":{{\"plugin_pane\":{{\"pane\":{{\"pane_id\":\"reviewr-1\",\"tab_id\":\"tab-9\"}}}}}}}}' ;;\nesac\n",
             log.display()
         ),
     )
@@ -159,4 +159,52 @@ fn valid_non_default_placement_and_direction_reach_herdr_arguments() {
             assert!(calls.contains(direction), "{calls}");
         }
     }
+}
+
+#[test]
+fn tab_placement_open_names_its_fresh_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("config.toml"), "toggle_placement = \"tab\"\n").unwrap();
+    let (herdr, log) = fake_herdr(dir.path());
+    let context = serde_json::json!({"focused_pane_cwd": env!("CARGO_MANIFEST_DIR")}).to_string();
+
+    let output = Command::new("bash")
+        .arg("herdr/sidebar.sh")
+        .arg("open")
+        .env("HERDR_REVIEWR_BIN", reviewr_bin())
+        .env("HERDR_PLUGIN_CONFIG_DIR", dir.path())
+        .env("HERDR_BIN_PATH", &herdr)
+        .env("HERDR_WORKSPACE_ID", "workspace-1")
+        .env("HERDR_PANE_ID", "agent-1")
+        .env("HERDR_PLUGIN_CONTEXT_JSON", &context)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let calls = fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("tab rename tab-9 reviewr"), "{calls}");
+}
+
+#[test]
+fn split_placement_open_renames_no_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("config.toml"), "toggle_placement = \"split\"\n").unwrap();
+    let (herdr, log) = fake_herdr(dir.path());
+    let context = serde_json::json!({"focused_pane_cwd": env!("CARGO_MANIFEST_DIR")}).to_string();
+
+    let output = Command::new("bash")
+        .arg("herdr/sidebar.sh")
+        .arg("open")
+        .env("HERDR_REVIEWR_BIN", reviewr_bin())
+        .env("HERDR_PLUGIN_CONFIG_DIR", dir.path())
+        .env("HERDR_BIN_PATH", &herdr)
+        .env("HERDR_WORKSPACE_ID", "workspace-1")
+        .env("HERDR_PANE_ID", "agent-1")
+        .env("HERDR_PLUGIN_CONTEXT_JSON", &context)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let calls = fs::read_to_string(&log).unwrap();
+    assert!(!calls.contains("tab rename"), "{calls}");
 }

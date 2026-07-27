@@ -66,6 +66,8 @@ A manual open keeps focus on the agent for `split`, and gives focus to reviewr o
 
 A `split` or `zoomed` open attaches to the focused pane, or to the workspace's first pane when the context has none.
 
+A `tab` open names the fresh tab `reviewr`, using the `tab_id` the pane-open result reports. herdr otherwise labels a new tab with a bare number. The rename is cosmetic. When it fails, or an older herdr omits `tab_id`, the open still succeeds and the tab keeps its numeric label.
+
 **HH-EVENT-BESIDE-LAYOUT: a layout plugin handles the same event**
 
 1. `auto_open = false`. A layout plugin also handles `worktree.created`.

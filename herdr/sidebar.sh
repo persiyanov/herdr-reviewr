@@ -155,8 +155,16 @@ overlay)
   ;;
 esac
 
-new=$("$H" plugin pane open --plugin "${HERDR_PLUGIN_ID:-persiyanov.reviewr}" --entrypoint sidebar \
-  "$@" --cwd "$cwd" "$focus" 2>/dev/null |
-  jq -r '.result.plugin_pane.pane.pane_id // empty' 2>/dev/null)
+open_json=$("$H" plugin pane open --plugin "${HERDR_PLUGIN_ID:-persiyanov.reviewr}" --entrypoint sidebar \
+  "$@" --cwd "$cwd" "$focus" 2>/dev/null)
+new=$(printf '%s' "$open_json" | jq -r '.result.plugin_pane.pane.pane_id // empty' 2>/dev/null)
 [ -n "$new" ] || refuse "herdr plugin pane open failed"
+
+# A tab open lands in a fresh tab that herdr labels with a bare index; name it
+# after the plugin so the tab bar reads "reviewr" (HH-TAB-NAMED). Cosmetic: a
+# failed rename never fails an open that already succeeded.
+if [ "$placement" = tab ]; then
+  tab=$(printf '%s' "$open_json" | jq -r '.result.plugin_pane.pane.tab_id // empty' 2>/dev/null)
+  [ -z "$tab" ] || "$H" tab rename "$tab" reviewr >/dev/null 2>&1
+fi
 [ "$mode" = auto-open ] || printf 'opened %s (%s) in %s\n' "$new" "$placement" "$ws"
