@@ -188,14 +188,14 @@ Row 1's primary and actions follow the cursor:
 ### Open in editor
 
 On a file row in the file list, `e` opens that file in an editor. The editor takes the whole
-screen. reviewr's own display returns when it exits. Inert on a directory row. Inert on the diff
-pane too, where `e` edits the comment under the cursor instead (see above).
+screen. reviewr's own display returns when it exits.
 
-The editor command is `config.md`'s `editor` key, or `$EDITOR` when unset. Neither set reports a
-status error and opens nothing.
-
-Closing the editor refreshes the file list and diff, so an edit made there becomes visible. The
-cursor and scroll position hold (`overview.md` Continuity).
+- `e` is inert on a directory row. On the diff pane, `e` still edits the comment under the cursor
+  instead (see Footer).
+- The editor command is the configured `editor` key, or `$EDITOR` when unset (`config.md`).
+  Neither set reports a status error and opens nothing.
+- Closing the editor refreshes the file list and diff. The cursor and scroll position hold
+  (`overview.md` Continuity).
 
 ### Comment editor
 
