@@ -33,11 +33,11 @@ or Bitbucket Data Center — but never posts there.
 
 ## Requirements
 
-- **herdr ≥ 0.7.0** (the plugin system).
+- **herdr ≥ 0.7.5** (the plugin system).
 - **git** on `PATH`.
 - A **truecolor (24-bit)** terminal with Unicode box-drawing support. Pick a theme that matches
   its light or dark background (see [Theme](#theme)).
-- **macOS or Linux.**
+- **macOS, Linux, or Windows.**
 - A forge CLI or token for the **PR** tab, only for the forge(s) you use — everything else
   works without any of them:
   - **`gh`** (the GitHub CLI), authenticated, for a GitHub origin.
