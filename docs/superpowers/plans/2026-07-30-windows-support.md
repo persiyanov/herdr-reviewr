@@ -14,7 +14,11 @@
 - Clippy runs with `pedantic` and `-D warnings` (see `[lints]` in Cargo.toml); code must pass `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --all --check`.
 - All user-facing refusal/success strings must match `herdr/sidebar.sh` verbatim (existing tests assert on them; parity is a spec requirement).
 - Windows manifest commands use TOML **literal strings** (single quotes) so backslashes and `$env:` survive unescaped.
-- `min_herdr_version` becomes `"0.7.1"` (the version verified to honor `"windows"` + item-level platforms).
+- `min_herdr_version` becomes `"0.7.5"` — the earliest herdr verified to honor item-level `platforms` filters; an older herdr must refuse with a version message instead of running both `[[build]]` twins on unix (verified in the herdr-slackr reference implementation, branch `dcieslak19973/windows-support-20260730`).
+- herdr **rejects duplicate pane/action ids even across disjoint platform filters** — Windows twins carry `-windows` id suffixes (`sidebar-windows`, `toggle-windows`, …), and the Rust runtime selects its own platform's entrypoint via `cfg!(windows)`.
+- On Windows herdr hands out `$HERDR_PLUGIN_ROOT` as a `\\?\` verbatim path — PowerShell launcher one-liners strip that prefix before invoking the exe.
+- `herdr plugin unlink` is broken on Windows (raw NotFound error) — clean up link probes with `herdr plugin uninstall` instead.
+- `herdr/install.ps1` must be **ASCII only**: PowerShell 5.1 reads a BOM-less script as ANSI, and a UTF-8 em-dash's trailing byte decodes to a curly quote that breaks parsing.
 - The manifest `version` field stays `0.13.1` in this plan; release/version bump follows `docs/RELEASING.md` separately.
 - Commit messages follow the repo's conventional style (`feat:`, `fix:`, `docs:`, `ci:`).
 
@@ -282,7 +286,15 @@ mod tests {
 }
 ```
 
-Note: the items are intentionally private (`fn`, not `pub fn`) — Task 2's runtime lives in this same file. No `dead_code` warnings fire in this task even though nothing outside the module calls these yet: the unit tests reference every item, and `cfg(test)` usage counts. Verify with clippy in Step 3; do not add any `#[allow]`.
+Note: the items are intentionally private (`fn`, not `pub fn`) — Task 2's runtime lives in this same file. Because `cargo clippy --all-targets` also compiles the non-test target (where these items have no callers until Task 2), add this directly under the module doc:
+
+```rust
+// The runtime (`pub fn run`) lands in the next task; until then the non-test target has no
+// callers for these items.
+#![cfg_attr(not(test), allow(dead_code))]
+```
+
+Task 2 removes this line when the runtime wires the items up.
 
 - [ ] **Step 2: Register the module and run the tests**
 
@@ -323,9 +335,15 @@ git commit -m "feat: sidebar decision core in Rust (port of sidebar.sh logic)"
 
 - [ ] **Step 1: Append the runtime to `src/sidebar.rs`**
 
-Add `use std::process::{Command, ExitCode};` to the imports, then below the pure functions:
+First delete the temporary `#![cfg_attr(not(test), allow(dead_code))]` line (and its comment) that Task 1 added under the module doc — the runtime below consumes every item, so the allow must go. Add `use std::process::{Command, ExitCode};` to the imports, then below the pure functions:
 
 ```rust
+/// The manifest pane entrypoint for this build's platform: herdr rejects duplicate pane ids
+/// even across disjoint platform filters, so Windows has its own `sidebar-windows` twin.
+const fn entrypoint() -> &'static str {
+    if cfg!(windows) { "sidebar-windows" } else { "sidebar" }
+}
+
 /// Entry point called from `main` with argv after the `sidebar` word.
 pub fn run(args: &[String]) -> ExitCode {
     let mode = match Mode::parse(args.first().map(String::as_str)) {
@@ -473,7 +491,7 @@ fn open_sidebar(
         "--plugin".into(),
         plugin,
         "--entrypoint".into(),
-        "sidebar".into(),
+        entrypoint().into(),
     ];
     args.extend(tail);
     args.push("--cwd".into());
@@ -498,6 +516,16 @@ Parity notes for the implementer (each mirrors a `sidebar.sh` line — do not "i
 - Unknown mode refuses **loudly** even though `refuse()` would silence auto-open — the mode itself failed to parse, so it is never auto (`refuse(false, …)`).
 - `focus_flag`'s manual/split matrix: script line 133-134 (`--no-focus` default; manual + non-split → `--focus`).
 - `close: nothing open` / `open: already open (…)` / `closed …` / `opened …` strings are stdout, refusals are stderr with the `reviewr: ` prefix.
+
+Also add to the `#[cfg(test)]` module (alongside Task 1's tests):
+
+```rust
+    #[test]
+    fn entrypoint_matches_the_platform_pane_id() {
+        let expected = if cfg!(windows) { "sidebar-windows" } else { "sidebar" };
+        assert_eq!(super::entrypoint(), expected);
+    }
+```
 
 - [ ] **Step 2: Dispatch in `src/main.rs`**
 
@@ -624,12 +652,9 @@ git commit -m "feat: herdr-reviewr sidebar subcommand replaces sidebar.sh at run
 - Consumes: `herdr-reviewr sidebar <mode>` (Task 2), `herdr/install.ps1` (Task 5 — referenced here, created there; `plugin link` skips build so the ordering is safe).
 - Produces: the manifest all later verification runs against.
 
-- [ ] **Step 1: Probe — does herdr accept duplicate item ids across platform variants?**
+- [ ] **Step 1: Context — duplicate ids are rejected; twins use `-windows` suffixes**
 
-Before rewriting, verify the risk called out in the spec. Write the new manifest (Step 2), then:
-
-Run: `herdr plugin link .` (from the repo root), then `herdr plugin list`, then `herdr plugin unlink dcieslak19973.reviewr`
-Expected: link succeeds and `plugin list` shows the plugin with 4 actions / 1 pane (Windows variants active, unix variants filtered out). **If herdr rejects duplicate ids**, STOP — report back; the fallback design (distinct ids like `sidebar-win` plus env-driven entrypoint selection) needs a human decision.
+Verified in the herdr-slackr reference implementation: herdr rejects duplicate pane/action ids even across disjoint platform filters. Windows twins therefore carry `-windows` id suffixes, and the Rust runtime's `entrypoint()` (Task 2) selects `sidebar-windows` on Windows. No probe needed; the link verification happens in Step 4.
 
 - [ ] **Step 2: Rewrite `herdr-plugin.toml`**
 
@@ -637,15 +662,25 @@ Expected: link succeeds and `plugin list` shows the plugin with 4 actions / 1 pa
 id = "dcieslak19973.reviewr"
 name = "reviewr"
 version = "0.13.1"
-min_herdr_version = "0.7.1"
+# 0.7.5 is the earliest herdr verified to honor item-level `platforms` filters (see
+# docs/superpowers/specs/2026-07-30-windows-support-design.md); an older herdr refuses here
+# with a version message instead of half-installing a manifest it may misread (e.g. running
+# both [[build]] twins on unix).
+min_herdr_version = "0.7.5"
 platforms = ["macos", "linux", "windows"]
 description = "Native terminal code-review sidebar for herdr."
 
 # On `herdr plugin install`, download the prebuilt `herdr-reviewr` binary for this platform
 # from the matching GitHub Release into $HERDR_PLUGIN_ROOT/bin (no Rust toolchain needed).
 # Skipped by `herdr plugin link` — for a local checkout, build it yourself with
-# `cargo install --path .`. Item-level `platforms` override the top-level list, so each
-# platform runs its native script.
+# `cargo install --path .`.
+#
+# Windows notes: commands are argv arrays herdr spawns directly — no shell — so each entry
+# has a unix item and a Windows twin gated by item-level `platforms`. herdr rejects
+# duplicate pane/action ids even across disjoint platforms, hence the `-windows` id
+# suffixes; on Windows, bind THOSE action ids. The PowerShell one-liners expand
+# $env:HERDR_PLUGIN_ROOT themselves and strip the `\\?\` verbatim prefix herdr reports on
+# Windows before invoking bin\herdr-reviewr.exe by absolute path.
 [[build]]
 platforms = ["macos", "linux"]
 command = ["bash", "herdr/install.sh"]
@@ -656,83 +691,98 @@ command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "h
 
 # The sidebar pane runs the downloaded binary by absolute path under the plugin root, since
 # the pane's cwd is the repo under review (not the plugin root) and the binary isn't on
-# PATH. Manifest commands are direct argv — the shell (sh / powershell) exists only to
-# expand $HERDR_PLUGIN_ROOT.
+# PATH. Both platform twins share the `reviewr` title, so the sidebar's label-based pane
+# discovery is platform-agnostic.
 [[panes]]
 id = "sidebar"
+platforms = ["macos", "linux"]
 title = "reviewr"
 placement = "split"
-platforms = ["macos", "linux"]
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-reviewr\""]
 
 [[panes]]
-id = "sidebar"
+id = "sidebar-windows"
+platforms = ["windows"]
 title = "reviewr"
 placement = "split"
-platforms = ["windows"]
-command = ["powershell", "-NoProfile", "-Command", '& "$env:HERDR_PLUGIN_ROOT\bin\herdr-reviewr.exe"']
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  '''$r = $env:HERDR_PLUGIN_ROOT; if ($r -and $r.StartsWith('\\?\')) { $r = $r.Substring(4) }; $exe = Join-Path $r 'bin\herdr-reviewr.exe'; & $exe''',
+]
 
 # Actions receive $HERDR_PLUGIN_ROOT, so they run the binary by absolute path and work
 # regardless of PATH. Sidebar orchestration lives in `herdr-reviewr sidebar <mode>`
 # (formerly herdr/sidebar.sh).
 [[actions]]
 id = "skill-install"
+platforms = ["macos", "linux"]
 title = "reviewr: install agent skill"
 contexts = ["pane", "workspace"]
-platforms = ["macos", "linux"]
 command = ["bash", "-c", 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" skill-install']
 
 [[actions]]
-id = "skill-install"
+id = "skill-install-windows"
+platforms = ["windows"]
 title = "reviewr: install agent skill"
 contexts = ["pane", "workspace"]
-platforms = ["windows"]
-command = ["powershell", "-NoProfile", "-Command", '& "$env:HERDR_PLUGIN_ROOT\bin\herdr-reviewr.exe" skill-install']
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  '''$r = $env:HERDR_PLUGIN_ROOT; if ($r -and $r.StartsWith('\\?\')) { $r = $r.Substring(4) }; $exe = Join-Path $r 'bin\herdr-reviewr.exe'; & $exe skill-install''',
+]
 
 [[actions]]
 id = "toggle"
+platforms = ["macos", "linux"]
 title = "reviewr: toggle sidebar"
 contexts = ["pane", "workspace"]
-platforms = ["macos", "linux"]
 command = ["bash", "-c", 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" sidebar toggle']
 
 [[actions]]
-id = "toggle"
+id = "toggle-windows"
+platforms = ["windows"]
 title = "reviewr: toggle sidebar"
 contexts = ["pane", "workspace"]
-platforms = ["windows"]
-command = ["powershell", "-NoProfile", "-Command", '& "$env:HERDR_PLUGIN_ROOT\bin\herdr-reviewr.exe" sidebar toggle']
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  '''$r = $env:HERDR_PLUGIN_ROOT; if ($r -and $r.StartsWith('\\?\')) { $r = $r.Substring(4) }; $exe = Join-Path $r 'bin\herdr-reviewr.exe'; & $exe sidebar toggle''',
+]
 
 [[actions]]
 id = "open"
+platforms = ["macos", "linux"]
 title = "reviewr: open sidebar"
 contexts = ["pane", "workspace"]
-platforms = ["macos", "linux"]
 command = ["bash", "-c", 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" sidebar open']
 
 [[actions]]
-id = "open"
+id = "open-windows"
+platforms = ["windows"]
 title = "reviewr: open sidebar"
 contexts = ["pane", "workspace"]
-platforms = ["windows"]
-command = ["powershell", "-NoProfile", "-Command", '& "$env:HERDR_PLUGIN_ROOT\bin\herdr-reviewr.exe" sidebar open']
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  '''$r = $env:HERDR_PLUGIN_ROOT; if ($r -and $r.StartsWith('\\?\')) { $r = $r.Substring(4) }; $exe = Join-Path $r 'bin\herdr-reviewr.exe'; & $exe sidebar open''',
+]
 
 [[actions]]
 id = "close"
+platforms = ["macos", "linux"]
 title = "reviewr: close sidebar"
 contexts = ["pane", "workspace"]
-platforms = ["macos", "linux"]
 command = ["bash", "-c", 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" sidebar close']
 
 [[actions]]
-id = "close"
+id = "close-windows"
+platforms = ["windows"]
 title = "reviewr: close sidebar"
 contexts = ["pane", "workspace"]
-platforms = ["windows"]
-command = ["powershell", "-NoProfile", "-Command", '& "$env:HERDR_PLUGIN_ROOT\bin\herdr-reviewr.exe" sidebar close']
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  '''$r = $env:HERDR_PLUGIN_ROOT; if ($r -and $r.StartsWith('\\?\')) { $r = $r.Substring(4) }; $exe = Join-Path $r 'bin\herdr-reviewr.exe'; & $exe sidebar close''',
+]
 
 # Auto-open the sidebar for a freshly created worktree (gated by auto_open; see
-# `herdr-reviewr sidebar auto-open`).
+# `herdr-reviewr sidebar auto-open`). Events carry no ids, so the twins need no suffix.
 [[events]]
 on = "worktree.created"
 platforms = ["macos", "linux"]
@@ -741,7 +791,10 @@ command = ["bash", "-c", 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" sidebar au
 [[events]]
 on = "worktree.created"
 platforms = ["windows"]
-command = ["powershell", "-NoProfile", "-Command", '& "$env:HERDR_PLUGIN_ROOT\bin\herdr-reviewr.exe" sidebar auto-open']
+command = [
+  "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+  '''$r = $env:HERDR_PLUGIN_ROOT; if ($r -and $r.StartsWith('\\?\')) { $r = $r.Substring(4) }; $exe = Join-Path $r 'bin\herdr-reviewr.exe'; & $exe sidebar auto-open''',
+]
 ```
 
 - [ ] **Step 3: Delete the script**
@@ -750,10 +803,10 @@ command = ["powershell", "-NoProfile", "-Command", '& "$env:HERDR_PLUGIN_ROOT\bi
 git rm herdr/sidebar.sh
 ```
 
-- [ ] **Step 4: Verify the manifest parses and links (repeat of the Step 1 probe on the final file)**
+- [ ] **Step 4: Verify the manifest parses and links**
 
-Run: `herdr plugin link .` then `herdr plugin list` then `herdr plugin unlink dcieslak19973.reviewr`
-Expected: clean link, 4 actions, 1 pane, 1 event listed.
+Run: `herdr plugin link .` then `herdr plugin list` then `herdr plugin uninstall dcieslak19973.reviewr`
+Expected: clean link; the list shows the Windows-side items (`sidebar-windows` pane, the four `-windows` actions, 1 event) with unix twins filtered out. Cleanup uses `plugin uninstall` — `plugin unlink` is broken on Windows (raw NotFound error).
 
 - [ ] **Step 5: Commit**
 
@@ -888,76 +941,102 @@ git commit -m "feat: Windows clipboard via clip.exe; PATHEXT-aware tool probe"
 - [ ] **Step 1: Create `herdr/install.ps1`**
 
 ```powershell
-# herdr `[[build]]` step (Windows): download the prebuilt herdr-reviewr.exe from the matching
-# GitHub Release into the plugin's bin/ dir. Mirror of herdr/install.sh — same version
-# resolution, retry, and checksum contract. Runs on `herdr plugin install`; `herdr plugin
-# link` skips the build step — for a local checkout, build with `cargo install --path .`.
+# herdr `[[build]]` step, Windows twin of install.sh: download the prebuilt herdr-reviewr
+# binary for this platform from the matching GitHub Release into the plugin's bin/ dir. Runs
+# on `herdr plugin install` (a managed checkout); `herdr plugin link` skips the build step --
+# for a local checkout, build from source with `cargo install --path .`.
+# ASCII only: PowerShell 5.1 reads a BOM-less script as ANSI, and a UTF-8 em-dash's trailing
+# byte decodes to a curly quote that PS treats as a string delimiter.
 #
-# The build runs with the plugin checkout as the working directory, so the plugin root is
-# resolved from this script's location rather than $HERDR_PLUGIN_ROOT (build commands may
-# not receive the runtime env). At runtime the pane command reads
+# The build runs with the plugin checkout as the working directory, but like install.sh we
+# resolve the plugin root from this script's location rather than $env:HERDR_PLUGIN_ROOT
+# (build commands may not receive the runtime env; and on Windows herdr hands out the plugin
+# root as a `\\?\` verbatim path). At runtime the pane command reads
 # $HERDR_PLUGIN_ROOT\bin\herdr-reviewr.exe.
 $ErrorActionPreference = 'Stop'
 
 $Name = 'herdr-reviewr'
 $Repo = 'dcieslak19973/herdr-reviewr'
+
 $Root = Split-Path -Parent $PSScriptRoot
 $BinDir = Join-Path $Root 'bin'
 
 # The release tag matches the manifest version, so a checkout always pulls its own release.
-$versionLine = Get-Content (Join-Path $Root 'herdr-plugin.toml') |
-  Where-Object { $_ -match '^version' } | Select-Object -First 1
-if ($versionLine -notmatch '"([^"]+)"') { throw "${Name}: cannot read version from herdr-plugin.toml" }
+$versionLine = (Get-Content (Join-Path $Root 'herdr-plugin.toml')) -match '^version' |
+    Select-Object -First 1
+if (-not ($versionLine -match '"([^"]+)"')) {
+    throw "${Name}: cannot read version from herdr-plugin.toml"
+}
 $Tag = "v$($Matches[1])"
 
-if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
-  throw "${Name}: no prebuilt binary for windows-$($env:PROCESSOR_ARCHITECTURE) — build from source with 'cargo install --path .'"
+# One prebuilt Windows target. Windows-on-ARM runs it via x64 emulation; anything genuinely
+# 32-bit gets the same source-build escape hatch as an unmapped unix platform.
+if (-not [Environment]::Is64BitOperatingSystem) {
+    throw "${Name}: no prebuilt binary for 32-bit Windows -- build from source with 'cargo install --path .'"
 }
 $Target = 'x86_64-pc-windows-msvc'
 
+# taiki-e's Windows archives are .zip; the checksum sidecar drops the archive extension:
+# <name>-<target>.sha256, not <archive>.sha256.
 $Archive = "$Name-$Target.zip"
-# taiki-e's checksum sidecar drops the archive extension: <name>-<target>.sha256.
 $Checksum = "$Name-$Target.sha256"
+# HERDR_REVIEWR_BASE_URL is a test hook: point it at a local directory of staged assets and
+# Get-Asset copies instead of downloading.
 $Base = if ($env:HERDR_REVIEWR_BASE_URL) { $env:HERDR_REVIEWR_BASE_URL }
         else { "https://github.com/$Repo/releases/download/$Tag" }
 
-# Release-asset downloads are eventually-consistent: GitHub's CDN can 404 for a few minutes
-# after a release publishes. Retry (incl. on 404) so an install right after a release does
-# not fail spuriously. A local path (the test hook) is copied instead of downloaded.
-function Get-Asset([string]$Source, [string]$Dest) {
-  if (Test-Path $Source) { Copy-Item $Source $Dest; return }
-  for ($attempt = 1; $attempt -le 6; $attempt++) {
-    try { Invoke-WebRequest -UseBasicParsing -Uri $Source -OutFile $Dest; return }
-    catch { if ($attempt -eq 6) { throw }; Start-Sleep -Seconds 3 }
-  }
-}
-
-$Tmp = Join-Path ([System.IO.Path]::GetTempPath()) "herdr-reviewr-install-$PID"
-New-Item -ItemType Directory -Force $Tmp | Out-Null
+$Tmp = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
+New-Item -ItemType Directory -Path $Tmp | Out-Null
 try {
-  Write-Output "${Name}: downloading $Archive ($Tag)"
-  Get-Asset "$Base/$Archive" (Join-Path $Tmp $Archive)
-  Get-Asset "$Base/$Checksum" (Join-Path $Tmp $Checksum)
+    # Release-asset downloads are eventually-consistent: GitHub's CDN can 404 for a few
+    # minutes after a release publishes, even though the asset exists. Retry (incl. on 404)
+    # so an install right after a release doesn't fail spuriously.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    function Get-Asset([string]$Source, [string]$Dest) {
+        if (Test-Path $Source) { Copy-Item $Source $Dest; return }
+        for ($attempt = 1; $attempt -le 5; $attempt++) {
+            try {
+                Invoke-WebRequest -UseBasicParsing -Uri $Source -OutFile $Dest
+                return
+            } catch {
+                if ($attempt -eq 5) { throw }
+                Start-Sleep -Seconds 3
+            }
+        }
+    }
 
-  Write-Output "${Name}: verifying checksum"
-  $expected = ((Get-Content (Join-Path $Tmp $Checksum) -TotalCount 1) -split '\s+')[0].ToLowerInvariant()
-  $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $Tmp $Archive)).Hash.ToLowerInvariant()
-  if ($expected -ne $actual) { throw "${Name}: checksum mismatch (expected $expected, got $actual)" }
+    Write-Output "${Name}: downloading $Archive ($Tag)"
+    Get-Asset "$Base/$Archive" (Join-Path $Tmp $Archive)
+    Get-Asset "$Base/$Checksum" (Join-Path $Tmp $Checksum)
 
-  Expand-Archive -Path (Join-Path $Tmp $Archive) -DestinationPath $Tmp -Force
-  New-Item -ItemType Directory -Force $BinDir | Out-Null
-  Copy-Item (Join-Path $Tmp "$Name.exe") (Join-Path $BinDir "$Name.exe") -Force
-  Write-Output "${Name}: installed $(Join-Path $BinDir "$Name.exe")"
+    Write-Output "${Name}: verifying checksum"
+    $expected = ((Get-Content (Join-Path $Tmp $Checksum) -TotalCount 1) -split '\s+')[0]
+    $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $Tmp $Archive)).Hash
+    # -ne on strings is case-insensitive in PowerShell, which is what we want: the sidecar
+    # is lowercase hex, Get-FileHash reports uppercase.
+    if ($expected -ne $actual) {
+        throw "${Name}: checksum mismatch (expected $expected, got $actual)"
+    }
 
-  # Post-install next steps: printed on success only. PATH is not modified on Windows —
-  # the pane and actions invoke the binary by absolute path, and users can too.
-  Write-Output "${Name}: next steps"
-  Write-Output "  1) install the agent skill:  & `"$(Join-Path $BinDir "$Name.exe")`" skill-install"
-  Write-Output "     (or: herdr plugin action invoke skill-install --plugin dcieslak19973.reviewr)"
+    Expand-Archive -Path (Join-Path $Tmp $Archive) -DestinationPath $Tmp -Force
+    New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+    Copy-Item -Path (Join-Path $Tmp "$Name.exe") -Destination (Join-Path $BinDir "$Name.exe") -Force
+    Write-Output "${Name}: installed $(Join-Path $BinDir "$Name.exe")"
 } finally {
-  Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
 }
+
+# No PATH mutation on Windows (there is no ~/.local/bin convention): the pane and actions
+# invoke the binary by absolute path under the plugin root, and a shell can too.
+Write-Output "${Name}: run it directly as: & '$(Join-Path $BinDir "$Name.exe")'"
+
+# Post-install next steps: printed on success only, never affects exit status.
+Write-Output "${Name}: next steps"
+Write-Output "  1) install the agent skill:  npx skills add dcieslak19973/herdr-reviewr --skill reviewr-comments -g"
+Write-Output "     (or: & '$(Join-Path $BinDir "$Name.exe")' skill-install . or: herdr plugin action invoke skill-install-windows --plugin dcieslak19973.reviewr)"
 ```
+
+The script must be saved as ASCII (no em-dashes, no smart quotes — the `--` in comments is deliberate).
 
 - [ ] **Step 2: Test the happy path locally with the base-URL hook**
 
@@ -1065,9 +1144,9 @@ Replace the bullet `- **macOS and Linux only** — no Windows.` with:
 
 ```markdown
 - **macOS, Linux, and Windows.** Windows needs `git` on `PATH` (ships with
-  [Git for Windows](https://gitforwindows.org/)) and a herdr new enough to run Windows
-  plugin commands (0.7.1+); an older herdr silently skips the build step, leaving a
-  binary-less install — `herdr plugin list` shows the plugin but the pane won't open.
+  [Git for Windows](https://gitforwindows.org/)) and herdr 0.7.5+ (older herdrs refuse the
+  manifest's `min_herdr_version` with a clear message). On Windows the action ids carry a
+  `-windows` suffix — bind keys to `dcieslak19973.reviewr.toggle-windows`, not `.toggle`.
 ```
 
 Replace, in the clipboard bullet ending `OSC 52 and Windows are on the roadmap.`, that sentence with: `Windows uses the built-in \`clip\`. OSC 52 is on the roadmap.`
@@ -1089,9 +1168,12 @@ In the "Plugin manifest" section, after the top-level fields line, add:
 
 ```markdown
 `platforms` accepts `"macos"`, `"linux"`, `"windows"`. Item-level `platforms` on any
-`[[build]]`/`[[panes]]`/`[[actions]]`/`[[events]]` entry override the top-level list —
-declare one entry per platform (same id) to vary the command. Commands are direct argv, no
-shell; Windows resolves `PATHEXT` shims (`npm.cmd` etc.) for build/action/event commands.
+`[[build]]`/`[[panes]]`/`[[actions]]`/`[[events]]` entry override the top-level list
+(honored from 0.7.5). herdr rejects duplicate pane/action ids even across disjoint
+platform filters — platform twins need distinct ids (`toggle` / `toggle-windows`).
+Commands are direct argv, no shell; Windows resolves `PATHEXT` shims (`npm.cmd` etc.) for
+build/action/event commands, and hands out `$HERDR_PLUGIN_ROOT` as a `\\?\` verbatim path.
+`plugin unlink` is broken on Windows (raw NotFound) — use `plugin uninstall`.
 Observed (0.7.1-preview): with no `"windows"` in `platforms`, `plugin install` on Windows
 still installs but reports `build (skipped on windows)`; a missing `git` on `PATH` fails
 the clone with the raw spawn error `Error { kind: NotFound, message: "program not found" }`.
@@ -1109,7 +1191,9 @@ Add at the top, following the file's existing format (read it first and match he
 - The sidebar actions and `worktree.created` hook now run `herdr-reviewr sidebar <mode>`
   (a Rust port of `herdr/sidebar.sh`) — `jq` and `bash` are no longer runtime
   dependencies on any platform.
-- `min_herdr_version` is now 0.7.1 (item-level manifest `platforms` support).
+- `min_herdr_version` is now 0.7.5 (item-level manifest `platforms` support; older herdrs
+  refuse cleanly instead of running both `[[build]]` twins). Windows action ids carry a
+  `-windows` suffix.
 ```
 
 - [ ] **Step 5: Commit**
@@ -1143,7 +1227,7 @@ Expected: plugin listed, enabled, 4 actions / 1 pane / 1 event.
 - [ ] **Step 2: Exercise the sidebar action headlessly**
 
 ```powershell
-herdr plugin action invoke toggle --plugin dcieslak19973.reviewr
+herdr plugin action invoke toggle-windows --plugin dcieslak19973.reviewr
 herdr plugin log list --plugin dcieslak19973.reviewr --limit 10
 ```
 
@@ -1156,8 +1240,10 @@ Inside the reviewr pane on any repo with changes: navigate the diff, press `y` o
 - [ ] **Step 4: Clean up and report**
 
 ```powershell
-herdr plugin unlink dcieslak19973.reviewr
+herdr plugin uninstall dcieslak19973.reviewr
 Remove-Item -Recurse -Force bin
 ```
+
+(`plugin unlink` is broken on Windows — `plugin uninstall` is the cleanup path for link probes too.)
 
 Report results, including anything that only a post-release `herdr plugin install` can prove (the real download path — verify after the next release per `docs/RELEASING.md`, then have the colleague re-run their install with git installed).

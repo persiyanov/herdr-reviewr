@@ -80,12 +80,19 @@ New subcommand `herdr-reviewr sidebar <toggle|open|close|auto-open>`, a 1:1 port
 - Top-level `platforms = ["macos", "linux", "windows"]`.
 - Each of build / pane / four actions / one event gets a Unix item (`platforms =
   ["macos", "linux"]`, `bash`/`sh` one-liners now invoking `… sidebar <mode>`) and a Windows
-  twin (`platforms = ["windows"]`) using
-  `powershell -NoProfile -Command "& \"$env:HERDR_PLUGIN_ROOT\bin\herdr-reviewr.exe\" …"`.
-  PowerShell over `cmd /c` because it quotes paths containing spaces correctly
-  (`C:\Users\Dan Cieslak` is the local proof case).
-- `min_herdr_version` bumps to the version verified to honor `"windows"` +
-  item-level platforms (0.7.1 verified locally).
+  twin (`platforms = ["windows"]`) using a PowerShell one-liner that strips the `\\?\`
+  verbatim prefix herdr reports in `$HERDR_PLUGIN_ROOT` on Windows, then invokes the exe by
+  absolute path. PowerShell over `cmd /c` because it quotes paths containing spaces
+  correctly (`C:\Users\Dan Cieslak` is the local proof case).
+- herdr rejects duplicate pane/action ids even across disjoint platform filters (verified
+  in the herdr-slackr reference implementation), so Windows twins carry `-windows` id
+  suffixes (`sidebar-windows`, `toggle-windows`, …) and the runtime selects its own
+  platform's entrypoint via `cfg!(windows)`.
+- `min_herdr_version` bumps to 0.7.5 — the earliest herdr verified to honor item-level
+  `platforms` filters; an older herdr refuses with a version message instead of running
+  both `[[build]]` twins on unix.
+- `plugin unlink` is broken on Windows (raw NotFound error); link-probe cleanup uses
+  `plugin uninstall`.
 
 ### 5. Windows clipboard
 
