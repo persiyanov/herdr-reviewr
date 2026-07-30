@@ -24,6 +24,7 @@ pub mod highlight;
 pub mod log;
 pub mod model;
 pub mod proc;
+pub mod sidebar;
 pub mod theme;
 pub mod turn;
 pub mod ui;
