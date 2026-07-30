@@ -7,9 +7,7 @@
 //! stdout; the `auto-open` event refuses silently (exit 0), except a config error, which
 //! reports through stderr for herdr's plugin log.
 
-// The runtime (`pub fn run`) lands in the next task; until then the non-test target has no
-// callers for these items.
-#![cfg_attr(not(test), allow(dead_code))]
+use std::process::{Command, ExitCode};
 
 use crate::config::{ToggleDirection, TogglePlacement};
 
@@ -33,7 +31,6 @@ impl Mode {
         }
     }
 
-    #[allow(dead_code)]
     fn is_auto(self) -> bool {
         matches!(self, Self::AutoOpen)
     }
@@ -140,6 +137,179 @@ fn auto_open_gated(auto_open: bool, placement: TogglePlacement) -> bool {
     !auto_open || !matches!(placement, TogglePlacement::Split | TogglePlacement::Tab)
 }
 
+/// The manifest pane entrypoint for this build's platform: herdr rejects duplicate pane ids
+/// even across disjoint platform filters, so Windows has its own `sidebar-windows` twin.
+const fn entrypoint() -> &'static str {
+    if cfg!(windows) { "sidebar-windows" } else { "sidebar" }
+}
+
+/// Entry point called from `main` with argv after the `sidebar` word.
+pub fn run(args: &[String]) -> ExitCode {
+    let mode = match Mode::parse(args.first().map(String::as_str)) {
+        Ok(mode) => mode,
+        Err(message) => return refuse(false, &message),
+    };
+
+    // Validate the whole plugin config before reading workspace state or taking any action.
+    // A config error is loud for every mode, including the event — herdr's plugin log is
+    // where a broken config.toml gets noticed (tests/sidebar.rs pins this).
+    let cfg = match crate::config::plugin_config() {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            eprintln!("reviewr: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    if mode.is_auto() && auto_open_gated(cfg.auto_open(), cfg.toggle_placement()) {
+        return ExitCode::SUCCESS;
+    }
+
+    let mut ctx = Context {
+        workspace: env_non_empty("HERDR_WORKSPACE_ID"),
+        pane: env_non_empty("HERDR_PANE_ID"),
+        cwd: env_non_empty("HERDR_PLUGIN_CONTEXT_JSON").and_then(|json| context_cwd(&json)),
+    };
+    if mode.is_auto()
+        && let Some(event) = env_non_empty("HERDR_PLUGIN_EVENT_JSON")
+    {
+        ctx = event_context(&event);
+    }
+    let Some(workspace) = ctx.workspace.clone() else {
+        return refuse(mode.is_auto(), "no workspace context (invoke from inside herdr)");
+    };
+
+    // One pane-list snapshot serves the whole run. A failed listing must not read as
+    // "no sidebar" — that would stack a duplicate on toggle and false-succeed a close.
+    let Some(panes_json) =
+        herdr(&["pane", "list", "--workspace", &workspace]).filter(|out| !out.is_empty())
+    else {
+        return refuse(mode.is_auto(), &format!("herdr pane list failed for {workspace}"));
+    };
+    let existing = sidebar_panes(&panes_json);
+
+    match mode {
+        Mode::Close => {
+            if existing.is_empty() {
+                println!("close: nothing open in {workspace}");
+                return ExitCode::SUCCESS;
+            }
+            close_all(&existing, &workspace, mode)
+        }
+        Mode::Toggle if !existing.is_empty() => close_all(&existing, &workspace, mode),
+        Mode::Open | Mode::AutoOpen if !existing.is_empty() => {
+            if mode == Mode::Open {
+                println!("open: already open ({}) in {workspace}", existing.join(" "));
+            }
+            ExitCode::SUCCESS
+        }
+        Mode::Toggle | Mode::Open | Mode::AutoOpen => {
+            open_sidebar(mode, &cfg, &ctx, &workspace, &panes_json)
+        }
+    }
+}
+
+/// A refusal: exit 1 with one stderr line for actions, a silent success for the event.
+fn refuse(is_auto: bool, message: &str) -> ExitCode {
+    if is_auto {
+        return ExitCode::SUCCESS;
+    }
+    eprintln!("reviewr: {message}");
+    ExitCode::from(1)
+}
+
+/// A non-empty environment variable, or `None`.
+fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+/// Run `herdr <args>` via `$HERDR_BIN_PATH`, returning stdout on success. Spawn failures
+/// and non-zero exits both yield `None`; herdr's stderr is not surfaced (the script ran
+/// every herdr call under `2>/dev/null`).
+fn herdr(args: &[&str]) -> Option<String> {
+    let bin = std::env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string());
+    let out = Command::new(bin).args(args).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Close every listed sidebar via plain `pane close` — not `plugin pane close`, whose
+/// registry does not survive a herdr restart and would strand the pane (spec A7).
+fn close_all(existing: &[String], workspace: &str, mode: Mode) -> ExitCode {
+    let (mut closed, mut failed) = (String::new(), String::new());
+    for pane in existing {
+        let bucket =
+            if herdr(&["pane", "close", pane]).is_some() { &mut closed } else { &mut failed };
+        bucket.push(' ');
+        bucket.push_str(pane);
+    }
+    if !failed.is_empty() {
+        return refuse(mode.is_auto(), &format!("failed to close{failed} in {workspace}"));
+    }
+    println!("closed{closed} in {workspace}");
+    ExitCode::SUCCESS
+}
+
+/// Whether `cwd` is inside a git repository — the open-path gate.
+fn is_git_repo(cwd: &str) -> bool {
+    Command::new("git")
+        .args(["-C", cwd, "rev-parse", "--show-toplevel"])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+/// The opening path: gate on a git repo, assemble the placement, run `plugin pane open`.
+fn open_sidebar(
+    mode: Mode,
+    cfg: &crate::config::PluginConfig,
+    ctx: &Context,
+    workspace: &str,
+    panes_json: &str,
+) -> ExitCode {
+    let cwd = ctx.cwd.as_deref().unwrap_or("");
+    if cwd.is_empty() || !is_git_repo(cwd) {
+        let shown = if cwd.is_empty() { "<no cwd>" } else { cwd };
+        return refuse(mode.is_auto(), &format!("not a git repo: '{shown}'"));
+    }
+
+    let target = ctx.pane.clone().or_else(|| first_pane_id(panes_json));
+    let tail = match open_args(
+        cfg.toggle_placement(),
+        cfg.toggle_direction(),
+        workspace,
+        target.as_deref(),
+    ) {
+        Ok(tail) => tail,
+        Err(message) => return refuse(mode.is_auto(), &message),
+    };
+
+    let plugin =
+        env_non_empty("HERDR_PLUGIN_ID").unwrap_or_else(|| "dcieslak19973.reviewr".to_string());
+    let mut args: Vec<String> = vec![
+        "plugin".into(),
+        "pane".into(),
+        "open".into(),
+        "--plugin".into(),
+        plugin,
+        "--entrypoint".into(),
+        entrypoint().into(),
+    ];
+    args.extend(tail);
+    args.push("--cwd".into());
+    args.push(cwd.into());
+    args.push(focus_flag(mode.is_auto(), cfg.toggle_placement()).into());
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let new_pane = herdr(&arg_refs)
+        .and_then(|out| serde_json::from_str::<serde_json::Value>(&out).ok())
+        .and_then(|v| non_empty_str(v.pointer("/result/plugin_pane/pane/pane_id")));
+    let Some(new_pane) = new_pane else {
+        return refuse(mode.is_auto(), "herdr plugin pane open failed");
+    };
+    if !mode.is_auto() {
+        println!("opened {new_pane} ({}) in {workspace}", cfg.toggle_placement().as_str());
+    }
+    ExitCode::SUCCESS
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -238,5 +408,11 @@ mod tests {
         assert!(auto_open_gated(true, TogglePlacement::Overlay));
         assert!(auto_open_gated(true, TogglePlacement::Zoomed));
         assert!(auto_open_gated(false, TogglePlacement::Split));
+    }
+
+    #[test]
+    fn entrypoint_matches_the_platform_pane_id() {
+        let expected = if cfg!(windows) { "sidebar-windows" } else { "sidebar" };
+        assert_eq!(super::entrypoint(), expected);
     }
 }

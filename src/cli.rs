@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use crate::comments::{Author, Status, Store, StoredComment};
 use crate::model::{Comment, Side};
 
-const USAGE: &str = "usage: herdr-reviewr comment add --file <path> --start <n> [--end <n>] [--side new|old] [--lines <snippet>] [--author user|agent] --text <text>\n       herdr-reviewr comment list [--json] [--all]\n       herdr-reviewr comment resolve <id>\n       herdr-reviewr comment rm <id>\n       herdr-reviewr skill-path\n       herdr-reviewr skill-install [--target <dir> | --project] [--copy] [--force]\n";
+const USAGE: &str = "usage: herdr-reviewr comment add --file <path> --start <n> [--end <n>] [--side new|old] [--lines <snippet>] [--author user|agent] --text <text>\n       herdr-reviewr comment list [--json] [--all]\n       herdr-reviewr comment resolve <id>\n       herdr-reviewr comment rm <id>\n       herdr-reviewr sidebar [toggle|open|close|auto-open]\n       herdr-reviewr skill-path\n       herdr-reviewr skill-install [--target <dir> | --project] [--copy] [--force]\n";
 
 /// Entry point called from `main` with the full process argv (`args[0]` is the program
 /// name, `args[1]` the subcommand). Only reached when `main` has already confirmed

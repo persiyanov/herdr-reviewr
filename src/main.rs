@@ -13,6 +13,10 @@ fn main() -> std::process::ExitCode {
         return herdr_reviewr::cli::run(args);
     }
 
+    if args.get(1).map(String::as_str) == Some("sidebar") {
+        return herdr_reviewr::sidebar::run(&args[2..]);
+    }
+
     match herdr_reviewr::run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
