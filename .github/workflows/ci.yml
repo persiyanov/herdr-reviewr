@@ -48,3 +48,20 @@ jobs:
           echo "$out"
           echo "$out" | grep -q "not a dynamic executable\|statically linked" \
             || { echo "binary is dynamically linked"; exit 1; }
+
+  windows:
+    name: test (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install toolchain (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@1.90.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --all-features
+
+      - name: Build (release)
+        run: cargo build --release
