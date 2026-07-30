@@ -9,7 +9,7 @@
 
 // The runtime (`pub fn run`) lands in the next task; until then the non-test target has no
 // callers for these items.
-#![allow(dead_code)]
+#![cfg_attr(not(test), allow(dead_code))]
 
 use crate::config::{ToggleDirection, TogglePlacement};
 
@@ -33,6 +33,7 @@ impl Mode {
         }
     }
 
+    #[allow(dead_code)]
     fn is_auto(self) -> bool {
         matches!(self, Self::AutoOpen)
     }
