@@ -7,6 +7,10 @@
 //! stdout; the `auto-open` event refuses silently (exit 0), except a config error, which
 //! reports through stderr for herdr's plugin log.
 
+// The runtime (`pub fn run`) lands in the next task; until then the non-test target has no
+// callers for these items.
+#![allow(dead_code)]
+
 use crate::config::{ToggleDirection, TogglePlacement};
 
 /// The invocation mode, defaulting to `toggle` exactly like the script's `${1:-toggle}`.
