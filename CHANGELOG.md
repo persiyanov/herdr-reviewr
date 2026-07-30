@@ -11,9 +11,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   build step, per-platform manifest commands, and clipboard via `clip`.
 
 ### Changed
-- The sidebar actions and `worktree.created` hook now run `herdr-reviewr sidebar <mode>`
-  (a Rust port of `herdr/sidebar.sh`) — `jq` and `bash` are no longer runtime
-  dependencies on any platform.
+- The sidebar actions and `worktree.created` hook now run `herdr-reviewr sidebar <mode>` — the
+  `herdr/sidebar.sh` script is retired and `jq` is no longer a runtime dependency; on
+  macOS/Linux `bash` remains only as the one-line exec wrapper that expands
+  `$HERDR_PLUGIN_ROOT`.
 - `min_herdr_version` is now 0.7.5 (item-level manifest `platforms` support; older herdrs
   refuse cleanly instead of running both `[[build]]` twins). Windows action ids carry a
   `-windows` suffix.
