@@ -438,7 +438,7 @@ fn valid_ref_name(name: &str) -> bool {
         })
 }
 
-/// Print the shared normalized configuration for `herdr/sidebar.sh`.
+/// Print the shared normalized configuration for `herdr-reviewr sidebar <mode>`.
 pub fn print_plugin_config() -> Result<(), PluginConfigError> {
     println!("{}", plugin_config()?.to_json());
     Ok(())

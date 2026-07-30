@@ -7,6 +7,17 @@ herdr **plugin** (`../herdr-plugin.toml`); the binary runs inside a plugin pane.
 
 Top-level: `id`, `name`, `version`, `min_herdr_version`, `platforms` (required); `description`.
 
+`platforms` accepts `"macos"`, `"linux"`, `"windows"`. Item-level `platforms` on any
+`[[build]]`/`[[panes]]`/`[[actions]]`/`[[events]]` entry override the top-level list
+(honored from 0.7.5). herdr rejects duplicate pane/action ids even across disjoint
+platform filters — platform twins need distinct ids (`toggle` / `toggle-windows`).
+Commands are direct argv, no shell; Windows resolves `PATHEXT` shims (`npm.cmd` etc.) for
+build/action/event commands, and hands out `$HERDR_PLUGIN_ROOT` as a `\\?\` verbatim path.
+`plugin unlink` is broken on Windows (raw NotFound) — use `plugin uninstall`.
+Observed (0.7.1-preview): with no `"windows"` in `platforms`, `plugin install` on Windows
+still installs but reports `build (skipped on windows)`; a missing `git` on `PATH` fails
+the clone with the raw spawn error `Error { kind: NotFound, message: "program not found" }`.
+
 ```toml
 [[build]]                                   # run on `plugin install`, skipped by `plugin link`
 command = ["cargo", "install", "--path", "."]
@@ -19,11 +30,11 @@ command = ["herdr-review"]                  # see "pane command" below
 [[actions]]                                 # invokable command, bindable to a key
 id = "toggle"
 contexts = ["pane", "workspace"]
-command = ["bash", "herdr/sidebar.sh", "toggle"]
+command = ["bash", "-c", 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" sidebar toggle']
 
 [[events]]                                  # run a command on a herdr event
 on = "worktree.created"
-command = ["bash", "herdr/sidebar.sh", "open"]
+command = ["bash", "-c", 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" sidebar auto-open']
 ```
 
 Lifecycle: `herdr plugin link <dir>` (local dev, no build) · `herdr plugin install <owner>/<repo>` ·
@@ -49,7 +60,7 @@ herdr plugin pane close <pane_id>
 `HERDR_BIN_PATH`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID`, `HERDR_TAB_ID`, `HERDR_WORKSPACE_ID`,
 `HERDR_PLUGIN_ID`, `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_STATE_DIR`,
 `HERDR_PLUGIN_ENTRYPOINT_ID`, `HERDR_PLUGIN_CONTEXT_JSON`, and `HERDR_PLUGIN_EVENT_JSON` (events).
-herdr runs plugin commands with a minimal `PATH`; prepend common bin dirs for `jq`/`git`.
+herdr runs plugin commands with a minimal `PATH`; prepend common bin dirs for `git`.
 
 - **Action context** (`HERDR_PLUGIN_CONTEXT_JSON`): `workspace_id`, `tab_id`, `focused_pane_id`,
   `focused_pane_cwd`, `worktree:{repo_root, checkout_path, ...}`.

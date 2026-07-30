@@ -53,6 +53,11 @@ From the herdr marketplace. You get a prebuilt binary, no Rust toolchain:
 herdr plugin install dcieslak19973/herdr-reviewr
 ```
 
+> **`Error { kind: NotFound, message: "program not found" }`** during
+> `herdr plugin install` means herdr could not spawn `git` — it is not installed or not on
+> `PATH` in this shell. Install [Git for Windows](https://gitforwindows.org/) (or
+> `git` via your package manager), open a fresh shell, and re-run the install.
+
 The sidebar **auto-opens for a newly created worktree**, so installing the plugin is enough. Set
 `auto_open = false` to keep it hidden until you ask (see [Configuration](#configuration)). To
 toggle it on demand, bind a key to the **reviewr: toggle sidebar** action in your herdr config.
@@ -507,9 +512,13 @@ This is a focused, young tool. The known constraints:
   needed.
 
 **Platform**
-- **macOS and Linux only** — no Windows.
+- **macOS, Linux, and Windows.** Windows needs `git` on `PATH` (ships with
+  [Git for Windows](https://gitforwindows.org/)) and herdr 0.7.5+ (older herdrs refuse the
+  manifest's `min_herdr_version` with a clear message). On Windows the action ids carry a
+  `-windows` suffix — bind keys to `dcieslak19973.reviewr.toggle-windows`, not `.toggle`.
 - **Clipboard export** uses `pbcopy` on macOS, or `wl-copy` / `xclip` / `xsel` on Linux. With
-  none installed it says so, and **Send** still works. OSC 52 and Windows are on the roadmap.
+  none installed it says so, and **Send** still works. Windows uses the built-in `clip`. OSC 52
+  is on the roadmap.
 
 **herdr coupling**
 - **Send needs a findable agent pane** — the agent in your tab, or the sole agent in the

@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Windows support.** Prebuilt `x86_64-pc-windows-msvc` release binary, `herdr/install.ps1`
+  build step, per-platform manifest commands, and clipboard via `clip`.
+
+### Changed
+- The sidebar actions and `worktree.created` hook now run `herdr-reviewr sidebar <mode>`
+  (a Rust port of `herdr/sidebar.sh`) — `jq` and `bash` are no longer runtime
+  dependencies on any platform.
+- `min_herdr_version` is now 0.7.5 (item-level manifest `platforms` support; older herdrs
+  refuse cleanly instead of running both `[[build]]` twins). Windows action ids carry a
+  `-windows` suffix.
+
 ## [0.13.1] — 2026-07-12
 
 ### Added
