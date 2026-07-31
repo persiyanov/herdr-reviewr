@@ -7,19 +7,22 @@
 #[must_use]
 pub fn on_path(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else { return false };
+    // Read once, not per `PATH` directory. Only one case is probed per extension: Windows file
+    // lookups are case-insensitive, so a single `is_file()` check matches the on-disk name
+    // regardless of how `PATHEXT` or `name` happen to be cased.
+    let extensions: Vec<String> = if cfg!(windows) {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+            .split(';')
+            .filter(|ext| !ext.is_empty())
+            .map(str::to_string)
+            .collect()
+    } else {
+        Vec::new()
+    };
     std::env::split_paths(&path).any(|dir| {
-        if dir.join(name).is_file() {
-            return true;
-        }
-        if cfg!(windows) {
-            let pathext =
-                std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-            return pathext.split(';').filter(|ext| !ext.is_empty()).any(|ext| {
-                dir.join(format!("{name}{}", ext.to_lowercase())).is_file()
-                    || dir.join(format!("{name}{ext}")).is_file()
-            });
-        }
-        false
+        dir.join(name).is_file()
+            || extensions.iter().any(|ext| dir.join(format!("{name}{ext}")).is_file())
     })
 }
 

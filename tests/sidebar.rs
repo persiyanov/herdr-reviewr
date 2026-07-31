@@ -183,3 +183,33 @@ fn valid_non_default_placement_and_direction_reach_herdr_arguments() {
         }
     }
 }
+
+/// Pins `sidebar::entrypoint()`'s two hardcoded pane ids to what `herdr-plugin.toml` actually
+/// declares: herdr rejects duplicate pane ids even across disjoint platforms, which is why
+/// there are two `[[panes]]` entries (`sidebar` for macos/linux, `sidebar-windows` for
+/// windows) instead of one shared id. If the manifest's ids or platform lists ever drift from
+/// this, the binary would ask herdr to open a pane entrypoint that doesn't exist for its
+/// platform.
+#[test]
+fn manifest_pins_the_sidebar_pane_ids_and_platforms() {
+    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("herdr-plugin.toml");
+    let text = fs::read_to_string(&manifest_path).unwrap();
+    let table: toml::Table = text.parse().unwrap();
+    let panes = table.get("panes").and_then(toml::Value::as_array).expect("[[panes]] array");
+
+    let platforms_of = |id: &str| -> Vec<String> {
+        let pane = panes
+            .iter()
+            .find(|p| p.get("id").and_then(toml::Value::as_str) == Some(id))
+            .unwrap_or_else(|| panic!("no [[panes]] entry with id = \"{id}\""));
+        pane.get("platforms")
+            .and_then(toml::Value::as_array)
+            .unwrap_or_else(|| panic!("pane \"{id}\" has no platforms array"))
+            .iter()
+            .map(|v| v.as_str().expect("platform entry is a string").to_string())
+            .collect()
+    };
+
+    assert_eq!(platforms_of("sidebar"), vec!["macos", "linux"]);
+    assert_eq!(platforms_of("sidebar-windows"), vec!["windows"]);
+}

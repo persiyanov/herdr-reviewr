@@ -41,8 +41,9 @@ jobs:
       - uses: actions/checkout@v5
 
       # Builds herdr-reviewr for the target (cross-compiling aarch64 Linux via `cross` as needed),
-      # archives it as herdr-reviewr-<target>.tar.gz with a .sha256 sidecar, and uploads both to
-      # the release for this tag. The toolchain is pinned by rust-toolchain.toml.
+      # archives it as herdr-reviewr-<target>.tar.gz (.zip on Windows) with a .sha256 sidecar,
+      # and uploads both to the release for this tag. The toolchain is pinned by
+      # rust-toolchain.toml.
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: herdr-reviewr
