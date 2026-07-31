@@ -73,7 +73,13 @@ command = "dcieslak19973.reviewr.toggle"   # <plugin_id>.<action_id> — note th
 `cmd+…` chords reach herdr. macOS swallows `alt+…`. With no key bound, run the action once with
 `herdr plugin action invoke toggle --plugin dcieslak19973.reviewr`.
 
-`install.sh` also symlinks the binary onto `PATH` at `~/.local/bin/herdr-reviewr`, so the `herdr-reviewr` CLI (see [Working with agents](#working-with-agents)) works directly once that directory is on your `PATH`.
+> **Windows:** action ids carry a `-windows` suffix — bind
+> `dcieslak19973.reviewr.toggle-windows`, not `.toggle`, and invoke
+> `herdr plugin action invoke toggle-windows --plugin dcieslak19973.reviewr`. Same for `open`
+> and `close` below.
+
+`install.sh` also symlinks the binary onto `PATH` at `~/.local/bin/herdr-reviewr`, so the `herdr-reviewr` CLI (see [Working with agents](#working-with-agents)) works directly once that directory is on your `PATH`. On Windows, `install.ps1` does not modify `PATH`; it prints the
+installed binary's absolute path, so run `herdr-reviewr` commands via that path instead.
 
 Beside `toggle` there are two explicit actions, made for scripts and layout plugins. `open` opens
 the sidebar and does nothing when one is already open. `close` closes it and does nothing when none
@@ -519,6 +525,8 @@ This is a focused, young tool. The known constraints:
 - **Clipboard export** uses `pbcopy` on macOS, or `wl-copy` / `xclip` / `xsel` on Linux. With
   none installed it says so, and **Send** still works. Windows uses the built-in `clip`. OSC 52
   is on the roadmap.
+- **Browser open** (the PR tab's `o`) uses `open` on macOS, `xdg-open` on Linux, or `explorer`
+  on Windows — all three ship with their OS, so this needs no install.
 
 **herdr coupling**
 - **Send needs a findable agent pane** — the agent in your tab, or the sole agent in the
