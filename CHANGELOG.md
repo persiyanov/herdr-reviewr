@@ -8,7 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - **Windows support.** Prebuilt `x86_64-pc-windows-msvc` release binary, `herdr/install.ps1`
-  build step, per-platform manifest commands, and clipboard via `clip`.
+  build step, per-platform manifest commands, clipboard via `clip`, and browser open via
+  `rundll32`.
 
 ### Changed
 - The sidebar actions and `worktree.created` hook now run `herdr-reviewr sidebar <mode>` — the

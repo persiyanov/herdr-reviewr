@@ -525,7 +525,7 @@ This is a focused, young tool. The known constraints:
 - **Clipboard export** uses `pbcopy` on macOS, or `wl-copy` / `xclip` / `xsel` on Linux. With
   none installed it says so, and **Send** still works. Windows uses the built-in `clip`. OSC 52
   is on the roadmap.
-- **Browser open** (the PR tab's `o`) uses `open` on macOS, `xdg-open` on Linux, or `explorer`
+- **Browser open** (the PR tab's `o`) uses `open` on macOS, `xdg-open` on Linux, or `rundll32`
   on Windows — all three ship with their OS, so this needs no install.
 
 **herdr coupling**
