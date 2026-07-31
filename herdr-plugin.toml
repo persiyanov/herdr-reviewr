@@ -19,7 +19,10 @@ description = "Native terminal code-review sidebar for herdr."
 # duplicate pane/action ids even across disjoint platforms, hence the `-windows` id
 # suffixes; on Windows, bind THOSE action ids. The PowerShell one-liners expand
 # $env:HERDR_PLUGIN_ROOT themselves and strip the `\\?\` verbatim prefix herdr reports on
-# Windows before invoking bin\herdr-reviewr.exe by absolute path.
+# Windows before invoking bin\herdr-reviewr.exe by absolute path. Known limitation: the
+# `Substring(4)` strip assumes a `\\?\C:\...` local-drive prefix; a `\\?\UNC\server\share\...`
+# root (verbatim UNC) would be mangled the same way, but $HERDR_PLUGIN_ROOT hasn't been
+# observed to be a UNC path in practice.
 [[build]]
 platforms = ["macos", "linux"]
 command = ["bash", "herdr/install.sh"]
@@ -52,12 +55,18 @@ command = [
 # Actions receive $HERDR_PLUGIN_ROOT, so they run the binary by absolute path and work
 # regardless of PATH. Sidebar orchestration lives in `herdr-reviewr sidebar <mode>`
 # (formerly herdr/sidebar.sh).
+#
+# The unix commands below prepend a PATH before `exec`ing the binary, restoring the retired
+# `herdr/sidebar.sh`'s minimal-PATH contract: herdr runs plugin commands with a minimal PATH,
+# and `git` (spawned by the binary's `is_git_repo` check) can otherwise go unfound for
+# Homebrew-only-git macOS users. `skill-install` doesn't need git, but the retired script
+# prepended for every command, so this keeps the unix entries uniform.
 [[actions]]
 id = "skill-install"
 platforms = ["macos", "linux"]
 title = "reviewr: install agent skill"
 contexts = ["pane", "workspace"]
-command = ["bash", "-c", 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" skill-install']
+command = ["bash", "-c", 'export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"; exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" skill-install']
 
 [[actions]]
 id = "skill-install-windows"
@@ -74,7 +83,7 @@ id = "toggle"
 platforms = ["macos", "linux"]
 title = "reviewr: toggle sidebar"
 contexts = ["pane", "workspace"]
-command = ["bash", "-c", 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" sidebar toggle']
+command = ["bash", "-c", 'export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"; exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" sidebar toggle']
 
 [[actions]]
 id = "toggle-windows"
@@ -91,7 +100,7 @@ id = "open"
 platforms = ["macos", "linux"]
 title = "reviewr: open sidebar"
 contexts = ["pane", "workspace"]
-command = ["bash", "-c", 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" sidebar open']
+command = ["bash", "-c", 'export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"; exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" sidebar open']
 
 [[actions]]
 id = "open-windows"
@@ -108,7 +117,7 @@ id = "close"
 platforms = ["macos", "linux"]
 title = "reviewr: close sidebar"
 contexts = ["pane", "workspace"]
-command = ["bash", "-c", 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" sidebar close']
+command = ["bash", "-c", 'export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"; exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" sidebar close']
 
 [[actions]]
 id = "close-windows"
@@ -121,11 +130,12 @@ command = [
 ]
 
 # Auto-open the sidebar for a freshly created worktree (gated by auto_open; see
-# `herdr-reviewr sidebar auto-open`). Events carry no ids, so the twins need no suffix.
+# `herdr-reviewr sidebar auto-open`). Events carry no ids, so the twins need no suffix. The
+# unix command prepends PATH for the same reason as the actions above.
 [[events]]
 on = "worktree.created"
 platforms = ["macos", "linux"]
-command = ["bash", "-c", 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" sidebar auto-open']
+command = ["bash", "-c", 'export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"; exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" sidebar auto-open']
 
 [[events]]
 on = "worktree.created"

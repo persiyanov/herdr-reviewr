@@ -181,7 +181,7 @@ pub fn run(args: &[String]) -> ExitCode {
     // One pane-list snapshot serves the whole run. A failed listing must not read as
     // "no sidebar" — that would stack a duplicate on toggle and false-succeed a close.
     let Some(panes_json) =
-        herdr(&["pane", "list", "--workspace", &workspace]).filter(|out| !out.is_empty())
+        herdr(&["pane", "list", "--workspace", &workspace]).filter(|out| !out.trim().is_empty())
     else {
         return refuse(mode.is_auto(), &format!("herdr pane list failed for {workspace}"));
     };
@@ -248,12 +248,28 @@ fn close_all(existing: &[String], workspace: &str, mode: Mode) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Whether `cwd` is inside a git repository — the open-path gate.
+/// Well-known git install locations, tried only when a bare `git` spawn fails outright (not a
+/// non-zero exit — that's a real "not a repo" answer). The `[[actions]]` entries in
+/// `herdr-plugin.toml` restore the retired `herdr/sidebar.sh`'s PATH prepend, but that covers
+/// only unix actions; this is the binary's own last resort, for a Windows box without
+/// Git-for-Windows on PATH or any minimal-PATH environment the manifest doesn't reach.
+#[cfg(unix)]
+const GIT_FALLBACKS: &[&str] = &["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"];
+#[cfg(windows)]
+const GIT_FALLBACKS: &[&str] = &[r"C:\Program Files\Git\cmd\git.exe"];
+
+/// Whether `cwd` is inside a git repository — the open-path gate. Tries bare `git` first (the
+/// common case); only when the spawn itself fails does it retry against `GIT_FALLBACKS` in
+/// order, stopping at the first candidate that spawns at all (its exit status is the answer).
 fn is_git_repo(cwd: &str) -> bool {
-    Command::new("git")
-        .args(["-C", cwd, "rev-parse", "--show-toplevel"])
-        .output()
-        .is_ok_and(|out| out.status.success())
+    for git in std::iter::once("git").chain(GIT_FALLBACKS.iter().copied()) {
+        if let Ok(out) =
+            Command::new(git).args(["-C", cwd, "rev-parse", "--show-toplevel"]).output()
+        {
+            return out.status.success();
+        }
+    }
+    false
 }
 
 /// The opening path: gate on a git repo, assemble the placement, run `plugin pane open`.
@@ -314,7 +330,7 @@ fn open_sidebar(
 mod tests {
     use super::{
         Context, Mode, auto_open_gated, context_cwd, event_context, first_pane_id, focus_flag,
-        open_args, sidebar_panes,
+        is_git_repo, open_args, sidebar_panes,
     };
     use crate::config::{ToggleDirection, TogglePlacement};
 
@@ -414,5 +430,14 @@ mod tests {
     fn entrypoint_matches_the_platform_pane_id() {
         let expected = if cfg!(windows) { "sidebar-windows" } else { "sidebar" };
         assert_eq!(super::entrypoint(), expected);
+    }
+
+    #[test]
+    fn is_git_repo_distinguishes_a_checkout_from_a_bare_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_git_repo(dir.path().to_str().unwrap()));
+        // This crate's own checkout is a real git repo (assuming a normal `cargo test` run
+        // from a clone, not an extracted source tarball).
+        assert!(is_git_repo(env!("CARGO_MANIFEST_DIR")));
     }
 }

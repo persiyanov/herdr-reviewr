@@ -60,7 +60,11 @@ herdr plugin pane close <pane_id>
 `HERDR_BIN_PATH`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID`, `HERDR_TAB_ID`, `HERDR_WORKSPACE_ID`,
 `HERDR_PLUGIN_ID`, `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_STATE_DIR`,
 `HERDR_PLUGIN_ENTRYPOINT_ID`, `HERDR_PLUGIN_CONTEXT_JSON`, and `HERDR_PLUGIN_EVENT_JSON` (events).
-herdr runs plugin commands with a minimal `PATH`; prepend common bin dirs for `git`.
+herdr runs plugin commands with a minimal `PATH`; the unix `[[actions]]`/`[[events]]` commands
+in `herdr-plugin.toml` prepend common bin dirs (`/opt/homebrew/bin`, `/usr/local/bin`,
+`/usr/bin`, `/bin`) before `exec`ing the binary, restoring the retired `herdr/sidebar.sh`'s
+contract. The binary itself (`src/sidebar.rs`'s `is_git_repo`) also falls back to well-known
+`git` locations if a bare `git` spawn fails outright, as a second line of defense.
 
 - **Action context** (`HERDR_PLUGIN_CONTEXT_JSON`): `workspace_id`, `tab_id`, `focused_pane_id`,
   `focused_pane_cwd`, `worktree:{repo_root, checkout_path, ...}`.
