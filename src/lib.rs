@@ -13,6 +13,7 @@ pub mod azure_devops;
 pub mod browser;
 pub mod config;
 pub mod diff;
+pub mod exec;
 pub mod export;
 pub mod file_list;
 pub mod forge;
@@ -172,6 +173,42 @@ fn app_for(cfg: &Config, initial_config: &Result<PluginConfig, config::PluginCon
             app.set_config_error(error.to_string());
             app
         }
+    }
+}
+
+/// Open `path` in the resolved editor as a full-screen takeover (`specs/input.md` "Open in
+/// editor"): leave the alternate screen and terminal modes, spawn and wait, then restore them
+/// exactly as `run` set them up initially. A missing `editor`/`$EDITOR` never touches the
+/// terminal at all. Either way the caller's next frame repaints from a cleared screen.
+fn open_in_editor(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    kbd: bool,
+    path: &std::path::Path,
+) {
+    let configured = app.plugin_config().and_then(PluginConfig::editor);
+    let Some(editor) = exec::resolve_editor(configured) else {
+        app.status = "no editor: set `editor` in config.toml or $EDITOR".to_string();
+        return;
+    };
+
+    restore_terminal(kbd);
+    let result = exec::run_editor(&editor, path);
+    *terminal = ratatui::init();
+    let _ = execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    if kbd {
+        let _ = execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
+    let _ = terminal.clear();
+
+    match result {
+        // The file may have changed; the world refresh rebuilds the diff cache off the new
+        // content hash, the same path a poll takes for the agent's own edits (`world.rs`).
+        Ok(()) => app.request_world_refresh(false, false),
+        Err(e) => app.status = format!("error: {e}"),
     }
 }
 
@@ -1125,6 +1162,9 @@ fn event_loop(
                     _ => {}
                 }
             }
+            if let Some(path) = app.editor_request.take() {
+                open_in_editor(terminal, app, kbd, &path);
+            }
             if app.should_quit {
                 break;
             }
@@ -1584,6 +1624,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             // the diff focused — otherwise `delete` would silently drop a comment under an
             // off-screen cursor. (The comments-list overlay targets the highlighted row instead.)
             K::Edit if app.focus == Focus::Diff => app.start_edit(),
+            // Off the diff, `edit` instead opens the file under the cursor in an editor — inert
+            // on a directory row, which `request_open_editor` itself guards (specs/input.md
+            // "Open in editor").
+            K::Edit if app.focus == Focus::Files => app.request_open_editor(),
             K::Delete if app.focus == Focus::Diff => app.delete_comment(),
             K::Send => app.send_to_agent(),
             K::Copy => {
@@ -1595,7 +1639,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::Search => app.open_search(),
             K::Find => app.open_find(),
             K::Keys => app.toggle_keys(),
-            // `edit`/`delete` off the diff, and `open-pr` off the `PR` tab, are inert.
+            // `delete` off the diff, and `open-pr` off the `PR` tab, are inert. `edit` is
+            // handled by the two focus arms above; this arm is unreachable for it but required
+            // for exhaustiveness.
             K::Edit | K::Delete | K::OpenPr => {}
         }
         return Ok(());

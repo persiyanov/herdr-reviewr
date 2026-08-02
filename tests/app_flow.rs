@@ -666,6 +666,97 @@ fn editing_a_comment_surfaces_its_file_from_a_collapsed_directory() {
     assert!(matches!(app.mode, Mode::Composing { editing: Some(_) }));
 }
 
+#[test]
+fn open_editor_targets_the_file_row_and_is_inert_on_a_directory() {
+    let r = Repo::init();
+    r.write("src/a.rs", "one\n");
+    r.write("src/b.rs", "one\n");
+    r.commit_all("init");
+    r.write("src/a.rs", "two\n");
+    r.write("src/b.rs", "two\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Files;
+
+    // A directory row: `request_open_editor` is inert.
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
+    app.request_open_editor();
+    assert_eq!(app.editor_request, None, "a directory row requests nothing");
+
+    // A file row: the request carries the file's absolute path.
+    app.file_cursor = file_row(&app, "src/a.rs");
+    app.request_open_editor();
+    assert_eq!(app.editor_request, Some(r.path().join("src/a.rs")));
+}
+
+#[test]
+fn open_editor_works_the_same_way_on_the_all_files_tab() {
+    use herdr_reviewr::app::Tab;
+
+    let r = Repo::init();
+    r.write("src/a.rs", "one\n");
+    r.write("src/b.rs", "one\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    app.focus = Focus::Files;
+
+    // A directory row: inert, same as on Changes. `All files` opens collapsed
+    // (`specs/file-list.md`), so `src` starts as its own row here, unlike on Changes.
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
+    app.request_open_editor();
+    assert_eq!(app.editor_request, None, "a directory row requests nothing on All files either");
+    app.expand_dir();
+
+    // A file row: same absolute-path request as on Changes.
+    app.file_cursor = file_row(&app, "src/a.rs");
+    app.request_open_editor();
+    assert_eq!(app.editor_request, Some(r.path().join("src/a.rs")));
+    assert!(
+        app.footer_bands().iter().any(|&(a, _)| a == FooterAction::OpenEditor),
+        "the footer offers it on All files too"
+    );
+}
+
+#[test]
+fn returning_from_an_external_edit_refreshes_the_open_diff() {
+    let r = Repo::init();
+    r.write("a.rs", "alpha\n");
+    r.commit_all("init");
+    r.write("a.rs", "beta\n");
+    let mut app = app_on(&r);
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+    assert!(app.visible.iter().any(|row| row.text() == "beta"), "the initial diff shows beta");
+
+    // Simulate an external editor changing the file on disk, then the same refresh the event
+    // loop requests once the editor closes (`request_open_editor`'s contract, `specs/input.md`
+    // "Open in editor").
+    r.write("a.rs", "gamma\n");
+    app.request_world_refresh(false, false);
+    common::land_world(&mut app);
+
+    assert!(app.visible.iter().any(|row| row.text() == "gamma"), "the diff reflects the edit");
+}
+
+#[test]
+fn the_footer_offers_open_editor_only_on_a_file_row() {
+    let r = Repo::init();
+    r.write("src/a.rs", "one\n");
+    r.write("src/b.rs", "one\n");
+    r.commit_all("init");
+    r.write("src/a.rs", "two\n");
+    r.write("src/b.rs", "two\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Files;
+    let has_open_editor =
+        |a: &App| a.footer_bands().iter().any(|&(x, _)| x == FooterAction::OpenEditor);
+
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
+    assert!(!has_open_editor(&app), "a directory row offers no open-editor action");
+
+    app.file_cursor = file_row(&app, "src/a.rs");
+    assert!(has_open_editor(&app), "a file row offers open-editor");
+}
+
 /// Expand the fold under the cursor with synthetic geometry (these tests don't render).
 fn expand_fold(app: &mut App) {
     let heights = vec![1usize; app.visible.len()];
@@ -3188,6 +3279,40 @@ fn mouse(app: &mut App, keymap: &Keymap, kind: MouseEventKind) {
     let heights = vec![1usize; app.visible.len()];
     let event = MouseEvent { kind, column: 10, row: 10, modifiers: KeyModifiers::NONE };
     handle_mouse(app, event, area, &heights, keymap).unwrap();
+}
+
+#[test]
+fn e_dispatches_by_focus_edit_comment_or_open_editor() {
+    let r = Repo::init();
+    r.write("src/a.rs", "one\n");
+    r.write("src/b.rs", "one\n");
+    r.commit_all("init");
+    r.write("src/a.rs", "two\n");
+    r.write("src/b.rs", "two\n");
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+
+    // Files pane, on the file row: `e` requests the editor.
+    app.focus = Focus::Files;
+    app.file_cursor = file_row(&app, "src/a.rs");
+    press(&mut app, &keymap, KeyCode::Char('e'));
+    assert_eq!(app.editor_request, Some(r.path().join("src/a.rs")));
+
+    // Files pane, on the directory row: `e` does nothing.
+    app.editor_request = None;
+    app.file_cursor = app.file_rows.iter().position(|row| row.dir_path() == Some("src")).unwrap();
+    press(&mut app, &keymap, KeyCode::Char('e'));
+    assert_eq!(app.editor_request, None, "a directory row requests nothing");
+
+    // Diff pane, on a commented line: `e` still edits the comment (unchanged behavior).
+    app.select_file(file_row(&app, "src/a.rs")).unwrap();
+    comment_on(&mut app, '+', "note");
+    press(&mut app, &keymap, KeyCode::Char('e'));
+    assert!(
+        matches!(app.mode, Mode::Composing { editing: Some(_) }),
+        "e still edits the comment on the diff"
+    );
+    assert_eq!(app.editor_request, None, "the diff-pane edit never requests the editor");
 }
 
 #[test]

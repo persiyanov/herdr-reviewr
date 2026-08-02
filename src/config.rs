@@ -81,7 +81,7 @@ pub(crate) fn canonical_base(entry: &str) -> String {
         .to_string()
 }
 
-const PLUGIN_CONFIG_KEYS: [&str; 11] = [
+const PLUGIN_CONFIG_KEYS: [&str; 12] = [
     "theme",
     "base_branches",
     "default_scope",
@@ -92,6 +92,7 @@ const PLUGIN_CONFIG_KEYS: [&str; 11] = [
     "github_host",
     "gitlab_host",
     "azure_devops_host",
+    "editor",
     "keybindings",
 ];
 
@@ -182,6 +183,7 @@ pub struct PluginConfig {
     github_host: Option<String>,
     gitlab_host: Option<String>,
     azure_devops_host: Option<String>,
+    editor: Option<String>,
     keymap: crate::keymap::Keymap,
 }
 
@@ -198,6 +200,7 @@ impl Default for PluginConfig {
             github_host: None,
             gitlab_host: None,
             azure_devops_host: None,
+            editor: None,
             keymap: crate::keymap::Keymap::default(),
         }
     }
@@ -255,6 +258,12 @@ impl PluginConfig {
         }
     }
 
+    /// The `editor` key: the command `e` opens a file with in the Files pane, whitespace-split,
+    /// the path appended (`specs/input.md` "Open in editor").
+    pub fn editor(&self) -> Option<&str> {
+        self.editor.as_deref()
+    }
+
     /// The resolved keymap: the defaults with this snapshot's `[keybindings]` applied.
     pub fn keymap(&self) -> &crate::keymap::Keymap {
         &self.keymap
@@ -282,6 +291,7 @@ impl PluginConfig {
             "github_host": self.github_host,
             "gitlab_host": self.gitlab_host,
             "azure_devops_host": self.azure_devops_host,
+            "editor": self.editor,
             "keybindings": keybindings,
         })
     }
@@ -506,6 +516,13 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
                 ),
             ));
         }
+    }
+    if let Some(value) = table.get("editor") {
+        let editor = string_value(path, "editor", value, "a non-empty string")?;
+        if editor.trim().is_empty() {
+            return Err(value_error(path, "editor", "a non-empty string"));
+        }
+        config.editor = Some(editor.to_owned());
     }
     if let Some(value) = table.get("keybindings") {
         config.keymap = parse_keybindings(path, value)?;
@@ -756,6 +773,7 @@ mod tests {
         assert_eq!(config.toggle_direction(), ToggleDirection::Right);
         assert!(config.auto_open());
         assert_eq!(config.github_host(), None);
+        assert_eq!(config.editor(), None);
     }
 
     #[test]
@@ -772,6 +790,7 @@ mod tests {
                 "toggle_direction = \"down\"\n",
                 "auto_open = false\n",
                 "github_host = \"GitHub.Example.COM\"\n",
+                "editor = \"code --wait\"\n",
             ),
         )
         .unwrap();
@@ -785,6 +804,7 @@ mod tests {
         assert_eq!(config.toggle_direction(), ToggleDirection::Down);
         assert!(!config.auto_open());
         assert_eq!(config.github_host(), Some("github.example.com"));
+        assert_eq!(config.editor(), Some("code --wait"));
     }
 
     #[test]
@@ -844,6 +864,9 @@ mod tests {
             // Any organization label matches the built-in wildcard (`specs/config.md`).
             ("azure_devops_host = \"foo.visualstudio.com\"\n", "`azure_devops_host`"),
             ("github_host = \"bar.visualstudio.com\"\n", "`github_host`"),
+            ("editor = \"\"\n", "`editor`"),
+            ("editor = \"   \"\n", "`editor`"),
+            ("editor = 1\n", "`editor`"),
         ];
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -1066,6 +1089,7 @@ mod tests {
         assert_eq!(object["toggle_direction"], "right");
         assert_eq!(object["auto_open"], true);
         assert!(object["github_host"].is_null());
+        assert!(object["editor"].is_null());
         let keybindings = object["keybindings"].as_object().unwrap();
         assert_eq!(
             keybindings.len(),

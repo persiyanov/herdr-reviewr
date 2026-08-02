@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-10
-Last edited: 2026-07-31
+Last edited: 2026-08-02
 ---
 
 # Configuration
@@ -23,6 +23,7 @@ auto_open = false
 github_host = "github.example.com"
 gitlab_host = "git.corp.example"
 azure_devops_host = "tfs.corp.example"
+editor = "code --wait"
 
 [keybindings]
 comment = ["c", "ㅊ"]
@@ -30,19 +31,20 @@ select  = ["v", "ㅍ"]
 find    = ["ctrl+f"]
 ```
 
-| key                  | value                                                                              |
-| -------------------- | ---------------------------------------------------------------------------------- |
-| `theme`              | one name from the theme set in `theme.md`                                          |
-| `base_branches`      | non-empty array of non-empty branch names, `origin/` and `refs/` prefixes accepted |
-| `default_scope`      | `uncommitted`, `branch`, or `last-turn`                                            |
-| `navigator_position` | `right`, `left`, `top`, or `bottom`                                                |
-| `toggle_placement`   | `split`, `overlay`, `zoomed`, or `tab`                                             |
-| `toggle_direction`   | `right` or `down`                                                                  |
-| `auto_open`          | boolean                                                                            |
-| `github_host`        | bare hostname other than `github.com`                                              |
-| `gitlab_host`        | bare hostname other than `gitlab.com`                                              |
-| `azure_devops_host`  | bare hostname other than `dev.azure.com`                                           |
-| `keybindings`        | table of actions from the keymap in `input.md`, each a non-empty array of keys     |
+| key                  | value                                                                                          |
+| -------------------- | ---------------------------------------------------------------------------------------------- |
+| `theme`              | one name from the theme set in `theme.md`                                                      |
+| `base_branches`      | non-empty array of non-empty branch names, `origin/` and `refs/` prefixes accepted             |
+| `default_scope`      | `uncommitted`, `branch`, or `last-turn`                                                        |
+| `navigator_position` | `right`, `left`, `top`, or `bottom`                                                            |
+| `toggle_placement`   | `split`, `overlay`, `zoomed`, or `tab`                                                         |
+| `toggle_direction`   | `right` or `down`                                                                              |
+| `auto_open`          | boolean                                                                                        |
+| `github_host`        | bare hostname other than `github.com`                                                          |
+| `gitlab_host`        | bare hostname other than `gitlab.com`                                                          |
+| `azure_devops_host`  | bare hostname other than `dev.azure.com`                                                       |
+| `editor`             | non-empty string: the editor command, split on whitespace, the file path appended (`input.md`) |
+| `keybindings`        | table of actions from the keymap in `input.md`, each a non-empty array of keys                 |
 
 `--resolve-plugin-config` prints the validated config as JSON, every key included, the keymap resolved.
 
