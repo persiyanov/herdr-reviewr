@@ -23,6 +23,16 @@ pub enum Appearance {
     Light,
 }
 
+impl Appearance {
+    /// The external Markdown renderer's concrete Glow style name (`specs/markdown.md`).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+}
+
 /// The syntax theme paired with a palette: a bundled `.tmTheme`'s vendored bytes (for themes
 /// `two-face` lacks, and for Catppuccin Mocha kept byte-identical to today's), or a theme
 /// from the `two-face` embedded set.
@@ -32,10 +42,11 @@ pub enum SyntaxChoice {
     Embedded(EmbeddedThemeName),
 }
 
-/// A resolved theme: its name, the chrome `Palette`, and its paired syntax theme.
+/// A resolved theme: its name, appearance, chrome `Palette`, and paired syntax theme.
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
     pub name: &'static str,
+    pub appearance: Appearance,
     pub palette: Palette,
     pub syntax: SyntaxChoice,
 }
@@ -153,7 +164,12 @@ fn derived(
     syntax: EmbeddedThemeName,
     anchors: Anchors,
 ) -> Theme {
-    Theme { name, palette: derive(anchors, appearance), syntax: SyntaxChoice::Embedded(syntax) }
+    Theme {
+        name,
+        appearance,
+        palette: derive(anchors, appearance),
+        syntax: SyntaxChoice::Embedded(syntax),
+    }
 }
 
 /// The anchor colors a derived theme lists; the rest of its palette is computed from these.
@@ -174,6 +190,7 @@ struct Anchors {
 fn catppuccin() -> Theme {
     Theme {
         name: "catppuccin",
+        appearance: Appearance::Dark,
         palette: Palette {
             base: Color::Rgb(0x1e, 0x1e, 0x2e),
             surface0: Color::Rgb(0x31, 0x32, 0x44),
@@ -206,7 +223,12 @@ fn bundled(
     syntax: &'static [u8],
     anchors: Anchors,
 ) -> Theme {
-    Theme { name, palette: derive(anchors, appearance), syntax: SyntaxChoice::Bundled(syntax) }
+    Theme {
+        name,
+        appearance,
+        palette: derive(anchors, appearance),
+        syntax: SyntaxChoice::Bundled(syntax),
+    }
 }
 
 /// Vendored `.tmTheme` assets for the syntax themes `two-face` does not carry (and Mocha,

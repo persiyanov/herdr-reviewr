@@ -81,8 +81,9 @@ pub(crate) fn canonical_base(entry: &str) -> String {
         .to_string()
 }
 
-const PLUGIN_CONFIG_KEYS: [&str; 11] = [
+const PLUGIN_CONFIG_KEYS: [&str; 12] = [
     "theme",
+    "file_markdown_renderer",
     "base_branches",
     "default_scope",
     "navigator_position",
@@ -173,6 +174,7 @@ impl ToggleDirection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginConfig {
     theme: String,
+    file_markdown_renderer: Option<Vec<String>>,
     base_branches: Vec<String>,
     default_scope: crate::model::Scope,
     navigator_position: NavigatorPosition,
@@ -189,6 +191,7 @@ impl Default for PluginConfig {
     fn default() -> Self {
         Self {
             theme: crate::theme::DEFAULT.to_owned(),
+            file_markdown_renderer: None,
             base_branches: DEFAULT_BASE_BRANCHES.iter().map(|s| (*s).to_owned()).collect(),
             default_scope: crate::model::Scope::Uncommitted,
             navigator_position: NavigatorPosition::Right,
@@ -206,6 +209,12 @@ impl Default for PluginConfig {
 impl PluginConfig {
     pub fn theme(&self) -> &str {
         &self.theme
+    }
+
+    /// The optional external renderer argv for Markdown file previews. `None` selects the
+    /// built-in renderer; PR Markdown never reads this setting (`specs/markdown.md`).
+    pub fn file_markdown_renderer(&self) -> Option<&[String]> {
+        self.file_markdown_renderer.as_deref()
     }
 
     pub fn base_branches(&self) -> &[String] {
@@ -273,6 +282,7 @@ impl PluginConfig {
             .collect();
         serde_json::json!({
             "theme": self.theme,
+            "file_markdown_renderer": self.file_markdown_renderer,
             "base_branches": self.base_branches,
             "default_scope": self.default_scope.name(),
             "navigator_position": self.navigator_position.as_str(),
@@ -367,6 +377,21 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             ));
         }
         theme.clone_into(&mut config.theme);
+    }
+    if let Some(value) = table.get("file_markdown_renderer") {
+        let command = string_value(
+            path,
+            "file_markdown_renderer",
+            value,
+            "a non-empty command string with balanced double quotes",
+        )?;
+        config.file_markdown_renderer = Some(parse_command(command).ok_or_else(|| {
+            value_error(
+                path,
+                "file_markdown_renderer",
+                "a non-empty command string with balanced double quotes",
+            )
+        })?);
     }
     if let Some(value) = table.get("base_branches") {
         let Some(values) = value.as_array() else {
@@ -603,6 +628,41 @@ fn string_value<'a>(
     value.as_str().ok_or_else(|| value_error(path, key, expected))
 }
 
+/// Split one trusted command setting into argv. Whitespace separates arguments and double
+/// quotes group whitespace, matching herdr-file-viewer's renderer command model. The command
+/// is still executed directly; shell punctuation has no special meaning (`specs/config.md`).
+fn parse_command(text: &str) -> Option<Vec<String>> {
+    let mut argv = Vec::new();
+    let mut current = String::new();
+    let mut in_token = false;
+    let mut quoted = false;
+    for ch in text.chars() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                in_token = true;
+            }
+            ch if ch.is_whitespace() && !quoted => {
+                if in_token {
+                    argv.push(std::mem::take(&mut current));
+                    in_token = false;
+                }
+            }
+            ch => {
+                current.push(ch);
+                in_token = true;
+            }
+        }
+    }
+    if quoted {
+        return None;
+    }
+    if in_token {
+        argv.push(current);
+    }
+    (!argv.is_empty() && !argv[0].is_empty()).then_some(argv)
+}
+
 fn value_error(path: &Path, key: &str, expected: &str) -> PluginConfigError {
     PluginConfigError::new(path, format!("invalid value for `{key}`; expected {expected}"))
 }
@@ -749,6 +809,7 @@ mod tests {
         std::fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.theme(), "gruvbox");
+        assert_eq!(config.file_markdown_renderer(), None);
         assert_eq!(config.base_branches(), PluginConfig::default().base_branches());
         assert_eq!(config.default_scope(), Scope::Uncommitted);
         assert_eq!(config.navigator_position(), NavigatorPosition::Right);
@@ -765,6 +826,7 @@ mod tests {
             dir.path().join("config.toml"),
             concat!(
                 "theme = \"tokyo-night\"\n",
+                "file_markdown_renderer = \"glow -s {style} -w {width} -\"\n",
                 "base_branches = [\"origin/dev\", \"main\"]\n",
                 "default_scope = \"last-turn\"\n",
                 "navigator_position = \"bottom\"\n",
@@ -777,6 +839,10 @@ mod tests {
         .unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.theme(), "tokyo-night");
+        assert_eq!(
+            config.file_markdown_renderer().unwrap().iter().map(String::as_str).collect::<Vec<_>>(),
+            ["glow", "-s", "{style}", "-w", "{width}", "-"]
+        );
         // Entries canonicalize to bare names at validation (`specs/config.md`).
         assert_eq!(config.base_branches(), ["dev", "main"]);
         assert_eq!(config.default_scope(), Scope::LastTurn);
@@ -822,6 +888,9 @@ mod tests {
     fn every_invalid_value_fails_instead_of_falling_back() {
         let cases = [
             ("theme = \"unknown\"\n", "`theme`"),
+            ("file_markdown_renderer = []\n", "`file_markdown_renderer`"),
+            ("file_markdown_renderer = \"\"\n", "`file_markdown_renderer`"),
+            ("file_markdown_renderer = \"glow \\\"unterminated\"\n", "`file_markdown_renderer`"),
             ("base_branches = []\n", "`base_branches`"),
             ("base_branches = [\"\"]\n", "`base_branches`"),
             ("base_branches = [\"main^{commit}\"]\n", "`base_branches`"),
@@ -853,6 +922,30 @@ mod tests {
             assert!(error.contains(key), "{text}: {error}");
             assert!(error.contains("expected"), "{text}: {error}");
         }
+    }
+
+    #[test]
+    fn file_markdown_renderer_parses_to_argv_without_a_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "file_markdown_renderer = '\"/opt/Glow Tools/glow\" -s {style} -w {width} -'\n",
+        )
+        .unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(
+            config.file_markdown_renderer().unwrap().iter().map(String::as_str).collect::<Vec<_>>(),
+            ["/opt/Glow Tools/glow", "-s", "{style}", "-w", "{width}", "-"]
+        );
+
+        std::fs::write(dir.path().join("config.toml"), "file_markdown_renderer = 'glow | less'\n")
+            .unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(
+            config.file_markdown_renderer().unwrap().iter().map(String::as_str).collect::<Vec<_>>(),
+            ["glow", "|", "less"],
+            "shell punctuation remains an ordinary argv item"
+        );
     }
 
     #[test]
@@ -1061,6 +1154,7 @@ mod tests {
         let object = value.as_object().unwrap();
         assert_eq!(object.len(), super::PLUGIN_CONFIG_KEYS.len(), "one JSON key per config key");
         assert_eq!(object["default_scope"], "uncommitted");
+        assert!(object["file_markdown_renderer"].is_null());
         assert_eq!(object["navigator_position"], "right");
         assert_eq!(object["toggle_placement"], "split");
         assert_eq!(object["toggle_direction"], "right");

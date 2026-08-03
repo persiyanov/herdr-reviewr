@@ -1,11 +1,17 @@
-//! Markdown rendering: one renderer behind the PR tab's bodies and the File view's preview.
+//! Markdown rendering for PR bodies and Markdown file previews.
 //!
-//! See `specs/markdown.md`. Parses with `pulldown-cmark` and emits theme-styled,
-//! pre-wrapped `ratatui` lines. Fenced code goes through the shared [`Highlighter`], so
-//! code in a comment matches the diff panes.
+//! See `specs/markdown.md`. PR bodies always use the built-in `pulldown-cmark` renderer.
+//! File previews may delegate to one configured argv command, with the built-in renderer as
+//! the default and failure fallback.
 
+use std::io::{Read, Write};
 use std::ops::Range;
+use std::os::unix::process::CommandExt;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
+use ansi_to_tui::IntoText;
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -20,6 +26,17 @@ const MAX_NEST: usize = 8;
 
 /// The indent code-block lines carry inside their block.
 const CODE_INDENT: &str = "  ";
+
+/// An external file-preview render gets one bounded wall-clock window. The timeout is not
+/// configurable, so untrusted Markdown cannot extend it (`specs/markdown.md`).
+const EXTERNAL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Bound captured renderer output independently from the already-bounded file input.
+const MAX_EXTERNAL_OUTPUT: u64 = 16 * 1024 * 1024;
+
+/// Bounds on parsed external output complexity, before bytes become heap-allocated spans.
+const MAX_EXTERNAL_LINES: usize = 100_000;
+const MAX_EXTERNAL_STYLE_RUNS: usize = 250_000;
 
 /// A shrunk table column never drops below this width (or its natural width, when
 /// smaller), so wrapped cells stay readable (`specs/markdown.md`).
@@ -101,11 +118,51 @@ pub struct RenderCache {
     rendered: Rendered,
 }
 
+/// The file-preview cache includes the configured argv in its key. A live config change therefore
+/// replaces an on-screen render without affecting the PR cache (`specs/config.md`).
+#[derive(Debug, Default)]
+pub struct FileRenderCache {
+    key: Option<(String, usize, Option<Vec<String>>, crate::theme::Appearance)>,
+    rendered: Rendered,
+}
+
 impl RenderCache {
     pub fn get(&mut self, text: &str, width: usize, hl: &Highlighter, p: &Palette) -> Rendered {
         if !self.key.as_ref().is_some_and(|(t, w)| t == text && *w == width) {
             self.rendered = render(text, width, hl, p);
             self.key = Some((text.to_string(), width));
+        }
+        self.rendered.clone()
+    }
+
+    pub fn clear(&mut self) {
+        self.key = None;
+        self.rendered = Rendered::default();
+    }
+}
+
+impl FileRenderCache {
+    pub fn get(
+        &mut self,
+        text: &str,
+        width: usize,
+        command: Option<&[String]>,
+        appearance: crate::theme::Appearance,
+        hl: &Highlighter,
+        p: &Palette,
+    ) -> Rendered {
+        let command = command.map(<[String]>::to_vec);
+        if !self.key.as_ref().is_some_and(|(t, w, c, a)| {
+            t == text && *w == width && *c == command && *a == appearance
+        }) {
+            self.rendered = command.as_deref().map_or_else(
+                || render(text, width, hl, p),
+                |argv| {
+                    render_external(argv, text, width, appearance, EXTERNAL_TIMEOUT)
+                        .unwrap_or_else(|| render(text, width, hl, p))
+                },
+            );
+            self.key = Some((text.to_string(), width, command, appearance));
         }
         self.rendered.clone()
     }
@@ -765,6 +822,191 @@ pub(crate) fn slug_text(text: &str) -> String {
     slug
 }
 
+/// Run one configured Markdown file-preview command directly. The repository text is stdin-only;
+/// `{width}` and `{style}` substitution applies to already-tokenized trusted arguments. Any spawn,
+/// I/O, exit, timeout, size, or ANSI-conversion failure returns `None` for the built-in fallback.
+fn render_external(
+    command: &[String],
+    input: &str,
+    width: usize,
+    appearance: crate::theme::Appearance,
+    timeout: Duration,
+) -> Option<Rendered> {
+    let width = width.max(1).to_string();
+    let argv: Vec<String> = command
+        .iter()
+        .map(|arg| arg.replace("{width}", &width).replace("{style}", appearance.as_str()))
+        .collect();
+    let (program, command_args) = argv.split_first()?;
+    let mut child = Command::new(program)
+        .args(command_args)
+        // Glow otherwise selects its no-color output profile when stdout is a pipe.
+        .env("CLICOLOR_FORCE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .ok()?;
+
+    let mut stdin = child.stdin.take()?;
+    let owned = input.to_owned();
+    let (stdin_tx, stdin_rx) = mpsc::channel();
+    let stdin_thread = std::thread::spawn(move || {
+        let ok = stdin.write_all(owned.as_bytes()).is_ok();
+        let _ = stdin_tx.send(ok);
+    });
+
+    let stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    let stdout_thread = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.take(MAX_EXTERNAL_OUTPUT + 1).read_to_end(&mut bytes).map(|_| bytes);
+        let _ = tx.send(result);
+    });
+
+    let deadline = Instant::now() + timeout;
+    let bytes = match rx.recv_timeout(timeout) {
+        Ok(Ok(bytes)) if bytes.len() as u64 <= MAX_EXTERNAL_OUTPUT => bytes,
+        _ => {
+            crate::proc::terminate_process_group(&mut child);
+            let _ = stdin_thread.join();
+            let _ = stdout_thread.join();
+            return None;
+        }
+    };
+    let stdin_ok =
+        stdin_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).unwrap_or(false);
+    if !stdin_ok {
+        crate::proc::terminate_process_group(&mut child);
+        let _ = stdin_thread.join();
+        let _ = stdout_thread.join();
+        return None;
+    }
+    let status =
+        crate::proc::wait_bounded(&mut child, deadline.saturating_duration_since(Instant::now()));
+    let _ = stdin_thread.join();
+    let _ = stdout_thread.join();
+    let status = status?;
+    if !status.success() {
+        return None;
+    }
+
+    external_output(&String::from_utf8_lossy(&bytes))
+}
+
+/// Keep only Select Graphic Rendition (SGR) ANSI styling and convert it into ratatui spans.
+/// Cursor, screen, hyperlink, bell, carriage-return, and other terminal controls never reach
+/// the terminal (`specs/markdown.md`).
+fn external_output(raw: &str) -> Option<Rendered> {
+    let clean = strip_terminal_control(raw);
+    if clean.lines().count() > MAX_EXTERNAL_LINES
+        || clean.matches('\u{1b}').take(MAX_EXTERNAL_STYLE_RUNS + 1).count()
+            > MAX_EXTERNAL_STYLE_RUNS
+    {
+        return None;
+    }
+    let text = clean.into_text().ok()?;
+    let lines = text.lines;
+    // External renderers do not expose source blocks, links, or heading identities. A constant
+    // source identity makes source/preview position transfer conservatively return to the top.
+    let meta = lines.iter().map(|_| LineMeta { source_line: 1, links: Vec::new() }).collect();
+    Some(Rendered { lines, meta, anchors: Vec::new() })
+}
+
+/// Strip every terminal control sequence except SGR (`CSI ... m`). This byte-level pass follows
+/// the external renderer boundary used by herdr-file-viewer, then neutralizes Unicode controls.
+fn strip_terminal_control(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            match bytes.get(i + 1) {
+                Some(b'[') => {
+                    let start = i;
+                    let mut end = i + 2;
+                    while end < bytes.len() && !(0x40..=0x7e).contains(&bytes[end]) {
+                        end += 1;
+                    }
+                    if end < bytes.len() && bytes[end] == b'm' {
+                        out.extend_from_slice(&bytes[start..=end]);
+                    }
+                    i = end.saturating_add(1);
+                }
+                Some(b']') => i = control_string_end(bytes, i + 2, true),
+                Some(b'P' | b'X' | b'^' | b'_') => {
+                    i = control_string_end(bytes, i + 2, false);
+                }
+                Some(_) => i += 2,
+                None => i += 1,
+            }
+        } else if bytes[i] == 0xc2 {
+            match bytes.get(i + 1) {
+                Some(0x9b) => {
+                    let mut end = i + 2;
+                    while end < bytes.len() && !(0x40..=0x7e).contains(&bytes[end]) {
+                        end += 1;
+                    }
+                    if end < bytes.len() && bytes[end] == b'm' {
+                        out.extend_from_slice(b"\x1b[");
+                        out.extend_from_slice(&bytes[i + 2..=end]);
+                    }
+                    i = end.saturating_add(1);
+                }
+                Some(0x9d) => {
+                    i = control_string_end(bytes, i + 2, true);
+                }
+                Some(0x90 | 0x98 | 0x9e | 0x9f) => {
+                    i = control_string_end(bytes, i + 2, false);
+                }
+                Some(0x80..=0x9f) => i += 2,
+                _ => {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+        } else {
+            let byte = bytes[i];
+            if (byte >= 0x20 || matches!(byte, b'\n' | b'\t')) && byte != 0x7f {
+                out.push(byte);
+            }
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out)
+        .chars()
+        .map(|ch| {
+            if matches!(
+                ch,
+                '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}'
+            ) {
+                '�'
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
+/// Consume an OSC/DCS/SOS/PM/APC control string through ST (`ESC \\`) or C1 ST. OSC also accepts
+/// BEL as its terminator; the other control strings treat BEL as payload.
+fn control_string_end(bytes: &[u8], mut at: usize, bel_terminates: bool) -> usize {
+    while at < bytes.len() {
+        if bel_terminates && bytes[at] == 0x07 {
+            return at + 1;
+        }
+        if bytes[at] == 0x1b && bytes.get(at + 1) == Some(&b'\\') {
+            return at + 2;
+        }
+        if bytes[at] == 0xc2 && bytes.get(at + 1) == Some(&0x9c) {
+            return at + 2;
+        }
+        at += 1;
+    }
+    at
+}
+
 /// A character the terminal must never receive raw: a control character or an explicit
 /// bidirectional override. One predicate serves the display ([`sanitize`]) and the link
 /// opener (`browser::openable_url`), so what the display would neutralize can never
@@ -938,6 +1180,7 @@ mod tests {
     use crate::theme::{self, Palette};
     use ratatui::style::Modifier;
     use ratatui::text::Line;
+    use std::time::{Duration, Instant};
 
     fn setup() -> (Highlighter, Palette) {
         let t = theme::resolve(Some("catppuccin"));
@@ -1442,5 +1685,135 @@ mod tests {
         );
         cache.clear();
         assert_eq!(cache.get("**hi**", 80, &hl, &p).lines, first.lines);
+    }
+
+    #[test]
+    fn external_output_keeps_sgr_and_strips_terminal_controls() {
+        use ratatui::style::Color;
+
+        let rendered = super::external_output(concat!(
+            "\u{1b}[34mblue\u{1b}[0m\u{1b}[2J",
+            "\u{1b}]8;;https://evil.example\u{7}link\u{1b}]8;;\u{7}",
+            "\u{1b}Psecret\u{7}still-secret\u{1b}\\\u{009d}also-secret\u{009c}",
+            "\u{009b}2J\u{009b}31mred\u{009b}0m\n",
+        ))
+        .unwrap();
+        assert_eq!(texts(&rendered.lines), ["bluelinkred"]);
+        assert_eq!(rendered.lines[0].spans[0].style.fg, Some(Color::Blue));
+        assert_eq!(rendered.lines[0].spans.last().unwrap().style.fg, Some(Color::Red));
+        assert!(rendered.meta.iter().all(|meta| meta.links.is_empty()));
+        assert!(rendered.anchors.is_empty());
+    }
+
+    #[test]
+    fn external_command_substitutes_width_and_light_style_in_argv() {
+        let command = ["printf".to_string(), "style={style},width={width}".to_string()];
+        let rendered = super::render_external(
+            &command,
+            "untrusted input",
+            37,
+            crate::theme::Appearance::Light,
+            Duration::from_secs(1),
+        )
+        .expect("printf executes directly");
+        assert_eq!(texts(&rendered.lines), ["style=light,width=37"]);
+    }
+
+    #[test]
+    fn external_command_timeout_is_a_fallback_failure() {
+        let command = ["sh".to_string(), "-c".to_string(), "sleep 2 & wait".to_string()];
+        let started = Instant::now();
+        assert!(
+            super::render_external(
+                &command,
+                "untrusted input",
+                80,
+                crate::theme::Appearance::Dark,
+                Duration::from_millis(20),
+            )
+            .is_none(),
+            "a timed-out command returns no external render, selecting the built-in fallback"
+        );
+        assert!(started.elapsed() < Duration::from_millis(500), "descendants must die with parent");
+    }
+
+    fn assert_process_gone(pid: i32) {
+        use nix::errno::Errno;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        for _ in 0..50 {
+            if kill(Pid::from_raw(pid), None) == Err(Errno::ESRCH) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("renderer descendant {pid} survived process-group cleanup");
+    }
+
+    #[test]
+    fn successful_renderer_cleans_up_a_detached_stdio_descendant() {
+        let command = [
+            "sh".to_string(),
+            "-c".to_string(),
+            "sleep 2 >/dev/null 2>&1 </dev/null & printf $!".to_string(),
+        ];
+        let rendered = super::render_external(
+            &command,
+            "input",
+            80,
+            crate::theme::Appearance::Dark,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let pid = texts(&rendered.lines)[0].parse().unwrap();
+        assert_process_gone(pid);
+    }
+
+    #[test]
+    fn failed_renderer_cleans_up_a_detached_stdio_descendant() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let command = [
+            "sh".to_string(),
+            "-c".to_string(),
+            "sleep 2 >/dev/null 2>&1 </dev/null & echo $! > \"$1\"; exit 7".to_string(),
+            "sh".to_string(),
+            pid_file.to_string_lossy().into_owned(),
+        ];
+        assert!(
+            super::render_external(
+                &command,
+                "input",
+                80,
+                crate::theme::Appearance::Dark,
+                Duration::from_secs(1),
+            )
+            .is_none()
+        );
+        let pid: i32 = std::fs::read_to_string(pid_file).unwrap().trim().parse().unwrap();
+        assert_process_gone(pid);
+    }
+
+    #[test]
+    fn external_command_must_accept_the_complete_stdin() {
+        let command = ["true".to_string()];
+        assert!(
+            super::render_external(
+                &command,
+                &"x".repeat(1024 * 1024),
+                80,
+                crate::theme::Appearance::Dark,
+                Duration::from_secs(1),
+            )
+            .is_none(),
+            "an early stdin close selects the built-in fallback"
+        );
+    }
+
+    #[test]
+    fn excessive_external_style_runs_are_rejected_before_ansi_conversion() {
+        let raw = "\u{1b}[31m".repeat(super::MAX_EXTERNAL_STYLE_RUNS + 1);
+        assert!(super::external_output(&raw).is_none());
     }
 }
