@@ -405,14 +405,10 @@ fn parse_issues(json: &str) -> Result<Vec<Issue>, IssueError> {
             }
         });
         let summary = row.get("subIssuesSummary");
-        let sub_completed = summary
-            .and_then(|s| s.get("completed"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32;
-        let sub_total = summary
-            .and_then(|s| s.get("total"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32;
+        let sub_completed =
+            summary.and_then(|s| s.get("completed")).and_then(Value::as_u64).unwrap_or(0) as u32;
+        let sub_total =
+            summary.and_then(|s| s.get("total")).and_then(Value::as_u64).unwrap_or(0) as u32;
         let mut comments = parse_comments(row.get("comments"));
         // Newest first — matches the PR tab's comment surface (specs/issue-tab.md).
         comments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -620,10 +616,7 @@ mod tests {
     fn order_as_tree_nests_children_under_present_parents() {
         // Input: child, parent, other — output: parent, child, other.
         let ordered = order_as_tree(vec![bare(2, Some(1)), bare(1, None), bare(3, None)]);
-        assert_eq!(
-            ordered.iter().map(|i| i.number).collect::<Vec<_>>(),
-            vec![1, 2, 3]
-        );
+        assert_eq!(ordered.iter().map(|i| i.number).collect::<Vec<_>>(), vec![1, 2, 3]);
     }
 
     #[test]

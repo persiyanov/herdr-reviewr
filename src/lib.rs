@@ -483,10 +483,8 @@ impl IssueCoordinator {
 
     fn request(&mut self, kind: crate::app::RefreshKind) {
         self.wait_started.get_or_insert_with(Instant::now);
-        let hung = self
-            .active
-            .as_ref()
-            .is_some_and(|active| active.started.elapsed() >= FETCH_HANG);
+        let hung =
+            self.active.as_ref().is_some_and(|active| active.started.elapsed() >= FETCH_HANG);
         if kind == crate::app::RefreshKind::Ambient && !hung && self.active.is_some() {
             return;
         }
@@ -1083,16 +1081,14 @@ fn event_loop(
                     app.plugin_config().expect("config checked above").clone(),
                 );
                 thread::spawn(move || {
-                    let view = match crate::forge::fetch_input(&repo, base.as_deref(), &plugin_config)
-                    {
-                        Ok(input) => {
-                            crate::issue::fetch(&repo, &input, query, &cancelled)
-                        }
-                        Err(
-                            crate::forge::PrInputError::TargetRead(message)
-                            | crate::forge::PrInputError::BranchState { message, .. },
-                        ) => crate::issue::IssueView::GitError(message),
-                    };
+                    let view =
+                        match crate::forge::fetch_input(&repo, base.as_deref(), &plugin_config) {
+                            Ok(input) => crate::issue::fetch(&repo, &input, query, &cancelled),
+                            Err(
+                                crate::forge::PrInputError::TargetRead(message)
+                                | crate::forge::PrInputError::BranchState { message, .. },
+                            ) => crate::issue::IssueView::GitError(message),
+                        };
                     let _ = tx.send(TaggedIssue { generation, query, view });
                 });
             }
@@ -1210,7 +1206,9 @@ fn event_loop(
             // While a fetch is in flight, wake often so its result paints promptly when it
             // lands. A world refresh usually lands within tens of milliseconds, so its wake
             // is tighter — the landing paints near the build's own speed.
-            if pr.active_fetch.is_some() || pr.active_probe_epoch.is_some() || issue.active.is_some()
+            if pr.active_fetch.is_some()
+                || pr.active_probe_epoch.is_some()
+                || issue.active.is_some()
             {
                 timeout = timeout.min(Duration::from_millis(100));
             }

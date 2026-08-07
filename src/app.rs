@@ -2174,14 +2174,14 @@ impl App {
         self.issue_notice = None;
         let selected_number = self.issue_selected().map(|i| i.number);
         let detail = self.issue_detail_cursor;
-        let selected_comment = self.issue_selected_comment().map(|c| {
-            (c.author.clone(), c.created_at.clone())
-        });
+        let selected_comment =
+            self.issue_selected_comment().map(|c| (c.author.clone(), c.created_at.clone()));
         self.issue = view;
         if let Some(number) = selected_number {
-            if let Some(i) = self.issue_snapshot().and_then(|s| {
-                s.issues.iter().position(|issue| issue.number == number)
-            }) {
+            if let Some(i) = self
+                .issue_snapshot()
+                .and_then(|s| s.issues.iter().position(|issue| issue.number == number))
+            {
                 self.issue_cursor = i;
                 self.issue_detail_cursor = match detail {
                     Some(0) if self.issue_has_detail() => Some(0),
@@ -2261,11 +2261,7 @@ impl App {
     /// Zero when the selected issue has no comments (section hidden).
     #[must_use]
     pub fn issue_detail_row_count(&self) -> usize {
-        if self.issue_has_detail() {
-            1 + self.issue_selected_comment_count()
-        } else {
-            0
-        }
+        if self.issue_has_detail() { 1 + self.issue_selected_comment_count() } else { 0 }
     }
 
     /// Whether focus is in the detail section under the selected issue.
@@ -3750,11 +3746,8 @@ impl App {
         // `Do` actions (the footer paints only one Primary). Open the selected issue when one is
         // selected. Same go/move bands as PR (no hunk/file steps).
         if self.tab == Tab::Issue {
-            let mut out = vec![
-                (A::IssueFilter, Primary),
-                (A::IssueAssignee, Do),
-                (A::IssuePriority, Do),
-            ];
+            let mut out =
+                vec![(A::IssueFilter, Primary), (A::IssueAssignee, Do), (A::IssuePriority, Do)];
             if self.issue_selected().is_some() {
                 out.push((A::OpenPr, Do));
             }
@@ -4212,7 +4205,9 @@ mod tests {
 
     #[test]
     fn issue_cache_skips_network_when_fresh() {
-        use crate::issue::{Issue, IssueAssignee, IssueQuery, IssueSnapshot, IssueState, IssueView};
+        use crate::issue::{
+            Issue, IssueAssignee, IssueQuery, IssueSnapshot, IssueState, IssueView,
+        };
         let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
         let query = IssueQuery::default();
         app.issue_query = query;

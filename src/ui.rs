@@ -3127,10 +3127,8 @@ fn render_issue_header(frame: &mut Frame, app: &App, area: Rect) {
     let w = area.width as usize;
     let chips = issue_chip_labels(app);
     let chips_w = issue_chips_width(app);
-    let title = app
-        .issue_selected()
-        .map(|i| format!("#{} {}", i.number, i.title))
-        .unwrap_or_default();
+    let title =
+        app.issue_selected().map(|i| format!("#{} {}", i.number, i.title)).unwrap_or_default();
     let name = truncate_width(&title, w.saturating_sub(lead_tabs + chips_w + 2).max(4));
     let name_w = name.width();
     let pad = w.saturating_sub(lead_tabs + name_w + if name_w > 0 { 2 } else { 0 } + chips_w);
@@ -3194,7 +3192,12 @@ fn render_issue_nav(frame: &mut Frame, app: &App, area: Rect) {
         let half = split_axis(area.width, 50);
         let issues = Rect::new(area.x, area.y, half, area.height);
         let detail = Rect::new(area.x + half, area.y, area.width - half, area.height);
-        render_issue_list_panel(frame, app, issues, app.focus == Focus::Files && !app.issue_detail_focused());
+        render_issue_list_panel(
+            frame,
+            app,
+            issues,
+            app.focus == Focus::Files && !app.issue_detail_focused(),
+        );
         render_issue_detail_panel(
             frame,
             app,
@@ -3273,9 +3276,8 @@ fn render_issue_detail_panel(frame: &mut Frame, app: &App, area: Rect, focused: 
     let rows = issue_detail_rows(app, width, std::time::SystemTime::now());
     let focus = issue_nav_focus(app);
     let viewport = list_area.height as usize;
-    let can_reveal = viewport > 0
-        && app.issue_detail_focused()
-        && rows.iter().any(|row| row.hit == Some(focus));
+    let can_reveal =
+        viewport > 0 && app.issue_detail_focused() && rows.iter().any(|row| row.hit == Some(focus));
     // Only consume the reveal flag when this pane owns focus; the issues panel may have
     // already taken it when focus is on the list.
     let reveal = can_reveal && app.take_issue_nav_reveal();
@@ -3406,7 +3408,11 @@ fn issue_detail_rows(app: &App, width: usize, now: std::time::SystemTime) -> Vec
 }
 
 /// Combined single-column rows: issues, then optional detail section with a header.
-fn issue_nav_rows_combined(app: &App, width: usize, now: std::time::SystemTime) -> Vec<IssueNavRow> {
+fn issue_nav_rows_combined(
+    app: &App,
+    width: usize,
+    now: std::time::SystemTime,
+) -> Vec<IssueNavRow> {
     let p = app.palette();
     let dim = Style::default().fg(p.overlay0);
     let mut rows = issue_list_rows(app, width, now);
@@ -3415,10 +3421,7 @@ fn issue_nav_rows_combined(app: &App, width: usize, now: std::time::SystemTime) 
     {
         rows.push(IssueNavRow { spans: Vec::new(), hit: None });
         rows.push(IssueNavRow {
-            spans: vec![Span::styled(
-                format!("comments · {}", issue.comments.len()),
-                dim,
-            )],
+            spans: vec![Span::styled(format!("comments · {}", issue.comments.len()), dim)],
             hit: None,
         });
         rows.extend(issue_detail_rows(app, width, now));
@@ -3533,10 +3536,8 @@ fn render_issue_read(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = inner.width as usize;
-    let notice_lines = app
-        .issue_notice()
-        .map(|notice| wrap_text(notice, width.max(1)))
-        .unwrap_or_default();
+    let notice_lines =
+        app.issue_notice().map(|notice| wrap_text(notice, width.max(1))).unwrap_or_default();
     let notice_capacity = match inner.height {
         0 => 0,
         1 => 1,
@@ -3576,11 +3577,7 @@ fn render_issue_read(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut body_meta: Option<(usize, crate::markdown::Rendered)> = None;
     if let Some(cm) = app.issue_selected_comment() {
-        let text = if cm.body.trim().is_empty() {
-            "_No comment body._"
-        } else {
-            cm.body.as_str()
-        };
+        let text = if cm.body.trim().is_empty() { "_No comment body._" } else { cm.body.as_str() };
         let mut rendered = app.markdown_render(text, width.max(1));
         let offset = lines.len();
         lines.append(&mut rendered.lines);
@@ -3614,11 +3611,8 @@ fn render_issue_read(frame: &mut Frame, app: &App, area: Rect) {
             )));
             lines.push(Line::raw(""));
         }
-        let text = if issue.body.trim().is_empty() {
-            "_No description._"
-        } else {
-            issue.body.as_str()
-        };
+        let text =
+            if issue.body.trim().is_empty() { "_No description._" } else { issue.body.as_str() };
         let mut rendered = app.markdown_render(text, width.max(1));
         let offset = lines.len();
         lines.append(&mut rendered.lines);
@@ -3732,8 +3726,7 @@ pub fn issue_nav_hit(area: Rect, app: &App, col: u16, row: u16) -> Option<IssueN
             if row >= inner.y + list_h {
                 return None; // hint row
             }
-            let rows =
-                issue_detail_rows(app, inner.width as usize, std::time::SystemTime::now());
+            let rows = issue_detail_rows(app, inner.width as usize, std::time::SystemTime::now());
             let scroll = app.issue_detail_nav_scroll();
             return rows.get((row - inner.y) as usize + scroll)?.hit;
         }

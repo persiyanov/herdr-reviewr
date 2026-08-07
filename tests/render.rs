@@ -2825,17 +2825,14 @@ fn issue_tab_shows_filter_chip_and_empty_state() {
     assert!(out.contains("Fix the pane"), "issue title in list and read pane:\n{out}");
     // Read-pane title is H1-styled (bold mauve); presence is enough — style is unit-covered in markdown.
     assert!(out.contains("labels: bug"), "labels in read pane:\n{out}");
-    assert!(
-        !out.contains("comments ·"),
-        "no comments section when the issue has none:\n{out}"
-    );
+    assert!(!out.contains("comments ·"), "no comments section when the issue has none:\n{out}");
     assert!(out.contains("i open") || out.contains("open"), "state filter in footer:\n{out}");
+    assert!(out.contains("a all") || out.contains("a mine"), "assignee filter in footer:\n{out}");
     assert!(
-        out.contains("a all") || out.contains("a mine"),
-        "assignee filter in footer:\n{out}"
-    );
-    assert!(
-        out.contains("L any") || out.contains("L p0") || out.contains("L p1") || out.contains("L p2"),
+        out.contains("L any")
+            || out.contains("L p0")
+            || out.contains("L p1")
+            || out.contains("L p2"),
         "priority filter in footer:\n{out}"
     );
 }
@@ -3017,10 +3014,7 @@ fn issue_nav_shows_comments_for_selected_issue() {
     app.issue_select(0);
     app.issue_enter_detail();
     assert!(app.issue_detail_focused(), "→ enters detail when comments exist");
-    assert!(
-        app.issue_showing_description(),
-        "detail lands on description first"
-    );
+    assert!(app.issue_showing_description(), "detail lands on description first");
     let on_desc = dump(&render_size(&app, 100, 24));
     assert!(on_desc.contains("Issue body"), "description still shows the issue body:\n{on_desc}");
 
@@ -3089,7 +3083,10 @@ fn issue_nav_side_by_side_on_stacked_layout() {
     assert!(out.contains("description"), "description row in detail panel:\n{out}");
     assert!(out.contains("@bob"), "comment row visible beside issues:\n{out}");
     assert!(
-        out.contains("←") && out.contains("→") && out.contains("issues") && out.contains("comments"),
+        out.contains("←")
+            && out.contains("→")
+            && out.contains("issues")
+            && out.contains("comments"),
         "detail hint shows left/right affordances:\n{out}"
     );
 }
