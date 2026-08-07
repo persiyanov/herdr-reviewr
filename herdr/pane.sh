@@ -11,6 +11,11 @@
 # and never read. There is no state file. Actions refuse loudly (exit 1, one stderr line)
 # and report successes on stdout; a refused event reports its config error through stderr
 # for herdr's plugin log.
+#
+# Local patch (per-tab scope): when HERDR_TAB_ID is set and toggle_placement is not "tab",
+# open/close/toggle only count reviewr panes in the current herdr tab. Other tabs keep
+# their own instances. placement=tab still uses workspace scope (reviewr lives in a
+# sibling tab). auto-open has no tab context and stays workspace-scoped.
 set -uo pipefail
 
 # herdr runs plugin commands with a minimal PATH; ensure jq/git resolve on common installs.
@@ -81,6 +86,7 @@ refuse() {
 
 ws="${HERDR_WORKSPACE_ID:-}"
 pane="${HERDR_PANE_ID:-}"
+tab="${HERDR_TAB_ID:-}"
 cwd=""
 [ -n "${HERDR_PLUGIN_CONTEXT_JSON:-}" ] &&
   cwd=$(printf '%s' "$HERDR_PLUGIN_CONTEXT_JSON" | jq -r '.focused_pane_cwd // .workspace_cwd // empty' 2>/dev/null)
@@ -92,6 +98,7 @@ if [ "$mode" = auto-open ] && [ -n "${HERDR_PLUGIN_EVENT_JSON:-}" ]; then
   ws=$(printf '%s' "$ev" | jq -r '.data.workspace.workspace_id // .data.worktree.open_workspace_id // empty' 2>/dev/null)
   cwd=$(printf '%s' "$ev" | jq -r '.data.workspace.worktree.checkout_path // .data.worktree.path // empty' 2>/dev/null)
   pane=""
+  tab=""
 fi
 
 [ -n "$ws" ] || refuse "no workspace context (invoke from inside herdr)"
@@ -101,6 +108,16 @@ fi
 panes_json=$("$H" pane list --workspace "$ws" 2>/dev/null) && [ -n "$panes_json" ] &&
   printf '%s' "$panes_json" | jq -e '.result.panes' >/dev/null 2>&1 ||
   refuse "herdr pane list failed for $ws"
+
+# Default upstream behavior is one reviewr per workspace. Local patch: when we know the
+# caller's tab and reviewr is not itself a sibling herdr tab (placement=tab), only manage
+# panes in that tab so each herdr tab can keep its own sidebar.
+scope_tab=""
+if [ -n "$tab" ] && [ "$placement" != "tab" ]; then
+  scope_tab="$tab"
+fi
+scope_label="$ws"
+[ -n "$scope_tab" ] && scope_label="$ws tab $scope_tab"
 
 # A reviewr pane runs the review UI in its foreground process group (specs/herdr-host.md,
 # Pane identity). A wrapped launch (`cargo run`) counts through its child; a flag run
@@ -135,12 +152,17 @@ is_reviewr_pane() {
   [ "$count" -gt 0 ] 2>/dev/null
 }
 
-# The workspace's reviewr panes: any tab, any placement, however they were launched
-# (HH-LAUNCHER-BLIND) — the actions and a layout's own pane converge on one set. The
-# per-pane reads run concurrently, so the sweep costs one process-info round-trip of
-# wall clock, not one per pane in the workspace. Each probe reports through a marker
-# file keyed by its position in the list, so nothing rests on a pane id's spelling.
-pane_list=$(printf '%s' "$panes_json" | jq -r '.result.panes[].pane_id // empty' 2>/dev/null)
+# Reviewr panes in scope: current tab when scope_tab is set, else the whole workspace
+# (HH-LAUNCHER-BLIND within that scope). The per-pane reads run concurrently, so the
+# sweep costs one process-info round-trip of wall clock, not one per pane. Each probe
+# reports through a marker file keyed by its position in the list, so nothing rests on
+# a pane id's spelling.
+if [ -n "$scope_tab" ]; then
+  pane_list=$(printf '%s' "$panes_json" | jq -r --arg t "$scope_tab" \
+    '.result.panes[] | select(.tab_id == $t) | .pane_id // empty' 2>/dev/null)
+else
+  pane_list=$(printf '%s' "$panes_json" | jq -r '.result.panes[].pane_id // empty' 2>/dev/null)
+fi
 probe_dir=$(mktemp -d) || refuse "cannot create a temp dir"
 trap 'rm -rf "$probe_dir"' EXIT
 i=0
@@ -199,13 +221,13 @@ close_all() {
   done <<EOF
 $existing
 EOF
-  [ -z "$failed" ] || refuse "herdr pane close failed for$failed in $ws"
-  printf 'closed%s in %s\n' "$closed" "$ws"
+  [ -z "$failed" ] || refuse "herdr pane close failed for$failed in $scope_label"
+  printf 'closed%s in %s\n' "$closed" "$scope_label"
 }
 
 case "$mode" in
 close)
-  [ -n "$existing" ] || { printf 'close: nothing open in %s\n' "$ws"; exit 0; }
+  [ -n "$existing" ] || { printf 'close: nothing open in %s\n' "$scope_label"; exit 0; }
   close_all
   exit 0
   ;;
@@ -217,7 +239,7 @@ toggle)
   ;;
 open | auto-open)
   if [ -n "$existing" ]; then
-    [ "$mode" = open ] && printf 'open: already open (%s) in %s\n' "$(printf '%s' "$existing" | tr '\n' ' ' | sed 's/ $//')" "$ws"
+    [ "$mode" = open ] && printf 'open: already open (%s) in %s\n' "$(printf '%s' "$existing" | tr '\n' ' ' | sed 's/ $//')" "$scope_label"
     exit 0
   fi
   ;;
@@ -236,13 +258,18 @@ focus=--no-focus
 [ "$mode" != auto-open ] && [ "$placement" != "split" ] && focus=--focus
 
 # Placement decides the pane-open shape (spec: Pane placement). A split or zoomed
-# open attaches to the focused pane, else the workspace's first pane.
+# open attaches to the focused pane, else the first pane in scope (current tab when set).
 case "$placement" in
 split | zoomed)
   if [ -z "$pane" ]; then
-    pane=$(printf '%s' "$panes_json" | jq -r '.result.panes[0].pane_id // empty' 2>/dev/null)
+    if [ -n "$scope_tab" ]; then
+      pane=$(printf '%s' "$panes_json" | jq -r --arg t "$scope_tab" \
+        '.result.panes[] | select(.tab_id == $t) | .pane_id // empty' 2>/dev/null | head -n1)
+    else
+      pane=$(printf '%s' "$panes_json" | jq -r '.result.panes[0].pane_id // empty' 2>/dev/null)
+    fi
   fi
-  [ -n "$pane" ] || refuse "no pane to attach to in $ws"
+  [ -n "$pane" ] || refuse "no pane to attach to in $scope_label"
   set -- --placement "$placement" --target-pane "$pane"
   [ "$placement" = "split" ] && set -- "$@" --direction "$direction"
   ;;
@@ -266,7 +293,7 @@ new=$(printf '%s' "$open_json" | jq -r '.result.plugin_pane.pane.pane_id // empt
 # after the plugin so the tab bar reads "reviewr" (specs/herdr-host.md). Cosmetic: a
 # failed rename never fails an open that already succeeded.
 if [ "$placement" = tab ]; then
-  tab=$(printf '%s' "$open_json" | jq -r '.result.plugin_pane.pane.tab_id // empty' 2>/dev/null)
-  [ -z "$tab" ] || "$H" tab rename "$tab" reviewr >/dev/null 2>&1
+  opened_tab=$(printf '%s' "$open_json" | jq -r '.result.plugin_pane.pane.tab_id // empty' 2>/dev/null)
+  [ -z "$opened_tab" ] || "$H" tab rename "$opened_tab" reviewr >/dev/null 2>&1
 fi
-[ "$mode" = auto-open ] || printf 'opened %s (%s) in %s\n' "$new" "$placement" "$ws"
+[ "$mode" = auto-open ] || printf 'opened %s (%s) in %s\n' "$new" "$placement" "$scope_label"
