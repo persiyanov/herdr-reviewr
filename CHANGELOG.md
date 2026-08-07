@@ -11,7 +11,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   open → closed → all; `a` cycles all assignees → mine (`@me`); `L` cycles priority labels
   any → p0 → p1 → p2; `o` opens the selected issue in the browser. Lists are cached by query
   for one minute so tab re-entry and filter flips do not re-hit `gh` while fresh. Parent and
-  sub-issues nest under their parent when both are in the list (indent + `done/total`).
+  sub-issues nest under their parent when both are in the list (indent + `done/total`). When an
+  issue has comments, a detail section lists description then the thread (`→` / `←` to enter
+  and leave); on top/bottom navigator layout the comments pane sits beside the issue list.
   GitHub-only via `gh`; no comment write or edit.
 - **Per-tab reviewr panes.** `toggle` / `open` / `close` scope to the current herdr tab when
   `HERDR_TAB_ID` is set, so each herdr tab can keep its own reviewr instance.
