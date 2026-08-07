@@ -183,14 +183,19 @@ fn gh_issue_list(
     state: &str,
     cancelled: &AtomicBool,
 ) -> Result<String, IssueError> {
+    // `gh issue list` has no `--hostname` flag. Pin the host with the `[HOST/]OWNER/REPO`
+    // form of `--repo` (enterprise) or plain `OWNER/REPO` (github.com).
+    let repo_arg = if host.eq_ignore_ascii_case("github.com") {
+        repo_slug.to_string()
+    } else {
+        format!("{host}/{repo_slug}")
+    };
     let mut cmd = Command::new("gh");
     cmd.current_dir(repo).args([
         "issue",
         "list",
-        "--hostname",
-        host,
         "--repo",
-        repo_slug,
+        &repo_arg,
         "--state",
         state,
         "--limit",
