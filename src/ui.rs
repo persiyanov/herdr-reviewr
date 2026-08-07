@@ -3332,6 +3332,13 @@ fn render_issue_read(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut body_meta: Option<(usize, crate::markdown::Rendered)> = None;
     if let Some(issue) = app.issue_selected() {
+        // Full title as H1 style — the navigator may truncate it (specs/issue-tab.md).
+        // Styled manually (not via markdown) so characters like `#`/`*` in titles stay literal.
+        let h1 = Style::default().fg(p.mauve).add_modifier(Modifier::BOLD);
+        for piece in wrap_text(&issue.title, width.max(1)) {
+            lines.push(Line::from(Span::styled(piece, h1)));
+        }
+        lines.push(Line::raw(""));
         if !issue.labels.is_empty() {
             let labels = issue.labels.join(", ");
             lines.push(Line::from(Span::styled(

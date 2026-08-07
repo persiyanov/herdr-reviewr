@@ -2818,7 +2818,8 @@ fn issue_tab_shows_filter_chip_and_empty_state() {
     assert!(out.contains("[all]"), "assignee chip:\n{out}");
     assert!(out.contains("[any]"), "priority chip:\n{out}");
     assert!(out.contains("#42"), "issue number:\n{out}");
-    assert!(out.contains("Fix the pane"), "issue title in list:\n{out}");
+    assert!(out.contains("Fix the pane"), "issue title in list and read pane:\n{out}");
+    // Read-pane title is H1-styled (bold mauve); presence is enough — style is unit-covered in markdown.
     assert!(out.contains("labels: bug"), "labels in read pane:\n{out}");
     assert!(out.contains("i open") || out.contains("open"), "state filter in footer:\n{out}");
     assert!(

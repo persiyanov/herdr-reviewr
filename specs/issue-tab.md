@@ -40,7 +40,9 @@ v1 is **GitHub only** via `gh issue list`. No comment write, no edit, no close �
 - Navigator title `Issues · {state}` plus ` · mine` / ` · pN` when those filters are active; rows `#n title  age` with open/closed glyph
   (`●` green = open, `○` dim = closed). A title too wide for the row keeps its **head**
   and trails with `…` (not a path-style head elision).
-- `j`/`k` or a click selects an issue; the read pane shows labels (if any) then the body as markdown.
+- `j`/`k` or a click selects an issue; the read pane leads with the **full title** in markdown H1
+  style (bold mauve, wrapped — the navigator may have truncated it), then labels (if any), then
+  the body as markdown.
 - Empty body shows a dim italic placeholder. Empty list shows `No {query} issues.`
 - `o` opens the selected issue URL in the browser; `r` refetches (bypasses the cache).
 - Authoring keys (`s`, `c`, `v`, `d`, `e`) are inert. The comments-list key is free for other tabs; priority uses `L` so it does not steal `l`.
