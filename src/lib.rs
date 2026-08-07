@@ -1703,6 +1703,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
     }
 
     // The read-only Issue tab: list + body, filter cycle, open selected issue.
+    // `→` enters the detail section (description + comments); `←` returns to the issue list.
     if app.tab == crate::app::Tab::Issue {
         match (action, key.code) {
             (Some(K::Quit), _) => app.should_quit = true,
@@ -1724,10 +1725,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             (Some(K::Down), _) => app.issue_move(1),
             (Some(K::Up), _) => app.issue_move(-1),
             (Some(K::Keys), _) => app.toggle_keys(),
-            (_, Esc) => app.escape(),
+            (_, Right) => app.issue_enter_detail(),
+            (_, Left) => app.issue_exit_detail(),
+            (_, Esc) => {
+                if app.issue_detail_focused() {
+                    app.issue_exit_detail();
+                } else {
+                    app.escape();
+                }
+            }
             (_, Tab) => app.toggle_focus(),
-            (_, PageDown) if app.focus == Focus::Files => app.issue_scroll_nav(PAGE),
-            (_, PageUp) if app.focus == Focus::Files => app.issue_scroll_nav(-PAGE),
+            (_, PageDown) if app.focus == Focus::Files => app.issue_scroll_focused_nav(PAGE),
+            (_, PageUp) if app.focus == Focus::Files => app.issue_scroll_focused_nav(-PAGE),
             (_, PageDown) => app.issue_scroll_read(PAGE),
             (_, PageUp) => app.issue_scroll_read(-PAGE),
             _ => {}
@@ -2009,18 +2018,28 @@ pub fn handle_mouse(
                     }
                 } else if ui::in_files_pane(area, app, m.column, m.row) {
                     app.focus = Focus::Files;
-                    if let Some(i) = ui::issue_nav_hit(area, app, m.column, m.row) {
-                        app.issue_select(i);
+                    if let Some(hit) = ui::issue_nav_hit(area, app, m.column, m.row) {
+                        match hit {
+                            ui::IssueNavHit::Issue(i) => app.issue_select(i),
+                            ui::IssueNavHit::Description => app.issue_select_detail(0),
+                            ui::IssueNavHit::Comment(c) => app.issue_select_detail(c + 1),
+                        }
                     }
                 } else if ui::in_diff_pane(area, app, m.column, m.row) {
                     app.focus = Focus::Diff;
                 }
             }
             MouseEventKind::ScrollDown if ui::in_files_pane(area, app, m.column, m.row) => {
-                app.issue_scroll_nav(3);
+                match ui::issue_nav_pane_at(area, app, m.column, m.row) {
+                    Some(ui::IssueNavPane::Detail) => app.issue_scroll_detail_nav(3),
+                    _ => app.issue_scroll_nav(3),
+                }
             }
             MouseEventKind::ScrollUp if ui::in_files_pane(area, app, m.column, m.row) => {
-                app.issue_scroll_nav(-3);
+                match ui::issue_nav_pane_at(area, app, m.column, m.row) {
+                    Some(ui::IssueNavPane::Detail) => app.issue_scroll_detail_nav(-3),
+                    _ => app.issue_scroll_nav(-3),
+                }
             }
             MouseEventKind::ScrollDown => app.issue_scroll_read(3),
             MouseEventKind::ScrollUp => app.issue_scroll_read(-3),

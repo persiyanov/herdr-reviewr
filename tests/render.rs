@@ -2812,6 +2812,7 @@ fn issue_tab_shows_filter_chip_and_empty_state() {
             parent_number: None,
             sub_completed: 0,
             sub_total: 0,
+            comments: vec![],
         }],
         truncated: false,
     });
@@ -2824,6 +2825,10 @@ fn issue_tab_shows_filter_chip_and_empty_state() {
     assert!(out.contains("Fix the pane"), "issue title in list and read pane:\n{out}");
     // Read-pane title is H1-styled (bold mauve); presence is enough — style is unit-covered in markdown.
     assert!(out.contains("labels: bug"), "labels in read pane:\n{out}");
+    assert!(
+        !out.contains("comments ·"),
+        "no comments section when the issue has none:\n{out}"
+    );
     assert!(out.contains("i open") || out.contains("open"), "state filter in footer:\n{out}");
     assert!(
         out.contains("a all") || out.contains("a mine"),
@@ -2865,6 +2870,7 @@ fn issue_list_prefers_title_head_when_narrow() {
             parent_number: None,
             sub_completed: 0,
             sub_total: 0,
+            comments: vec![],
         }],
         truncated: false,
     });
@@ -2900,6 +2906,7 @@ fn issue_list_indents_sub_issues_under_parent() {
                 parent_number: None,
                 sub_completed: 1,
                 sub_total: 2,
+                comments: vec![],
             },
             Issue {
                 number: 12,
@@ -2913,19 +2920,176 @@ fn issue_list_indents_sub_issues_under_parent() {
                 parent_number: Some(10),
                 sub_completed: 0,
                 sub_total: 0,
+                comments: vec![],
             },
         ],
         truncated: false,
     });
     let nav = right_column(&dump(&render_size(&app, 100, 20)), 60);
     assert!(nav.contains("1/2"), "parent shows sub-issue progress:\n{nav}");
-    // Child row is indented (leading spaces before ● on the child line).
+    // Child row is indented (leading spaces before `#12` on the child line).
     let child_line = nav
         .lines()
         .find(|l| l.contains("#12") && l.contains("Child"))
         .unwrap_or_else(|| panic!("child row present:\n{nav}"));
     assert!(
-        child_line.trim_start() != child_line && child_line.contains('●'),
+        child_line.trim_start() != child_line && child_line.contains("#12"),
         "child row is indented:\n{child_line}"
+    );
+}
+
+#[test]
+fn issue_nav_shows_comments_for_selected_issue() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::issue::{
+        Issue, IssueComment, IssueQuery, IssueSnapshot, IssueState, IssueView,
+    };
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Issue).unwrap();
+    app.issue = IssueView::List(IssueSnapshot {
+        query: IssueQuery::default(),
+        issues: vec![
+            Issue {
+                number: 1,
+                title: "With comments".into(),
+                body: "Issue body".into(),
+                state: IssueState::Open,
+                author: "alice".into(),
+                updated_at: "2026-08-01T12:00:00Z".into(),
+                url: "https://github.com/o/r/issues/1".into(),
+                labels: vec![],
+                parent_number: None,
+                sub_completed: 0,
+                sub_total: 0,
+                comments: vec![
+                    IssueComment {
+                        author: "bob".into(),
+                        author_is_bot: false,
+                        body: "Newest comment body text".into(),
+                        created_at: "2026-08-02T12:00:00Z".into(),
+                        url: "https://github.com/o/r/issues/1#issuecomment-2".into(),
+                    },
+                    IssueComment {
+                        author: "carol".into(),
+                        author_is_bot: false,
+                        body: "Older comment".into(),
+                        created_at: "2026-08-01T12:00:00Z".into(),
+                        url: "https://github.com/o/r/issues/1#issuecomment-1".into(),
+                    },
+                ],
+            },
+            Issue {
+                number: 2,
+                title: "No comments".into(),
+                body: "Other body".into(),
+                state: IssueState::Open,
+                author: "alice".into(),
+                updated_at: "2026-08-01T12:00:00Z".into(),
+                url: "https://github.com/o/r/issues/2".into(),
+                labels: vec![],
+                parent_number: None,
+                sub_completed: 0,
+                sub_total: 0,
+                comments: vec![],
+            },
+        ],
+        truncated: false,
+    });
+    let nav = right_column(&dump(&render_size(&app, 100, 24)), 55);
+    assert!(nav.contains("comments · 2"), "comments header for selected issue:\n{nav}");
+    assert!(nav.contains("description"), "description row leads the detail section:\n{nav}");
+    assert!(nav.contains("@bob"), "comment author in nav:\n{nav}");
+    assert!(nav.contains("@carol"), "second comment author:\n{nav}");
+
+    // Selecting the second issue (no comments) hides the section.
+    app.issue_select(1);
+    let nav2 = right_column(&dump(&render_size(&app, 100, 24)), 55);
+    assert!(
+        !nav2.contains("comments ·"),
+        "comments section omitted when selected issue has none:\n{nav2}"
+    );
+    assert!(!nav2.contains("description"), "no description row without comments:\n{nav2}");
+
+    // Right-arrow enters detail on description; j moves to the first comment.
+    app.issue_select(0);
+    app.issue_enter_detail();
+    assert!(app.issue_detail_focused(), "→ enters detail when comments exist");
+    assert!(
+        app.issue_showing_description(),
+        "detail lands on description first"
+    );
+    let on_desc = dump(&render_size(&app, 100, 24));
+    assert!(on_desc.contains("Issue body"), "description still shows the issue body:\n{on_desc}");
+
+    app.issue_move(1);
+    let out = dump(&render_size(&app, 100, 24));
+    assert!(out.contains("Newest comment body text"), "comment body in read pane:\n{out}");
+    assert!(out.contains("@bob · comment"), "comment title in read pane:\n{out}");
+
+    // Left-arrow returns to the issue list; issue body is shown again.
+    app.issue_exit_detail();
+    assert!(!app.issue_detail_focused());
+    let back = dump(&render_size(&app, 100, 24));
+    assert!(back.contains("Issue body"), "← restores the issue description:\n{back}");
+
+    // → is inert when the issue has no comments.
+    app.issue_select(1);
+    app.issue_enter_detail();
+    assert!(!app.issue_detail_focused(), "→ does nothing without comments");
+}
+
+#[test]
+fn issue_nav_side_by_side_on_stacked_layout() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::config::NavigatorPosition;
+    use herdr_reviewr::issue::{
+        Issue, IssueComment, IssueQuery, IssueSnapshot, IssueState, IssueView,
+    };
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Issue).unwrap();
+    app.navigator_position = NavigatorPosition::Bottom;
+    // Stacked default share is short; grow it so the half-width detail panel can show
+    // description + a comment + the hint row.
+    for _ in 0..8 {
+        app.resize_navigator(4);
+    }
+    app.issue = IssueView::List(IssueSnapshot {
+        query: IssueQuery::default(),
+        issues: vec![Issue {
+            number: 1,
+            title: "With comments".into(),
+            body: "Issue body".into(),
+            state: IssueState::Open,
+            author: "alice".into(),
+            updated_at: "2026-08-01T12:00:00Z".into(),
+            url: "https://github.com/o/r/issues/1".into(),
+            labels: vec![],
+            parent_number: None,
+            sub_completed: 0,
+            sub_total: 0,
+            comments: vec![IssueComment {
+                author: "bob".into(),
+                author_is_bot: false,
+                body: "A thread note".into(),
+                created_at: "2026-08-02T12:00:00Z".into(),
+                url: "https://github.com/o/r/issues/1#issuecomment-2".into(),
+            }],
+        }],
+        truncated: false,
+    });
+    // Wide enough for a half-width comments panel.
+    let out = dump(&render_size(&app, 120, 24));
+    assert!(out.contains("comments · 1"), "detail panel title:\n{out}");
+    assert!(out.contains("description"), "description row in detail panel:\n{out}");
+    assert!(out.contains("@bob"), "comment row visible beside issues:\n{out}");
+    assert!(
+        out.contains("←") && out.contains("→") && out.contains("issues") && out.contains("comments"),
+        "detail hint shows left/right affordances:\n{out}"
     );
 }

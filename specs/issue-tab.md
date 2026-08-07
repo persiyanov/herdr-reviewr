@@ -13,14 +13,19 @@ A read-only GitHub Issues list in reviewr's frame: filter chips in the header, i
 ```
  1 Changes  2 All files  3 PR  4 Issue    #42 Fix the pane     [open] [all] [any]
 ╭─ #42 · @alice ─────────────────────────╮╭─ Issues · open ──────────────╮
-│ labels: bug, ui                        ││ ● #10 Epic              1/2 2d│
-│                                        ││   ● #12 child a            1d│
-│ Details here…                          ││   ● #13 child b            5h│
+│ labels: bug, ui                        ││ #10 Epic                1/2 2d│
+│                                        ││   #12 child a              1d│
+│ Details here…                          ││   #13 child b              5h│
+│                                        ││                              │
+│                                        ││ comments · 2                 │
+│                                        ││ description                  │
+│                                        ││ @bob                   5h    │
+│                                        ││ @alice                  2d    │
 ╰────────────────────────────────────────╯╰──────────────────────────────╯
  12 open issues   i open · a all · L any · o open ↗ · …                    ?
 ```
 
-v1 is **GitHub only** via `gh issue list`. No comment write, no edit, no close — those need write permissions and stay out of scope.
+v1 is **GitHub only** via `gh issue list` (list rows include each issue's comments). No comment write, no edit, no close — those need write permissions and stay out of scope.
 
 ## Behavior
 
@@ -37,18 +42,41 @@ v1 is **GitHub only** via `gh issue list`. No comment write, no edit, no close �
 
 ### Navigator and read pane
 
-- Navigator title `Issues · {state}` plus ` · mine` / ` · pN` when those filters are active; rows `#n title  age` with open/closed glyph
-  (`●` green = open, `○` dim = closed). A title too wide for the row keeps its **head**
+- Navigator title `Issues · {state}` plus ` · mine` / ` · pN` when those filters are active; rows `#n title  age`.
+  Open/closed is carried by the `#n` color only: accent (yellow) when open, secondary dim
+  (`overlay0`) when closed. A title too wide for the row keeps its **head**
   and trails with `…` (not a path-style head elision).
 - **Parent / sub-issues.** Fetched via `parent` and `subIssuesSummary` on `gh issue list`. The list
   is reordered so each child sits under its parent when both are in the current result (one
   nesting level, two-space indent). A child whose parent is missing from the list (e.g. open
   filter, closed parent) stays top-level. Parents with sub-issues show `done/total` before the age.
-- `j`/`k` or a click selects an issue; the read pane leads with the **full title** in markdown H1
-  style (bold mauve, wrapped — the navigator may have truncated it), then a dim parent/sub
-  summary when relevant, then labels (if any), then the body as markdown.
-- Empty body shows a dim italic placeholder. Empty list shows `No {query} issues.`
-- `o` opens the selected issue URL in the browser; `r` refetches (bypasses the cache).
+- **Detail section.** When the selected issue has at least one comment, a detail surface
+  lists a pinned `description` row (the issue body) then the comments newest-first
+  (`@author` and age). Omitted entirely when the selected issue has no comments. Comments
+  arrive with the list fetch (`gh issue list --json …,comments`).
+  - **Side body layout** (`left`/`right`): detail stacks under the issue rows in one
+    navigator column, under a dim `comments · N` header.
+  - **Stacked body layout** (`top`/`bottom`): the navigator splits **half-and-half** —
+    issues on the left, a `comments · N` panel on the right — so the short navigator
+    height still leaves room for the thread.
+  - The detail surface always ends with a one-row hint `← issues · → comments` (the inert
+    direction is dimmed).
+- **Two-level focus.** The issue list and the detail section are separate focus zones:
+  - `→` on an issue with comments enters detail focus on `description` (issue row stays
+    highlighted as the selected parent). `→` is inert when the issue has no comments.
+  - `←` (or `esc`) from detail returns focus to the issue list; the same issue stays selected.
+  - `j`/`k` move within the active zone only (issues, or description → comments).
+  - A click on an issue selects it and leaves detail. A click on `description` or a comment
+    enters detail on that row.
+- The read pane shows the focused detail (or the issue body while list-focused):
+  - **Description / list focus:** the **full title** in markdown H1 style (bold mauve,
+    wrapped — the navigator may have truncated it), then a dim parent/sub summary when
+    relevant, then labels (if any), then the body as markdown. Empty body shows a dim
+    italic placeholder.
+  - **Comment focused:** `@author · comment` title and the comment body as markdown.
+- Empty list shows `No {query} issues.`
+- `o` opens the selected issue URL in the browser (issue row or its comment); `r` refetches
+  (bypasses the cache).
 - Authoring keys (`s`, `c`, `v`, `d`, `e`) are inert. The comments-list key is free for other tabs; priority uses `L` so it does not steal `l`.
 
 ### Filter and refresh

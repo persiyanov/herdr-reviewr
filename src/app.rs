@@ -560,13 +560,22 @@ pub struct App {
     issue_notice: Option<String>,
     /// A same-input issue refresh that crossed the loading-indicator delay.
     issue_refreshing: bool,
-    /// Navigator cursor over the issue list.
+    /// Navigator cursor over the issue list (always the selected issue; stays highlighted while
+    /// the detail section below is focused — specs/issue-tab.md).
     pub(crate) issue_cursor: usize,
+    /// When `Some`, focus is in the detail section under the selected issue: `0` is the
+    /// pinned `description` row (issue body), `1 + i` is `comments[i]`. `None` means focus is
+    /// on the issue list. `→` enters (when the issue has comments); `←` leaves.
+    pub(crate) issue_detail_cursor: Option<usize>,
     /// Top visible line of the issue read pane.
     pub(crate) issue_read_scroll: usize,
-    /// Top visible row of the issue navigator.
+    /// Top visible row of the issue list (or the combined list in side layout).
     issue_nav_scroll: std::cell::Cell<usize>,
     issue_nav_max_scroll: std::cell::Cell<usize>,
+    /// Top visible row of the detail pane when the navigator is split issues | comments
+    /// (stacked body layout with comments present — specs/issue-tab.md).
+    issue_detail_nav_scroll: std::cell::Cell<usize>,
+    issue_detail_nav_max_scroll: std::cell::Cell<usize>,
     reveal_issue_nav: std::cell::Cell<bool>,
     /// Issue refresh awaiting dispatch (same draw-then-fetch cadence as PR).
     pub issue_pending: Option<RefreshKind>,
@@ -721,9 +730,12 @@ impl App {
             issue_notice: None,
             issue_refreshing: false,
             issue_cursor: 0,
+            issue_detail_cursor: None,
             issue_read_scroll: 0,
             issue_nav_scroll: std::cell::Cell::new(0),
             issue_nav_max_scroll: std::cell::Cell::new(usize::MAX),
+            issue_detail_nav_scroll: std::cell::Cell::new(0),
+            issue_detail_nav_max_scroll: std::cell::Cell::new(usize::MAX),
             reveal_issue_nav: std::cell::Cell::new(true),
             issue_pending: None,
             world_request: None,
@@ -2096,8 +2108,10 @@ impl App {
         self.issue_notice = None;
         self.issue_refreshing = false;
         self.issue_cursor = 0;
+        self.issue_detail_cursor = None;
         self.issue_read_scroll = 0;
         self.issue_nav_scroll.set(0);
+        self.issue_detail_nav_scroll.set(0);
         self.reveal_issue_nav.set(true);
     }
 
@@ -2153,25 +2167,47 @@ impl App {
         self.paint_issue_view(view);
     }
 
-    /// Install a view and reconcile the cursor by issue number (Continuity).
+    /// Install a view and reconcile the cursor by issue number (Continuity). A detail focus on
+    /// description survives while the issue still has comments; a comment focus follows
+    /// author+timestamp identity.
     fn paint_issue_view(&mut self, view: crate::issue::IssueView) {
         self.issue_notice = None;
-        let selected = self.issue_selected().map(|i| i.number);
+        let selected_number = self.issue_selected().map(|i| i.number);
+        let detail = self.issue_detail_cursor;
+        let selected_comment = self.issue_selected_comment().map(|c| {
+            (c.author.clone(), c.created_at.clone())
+        });
         self.issue = view;
-        if let Some(number) = selected {
+        if let Some(number) = selected_number {
             if let Some(i) = self.issue_snapshot().and_then(|s| {
                 s.issues.iter().position(|issue| issue.number == number)
             }) {
                 self.issue_cursor = i;
+                self.issue_detail_cursor = match detail {
+                    Some(0) if self.issue_has_detail() => Some(0),
+                    None | Some(0) => None,
+                    Some(_) => selected_comment.and_then(|(author, created)| {
+                        let issue = self.issue_snapshot()?.issues.get(i)?;
+                        let pos = issue
+                            .comments
+                            .iter()
+                            .position(|c| c.author == author && c.created_at == created)?;
+                        Some(pos + 1)
+                    }),
+                };
+                self.clamp_issue_detail_cursor();
                 return;
             }
             self.issue_read_scroll = 0;
+            self.issue_detail_cursor = None;
         }
         let clamped = self.issue_row_count().saturating_sub(1);
         if self.issue_cursor > clamped {
             self.issue_read_scroll = 0;
+            self.issue_detail_cursor = None;
         }
         self.issue_cursor = self.issue_cursor.min(clamped);
+        self.clamp_issue_detail_cursor();
     }
 
     pub fn issue_notice(&self) -> Option<&str> {
@@ -2209,18 +2245,126 @@ impl App {
         self.issue_snapshot()?.issues.get(self.issue_cursor)
     }
 
+    /// Whether the selected issue has a detail section (at least one comment).
+    #[must_use]
+    pub fn issue_has_detail(&self) -> bool {
+        self.issue_selected_comment_count() > 0
+    }
+
+    /// Comment count for the selected issue (0 when there is no selection).
+    #[must_use]
+    pub fn issue_selected_comment_count(&self) -> usize {
+        self.issue_selected().map_or(0, |i| i.comments.len())
+    }
+
+    /// Selectable rows in the detail section: `description` plus each comment.
+    /// Zero when the selected issue has no comments (section hidden).
+    #[must_use]
+    pub fn issue_detail_row_count(&self) -> usize {
+        if self.issue_has_detail() {
+            1 + self.issue_selected_comment_count()
+        } else {
+            0
+        }
+    }
+
+    /// Whether focus is in the detail section under the selected issue.
+    #[must_use]
+    pub fn issue_detail_focused(&self) -> bool {
+        self.issue_detail_cursor.is_some()
+    }
+
+    /// Whether the read pane should show the issue description (list focus, or detail on
+    /// the pinned `description` row).
+    #[must_use]
+    pub fn issue_showing_description(&self) -> bool {
+        match self.issue_detail_cursor {
+            None | Some(0) => true,
+            Some(_) => false,
+        }
+    }
+
+    /// The comment under the detail cursor, when focus is on a comment row (`index >= 1`).
+    #[must_use]
+    pub fn issue_selected_comment(&self) -> Option<&crate::issue::IssueComment> {
+        let index = self.issue_detail_cursor?;
+        if index == 0 {
+            return None;
+        }
+        self.issue_selected()?.comments.get(index - 1)
+    }
+
     pub fn issue_move(&mut self, delta: isize) {
-        let n = self.issue_row_count();
-        if n == 0 {
+        if self.issue_row_count() == 0 {
             return;
         }
+        // Detail focus: j/k walk description → comments without leaving the selected issue.
+        if let Some(c) = self.issue_detail_cursor {
+            let m = self.issue_detail_row_count();
+            if m == 0 {
+                self.issue_detail_cursor = None;
+                return;
+            }
+            let next = (c as isize + delta).clamp(0, m as isize - 1) as usize;
+            if next != c {
+                self.issue_select_detail(next);
+            }
+            return;
+        }
+        let n = self.issue_row_count();
         self.issue_select(step(self.issue_cursor, delta, n));
     }
 
-    pub(crate) fn issue_select(&mut self, i: usize) {
+    /// Select an issue row and return focus to the issue list.
+    pub fn issue_select(&mut self, i: usize) {
         self.issue_cursor = i;
+        self.issue_detail_cursor = None;
         self.issue_read_scroll = 0;
         self.reveal_issue_nav.set(true);
+    }
+
+    /// Focus detail row `d` (`0` = description, `1+i` = comment i) of the selected issue.
+    pub fn issue_select_detail(&mut self, d: usize) {
+        let m = self.issue_detail_row_count();
+        if m == 0 {
+            self.issue_detail_cursor = None;
+            return;
+        }
+        self.issue_detail_cursor = Some(d.min(m - 1));
+        self.issue_read_scroll = 0;
+        self.reveal_issue_nav.set(true);
+    }
+
+    /// `→` from the issue list: enter the detail section on `description` when the selected
+    /// issue has comments. No-op when already in detail or the issue has none.
+    pub fn issue_enter_detail(&mut self) {
+        if self.issue_detail_cursor.is_some() || !self.issue_has_detail() {
+            return;
+        }
+        // Land on description so the left pane still shows the issue body until the user moves.
+        self.issue_select_detail(0);
+    }
+
+    /// `←` from the detail section: return focus to the issue list. The issue row stays selected.
+    pub fn issue_exit_detail(&mut self) {
+        if self.issue_detail_cursor.is_none() {
+            return;
+        }
+        self.issue_detail_cursor = None;
+        self.issue_read_scroll = 0;
+        self.reveal_issue_nav.set(true);
+    }
+
+    fn clamp_issue_detail_cursor(&mut self) {
+        let m = self.issue_detail_row_count();
+        match self.issue_detail_cursor {
+            Some(_) if m == 0 => self.issue_detail_cursor = None,
+            Some(c) if c >= m => {
+                self.issue_detail_cursor = Some(m - 1);
+                self.issue_read_scroll = 0;
+            }
+            _ => {}
+        }
     }
 
     pub(crate) fn issue_scroll_nav(&mut self, delta: isize) {
@@ -2232,6 +2376,25 @@ impl App {
         ));
     }
 
+    /// Scroll the detail list (description + comments) when it has its own pane.
+    pub(crate) fn issue_scroll_detail_nav(&mut self, delta: isize) {
+        self.reveal_issue_nav.set(false);
+        self.issue_detail_nav_scroll.set(clamp_scroll(
+            self.issue_detail_nav_scroll.get(),
+            delta,
+            self.issue_detail_nav_max_scroll.get(),
+        ));
+    }
+
+    /// Page/wheel scroll for the navigator: when detail is focused, prefer the detail pane.
+    pub(crate) fn issue_scroll_focused_nav(&mut self, delta: isize) {
+        if self.issue_detail_focused() {
+            self.issue_scroll_detail_nav(delta);
+        } else {
+            self.issue_scroll_nav(delta);
+        }
+    }
+
     pub(crate) fn issue_scroll_read(&mut self, delta: isize) {
         self.issue_read_scroll =
             clamp_scroll(self.issue_read_scroll, delta, self.pr_read_max_scroll.get());
@@ -2241,12 +2404,24 @@ impl App {
         self.issue_nav_max_scroll.set(max);
     }
 
+    pub(crate) fn note_issue_detail_nav_max_scroll(&self, max: usize) {
+        self.issue_detail_nav_max_scroll.set(max);
+    }
+
     pub(crate) fn issue_nav_scroll(&self) -> usize {
         self.issue_nav_scroll.get()
     }
 
     pub(crate) fn set_issue_nav_scroll(&self, scroll: usize) {
         self.issue_nav_scroll.set(scroll);
+    }
+
+    pub(crate) fn issue_detail_nav_scroll(&self) -> usize {
+        self.issue_detail_nav_scroll.get()
+    }
+
+    pub(crate) fn set_issue_detail_nav_scroll(&self, scroll: usize) {
+        self.issue_detail_nav_scroll.set(scroll);
     }
 
     pub(crate) fn take_issue_nav_reveal(&self) -> bool {
@@ -4055,6 +4230,7 @@ mod tests {
                 parent_number: None,
                 sub_completed: 0,
                 sub_total: 0,
+                comments: vec![],
             }],
             truncated: false,
         }));
