@@ -427,10 +427,10 @@ fn the_header_totals_the_scope_and_hides_them_at_zero() {
     r.write("untracked.rs", "one\ntwo\n");
     let app = app_on(&r);
 
-    // 64 columns is the exact fit (the tab strip ends in the two-column reserved
-    // indicator cell). The totals' `−` is multi-byte, so this breaks if the header
-    // measures bytes instead of display width.
-    let header = render_at(&app, 64).lines().next().unwrap().to_string();
+    // 73 columns is the exact fit with four tabs (the strip ends in the two-column
+    // reserved indicator cell). The totals' `−` is multi-byte, so this breaks if the
+    // header measures bytes instead of display width.
+    let header = render_at(&app, 73).lines().next().unwrap().to_string();
     assert!(header.contains("2 changed  +3 −1"), "count, then the totals:\n{header}");
 
     let clean = Repo::init();
@@ -731,8 +731,9 @@ fn pr_header_names_the_resolved_branch_and_marks_a_fork() {
     let header = render(&app).lines().next().unwrap().to_string();
     assert!(header.contains("⑂ persiyanov/feature"), "fork head is marked:\n{header}");
     // Narrow bars drop the branch first; the chip's number stays.
+    // Width accounts for the four-tab strip (`4 Issue` adds columns vs the old three-tab bar).
     app.pr = snap(false);
-    let narrow = render_at(&app, 46).lines().next().unwrap().to_string();
+    let narrow = render_at(&app, 55).lines().next().unwrap().to_string();
     assert!(!narrow.contains("persiyanov/feature"), "branch drops when narrow:\n{narrow}");
     assert!(narrow.contains("#226"), "the chip survives a narrow bar:\n{narrow}");
 
@@ -1311,7 +1312,7 @@ fn header_hits_use_the_frame_keymap_not_the_live_one() {
     use herdr_reviewr::keymap::default_keymap;
     // The live keymap has a wide tab-changes hint, shifting every span right by one column.
     let app = rebound_app("tab-changes = [\"ㅊ\"]\n");
-    for tab in [Tab::Changes, Tab::AllFiles, Tab::Pr] {
+    for tab in [Tab::Changes, Tab::AllFiles, Tab::Pr, Tab::Issue] {
         assert_ne!(
             tab_hit_cols(&app, default_keymap(), tab),
             tab_hit_cols(&app, app.keymap(), tab),
@@ -1331,9 +1332,12 @@ fn header_tab_hits_align_with_wide_hint_keys() {
     let row0 = out.lines().next().unwrap().to_string();
     let col_of = |needle: &str| row0[..row0.find(needle).unwrap()].chars().count() as u16;
     let area = Rect::new(0, 0, 140, 40);
-    for (needle, tab) in
-        [("Changes", Tab::Changes), ("2 All files", Tab::AllFiles), ("3 PR", Tab::Pr)]
-    {
+    for (needle, tab) in [
+        ("Changes", Tab::Changes),
+        ("2 All files", Tab::AllFiles),
+        ("3 PR", Tab::Pr),
+        ("4 Issue", Tab::Issue),
+    ] {
         assert_eq!(
             ui::hit_header(area, &app, app.keymap(), col_of(needle), 0),
             Some(HeaderHit::Tab(tab)),
@@ -2783,4 +2787,306 @@ fn a_click_on_a_picker_row_moves_the_highlight_and_misses_stay_inert() {
     )
     .unwrap();
     assert_eq!(app.picker_cursor, 2, "a click moves the highlight to the clicked row");
+}
+
+#[test]
+fn issue_tab_shows_filter_chip_and_empty_state() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::issue::{Issue, IssueQuery, IssueSnapshot, IssueState, IssueView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Issue).unwrap();
+    app.issue = IssueView::List(IssueSnapshot {
+        query: IssueQuery::default(),
+        issues: vec![Issue {
+            number: 42,
+            title: "Fix the pane".into(),
+            body: "Hello **world**".into(),
+            state: IssueState::Open,
+            author: "alice".into(),
+            updated_at: "2026-08-01T12:00:00Z".into(),
+            url: "https://github.com/o/r/issues/42".into(),
+            labels: vec!["bug".into()],
+            parent_number: None,
+            sub_completed: 0,
+            sub_total: 0,
+            comments: vec![],
+        }],
+        truncated: false,
+    });
+    let out = render(&app);
+    assert!(out.contains("4 Issue"), "tab label:\n{out}");
+    assert!(out.contains("[open]"), "state chip:\n{out}");
+    assert!(out.contains("[all]"), "assignee chip:\n{out}");
+    assert!(out.contains("[any]"), "priority chip:\n{out}");
+    assert!(out.contains("#42"), "issue number:\n{out}");
+    assert!(out.contains("Fix the pane"), "issue title in list and read pane:\n{out}");
+    // Read-pane title is H1-styled (bold mauve); presence is enough — style is unit-covered in markdown.
+    assert!(out.contains("labels: bug"), "labels in read pane:\n{out}");
+    assert!(!out.contains("comments ·"), "no comments section when the issue has none:\n{out}");
+    assert!(out.contains("i open") || out.contains("open"), "state filter in footer:\n{out}");
+    assert!(out.contains("a all") || out.contains("a mine"), "assignee filter in footer:\n{out}");
+    assert!(
+        out.contains("L any")
+            || out.contains("L p0")
+            || out.contains("L p1")
+            || out.contains("L p2"),
+        "priority filter in footer:\n{out}"
+    );
+}
+
+#[test]
+fn issue_list_prefers_title_head_when_narrow() {
+    // Issue titles are prose: keep the leading words and trail with `…`, never path-style
+    // head elision that would show only the unreadable tail.
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::issue::{Issue, IssueQuery, IssueSnapshot, IssueState, IssueView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Issue).unwrap();
+    // Short head token still fits after `#n ` and the age; long unique tail must not.
+    let head = "HEADKEEP";
+    let tail = "UNIQUETAILMARKERXYZZY";
+    app.issue = IssueView::List(IssueSnapshot {
+        query: IssueQuery::default(),
+        issues: vec![Issue {
+            number: 1,
+            title: format!(
+                "{head} middle filler words that pad the row past the navigator width {tail}"
+            ),
+            body: String::new(),
+            state: IssueState::Open,
+            author: "alice".into(),
+            updated_at: "2026-08-01T12:00:00Z".into(),
+            url: "https://github.com/o/r/issues/1".into(),
+            labels: vec![],
+            parent_number: None,
+            sub_completed: 0,
+            sub_total: 0,
+            comments: vec![],
+        }],
+        truncated: false,
+    });
+    // Default navigator is the right ~32%; take its column so the read pane cannot false-positive.
+    let nav = right_column(&dump(&render_size(&app, 90, 20)), 65);
+    assert!(nav.contains(head), "title head must stay visible:\n{nav}");
+    assert!(!nav.contains(tail), "title tail must elide, not crowd the head:\n{nav}");
+    assert!(nav.contains('…'), "clipped title marks the cut with a trailing ellipsis:\n{nav}");
+}
+
+#[test]
+fn issue_list_indents_sub_issues_under_parent() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::issue::{Issue, IssueQuery, IssueSnapshot, IssueState, IssueView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Issue).unwrap();
+    // Tree order already applied by fetch; paint with parent first, child second.
+    app.issue = IssueView::List(IssueSnapshot {
+        query: IssueQuery::default(),
+        issues: vec![
+            Issue {
+                number: 10,
+                title: "Parent epic".into(),
+                body: String::new(),
+                state: IssueState::Open,
+                author: "alice".into(),
+                updated_at: "2026-08-01T12:00:00Z".into(),
+                url: "https://github.com/o/r/issues/10".into(),
+                labels: vec![],
+                parent_number: None,
+                sub_completed: 1,
+                sub_total: 2,
+                comments: vec![],
+            },
+            Issue {
+                number: 12,
+                title: "Child task".into(),
+                body: String::new(),
+                state: IssueState::Open,
+                author: "alice".into(),
+                updated_at: "2026-08-01T12:00:00Z".into(),
+                url: "https://github.com/o/r/issues/12".into(),
+                labels: vec![],
+                parent_number: Some(10),
+                sub_completed: 0,
+                sub_total: 0,
+                comments: vec![],
+            },
+        ],
+        truncated: false,
+    });
+    let nav = right_column(&dump(&render_size(&app, 100, 20)), 60);
+    assert!(nav.contains("1/2"), "parent shows sub-issue progress:\n{nav}");
+    // Child row is indented (leading spaces before `#12` on the child line).
+    let child_line = nav
+        .lines()
+        .find(|l| l.contains("#12") && l.contains("Child"))
+        .unwrap_or_else(|| panic!("child row present:\n{nav}"));
+    assert!(
+        child_line.trim_start() != child_line && child_line.contains("#12"),
+        "child row is indented:\n{child_line}"
+    );
+}
+
+#[test]
+fn issue_nav_shows_comments_for_selected_issue() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::issue::{
+        Issue, IssueComment, IssueQuery, IssueSnapshot, IssueState, IssueView,
+    };
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Issue).unwrap();
+    app.issue = IssueView::List(IssueSnapshot {
+        query: IssueQuery::default(),
+        issues: vec![
+            Issue {
+                number: 1,
+                title: "With comments".into(),
+                body: "Issue body".into(),
+                state: IssueState::Open,
+                author: "alice".into(),
+                updated_at: "2026-08-01T12:00:00Z".into(),
+                url: "https://github.com/o/r/issues/1".into(),
+                labels: vec![],
+                parent_number: None,
+                sub_completed: 0,
+                sub_total: 0,
+                comments: vec![
+                    IssueComment {
+                        author: "bob".into(),
+                        author_is_bot: false,
+                        body: "Newest comment body text".into(),
+                        created_at: "2026-08-02T12:00:00Z".into(),
+                        url: "https://github.com/o/r/issues/1#issuecomment-2".into(),
+                    },
+                    IssueComment {
+                        author: "carol".into(),
+                        author_is_bot: false,
+                        body: "Older comment".into(),
+                        created_at: "2026-08-01T12:00:00Z".into(),
+                        url: "https://github.com/o/r/issues/1#issuecomment-1".into(),
+                    },
+                ],
+            },
+            Issue {
+                number: 2,
+                title: "No comments".into(),
+                body: "Other body".into(),
+                state: IssueState::Open,
+                author: "alice".into(),
+                updated_at: "2026-08-01T12:00:00Z".into(),
+                url: "https://github.com/o/r/issues/2".into(),
+                labels: vec![],
+                parent_number: None,
+                sub_completed: 0,
+                sub_total: 0,
+                comments: vec![],
+            },
+        ],
+        truncated: false,
+    });
+    let nav = right_column(&dump(&render_size(&app, 100, 24)), 55);
+    assert!(nav.contains("comments · 2"), "comments header for selected issue:\n{nav}");
+    assert!(nav.contains("description"), "description row leads the detail section:\n{nav}");
+    assert!(nav.contains("@bob"), "comment author in nav:\n{nav}");
+    assert!(nav.contains("@carol"), "second comment author:\n{nav}");
+
+    // Selecting the second issue (no comments) hides the section.
+    app.issue_select(1);
+    let nav2 = right_column(&dump(&render_size(&app, 100, 24)), 55);
+    assert!(
+        !nav2.contains("comments ·"),
+        "comments section omitted when selected issue has none:\n{nav2}"
+    );
+    assert!(!nav2.contains("description"), "no description row without comments:\n{nav2}");
+
+    // Right-arrow enters detail on description; j moves to the first comment.
+    app.issue_select(0);
+    app.issue_enter_detail();
+    assert!(app.issue_detail_focused(), "→ enters detail when comments exist");
+    assert!(app.issue_showing_description(), "detail lands on description first");
+    let on_desc = dump(&render_size(&app, 100, 24));
+    assert!(on_desc.contains("Issue body"), "description still shows the issue body:\n{on_desc}");
+
+    app.issue_move(1);
+    let out = dump(&render_size(&app, 100, 24));
+    assert!(out.contains("Newest comment body text"), "comment body in read pane:\n{out}");
+    assert!(out.contains("@bob · comment"), "comment title in read pane:\n{out}");
+
+    // Left-arrow returns to the issue list; issue body is shown again.
+    app.issue_exit_detail();
+    assert!(!app.issue_detail_focused());
+    let back = dump(&render_size(&app, 100, 24));
+    assert!(back.contains("Issue body"), "← restores the issue description:\n{back}");
+
+    // → is inert when the issue has no comments.
+    app.issue_select(1);
+    app.issue_enter_detail();
+    assert!(!app.issue_detail_focused(), "→ does nothing without comments");
+}
+
+#[test]
+fn issue_nav_side_by_side_on_stacked_layout() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::config::NavigatorPosition;
+    use herdr_reviewr::issue::{
+        Issue, IssueComment, IssueQuery, IssueSnapshot, IssueState, IssueView,
+    };
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Issue).unwrap();
+    app.navigator_position = NavigatorPosition::Bottom;
+    // Stacked default share is short; grow it so the half-width detail panel can show
+    // description + a comment + the hint row.
+    for _ in 0..8 {
+        app.resize_navigator(4);
+    }
+    app.issue = IssueView::List(IssueSnapshot {
+        query: IssueQuery::default(),
+        issues: vec![Issue {
+            number: 1,
+            title: "With comments".into(),
+            body: "Issue body".into(),
+            state: IssueState::Open,
+            author: "alice".into(),
+            updated_at: "2026-08-01T12:00:00Z".into(),
+            url: "https://github.com/o/r/issues/1".into(),
+            labels: vec![],
+            parent_number: None,
+            sub_completed: 0,
+            sub_total: 0,
+            comments: vec![IssueComment {
+                author: "bob".into(),
+                author_is_bot: false,
+                body: "A thread note".into(),
+                created_at: "2026-08-02T12:00:00Z".into(),
+                url: "https://github.com/o/r/issues/1#issuecomment-2".into(),
+            }],
+        }],
+        truncated: false,
+    });
+    // Wide enough for a half-width comments panel.
+    let out = dump(&render_size(&app, 120, 24));
+    assert!(out.contains("comments · 1"), "detail panel title:\n{out}");
+    assert!(out.contains("description"), "description row in detail panel:\n{out}");
+    assert!(out.contains("@bob"), "comment row visible beside issues:\n{out}");
+    assert!(
+        out.contains("←")
+            && out.contains("→")
+            && out.contains("issues")
+            && out.contains("comments"),
+        "detail hint shows left/right affordances:\n{out}"
+    );
 }

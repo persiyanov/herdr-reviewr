@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::Result;
 
@@ -43,6 +44,13 @@ enum DividerDrag {
     Cancelled,
 }
 
+/// One cached Issue list result with its fetch time (specs/issue-tab.md TTL).
+#[derive(Clone, Debug)]
+struct IssueCacheEntry {
+    fetched_at: Instant,
+    view: crate::issue::IssueView,
+}
+
 /// Which pane has the keyboard.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
@@ -57,13 +65,14 @@ enum Anchor {
     Dir(String),
 }
 
-/// Which top-level tab is active: the changes reviewer, the whole-repo browser, or the
-/// read-only PR mirror.
+/// Which top-level tab is active: the changes reviewer, the whole-repo browser, the
+/// read-only PR mirror, or the read-only GitHub Issues list.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
     Changes,
     AllFiles,
     Pr,
+    Issue,
 }
 
 /// What a pending PR refresh may do to a fetch already in flight: an ambient trigger —
@@ -78,9 +87,15 @@ pub enum RefreshKind {
 
 impl Tab {
     /// Whether this tab uses the file-tree / diff machinery (and so the per-tab stash). The
-    /// `PR` tab does not — it holds its own state and never swaps into the diff fields.
+    /// `PR` and `Issue` tabs do not — each holds its own state and never swaps into the
+    /// diff fields.
     pub(crate) fn is_file_tab(self) -> bool {
         matches!(self, Tab::Changes | Tab::AllFiles)
+    }
+
+    /// Whether this tab is a forge mirror (PR or Issues) rather than a file browser.
+    pub(crate) fn is_mirror_tab(self) -> bool {
+        matches!(self, Tab::Pr | Tab::Issue)
     }
 }
 
@@ -358,6 +373,12 @@ pub enum FooterAction {
     MovePickerRow,
     ClosePicker,
     OpenPr,
+    /// Cycle the Issue tab's state filter (open → closed → all).
+    IssueFilter,
+    /// Cycle the Issue tab's assignee filter (all → mine).
+    IssueAssignee,
+    /// Cycle the Issue tab's priority-label filter (any → p0 → p1 → p2).
+    IssuePriority,
     Refresh,
     Tabs,
     Quit,
@@ -528,6 +549,36 @@ pub struct App {
     /// The PR refresh awaiting dispatch, if any; the event loop services it after drawing, so
     /// a `loading` frame shows before the blocking CLI calls run.
     pub pr_pending: Option<RefreshKind>,
+    /// The read-only `Issue` tab's view of GitHub issues (`src/issue.rs`).
+    pub issue: crate::issue::IssueView,
+    /// Active list query for the Issue tab (state × assignee × priority).
+    pub issue_query: crate::issue::IssueQuery,
+    /// Successful Issue lists keyed by query, with fetch time for the TTL cache
+    /// (specs/issue-tab.md). Cleared with the rest of the issue view on identity loss.
+    issue_cache: HashMap<crate::issue::IssueQuery, IssueCacheEntry>,
+    /// Persistent same-input fetch remedy for the Issue tab.
+    issue_notice: Option<String>,
+    /// A same-input issue refresh that crossed the loading-indicator delay.
+    issue_refreshing: bool,
+    /// Navigator cursor over the issue list (always the selected issue; stays highlighted while
+    /// the detail section below is focused — specs/issue-tab.md).
+    pub(crate) issue_cursor: usize,
+    /// When `Some`, focus is in the detail section under the selected issue: `0` is the
+    /// pinned `description` row (issue body), `1 + i` is `comments[i]`. `None` means focus is
+    /// on the issue list. `→` enters (when the issue has comments); `←` leaves.
+    pub(crate) issue_detail_cursor: Option<usize>,
+    /// Top visible line of the issue read pane.
+    pub(crate) issue_read_scroll: usize,
+    /// Top visible row of the issue list (or the combined list in side layout).
+    issue_nav_scroll: std::cell::Cell<usize>,
+    issue_nav_max_scroll: std::cell::Cell<usize>,
+    /// Top visible row of the detail pane when the navigator is split issues | comments
+    /// (stacked body layout with comments present — specs/issue-tab.md).
+    issue_detail_nav_scroll: std::cell::Cell<usize>,
+    issue_detail_nav_max_scroll: std::cell::Cell<usize>,
+    reveal_issue_nav: std::cell::Cell<bool>,
+    /// Issue refresh awaiting dispatch (same draw-then-fetch cadence as PR).
+    pub issue_pending: Option<RefreshKind>,
     /// The world refresh request awaiting dispatch, if any; the event loop hands it to
     /// the worker after the frame paints (specs/tui.md).
     pub world_request: Option<crate::world::WorldRequest>,
@@ -673,6 +724,20 @@ impl App {
             pr_nav_max_scroll: std::cell::Cell::new(usize::MAX),
             reveal_pr_nav: std::cell::Cell::new(true),
             pr_pending: None,
+            issue: crate::issue::IssueView::Pending,
+            issue_query: crate::issue::IssueQuery::default(),
+            issue_cache: HashMap::new(),
+            issue_notice: None,
+            issue_refreshing: false,
+            issue_cursor: 0,
+            issue_detail_cursor: None,
+            issue_read_scroll: 0,
+            issue_nav_scroll: std::cell::Cell::new(0),
+            issue_nav_max_scroll: std::cell::Cell::new(usize::MAX),
+            issue_detail_nav_scroll: std::cell::Cell::new(0),
+            issue_detail_nav_max_scroll: std::cell::Cell::new(usize::MAX),
+            reveal_issue_nav: std::cell::Cell::new(true),
+            issue_pending: None,
             world_request: None,
             search: None,
             search_dirty: false,
@@ -1523,6 +1588,8 @@ impl App {
         };
         if self.tab == Tab::Pr {
             self.pr_read_scroll = idx.min(self.pr_read_max_scroll.get());
+        } else if self.tab == Tab::Issue {
+            self.issue_read_scroll = idx.min(self.pr_read_max_scroll.get());
         } else if self.preview_active() {
             self.preview_scrolled = true;
             self.preview_scroll = idx.min(self.preview_max_scroll.get());
@@ -1556,9 +1623,9 @@ impl App {
         self.navigator_position = self.navigator_position.clockwise();
     }
 
-    /// Whether the active tab can hide its navigator — `PR` never does (specs/tui.md).
+    /// Whether the active tab can hide its navigator — forge mirror tabs never do.
     fn navigator_can_hide(&self) -> bool {
-        self.tab != Tab::Pr
+        !self.tab.is_mirror_tab()
     }
 
     /// Whether the hidden state applies on the active tab.
@@ -1796,11 +1863,17 @@ impl App {
             return Ok(());
         }
         self.tab = tab;
-        // Entering the PR tab leaves the file tabs frozen in place and fetches the PR. A
-        // `loading` frame draws before the blocking fetch the event loop services, and a
-        // re-entry keeps the last snapshot on screen while it refetches.
+        // Entering a forge mirror tab leaves the file tabs frozen and fetches. A `loading`
+        // frame draws before the blocking fetch the event loop services; re-entry keeps
+        // the last snapshot on screen while it refetches.
         if tab == Tab::Pr {
             self.request_pr_refresh(RefreshKind::Ambient);
+            return Ok(());
+        }
+        if tab == Tab::Issue {
+            // TTL cache: re-entry within the window paints memory and skips `gh`
+            // (specs/issue-tab.md).
+            self.resolve_issue_query(RefreshKind::Ambient);
             return Ok(());
         }
         // Entering a file tab: bring its state into the diff fields if the other file tab holds
@@ -2017,6 +2090,369 @@ impl App {
         };
         match crate::browser::open(&url) {
             Ok(()) => self.status = format!("opened {} in browser", self.pr_forge.abbr()),
+            Err(e) => self.status = e.to_string(),
+        }
+    }
+
+    // ---- Issue tab (GitHub issues, read-only) ---------------------------------------------
+
+    /// Queue an Issue-tab refresh, merging into any request already pending.
+    pub fn request_issue_refresh(&mut self, kind: RefreshKind) {
+        self.issue_pending = self.issue_pending.max(Some(kind));
+    }
+
+    /// Clear a snapshot whose repository identity no longer matches.
+    pub fn clear_issue(&mut self) {
+        self.issue = crate::issue::IssueView::Pending;
+        self.issue_cache.clear();
+        self.issue_notice = None;
+        self.issue_refreshing = false;
+        self.issue_cursor = 0;
+        self.issue_detail_cursor = None;
+        self.issue_read_scroll = 0;
+        self.issue_nav_scroll.set(0);
+        self.issue_detail_nav_scroll.set(0);
+        self.reveal_issue_nav.set(true);
+    }
+
+    /// State chip / legacy accessor for the open/closed/all dimension.
+    #[must_use]
+    pub fn issue_filter(&self) -> crate::issue::IssueFilter {
+        self.issue_query.state
+    }
+
+    /// Paint a cached list for the active query when one exists, and only queue a network
+    /// fetch when the cache is missing, stale, or the refresh is forced (`r`).
+    pub fn resolve_issue_query(&mut self, kind: RefreshKind) {
+        let query = self.issue_query;
+        let cached = self.issue_cache.get(&query).cloned();
+        let fresh = cached
+            .as_ref()
+            .is_some_and(|entry| entry.fetched_at.elapsed() < crate::issue::ISSUE_CACHE_TTL);
+        if let Some(entry) = cached {
+            if matches!(entry.view, crate::issue::IssueView::List(_)) {
+                self.paint_issue_view(entry.view);
+            }
+        } else if !matches!(self.issue, crate::issue::IssueView::List(_)) {
+            self.issue = crate::issue::IssueView::Pending;
+        }
+        let need_fetch = match kind {
+            RefreshKind::Forced => true,
+            RefreshKind::Ambient => !fresh,
+        };
+        if need_fetch {
+            self.request_issue_refresh(kind);
+            if kind == RefreshKind::Forced {
+                self.refresh_commanded = true;
+            }
+        }
+    }
+
+    /// Apply a fetched issue view. Transient errors keep the last good list when one exists.
+    /// Successful lists are written into the per-query cache.
+    pub fn apply_issue(&mut self, view: crate::issue::IssueView) {
+        self.issue_refreshing = false;
+        if let crate::issue::IssueView::List(snapshot) = &view {
+            self.issue_cache.insert(
+                snapshot.query,
+                IssueCacheEntry { fetched_at: Instant::now(), view: view.clone() },
+            );
+        }
+        let retry = view.retry_remedy(self.keymap().hint(crate::keymap::Action::Refresh));
+        let has_list = matches!(self.issue, crate::issue::IssueView::List(_));
+        if has_list && let Some(message) = retry {
+            self.issue_notice = Some(message);
+            return;
+        }
+        self.paint_issue_view(view);
+    }
+
+    /// Install a view and reconcile the cursor by issue number (Continuity). A detail focus on
+    /// description survives while the issue still has comments; a comment focus follows
+    /// author+timestamp identity.
+    fn paint_issue_view(&mut self, view: crate::issue::IssueView) {
+        self.issue_notice = None;
+        let selected_number = self.issue_selected().map(|i| i.number);
+        let detail = self.issue_detail_cursor;
+        let selected_comment =
+            self.issue_selected_comment().map(|c| (c.author.clone(), c.created_at.clone()));
+        self.issue = view;
+        if let Some(number) = selected_number {
+            if let Some(i) = self
+                .issue_snapshot()
+                .and_then(|s| s.issues.iter().position(|issue| issue.number == number))
+            {
+                self.issue_cursor = i;
+                self.issue_detail_cursor = match detail {
+                    Some(0) if self.issue_has_detail() => Some(0),
+                    None | Some(0) => None,
+                    Some(_) => selected_comment.and_then(|(author, created)| {
+                        let issue = self.issue_snapshot()?.issues.get(i)?;
+                        let pos = issue
+                            .comments
+                            .iter()
+                            .position(|c| c.author == author && c.created_at == created)?;
+                        Some(pos + 1)
+                    }),
+                };
+                self.clamp_issue_detail_cursor();
+                return;
+            }
+            self.issue_read_scroll = 0;
+            self.issue_detail_cursor = None;
+        }
+        let clamped = self.issue_row_count().saturating_sub(1);
+        if self.issue_cursor > clamped {
+            self.issue_read_scroll = 0;
+            self.issue_detail_cursor = None;
+        }
+        self.issue_cursor = self.issue_cursor.min(clamped);
+        self.clamp_issue_detail_cursor();
+    }
+
+    pub fn issue_notice(&self) -> Option<&str> {
+        self.issue_notice.as_deref()
+    }
+
+    pub fn set_issue_refreshing(&mut self, refreshing: bool) {
+        if refreshing && matches!(self.issue, crate::issue::IssueView::Pending) {
+            self.issue = crate::issue::IssueView::Loading;
+            self.issue_refreshing = false;
+        } else {
+            self.issue_refreshing = refreshing;
+        }
+    }
+
+    pub fn issue_refreshing(&self) -> bool {
+        self.issue_refreshing
+    }
+
+    #[must_use]
+    pub fn issue_snapshot(&self) -> Option<&crate::issue::IssueSnapshot> {
+        match &self.issue {
+            crate::issue::IssueView::List(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn issue_row_count(&self) -> usize {
+        self.issue_snapshot().map_or(0, |s| s.issues.len())
+    }
+
+    #[must_use]
+    pub fn issue_selected(&self) -> Option<&crate::issue::Issue> {
+        self.issue_snapshot()?.issues.get(self.issue_cursor)
+    }
+
+    /// Whether the selected issue has a detail section (at least one comment).
+    #[must_use]
+    pub fn issue_has_detail(&self) -> bool {
+        self.issue_selected_comment_count() > 0
+    }
+
+    /// Comment count for the selected issue (0 when there is no selection).
+    #[must_use]
+    pub fn issue_selected_comment_count(&self) -> usize {
+        self.issue_selected().map_or(0, |i| i.comments.len())
+    }
+
+    /// Selectable rows in the detail section: `description` plus each comment.
+    /// Zero when the selected issue has no comments (section hidden).
+    #[must_use]
+    pub fn issue_detail_row_count(&self) -> usize {
+        if self.issue_has_detail() { 1 + self.issue_selected_comment_count() } else { 0 }
+    }
+
+    /// Whether focus is in the detail section under the selected issue.
+    #[must_use]
+    pub fn issue_detail_focused(&self) -> bool {
+        self.issue_detail_cursor.is_some()
+    }
+
+    /// Whether the read pane should show the issue description (list focus, or detail on
+    /// the pinned `description` row).
+    #[must_use]
+    pub fn issue_showing_description(&self) -> bool {
+        match self.issue_detail_cursor {
+            None | Some(0) => true,
+            Some(_) => false,
+        }
+    }
+
+    /// The comment under the detail cursor, when focus is on a comment row (`index >= 1`).
+    #[must_use]
+    pub fn issue_selected_comment(&self) -> Option<&crate::issue::IssueComment> {
+        let index = self.issue_detail_cursor?;
+        if index == 0 {
+            return None;
+        }
+        self.issue_selected()?.comments.get(index - 1)
+    }
+
+    pub fn issue_move(&mut self, delta: isize) {
+        if self.issue_row_count() == 0 {
+            return;
+        }
+        // Detail focus: j/k walk description → comments without leaving the selected issue.
+        if let Some(c) = self.issue_detail_cursor {
+            let m = self.issue_detail_row_count();
+            if m == 0 {
+                self.issue_detail_cursor = None;
+                return;
+            }
+            let next = (c as isize + delta).clamp(0, m as isize - 1) as usize;
+            if next != c {
+                self.issue_select_detail(next);
+            }
+            return;
+        }
+        let n = self.issue_row_count();
+        self.issue_select(step(self.issue_cursor, delta, n));
+    }
+
+    /// Select an issue row and return focus to the issue list.
+    pub fn issue_select(&mut self, i: usize) {
+        self.issue_cursor = i;
+        self.issue_detail_cursor = None;
+        self.issue_read_scroll = 0;
+        self.reveal_issue_nav.set(true);
+    }
+
+    /// Focus detail row `d` (`0` = description, `1+i` = comment i) of the selected issue.
+    pub fn issue_select_detail(&mut self, d: usize) {
+        let m = self.issue_detail_row_count();
+        if m == 0 {
+            self.issue_detail_cursor = None;
+            return;
+        }
+        self.issue_detail_cursor = Some(d.min(m - 1));
+        self.issue_read_scroll = 0;
+        self.reveal_issue_nav.set(true);
+    }
+
+    /// `→` from the issue list: enter the detail section on `description` when the selected
+    /// issue has comments. No-op when already in detail or the issue has none.
+    pub fn issue_enter_detail(&mut self) {
+        if self.issue_detail_cursor.is_some() || !self.issue_has_detail() {
+            return;
+        }
+        // Land on description so the left pane still shows the issue body until the user moves.
+        self.issue_select_detail(0);
+    }
+
+    /// `←` from the detail section: return focus to the issue list. The issue row stays selected.
+    pub fn issue_exit_detail(&mut self) {
+        if self.issue_detail_cursor.is_none() {
+            return;
+        }
+        self.issue_detail_cursor = None;
+        self.issue_read_scroll = 0;
+        self.reveal_issue_nav.set(true);
+    }
+
+    fn clamp_issue_detail_cursor(&mut self) {
+        let m = self.issue_detail_row_count();
+        match self.issue_detail_cursor {
+            Some(_) if m == 0 => self.issue_detail_cursor = None,
+            Some(c) if c >= m => {
+                self.issue_detail_cursor = Some(m - 1);
+                self.issue_read_scroll = 0;
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn issue_scroll_nav(&mut self, delta: isize) {
+        self.reveal_issue_nav.set(false);
+        self.issue_nav_scroll.set(clamp_scroll(
+            self.issue_nav_scroll.get(),
+            delta,
+            self.issue_nav_max_scroll.get(),
+        ));
+    }
+
+    /// Scroll the detail list (description + comments) when it has its own pane.
+    pub(crate) fn issue_scroll_detail_nav(&mut self, delta: isize) {
+        self.reveal_issue_nav.set(false);
+        self.issue_detail_nav_scroll.set(clamp_scroll(
+            self.issue_detail_nav_scroll.get(),
+            delta,
+            self.issue_detail_nav_max_scroll.get(),
+        ));
+    }
+
+    /// Page/wheel scroll for the navigator: when detail is focused, prefer the detail pane.
+    pub(crate) fn issue_scroll_focused_nav(&mut self, delta: isize) {
+        if self.issue_detail_focused() {
+            self.issue_scroll_detail_nav(delta);
+        } else {
+            self.issue_scroll_nav(delta);
+        }
+    }
+
+    pub(crate) fn issue_scroll_read(&mut self, delta: isize) {
+        self.issue_read_scroll =
+            clamp_scroll(self.issue_read_scroll, delta, self.pr_read_max_scroll.get());
+    }
+
+    pub(crate) fn note_issue_nav_max_scroll(&self, max: usize) {
+        self.issue_nav_max_scroll.set(max);
+    }
+
+    pub(crate) fn note_issue_detail_nav_max_scroll(&self, max: usize) {
+        self.issue_detail_nav_max_scroll.set(max);
+    }
+
+    pub(crate) fn issue_nav_scroll(&self) -> usize {
+        self.issue_nav_scroll.get()
+    }
+
+    pub(crate) fn set_issue_nav_scroll(&self, scroll: usize) {
+        self.issue_nav_scroll.set(scroll);
+    }
+
+    pub(crate) fn issue_detail_nav_scroll(&self) -> usize {
+        self.issue_detail_nav_scroll.get()
+    }
+
+    pub(crate) fn set_issue_detail_nav_scroll(&self, scroll: usize) {
+        self.issue_detail_nav_scroll.set(scroll);
+    }
+
+    pub(crate) fn take_issue_nav_reveal(&self) -> bool {
+        self.reveal_issue_nav.replace(false)
+    }
+
+    /// Cycle the Issue state filter (open → closed → all) and resolve via cache / fetch.
+    pub fn cycle_issue_filter(&mut self) {
+        self.issue_query.state = self.issue_query.state.cycle();
+        // Prefer a fresh cache entry; only hit the network on miss/expiry (specs/issue-tab.md).
+        self.resolve_issue_query(RefreshKind::Ambient);
+    }
+
+    /// Cycle the Issue assignee filter (all → mine).
+    pub fn cycle_issue_assignee(&mut self) {
+        self.issue_query.assignee = self.issue_query.assignee.cycle();
+        self.resolve_issue_query(RefreshKind::Ambient);
+    }
+
+    /// Cycle the Issue priority-label filter (any → p0 → p1 → p2).
+    pub fn cycle_issue_priority(&mut self) {
+        self.issue_query.priority = self.issue_query.priority.cycle();
+        self.resolve_issue_query(RefreshKind::Ambient);
+    }
+
+    /// Open the selected issue in the browser.
+    pub fn issue_open(&mut self) {
+        let Some(url) = self.issue_selected().map(|i| i.url.clone()) else {
+            return;
+        };
+        if url.is_empty() {
+            return;
+        }
+        match crate::browser::open(&url) {
+            Ok(()) => self.status = "opened issue in browser".to_string(),
             Err(e) => self.status = e.to_string(),
         }
     }
@@ -2248,7 +2684,7 @@ impl App {
     /// the expansion and never disturbs the file tab the reviewer will return to (`overview.md`
     /// Continuity).
     pub fn escape(&mut self) {
-        if self.tab != Tab::Pr {
+        if !self.tab.is_mirror_tab() {
             if self.select_anchor.is_some() {
                 self.clear_selection();
                 return;
@@ -3306,6 +3742,26 @@ impl App {
             return out;
         }
 
+        // The read-only Issue tab: state filter is primary; assignee and priority sit as row-1
+        // `Do` actions (the footer paints only one Primary). Open the selected issue when one is
+        // selected. Same go/move bands as PR (no hunk/file steps).
+        if self.tab == Tab::Issue {
+            let mut out =
+                vec![(A::IssueFilter, Primary), (A::IssueAssignee, Do), (A::IssuePriority, Do)];
+            if self.issue_selected().is_some() {
+                out.push((A::OpenPr, Do));
+            }
+            out.push((A::Search, Go));
+            out.push((A::TogglePane, Go));
+            out.push((A::NavigatorPosition, Go));
+            out.push((A::Tabs, Go));
+            out.push((A::Refresh, Go));
+            out.push((A::Quit, Go));
+            out.push((A::MoveLine, Move));
+            out.push((A::MovePage, Move));
+            return out;
+        }
+
         let mut out: Vec<(FooterAction, Band)> = Vec::new();
         // Whether the diff-jump is already the primary, so the `go` band doesn't repeat the toggle.
         let mut pane_is_primary = false;
@@ -3746,6 +4202,50 @@ mod tests {
     use crate::config::NavigatorPosition;
     use crate::model::{Comment, Scope, Side};
     use std::path::PathBuf;
+
+    #[test]
+    fn issue_cache_skips_network_when_fresh() {
+        use crate::issue::{
+            Issue, IssueAssignee, IssueQuery, IssueSnapshot, IssueState, IssueView,
+        };
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        let query = IssueQuery::default();
+        app.issue_query = query;
+        app.apply_issue(IssueView::List(IssueSnapshot {
+            query,
+            issues: vec![Issue {
+                number: 1,
+                title: "cached".into(),
+                body: String::new(),
+                state: IssueState::Open,
+                author: "a".into(),
+                updated_at: "2026-08-01T12:00:00Z".into(),
+                url: "https://github.com/o/r/issues/1".into(),
+                labels: vec![],
+                parent_number: None,
+                sub_completed: 0,
+                sub_total: 0,
+                comments: vec![],
+            }],
+            truncated: false,
+        }));
+        app.issue_pending = None;
+        // Ambient resolve of the same query must not re-queue a fetch.
+        app.resolve_issue_query(super::RefreshKind::Ambient);
+        assert!(app.issue_pending.is_none(), "fresh cache skips ambient fetch");
+        assert_eq!(app.issue_selected().map(|i| i.number), Some(1));
+
+        // Cycling to mine with no cache entry should request a fetch.
+        app.cycle_issue_assignee();
+        assert_eq!(app.issue_query.assignee, IssueAssignee::Mine);
+        assert_eq!(app.issue_pending, Some(super::RefreshKind::Ambient));
+
+        // Forced refresh always queues even when the cache is fresh.
+        app.issue_query = query;
+        app.issue_pending = None;
+        app.resolve_issue_query(super::RefreshKind::Forced);
+        assert_eq!(app.issue_pending, Some(super::RefreshKind::Forced));
+    }
 
     #[test]
     fn the_read_pane_scroll_stops_at_the_bottom_edge() {
