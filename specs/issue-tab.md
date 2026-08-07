@@ -33,7 +33,9 @@ v1 is **GitHub only** via `gh issue list`. No comment write, no edit, no close �
 
 ### Navigator and read pane
 
-- Navigator title `Issues · {filter}`; rows `#n title  age` with open/closed glyph.
+- Navigator title `Issues · {filter}`; rows `#n title  age` with open/closed glyph
+  (`●` green = open, `○` dim = closed). A title too wide for the row keeps its **head**
+  and trails with `…` (not a path-style head elision).
 - `j`/`k` or a click selects an issue; the read pane shows labels (if any) then the body as markdown.
 - Empty body shows a dim italic placeholder. Empty list shows `No {filter} issues.`
 - `o` opens the selected issue URL in the browser; `r` refetches.

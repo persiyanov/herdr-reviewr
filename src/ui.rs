@@ -3201,7 +3201,8 @@ fn issue_row(
     let budget = width
         .saturating_sub(2 + number.width() + trailing.width())
         .max(1);
-    let title = elide_head(&issue.title, budget);
+    // Titles prefer the leading words (unlike file paths, which elide the head).
+    let title = truncate_width(&issue.title, budget);
     vec![
         Span::styled(format!("{} ", state_glyph.0), Style::default().fg(state_glyph.1)),
         Span::styled(number, Style::default().fg(p.yellow)),

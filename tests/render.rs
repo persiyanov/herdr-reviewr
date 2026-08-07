@@ -2820,3 +2820,40 @@ fn issue_tab_shows_filter_chip_and_empty_state() {
     assert!(out.contains("labels: bug"), "labels in read pane:\n{out}");
     assert!(out.contains("i open") || out.contains("open"), "filter action in footer:\n{out}");
 }
+
+#[test]
+fn issue_list_prefers_title_head_when_narrow() {
+    // Issue titles are prose: keep the leading words and trail with `…`, never path-style
+    // head elision that would show only the unreadable tail.
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::issue::{Issue, IssueFilter, IssueSnapshot, IssueState, IssueView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Issue).unwrap();
+    // Short head token still fits after `#n ` and the age; long unique tail must not.
+    let head = "HEADKEEP";
+    let tail = "UNIQUETAILMARKERXYZZY";
+    app.issue = IssueView::List(IssueSnapshot {
+        filter: IssueFilter::Open,
+        issues: vec![Issue {
+            number: 1,
+            title: format!(
+                "{head} middle filler words that pad the row past the navigator width {tail}"
+            ),
+            body: String::new(),
+            state: IssueState::Open,
+            author: "alice".into(),
+            updated_at: "2026-08-01T12:00:00Z".into(),
+            url: "https://github.com/o/r/issues/1".into(),
+            labels: vec![],
+        }],
+        truncated: false,
+    });
+    // Default navigator is the right ~32%; take its column so the read pane cannot false-positive.
+    let nav = right_column(&dump(&render_size(&app, 90, 20)), 65);
+    assert!(nav.contains(head), "title head must stay visible:\n{nav}");
+    assert!(!nav.contains(tail), "title tail must elide, not crowd the head:\n{nav}");
+    assert!(nav.contains('…'), "clipped title marks the cut with a trailing ellipsis:\n{nav}");
+}
