@@ -15,12 +15,12 @@ when `HERDR_TAB_ID` is set and `toggle_placement` is not `tab`.
 ## Update from upstream
 
 ```bash
-cd /Users/zhuo/Developer/work/herdr-reviewr
+cd /Users/zhuo/Developer/forks/herdr-reviewer
 git fetch origin
 git rebase origin/main
 # if pane.sh conflicts: keep per-tab logic, take upstream for the rest
-# if release binary needed after a version bump:
-#   copy new binary from a fresh `herdr plugin install` temp, or build with `just install`
+# release binary after build:
+#   just install   # or cargo build --release && herdr plugin link .
 ```
 
 Config is separate and survives:

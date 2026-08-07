@@ -33,7 +33,8 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | —                                                        | scroll the viewport, selection put          | —                                           | wheel over the pane           |
 | —                                                        | scroll the diff horizontally (wrap off)     | `←` / `→`                                   | —                             |
 | `scope-uncommitted` / `scope-branch` / `scope-last-turn` | switch scope                                | `u` / `b` / `t`                             | click the scope chip to cycle |
-| `tab-changes` / `tab-all-files` / `tab-pr`               | switch tab                                  | `1` / `2` / `3`                             | click a tab name              |
+| `tab-changes` / `tab-all-files` / `tab-pr` / `tab-issue` | switch tab                                  | `1` / `2` / `3` / `4`                       | click a tab name              |
+| `issue-filter`                                           | cycle Issue list filter (open/closed/all)   | `i`                                         | click `[filter]` chip         |
 | —                                                        | expand the fold under the cursor            | `→`                                         | click the `⋯` row             |
 | —                                                        | open a link in rendered markdown            | —                                           | click the link                |
 | `wrap`                                                   | toggle line wrap                            | `w`                                         | —                             |

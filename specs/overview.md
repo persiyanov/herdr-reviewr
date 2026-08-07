@@ -19,13 +19,14 @@ open the pane → pick a changed file → read its diff → comment on a range
 → send the comments to the agent → add a line and hit enter
 ```
 
-Three tabs:
+Four tabs:
 
 | tab         | shows                                                                  |
 | ----------- | ---------------------------------------------------------------------- |
 | `Changes`   | the active scope's changed files, with a syntax-highlighted diff viewer |
 | `All files` | the whole repo tree, with a read-and-comment content viewer             |
 | `PR`        | a read-only mirror of the pull request: state, checks, comments         |
+| `Issue`     | a read-only GitHub Issues list (open by default; filterable)            |
 
 ## Voice
 
@@ -43,6 +44,7 @@ to move the work forward.
 - The `Changes` view: a changed-files list per scope plus the diff viewer (`diff-view.md`).
 - The `All files` tab: a repo tree and content viewer, annotated with the active scope's changes (`file-list.md`, `diff-view.md`).
 - The `PR` tab: pull-request identity, state, checks, and comments, read from the repository's forge, with external links only (`forge-host.md`, `pr-tab.md`).
+- The `Issue` tab: GitHub issues list (open / closed / all), body read-only, external links only (`issue-tab.md`).
 - Three scopes: `uncommitted`, `branch`, `last-turn` (`review-model.md`).
 - Comments anchored to `path:start-end`, held in memory for the review pass.
 - Export of all comments to the agent input or the clipboard.

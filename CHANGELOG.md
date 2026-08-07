@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Issue tab.** `4` opens a read-only GitHub Issues list (default: all open). `i` cycles
+  open → closed → all; `o` opens the selected issue in the browser. GitHub-only via `gh`;
+  no comment write or edit.
+- **Per-tab reviewr panes.** `toggle` / `open` / `close` scope to the current herdr tab when
+  `HERDR_TAB_ID` is set, so each herdr tab can keep its own reviewr instance.
+
 ## [0.29.0] — 2026-08-01
 
 ### Changed

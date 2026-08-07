@@ -297,7 +297,8 @@ The action names and their defaults:
 | `next-hunk` / `prev-hunk` | `]` / `[` |
 | `next-file` / `prev-file` | `f` / `F` |
 | `scope-uncommitted` / `scope-branch` / `scope-last-turn` | `u` / `b` / `t` |
-| `tab-changes` / `tab-all-files` / `tab-pr` | `1` / `2` / `3` |
+| `tab-changes` / `tab-all-files` / `tab-pr` / `tab-issue` | `1` / `2` / `3` / `4` |
+| `issue-filter` | `i` (Issue tab: open → closed → all) |
 | `wrap` | `w` |
 | `preview` | `m` |
 | `navigator-position` | `p` |

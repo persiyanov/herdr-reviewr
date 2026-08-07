@@ -11,7 +11,7 @@ The terminal frame: the pane layout, the tabs, and how the view stays current.
 ## Overview
 
 ```
-┌ 1 Changes  2 All files  3 PR  [uncommitted]  9 changed  +42 −18 [ Send (3) ] ┐
+┌ 1 Changes  2 All files  3 PR  4 Issue  [uncommitted]  9 changed  +42 −18 [ Send (3) ] ┐
 │ ⋯  11 unmodified lines                       │ M llm_registry.py  +18 -8  │
 │ 40    def resolve(self, name):               │ M deep_research.py +155-62 │
 │ 41 ▌  from .z import w                         │ D old_runner.py    -47     │
