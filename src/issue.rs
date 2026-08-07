@@ -159,6 +159,17 @@ impl IssueQuery {
     }
 }
 
+/// One plain comment on an issue (from `gh issue list --json comments`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IssueComment {
+    pub author: String,
+    pub author_is_bot: bool,
+    pub body: String,
+    /// ISO-8601 `…Z` post time — newest-first sort key.
+    pub created_at: String,
+    pub url: String,
+}
+
 /// One GitHub issue row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Issue {
@@ -176,6 +187,8 @@ pub struct Issue {
     pub sub_completed: u32,
     /// Total sub-issues under this issue (`subIssuesSummary.total`).
     pub sub_total: u32,
+    /// Issue-thread comments, newest first (specs/issue-tab.md).
+    pub comments: Vec<IssueComment>,
 }
 
 impl Issue {
@@ -324,7 +337,7 @@ fn gh_issue_list(
         "--limit",
         &ISSUE_CAP.to_string(),
         "--json",
-        "number,title,body,state,author,updatedAt,url,labels,parent,subIssuesSummary",
+        "number,title,body,state,author,updatedAt,url,labels,parent,subIssuesSummary,comments",
     ]);
     if query.assignee == IssueAssignee::Mine {
         cmd.args(["--assignee", "@me"]);
@@ -400,6 +413,9 @@ fn parse_issues(json: &str) -> Result<Vec<Issue>, IssueError> {
             .and_then(|s| s.get("total"))
             .and_then(Value::as_u64)
             .unwrap_or(0) as u32;
+        let mut comments = parse_comments(row.get("comments"));
+        // Newest first — matches the PR tab's comment surface (specs/issue-tab.md).
+        comments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         issues.push(Issue {
             number,
             title,
@@ -412,9 +428,31 @@ fn parse_issues(json: &str) -> Result<Vec<Issue>, IssueError> {
             parent_number,
             sub_completed,
             sub_total,
+            comments,
         });
     }
     Ok(issues)
+}
+
+fn parse_comments(value: Option<&Value>) -> Vec<IssueComment> {
+    let Some(rows) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let author = row["author"]["login"].as_str().unwrap_or("").to_string();
+        if author.is_empty() && row["body"].as_str().unwrap_or("").is_empty() {
+            continue;
+        }
+        out.push(IssueComment {
+            author_is_bot: forge::is_named_bot(&author),
+            author,
+            body: row["body"].as_str().unwrap_or("").to_string(),
+            created_at: row["createdAt"].as_str().unwrap_or("").to_string(),
+            url: row["url"].as_str().unwrap_or("").to_string(),
+        });
+    }
+    out
 }
 
 /// Put each child immediately under its parent when both are in the list. One nesting level.
@@ -513,7 +551,21 @@ mod tests {
             "url": "https://github.com/o/r/issues/42",
             "labels": [{"name": "bug"}, {"name": "ui"}],
             "parent": null,
-            "subIssuesSummary": {"completed": 1, "percentCompleted": 50, "total": 2}
+            "subIssuesSummary": {"completed": 1, "percentCompleted": 50, "total": 2},
+            "comments": [
+              {
+                "author": {"login": "carol"},
+                "body": "older note",
+                "createdAt": "2026-07-01T12:00:00Z",
+                "url": "https://github.com/o/r/issues/42#issuecomment-1"
+              },
+              {
+                "author": {"login": "dave"},
+                "body": "newer note",
+                "createdAt": "2026-08-01T12:00:00Z",
+                "url": "https://github.com/o/r/issues/42#issuecomment-2"
+              }
+            ]
           },
           {
             "number": 7,
@@ -525,7 +577,8 @@ mod tests {
             "url": "https://github.com/o/r/issues/7",
             "labels": [],
             "parent": {"number": 42, "title": "Fix the pane"},
-            "subIssuesSummary": {"completed": 0, "percentCompleted": 0, "total": 0}
+            "subIssuesSummary": {"completed": 0, "percentCompleted": 0, "total": 0},
+            "comments": []
           }
         ]"#;
         let issues = parse_issues(json).unwrap();
@@ -538,8 +591,12 @@ mod tests {
         assert_eq!(issues[0].parent_number, None);
         assert_eq!(issues[0].sub_completed, 1);
         assert_eq!(issues[0].sub_total, 2);
+        assert_eq!(issues[0].comments.len(), 2);
+        assert_eq!(issues[0].comments[0].author, "dave", "comments are newest-first");
+        assert_eq!(issues[0].comments[1].author, "carol");
         assert_eq!(issues[1].state, IssueState::Closed);
         assert_eq!(issues[1].parent_number, Some(42));
+        assert!(issues[1].comments.is_empty());
     }
 
     fn bare(number: u64, parent: Option<u64>) -> Issue {
@@ -555,6 +612,7 @@ mod tests {
             parent_number: parent,
             sub_completed: 0,
             sub_total: 0,
+            comments: vec![],
         }
     }
 
