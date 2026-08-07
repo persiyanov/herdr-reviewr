@@ -57,13 +57,14 @@ enum Anchor {
     Dir(String),
 }
 
-/// Which top-level tab is active: the changes reviewer, the whole-repo browser, or the
-/// read-only PR mirror.
+/// Which top-level tab is active: the changes reviewer, the whole-repo browser, the
+/// read-only PR mirror, or the read-only GitHub Issues list.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
     Changes,
     AllFiles,
     Pr,
+    Issue,
 }
 
 /// What a pending PR refresh may do to a fetch already in flight: an ambient trigger —
@@ -78,9 +79,15 @@ pub enum RefreshKind {
 
 impl Tab {
     /// Whether this tab uses the file-tree / diff machinery (and so the per-tab stash). The
-    /// `PR` tab does not — it holds its own state and never swaps into the diff fields.
+    /// `PR` and `Issue` tabs do not — each holds its own state and never swaps into the
+    /// diff fields.
     pub(crate) fn is_file_tab(self) -> bool {
         matches!(self, Tab::Changes | Tab::AllFiles)
+    }
+
+    /// Whether this tab is a forge mirror (PR or Issues) rather than a file browser.
+    pub(crate) fn is_mirror_tab(self) -> bool {
+        matches!(self, Tab::Pr | Tab::Issue)
     }
 }
 
@@ -358,6 +365,8 @@ pub enum FooterAction {
     MovePickerRow,
     ClosePicker,
     OpenPr,
+    /// Cycle the Issue tab's list filter (open → closed → all).
+    IssueFilter,
     Refresh,
     Tabs,
     Quit,
@@ -528,6 +537,24 @@ pub struct App {
     /// The PR refresh awaiting dispatch, if any; the event loop services it after drawing, so
     /// a `loading` frame shows before the blocking CLI calls run.
     pub pr_pending: Option<RefreshKind>,
+    /// The read-only `Issue` tab's view of GitHub issues (`src/issue.rs`).
+    pub issue: crate::issue::IssueView,
+    /// Active list filter for the Issue tab (default: all open issues).
+    pub issue_filter: crate::issue::IssueFilter,
+    /// Persistent same-input fetch remedy for the Issue tab.
+    issue_notice: Option<String>,
+    /// A same-input issue refresh that crossed the loading-indicator delay.
+    issue_refreshing: bool,
+    /// Navigator cursor over the issue list.
+    pub(crate) issue_cursor: usize,
+    /// Top visible line of the issue read pane.
+    pub(crate) issue_read_scroll: usize,
+    /// Top visible row of the issue navigator.
+    issue_nav_scroll: std::cell::Cell<usize>,
+    issue_nav_max_scroll: std::cell::Cell<usize>,
+    reveal_issue_nav: std::cell::Cell<bool>,
+    /// Issue refresh awaiting dispatch (same draw-then-fetch cadence as PR).
+    pub issue_pending: Option<RefreshKind>,
     /// The world refresh request awaiting dispatch, if any; the event loop hands it to
     /// the worker after the frame paints (specs/tui.md).
     pub world_request: Option<crate::world::WorldRequest>,
@@ -673,6 +700,16 @@ impl App {
             pr_nav_max_scroll: std::cell::Cell::new(usize::MAX),
             reveal_pr_nav: std::cell::Cell::new(true),
             pr_pending: None,
+            issue: crate::issue::IssueView::Pending,
+            issue_filter: crate::issue::IssueFilter::Open,
+            issue_notice: None,
+            issue_refreshing: false,
+            issue_cursor: 0,
+            issue_read_scroll: 0,
+            issue_nav_scroll: std::cell::Cell::new(0),
+            issue_nav_max_scroll: std::cell::Cell::new(usize::MAX),
+            reveal_issue_nav: std::cell::Cell::new(true),
+            issue_pending: None,
             world_request: None,
             search: None,
             search_dirty: false,
@@ -1523,6 +1560,8 @@ impl App {
         };
         if self.tab == Tab::Pr {
             self.pr_read_scroll = idx.min(self.pr_read_max_scroll.get());
+        } else if self.tab == Tab::Issue {
+            self.issue_read_scroll = idx.min(self.pr_read_max_scroll.get());
         } else if self.preview_active() {
             self.preview_scrolled = true;
             self.preview_scroll = idx.min(self.preview_max_scroll.get());
@@ -1556,9 +1595,9 @@ impl App {
         self.navigator_position = self.navigator_position.clockwise();
     }
 
-    /// Whether the active tab can hide its navigator — `PR` never does (specs/tui.md).
+    /// Whether the active tab can hide its navigator — forge mirror tabs never do.
     fn navigator_can_hide(&self) -> bool {
-        self.tab != Tab::Pr
+        !self.tab.is_mirror_tab()
     }
 
     /// Whether the hidden state applies on the active tab.
@@ -1796,11 +1835,15 @@ impl App {
             return Ok(());
         }
         self.tab = tab;
-        // Entering the PR tab leaves the file tabs frozen in place and fetches the PR. A
-        // `loading` frame draws before the blocking fetch the event loop services, and a
-        // re-entry keeps the last snapshot on screen while it refetches.
+        // Entering a forge mirror tab leaves the file tabs frozen and fetches. A `loading`
+        // frame draws before the blocking fetch the event loop services; re-entry keeps
+        // the last snapshot on screen while it refetches.
         if tab == Tab::Pr {
             self.request_pr_refresh(RefreshKind::Ambient);
+            return Ok(());
+        }
+        if tab == Tab::Issue {
+            self.request_issue_refresh(RefreshKind::Ambient);
             return Ok(());
         }
         // Entering a file tab: bring its state into the diff fields if the other file tab holds
@@ -2017,6 +2060,157 @@ impl App {
         };
         match crate::browser::open(&url) {
             Ok(()) => self.status = format!("opened {} in browser", self.pr_forge.abbr()),
+            Err(e) => self.status = e.to_string(),
+        }
+    }
+
+    // ---- Issue tab (GitHub issues, read-only) ---------------------------------------------
+
+    /// Queue an Issue-tab refresh, merging into any request already pending.
+    pub fn request_issue_refresh(&mut self, kind: RefreshKind) {
+        self.issue_pending = self.issue_pending.max(Some(kind));
+    }
+
+    /// Clear a snapshot whose repository identity no longer matches.
+    pub fn clear_issue(&mut self) {
+        self.issue = crate::issue::IssueView::Pending;
+        self.issue_notice = None;
+        self.issue_refreshing = false;
+        self.issue_cursor = 0;
+        self.issue_read_scroll = 0;
+        self.issue_nav_scroll.set(0);
+        self.reveal_issue_nav.set(true);
+    }
+
+    /// Apply a fetched issue view. Transient errors keep the last good list when one exists.
+    pub fn apply_issue(&mut self, view: crate::issue::IssueView) {
+        self.issue_refreshing = false;
+        let retry = view.retry_remedy(self.keymap().hint(crate::keymap::Action::Refresh));
+        let has_list = matches!(self.issue, crate::issue::IssueView::List(_));
+        if has_list && let Some(message) = retry {
+            self.issue_notice = Some(message);
+            return;
+        }
+        self.issue_notice = None;
+        let selected = self.issue_selected().map(|i| i.number);
+        self.issue = view;
+        if let Some(number) = selected {
+            if let Some(i) = self.issue_snapshot().and_then(|s| {
+                s.issues.iter().position(|issue| issue.number == number)
+            }) {
+                self.issue_cursor = i;
+                return;
+            }
+            self.issue_read_scroll = 0;
+        }
+        let clamped = self.issue_row_count().saturating_sub(1);
+        if self.issue_cursor > clamped {
+            self.issue_read_scroll = 0;
+        }
+        self.issue_cursor = self.issue_cursor.min(clamped);
+    }
+
+    pub fn issue_notice(&self) -> Option<&str> {
+        self.issue_notice.as_deref()
+    }
+
+    pub fn set_issue_refreshing(&mut self, refreshing: bool) {
+        if refreshing && matches!(self.issue, crate::issue::IssueView::Pending) {
+            self.issue = crate::issue::IssueView::Loading;
+            self.issue_refreshing = false;
+        } else {
+            self.issue_refreshing = refreshing;
+        }
+    }
+
+    pub fn issue_refreshing(&self) -> bool {
+        self.issue_refreshing
+    }
+
+    #[must_use]
+    pub fn issue_snapshot(&self) -> Option<&crate::issue::IssueSnapshot> {
+        match &self.issue {
+            crate::issue::IssueView::List(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn issue_row_count(&self) -> usize {
+        self.issue_snapshot().map_or(0, |s| s.issues.len())
+    }
+
+    #[must_use]
+    pub fn issue_selected(&self) -> Option<&crate::issue::Issue> {
+        self.issue_snapshot()?.issues.get(self.issue_cursor)
+    }
+
+    pub fn issue_move(&mut self, delta: isize) {
+        let n = self.issue_row_count();
+        if n == 0 {
+            return;
+        }
+        self.issue_select(step(self.issue_cursor, delta, n));
+    }
+
+    pub(crate) fn issue_select(&mut self, i: usize) {
+        self.issue_cursor = i;
+        self.issue_read_scroll = 0;
+        self.reveal_issue_nav.set(true);
+    }
+
+    pub(crate) fn issue_scroll_nav(&mut self, delta: isize) {
+        self.reveal_issue_nav.set(false);
+        self.issue_nav_scroll.set(clamp_scroll(
+            self.issue_nav_scroll.get(),
+            delta,
+            self.issue_nav_max_scroll.get(),
+        ));
+    }
+
+    pub(crate) fn issue_scroll_read(&mut self, delta: isize) {
+        self.issue_read_scroll =
+            clamp_scroll(self.issue_read_scroll, delta, self.pr_read_max_scroll.get());
+    }
+
+    pub(crate) fn note_issue_nav_max_scroll(&self, max: usize) {
+        self.issue_nav_max_scroll.set(max);
+    }
+
+    pub(crate) fn issue_nav_scroll(&self) -> usize {
+        self.issue_nav_scroll.get()
+    }
+
+    pub(crate) fn set_issue_nav_scroll(&self, scroll: usize) {
+        self.issue_nav_scroll.set(scroll);
+    }
+
+    pub(crate) fn take_issue_nav_reveal(&self) -> bool {
+        self.reveal_issue_nav.replace(false)
+    }
+
+    /// Cycle the Issue list filter and refetch.
+    pub fn cycle_issue_filter(&mut self) {
+        self.issue_filter = self.issue_filter.cycle();
+        // Keep place only if the new list still contains the selection — apply_issue does that
+        // after the fetch. Clear notice and show pending only when there is no list yet.
+        if !matches!(self.issue, crate::issue::IssueView::List(_)) {
+            self.issue = crate::issue::IssueView::Pending;
+        }
+        self.request_issue_refresh(RefreshKind::Forced);
+        self.refresh_commanded = true;
+    }
+
+    /// Open the selected issue in the browser.
+    pub fn issue_open(&mut self) {
+        let Some(url) = self.issue_selected().map(|i| i.url.clone()) else {
+            return;
+        };
+        if url.is_empty() {
+            return;
+        }
+        match crate::browser::open(&url) {
+            Ok(()) => self.status = "opened issue in browser".to_string(),
             Err(e) => self.status = e.to_string(),
         }
     }
@@ -2248,7 +2442,7 @@ impl App {
     /// the expansion and never disturbs the file tab the reviewer will return to (`overview.md`
     /// Continuity).
     pub fn escape(&mut self) {
-        if self.tab != Tab::Pr {
+        if !self.tab.is_mirror_tab() {
             if self.select_anchor.is_some() {
                 self.clear_selection();
                 return;
@@ -3294,6 +3488,24 @@ impl App {
             let mut out = Vec::new();
             if self.pr_snapshot().is_some() {
                 out.push((A::OpenPr, Primary));
+            }
+            out.push((A::Search, Go));
+            out.push((A::TogglePane, Go));
+            out.push((A::NavigatorPosition, Go));
+            out.push((A::Tabs, Go));
+            out.push((A::Refresh, Go));
+            out.push((A::Quit, Go));
+            out.push((A::MoveLine, Move));
+            out.push((A::MovePage, Move));
+            return out;
+        }
+
+        // The read-only Issue tab: filter cycle is primary; open the selected issue when one is
+        // selected. Same go/move bands as PR (no hunk/file steps).
+        if self.tab == Tab::Issue {
+            let mut out = vec![(A::IssueFilter, Primary)];
+            if self.issue_selected().is_some() {
+                out.push((A::OpenPr, Do));
             }
             out.push((A::Search, Go));
             out.push((A::TogglePane, Go));

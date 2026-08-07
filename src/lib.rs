@@ -20,6 +20,7 @@ pub mod git;
 pub mod gitlab;
 pub mod herdr;
 pub mod highlight;
+pub mod issue;
 pub mod keymap;
 #[macro_use]
 pub mod log;
@@ -203,6 +204,9 @@ const STATUS_TTL: Duration = Duration::from_secs(4);
 /// actions refresh sooner, on the worktree's turn-end, so this cadence is the slow safety net
 /// (specs/forge-host.md).
 const PR_POLL: Duration = Duration::from_mins(1);
+
+/// While the `Issue` tab is active, refetch the issue list at least this often.
+const ISSUE_POLL: Duration = Duration::from_mins(1);
 
 /// How long an in-flight PR fetch may run before a refresh trigger stops waiting on it.
 /// Generous against slow forges, short enough that the fallback poll recovers a wedged
@@ -426,6 +430,96 @@ fn drain_pr_shutdown(
 fn schedule_poll_probe(pr: &mut PrCoordinator, tab: crate::app::Tab) {
     if tab == crate::app::Tab::Pr {
         pr.probe_pending = true;
+    }
+}
+
+/// Owns one in-flight GitHub issue list fetch. Simpler than the PR coordinator: no hold gate,
+/// no multi-input identity — filter + repository probe on each fetch is enough for v1.
+#[derive(Debug)]
+struct IssueCoordinator {
+    generation: u64,
+    wait_started: Option<Instant>,
+    active: Option<ActiveIssueFetch>,
+    fetch_needed: bool,
+}
+
+#[derive(Debug)]
+struct ActiveIssueFetch {
+    generation: u64,
+    filter: crate::issue::IssueFilter,
+    cancelled: Arc<AtomicBool>,
+    started: Instant,
+}
+
+#[derive(Debug)]
+struct TaggedIssue {
+    generation: u64,
+    filter: crate::issue::IssueFilter,
+    view: crate::issue::IssueView,
+}
+
+impl IssueCoordinator {
+    fn new(ready: bool) -> Self {
+        Self {
+            generation: 1,
+            wait_started: ready.then(Instant::now),
+            active: None,
+            fetch_needed: ready,
+        }
+    }
+
+    fn stop(&mut self) {
+        self.cancel();
+        self.fetch_needed = false;
+        self.wait_started = None;
+    }
+
+    fn recover(&mut self) {
+        self.cancel();
+        self.generation = self.generation.wrapping_add(1);
+        self.fetch_needed = true;
+        self.wait_started = Some(Instant::now());
+    }
+
+    fn request(&mut self, kind: crate::app::RefreshKind) {
+        self.wait_started.get_or_insert_with(Instant::now);
+        let hung = self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.started.elapsed() >= FETCH_HANG);
+        if kind == crate::app::RefreshKind::Ambient && !hung && self.active.is_some() {
+            return;
+        }
+        self.cancel();
+        if hung {
+            self.active = None;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.fetch_needed = true;
+    }
+
+    fn cancel(&self) {
+        if let Some(active) = &self.active {
+            active.cancelled.store(true, Ordering::Release);
+        }
+    }
+
+    fn can_start(&self, config_ready: bool) -> bool {
+        self.fetch_needed && self.active.is_none() && config_ready
+    }
+
+    fn accepts(&self, tagged: &TaggedIssue, current_filter: crate::issue::IssueFilter) -> bool {
+        self.active.as_ref().is_some_and(|active| {
+            active.generation == tagged.generation
+                && active.filter == tagged.filter
+                && tagged.filter == current_filter
+        })
+    }
+}
+
+impl Drop for IssueCoordinator {
+    fn drop(&mut self) {
+        self.cancel();
     }
 }
 
@@ -683,6 +777,7 @@ fn event_loop(
     let poll = cfg.poll;
     let mut last_poll = Instant::now();
     let mut last_pr_poll = Instant::now();
+    let mut last_issue_poll = Instant::now();
     // Local input probes and forge reads run on workers. A completed fetch is applied only after
     // a fresh probe proves its complete input still matches (`specs/forge-host.md`).
     let (probe_tx, probe_rx) =
@@ -691,6 +786,8 @@ fn event_loop(
     let mut recovery_inflight = false;
     let (pr_tx, pr_rx) = mpsc::channel::<TaggedPr>();
     let mut pr = PrCoordinator::new(app.plugin_config().is_some());
+    let (issue_tx, issue_rx) = mpsc::channel::<TaggedIssue>();
+    let mut issue = IssueCoordinator::new(false);
     // The world worker owns every refresh build and the turn tracker; the loop sends
     // input-tagged jobs and reconciles the completions (specs/tui.md).
     let (world_tx, world_job_rx) = mpsc::channel::<crate::world::WorldJob>();
@@ -728,6 +825,7 @@ fn event_loop(
                             recovered.carry_authored_state_from(app);
                             *app = recovered;
                             pr.recover();
+                            issue.recover();
                         }
                         Ok(_) => {}
                         Err(error) => {
@@ -737,6 +835,7 @@ fn event_loop(
                             }
                             app.set_config_error(message);
                             pr.stop();
+                            issue.stop();
                         }
                     }
                 }
@@ -756,16 +855,22 @@ fn event_loop(
                 app.set_pr_refreshing(true);
                 pr.wait_started = None;
             }
+            if issue.wait_started.is_some_and(|started| started.elapsed() >= INDICATOR_DELAY) {
+                app.set_issue_refreshing(true);
+                issue.wait_started = None;
+            }
             // The tab-strip refresh glyph (specs/tui.md): a commanded refresh lights it
             // immediately, an ambient one past the appear delay, each tab only for its own
             // refresh. Once lit it holds a minimum, so a fast landing still reads.
             if std::mem::take(&mut app.refresh_commanded) {
                 glyph_since.get_or_insert_with(Instant::now);
             }
-            let glyph_due = if app.tab == crate::app::Tab::Pr {
-                app.pr_refreshing()
-            } else {
-                world_indicator(world_inflight.map(|(started, builds)| (started.elapsed(), builds)))
+            let glyph_due = match app.tab {
+                crate::app::Tab::Pr => app.pr_refreshing(),
+                crate::app::Tab::Issue => app.issue_refreshing(),
+                _ => world_indicator(
+                    world_inflight.map(|(started, builds)| (started.elapsed(), builds)),
+                ),
             };
             let mut glyph_wake = None;
             if glyph_due {
@@ -935,6 +1040,60 @@ fn event_loop(
                 pr.request_refresh(kind);
             }
 
+            let issue_fallback =
+                app.tab == crate::app::Tab::Issue && last_issue_poll.elapsed() >= ISSUE_POLL;
+            let issue_refresh = app
+                .issue_pending
+                .take()
+                .or(issue_fallback.then_some(crate::app::RefreshKind::Ambient));
+            if let Some(kind) = issue_refresh {
+                last_issue_poll = Instant::now();
+                issue.request(kind);
+            }
+
+            if let Ok(tagged) = issue_rx.try_recv() {
+                if issue.accepts(&tagged, app.issue_filter) {
+                    issue.active = None;
+                    app.apply_issue(tagged.view);
+                    issue.wait_started = None;
+                } else if issue.active.as_ref().is_some_and(|a| a.generation == tagged.generation) {
+                    issue.active = None;
+                }
+            }
+
+            if issue.can_start(app.plugin_config().is_some()) {
+                issue.fetch_needed = false;
+                let generation = issue.generation;
+                let filter = app.issue_filter;
+                let cancelled = Arc::new(AtomicBool::new(false));
+                issue.active = Some(ActiveIssueFetch {
+                    generation,
+                    filter,
+                    cancelled: cancelled.clone(),
+                    started: Instant::now(),
+                });
+                issue.wait_started.get_or_insert_with(Instant::now);
+                let (tx, repo, base, plugin_config) = (
+                    issue_tx.clone(),
+                    app.repo.clone(),
+                    app.base.clone(),
+                    app.plugin_config().expect("config checked above").clone(),
+                );
+                thread::spawn(move || {
+                    let view = match crate::forge::fetch_input(&repo, base.as_deref(), &plugin_config)
+                    {
+                        Ok(input) => {
+                            crate::issue::fetch(&repo, &input, filter, &cancelled)
+                        }
+                        Err(crate::forge::PrInputError::TargetRead(message))
+                        | Err(crate::forge::PrInputError::BranchState { message, .. }) => {
+                            crate::issue::IssueView::GitError(message)
+                        }
+                    };
+                    let _ = tx.send(TaggedIssue { generation, filter, view });
+                });
+            }
+
             // A fetch completion waits for a fresh local-input probe before it may paint.
             if let Ok(completion) = pr_rx.try_recv() {
                 let tag = (completion.generation, completion.config_epoch);
@@ -1048,7 +1207,8 @@ fn event_loop(
             // While a fetch is in flight, wake often so its result paints promptly when it
             // lands. A world refresh usually lands within tens of milliseconds, so its wake
             // is tighter — the landing paints near the build's own speed.
-            if pr.active_fetch.is_some() || pr.active_probe_epoch.is_some() {
+            if pr.active_fetch.is_some() || pr.active_probe_epoch.is_some() || issue.active.is_some()
+            {
                 timeout = timeout.min(Duration::from_millis(100));
             }
             if let Some((_, builds)) = world_inflight {
@@ -1061,6 +1221,9 @@ fn event_loop(
                 timeout = timeout.min(wake.max(Duration::from_millis(15)));
             }
             if let Some(started) = pr.wait_started {
+                timeout = timeout.min(INDICATOR_DELAY.saturating_sub(started.elapsed()));
+            }
+            if let Some(started) = issue.wait_started {
                 timeout = timeout.min(INDICATOR_DELAY.saturating_sub(started.elapsed()));
             }
             if event::poll(timeout)? {
@@ -1516,6 +1679,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             }
             (Some(K::TabChanges), _) => app.set_tab(crate::app::Tab::Changes)?,
             (Some(K::TabAllFiles), _) => app.set_tab(crate::app::Tab::AllFiles)?,
+            (Some(K::TabIssue), _) => app.set_tab(crate::app::Tab::Issue)?,
             (Some(K::OpenPr), _) => app.pr_open(),
             (Some(K::Search), _) => app.open_search(),
             (Some(K::NavigatorPosition), _) => app.cycle_navigator_position(),
@@ -1530,6 +1694,37 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             (_, PageUp) if app.focus == Focus::Files => app.pr_scroll_nav(-PAGE),
             (_, PageDown) => app.pr_scroll_read(PAGE),
             (_, PageUp) => app.pr_scroll_read(-PAGE),
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    // The read-only Issue tab: list + body, filter cycle, open selected issue.
+    if app.tab == crate::app::Tab::Issue {
+        match (action, key.code) {
+            (Some(K::Quit), _) => app.should_quit = true,
+            (Some(K::Refresh), _) => {
+                app.request_issue_refresh(crate::app::RefreshKind::Forced);
+                app.refresh_commanded = true;
+            }
+            (Some(K::TabChanges), _) => app.set_tab(crate::app::Tab::Changes)?,
+            (Some(K::TabAllFiles), _) => app.set_tab(crate::app::Tab::AllFiles)?,
+            (Some(K::TabPr), _) => app.set_tab(crate::app::Tab::Pr)?,
+            (Some(K::CycleIssueFilter), _) => app.cycle_issue_filter(),
+            (Some(K::OpenPr), _) => app.issue_open(),
+            (Some(K::Search), _) => app.open_search(),
+            (Some(K::NavigatorPosition), _) => app.cycle_navigator_position(),
+            (Some(K::NavigatorGrow), _) => app.resize_navigator(4),
+            (Some(K::NavigatorShrink), _) => app.resize_navigator(-4),
+            (Some(K::Down), _) => app.issue_move(1),
+            (Some(K::Up), _) => app.issue_move(-1),
+            (Some(K::Keys), _) => app.toggle_keys(),
+            (_, Esc) => app.escape(),
+            (_, Tab) => app.toggle_focus(),
+            (_, PageDown) if app.focus == Focus::Files => app.issue_scroll_nav(PAGE),
+            (_, PageUp) if app.focus == Focus::Files => app.issue_scroll_nav(-PAGE),
+            (_, PageDown) => app.issue_scroll_read(PAGE),
+            (_, PageUp) => app.issue_scroll_read(-PAGE),
             _ => {}
         }
         return Ok(());
@@ -1563,6 +1758,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::TabChanges => app.set_tab(crate::app::Tab::Changes)?,
             K::TabAllFiles => app.set_tab(crate::app::Tab::AllFiles)?,
             K::TabPr => app.set_tab(crate::app::Tab::Pr)?,
+            K::TabIssue => app.set_tab(crate::app::Tab::Issue)?,
             K::Down => app.move_cursor(1)?,
             K::Up => app.move_cursor(-1)?,
             K::NextHunk => app.next_hunk(),
@@ -1595,8 +1791,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::Search => app.open_search(),
             K::Find => app.open_find(),
             K::Keys => app.toggle_keys(),
-            // `edit`/`delete` off the diff, and `open-pr` off the `PR` tab, are inert.
-            K::Edit | K::Delete | K::OpenPr => {}
+            // `edit`/`delete` off the diff, and forge open/filter off their tabs, are inert.
+            K::Edit | K::Delete | K::OpenPr | K::CycleIssueFilter => {}
         }
         return Ok(());
     }
@@ -1779,6 +1975,41 @@ pub fn handle_mouse(
             }
             MouseEventKind::ScrollDown => app.pr_scroll_read(3),
             MouseEventKind::ScrollUp => app.pr_scroll_read(-3),
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    // The read-only Issue tab: same interaction shape as PR, with a filter chip instead of open.
+    if app.tab == crate::app::Tab::Issue {
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(url) = app.painted_link_at(m.column, m.row) {
+                    app.focus = Focus::Diff;
+                    app.open_link(&url);
+                } else if let Some(ui::HeaderHit::Tab(tab)) =
+                    ui::hit_header(area, app, keymap, m.column, m.row)
+                {
+                    app.set_tab(tab)?;
+                } else if ui::hit_issue_filter(area, app, m.column, m.row) {
+                    app.cycle_issue_filter();
+                } else if ui::in_files_pane(area, app, m.column, m.row) {
+                    app.focus = Focus::Files;
+                    if let Some(i) = ui::issue_nav_hit(area, app, m.column, m.row) {
+                        app.issue_select(i);
+                    }
+                } else if ui::in_diff_pane(area, app, m.column, m.row) {
+                    app.focus = Focus::Diff;
+                }
+            }
+            MouseEventKind::ScrollDown if ui::in_files_pane(area, app, m.column, m.row) => {
+                app.issue_scroll_nav(3);
+            }
+            MouseEventKind::ScrollUp if ui::in_files_pane(area, app, m.column, m.row) => {
+                app.issue_scroll_nav(-3);
+            }
+            MouseEventKind::ScrollDown => app.issue_scroll_read(3),
+            MouseEventKind::ScrollUp => app.issue_scroll_read(-3),
             _ => {}
         }
         return Ok(());

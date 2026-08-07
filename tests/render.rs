@@ -427,10 +427,10 @@ fn the_header_totals_the_scope_and_hides_them_at_zero() {
     r.write("untracked.rs", "one\ntwo\n");
     let app = app_on(&r);
 
-    // 64 columns is the exact fit (the tab strip ends in the two-column reserved
-    // indicator cell). The totals' `−` is multi-byte, so this breaks if the header
-    // measures bytes instead of display width.
-    let header = render_at(&app, 64).lines().next().unwrap().to_string();
+    // 73 columns is the exact fit with four tabs (the strip ends in the two-column
+    // reserved indicator cell). The totals' `−` is multi-byte, so this breaks if the
+    // header measures bytes instead of display width.
+    let header = render_at(&app, 73).lines().next().unwrap().to_string();
     assert!(header.contains("2 changed  +3 −1"), "count, then the totals:\n{header}");
 
     let clean = Repo::init();
@@ -731,8 +731,9 @@ fn pr_header_names_the_resolved_branch_and_marks_a_fork() {
     let header = render(&app).lines().next().unwrap().to_string();
     assert!(header.contains("⑂ persiyanov/feature"), "fork head is marked:\n{header}");
     // Narrow bars drop the branch first; the chip's number stays.
+    // Width accounts for the four-tab strip (`4 Issue` adds columns vs the old three-tab bar).
     app.pr = snap(false);
-    let narrow = render_at(&app, 46).lines().next().unwrap().to_string();
+    let narrow = render_at(&app, 55).lines().next().unwrap().to_string();
     assert!(!narrow.contains("persiyanov/feature"), "branch drops when narrow:\n{narrow}");
     assert!(narrow.contains("#226"), "the chip survives a narrow bar:\n{narrow}");
 
@@ -1311,7 +1312,7 @@ fn header_hits_use_the_frame_keymap_not_the_live_one() {
     use herdr_reviewr::keymap::default_keymap;
     // The live keymap has a wide tab-changes hint, shifting every span right by one column.
     let app = rebound_app("tab-changes = [\"ㅊ\"]\n");
-    for tab in [Tab::Changes, Tab::AllFiles, Tab::Pr] {
+    for tab in [Tab::Changes, Tab::AllFiles, Tab::Pr, Tab::Issue] {
         assert_ne!(
             tab_hit_cols(&app, default_keymap(), tab),
             tab_hit_cols(&app, app.keymap(), tab),
@@ -1331,9 +1332,12 @@ fn header_tab_hits_align_with_wide_hint_keys() {
     let row0 = out.lines().next().unwrap().to_string();
     let col_of = |needle: &str| row0[..row0.find(needle).unwrap()].chars().count() as u16;
     let area = Rect::new(0, 0, 140, 40);
-    for (needle, tab) in
-        [("Changes", Tab::Changes), ("2 All files", Tab::AllFiles), ("3 PR", Tab::Pr)]
-    {
+    for (needle, tab) in [
+        ("Changes", Tab::Changes),
+        ("2 All files", Tab::AllFiles),
+        ("3 PR", Tab::Pr),
+        ("4 Issue", Tab::Issue),
+    ] {
         assert_eq!(
             ui::hit_header(area, &app, app.keymap(), col_of(needle), 0),
             Some(HeaderHit::Tab(tab)),
@@ -2783,4 +2787,36 @@ fn a_click_on_a_picker_row_moves_the_highlight_and_misses_stay_inert() {
     )
     .unwrap();
     assert_eq!(app.picker_cursor, 2, "a click moves the highlight to the clicked row");
+}
+
+#[test]
+fn issue_tab_shows_filter_chip_and_empty_state() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::issue::{Issue, IssueFilter, IssueSnapshot, IssueState, IssueView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Issue).unwrap();
+    app.issue = IssueView::List(IssueSnapshot {
+        filter: IssueFilter::Open,
+        issues: vec![Issue {
+            number: 42,
+            title: "Fix the pane".into(),
+            body: "Hello **world**".into(),
+            state: IssueState::Open,
+            author: "alice".into(),
+            updated_at: "2026-08-01T12:00:00Z".into(),
+            url: "https://github.com/o/r/issues/42".into(),
+            labels: vec!["bug".into()],
+        }],
+        truncated: false,
+    });
+    let out = render(&app);
+    assert!(out.contains("4 Issue"), "tab label:\n{out}");
+    assert!(out.contains("[open]"), "filter chip:\n{out}");
+    assert!(out.contains("#42"), "issue number:\n{out}");
+    assert!(out.contains("Fix the pane"), "issue title in list:\n{out}");
+    assert!(out.contains("labels: bug"), "labels in read pane:\n{out}");
+    assert!(out.contains("i open") || out.contains("open"), "filter action in footer:\n{out}");
 }

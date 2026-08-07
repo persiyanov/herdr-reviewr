@@ -48,6 +48,8 @@ pub fn render(frame: &mut Frame, app: &App) {
     if app.mode == Mode::Search {
         if app.tab == Tab::Pr {
             render_pr_header(frame, app, p.tab);
+        } else if app.tab == Tab::Issue {
+            render_issue_header(frame, app, p.tab);
         } else {
             render_tab_bar(frame, app, p.tab);
         }
@@ -61,6 +63,10 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_pr_read(frame, app, p.diff);
         // `PR` never hides its navigator (specs/tui.md), so no hidden gate here.
         render_pr_nav(frame, app, p.files);
+    } else if app.tab == Tab::Issue {
+        render_issue_header(frame, app, p.tab);
+        render_issue_read(frame, app, p.diff);
+        render_issue_nav(frame, app, p.files);
     } else {
         render_tab_bar(frame, app, p.tab);
         render_diff_view(frame, app, p.diff);
@@ -474,14 +480,15 @@ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) ->
     }
 }
 
-/// The three tabs and their labels, left to right, each led by its `tab-*` action's hint key
+/// The top-level tabs and their labels, left to right, each led by its `tab-*` action's hint key
 /// (`specs/input.md`). Column math uses display width, since a bound hint key can be wide.
-fn tab_labels(keymap: &Keymap) -> [(Tab, String); 3] {
+fn tab_labels(keymap: &Keymap) -> [(Tab, String); 4] {
     use crate::keymap::Action as K;
     [
         (Tab::Changes, format!("{} Changes", keymap.hint(K::TabChanges))),
         (Tab::AllFiles, format!("{} All files", keymap.hint(K::TabAllFiles))),
         (Tab::Pr, format!("{} PR", keymap.hint(K::TabPr))),
+        (Tab::Issue, format!("{} Issue", keymap.hint(K::TabIssue))),
     ]
 }
 const HEADER_LEAD: &str = " ";
@@ -1484,10 +1491,18 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::PickResult => ("↑↓".into(), "pick"),
         A::OpenResult => ("enter".into(), "open"),
         A::OpenPr => (hint(K::OpenPr), "open ↗"),
+        A::IssueFilter => (hint(K::CycleIssueFilter), app.issue_filter.label()),
         A::Refresh => (hint(K::Refresh), "refresh"),
-        A::Tabs => {
-            (format!("{}·{}·{}", hint(K::TabChanges), hint(K::TabAllFiles), hint(K::TabPr)), "tabs")
-        }
+        A::Tabs => (
+            format!(
+                "{}·{}·{}·{}",
+                hint(K::TabChanges),
+                hint(K::TabAllFiles),
+                hint(K::TabPr),
+                hint(K::TabIssue)
+            ),
+            "tabs",
+        ),
         A::Quit => (hint(K::Quit), "quit"),
     };
     (k, l.into())
@@ -1627,6 +1642,20 @@ fn footer_row1(app: &App, w: usize) -> (Vec<Span<'static>>, Vec<FooterAction>) {
         let primary_w = primary.map_or(0, |a| entry_body_width(app, a));
         let budget = w.saturating_sub(used + primary_w + reserve + 4).max(8);
         let text = truncate_width(&format!("{}   ", pr_state_line(app, s)), budget);
+        used += text.chars().count();
+        spans.push(Span::styled(text, Style::default().fg(p.subtext0)));
+    }
+    // Issue tab: leading count for the active filter.
+    if app.tab == Tab::Issue
+        && let Some(s) = app.issue_snapshot()
+    {
+        let primary_w = primary.map_or(0, |a| entry_body_width(app, a));
+        let budget = w.saturating_sub(used + primary_w + reserve + 4).max(8);
+        let more = if s.truncated { "+" } else { "" };
+        let text = truncate_width(
+            &format!("{} {} issues{more}   ", s.issues.len(), s.filter.label()),
+            budget,
+        );
         used += text.chars().count();
         spans.push(Span::styled(text, Style::default().fg(p.subtext0)));
     }
@@ -3060,6 +3089,285 @@ pub fn hit_pr_open(area: Rect, app: &App, col: u16, row: u16) -> bool {
     let chip_w = pr_chip_width(app, s) as u16;
     // The chip occupies the last `chip_w` columns; `saturating_sub` keeps the bound overflow-free.
     col >= area.width.saturating_sub(chip_w) && col < area.width
+}
+
+// --- Issue tab (GitHub issues, read-only) ---------------------------------------
+
+/// Issue tab header: tabs, then a right-aligned filter chip `[open]` and optional selected title.
+fn render_issue_header(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.palette();
+    let bar = Style::default().bg(p.surface0);
+    let mut spans = tab_bar_spans(app);
+    let lead_tabs: usize = spans.iter().map(Span::width).sum();
+    let w = area.width as usize;
+    let filter = format!("[{}]", app.issue_filter.label());
+    let filter_w = filter.width();
+    let title = app
+        .issue_selected()
+        .map(|i| format!("#{} {}", i.number, i.title))
+        .unwrap_or_default();
+    let name = truncate_width(&title, w.saturating_sub(lead_tabs + filter_w + 2).max(4));
+    let name_w = name.width();
+    let pad = w.saturating_sub(lead_tabs + name_w + if name_w > 0 { 2 } else { 0 } + filter_w);
+    spans.push(Span::styled(" ".repeat(pad), bar));
+    if name_w > 0 {
+        spans.push(Span::styled(name, bar.fg(p.subtext0)));
+        spans.push(Span::styled("  ", bar));
+    }
+    spans.push(Span::styled(filter, bar.fg(p.lavender).add_modifier(Modifier::BOLD)));
+    let used: usize = spans.iter().map(Span::width).sum();
+    if used < w {
+        spans.push(Span::styled(" ".repeat(w - used), bar));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Whether a click lands on the Issue header's right-anchored `[filter]` chip.
+#[must_use]
+pub fn hit_issue_filter(area: Rect, app: &App, col: u16, row: u16) -> bool {
+    if row != area.y {
+        return false;
+    }
+    let filter_w = format!("[{}]", app.issue_filter.label()).width() as u16;
+    col >= area.width.saturating_sub(filter_w) && col < area.width
+}
+
+/// Issue navigator: newest-list order from `gh` (updatedAt desc by default).
+fn render_issue_nav(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.palette();
+    let title = format!("Issues · {}", app.issue_filter.label());
+    let block = bordered(&title, app.focus == Focus::Files, p);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let width = inner.width as usize;
+    let rows = issue_nav_rows(app, width, std::time::SystemTime::now());
+    let viewport = inner.height as usize;
+    let can_reveal =
+        viewport > 0 && rows.iter().any(|row| row.cursor == Some(app.issue_cursor));
+    let reveal = can_reveal && app.take_issue_nav_reveal();
+    let (scroll, max_scroll) =
+        settle_issue_nav_scroll(&rows, app.issue_cursor, viewport, app.issue_nav_scroll(), reveal);
+    app.note_issue_nav_max_scroll(max_scroll);
+    app.set_issue_nav_scroll(scroll);
+    let items: Vec<ListItem> = rows
+        .into_iter()
+        .skip(scroll)
+        .take(viewport)
+        .map(|row| {
+            let selected = row.cursor == Some(app.issue_cursor);
+            selectable_row(p, row.spans, width, selected.then(|| p.cursor_bg(true)))
+        })
+        .collect();
+    frame.render_widget(List::new(items), inner);
+}
+
+struct IssueNavRow {
+    spans: Vec<Span<'static>>,
+    cursor: Option<usize>,
+}
+
+fn issue_nav_rows(app: &App, width: usize, now: std::time::SystemTime) -> Vec<IssueNavRow> {
+    let Some(s) = app.issue_snapshot() else {
+        return Vec::new();
+    };
+    let p = app.palette();
+    s.issues
+        .iter()
+        .enumerate()
+        .map(|(index, issue)| IssueNavRow {
+            spans: issue_row(issue, width, now, p),
+            cursor: Some(index),
+        })
+        .collect()
+}
+
+fn issue_row(
+    issue: &crate::issue::Issue,
+    width: usize,
+    now: std::time::SystemTime,
+    p: &Palette,
+) -> Vec<Span<'static>> {
+    let number = format!("#{} ", issue.number);
+    let age = forge::relative_age(&issue.updated_at, now);
+    let state_glyph = match issue.state {
+        crate::issue::IssueState::Open => ("●", p.green),
+        crate::issue::IssueState::Closed => ("○", p.overlay0),
+    };
+    let trailing = if age.is_empty() {
+        String::new()
+    } else {
+        format!("  {age}")
+    };
+    let budget = width
+        .saturating_sub(2 + number.width() + trailing.width())
+        .max(1);
+    let title = elide_head(&issue.title, budget);
+    vec![
+        Span::styled(format!("{} ", state_glyph.0), Style::default().fg(state_glyph.1)),
+        Span::styled(number, Style::default().fg(p.yellow)),
+        Span::styled(title, text_style(p)),
+        Span::styled(trailing, Style::default().fg(p.overlay0)),
+    ]
+}
+
+fn settle_issue_nav_scroll(
+    rows: &[IssueNavRow],
+    cursor: usize,
+    viewport: usize,
+    current: usize,
+    reveal: bool,
+) -> (usize, usize) {
+    let max = rows.len().saturating_sub(viewport);
+    let mut scroll = current.min(max);
+    if reveal && let Some(target) = rows.iter().position(|row| row.cursor == Some(cursor)) {
+        if target < scroll {
+            scroll = target;
+        } else if target >= scroll.saturating_add(viewport) {
+            scroll = target.saturating_add(1).saturating_sub(viewport);
+        }
+    }
+    (scroll.min(max), max)
+}
+
+/// Issue read pane: selected body as markdown, or empty/degraded message.
+fn render_issue_read(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.palette();
+    let title = match app.issue_selected() {
+        Some(issue) => format!("#{} · @{}", issue.number, issue.author),
+        None => "Issue".to_string(),
+    };
+    let block = bordered(&title, app.focus == Focus::Diff, p);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let width = inner.width as usize;
+    let notice_lines = app
+        .issue_notice()
+        .map(|notice| wrap_text(notice, width.max(1)))
+        .unwrap_or_default();
+    let notice_capacity = match inner.height {
+        0 => 0,
+        1 => 1,
+        height => height - 1,
+    } as usize;
+    let notice_lines = if notice_lines.len() <= notice_capacity {
+        notice_lines
+    } else if notice_capacity == 0 {
+        Vec::new()
+    } else if notice_capacity == 1 {
+        notice_lines.into_iter().rev().take(1).collect()
+    } else {
+        let tail = notice_lines.len() - (notice_capacity - 1);
+        std::iter::once(notice_lines[0].clone())
+            .chain(notice_lines.into_iter().skip(tail))
+            .collect()
+    };
+    let notice_height = notice_lines.len() as u16;
+    if notice_height > 0 {
+        let notice_area = Rect::new(inner.x, inner.y, inner.width, notice_height);
+        frame.render_widget(
+            Paragraph::new(
+                notice_lines
+                    .into_iter()
+                    .map(|line| Line::from(Span::styled(line, Style::default().fg(p.yellow))))
+                    .collect::<Vec<_>>(),
+            ),
+            notice_area,
+        );
+    }
+    let body = Rect::new(
+        inner.x,
+        inner.y.saturating_add(notice_height),
+        inner.width,
+        inner.height.saturating_sub(notice_height),
+    );
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut body_meta: Option<(usize, crate::markdown::Rendered)> = None;
+    if let Some(issue) = app.issue_selected() {
+        if !issue.labels.is_empty() {
+            let labels = issue.labels.join(", ");
+            lines.push(Line::from(Span::styled(
+                format!("labels: {labels}"),
+                Style::default().fg(p.overlay0),
+            )));
+            lines.push(Line::raw(""));
+        }
+        let text = if issue.body.trim().is_empty() {
+            "_No description._"
+        } else {
+            issue.body.as_str()
+        };
+        let mut rendered = app.markdown_render(text, width.max(1));
+        let offset = lines.len();
+        lines.append(&mut rendered.lines);
+        body_meta = Some((offset, rendered));
+    } else {
+        let refresh = app.keymap().hint(crate::keymap::Action::Refresh);
+        for piece in wrap_text(&issue_empty_msg(&app.issue, app.issue_filter, refresh), width.max(1))
+        {
+            lines.push(Line::from(Span::styled(piece, Style::default().fg(p.overlay0))));
+        }
+    }
+    let max = lines.len().saturating_sub(body.height as usize);
+    app.note_pr_read_max_scroll(max);
+    let scroll = app.issue_read_scroll.min(max);
+    if let Some((offset, rendered)) = &body_meta {
+        note_markdown_regions(app, rendered, body, scroll, *offset);
+    }
+    frame.render_widget(Paragraph::new(lines).scroll((saturating_row(scroll), 0)), body);
+    render_overflow_scrollbar(
+        frame,
+        Rect::new(area.x, body.y, area.width, body.height),
+        max,
+        scroll,
+        p,
+    );
+}
+
+fn issue_empty_msg(
+    view: &crate::issue::IssueView,
+    filter: crate::issue::IssueFilter,
+    refresh: crate::keymap::Key,
+) -> String {
+    if let Some(message) = view.retry_remedy(refresh) {
+        return message;
+    }
+    match view {
+        crate::issue::IssueView::Loading => "loading…".into(),
+        crate::issue::IssueView::Pending | crate::issue::IssueView::List(_) => {
+            format!("No {} issues.", filter.label())
+        }
+        crate::issue::IssueView::NeedsForgeRemote => {
+            "The Issue tab needs a GitHub remote named upstream or origin.".into()
+        }
+        crate::issue::IssueView::NeedsGitHub => {
+            "Issues are GitHub-only for now. Open a GitHub repository, or use the PR tab on this forge."
+                .into()
+        }
+        crate::issue::IssueView::UnsupportedHost(host) => {
+            format!(
+                "Unsupported host: {host}. Self-hosted GitHub? Set `github_host` in the plugin config."
+            )
+        }
+        crate::issue::IssueView::MalformedOrigin(host) => {
+            format!("The origin remote must point to a repository path on {host}.")
+        }
+        crate::issue::IssueView::NoCli
+        | crate::issue::IssueView::NotAuthed(_)
+        | crate::issue::IssueView::GitError(_)
+        | crate::issue::IssueView::Error(_) => unreachable!("retry failures returned above"),
+    }
+}
+
+/// Cursor-row index for an issue navigator click.
+#[must_use]
+pub fn issue_nav_hit(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
+    let inner = inner_rect(panes(area, app).files);
+    if !contains(inner, col, row) {
+        return None;
+    }
+    let rows = issue_nav_rows(app, inner.width as usize, std::time::SystemTime::now());
+    let scroll = app.issue_nav_scroll();
+    rows.get((row - inner.y) as usize + scroll)?.cursor
 }
 
 /// The cursor-row index a click at `(col, row)` lands on — the pinned description at the

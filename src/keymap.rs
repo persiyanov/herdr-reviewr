@@ -19,6 +19,9 @@ pub enum Action {
     TabChanges,
     TabAllFiles,
     TabPr,
+    TabIssue,
+    /// Cycle the Issue tab filter (open / closed / all).
+    CycleIssueFilter,
     Wrap,
     Preview,
     NavigatorPosition,
@@ -84,7 +87,7 @@ impl std::fmt::Display for Key {
 
 /// Every action with its config name and default keys — the single source the default keymap,
 /// the name lookup, and the config error message are built from.
-const ACTIONS: [(Action, &str, &[Key]); 33] = [
+const ACTIONS: [(Action, &str, &[Key]); 35] = [
     (Action::Down, "down", &[Key::plain('j')]),
     (Action::Up, "up", &[Key::plain('k')]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -97,6 +100,8 @@ const ACTIONS: [(Action, &str, &[Key]); 33] = [
     (Action::TabChanges, "tab-changes", &[Key::plain('1')]),
     (Action::TabAllFiles, "tab-all-files", &[Key::plain('2')]),
     (Action::TabPr, "tab-pr", &[Key::plain('3')]),
+    (Action::TabIssue, "tab-issue", &[Key::plain('4')]),
+    (Action::CycleIssueFilter, "issue-filter", &[Key::plain('i')]),
     (Action::Wrap, "wrap", &[Key::plain('w')]),
     (Action::Preview, "preview", &[Key::plain('m')]),
     (Action::NavigatorPosition, "navigator-position", &[Key::plain('p')]),
@@ -252,6 +257,8 @@ mod tests {
         assert_eq!(keymap.action_for(Key::plain('?')), Some(Action::Keys));
         assert_eq!(keymap.hint(Action::Send), Key::plain('s'));
         assert_eq!(keymap.hint(Action::TabPr), Key::plain('3'));
+        assert_eq!(keymap.hint(Action::TabIssue), Key::plain('4'));
+        assert_eq!(keymap.hint(Action::CycleIssueFilter), Key::plain('i'));
         assert_eq!(Action::by_config_name("list-wider"), Some(Action::NavigatorGrow));
         assert_eq!(Action::by_config_name("list-narrower"), Some(Action::NavigatorShrink));
     }
