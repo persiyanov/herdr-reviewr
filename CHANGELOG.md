@@ -10,8 +10,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Issue tab.** `4` opens a read-only GitHub Issues list (default: all open). `i` cycles
   open → closed → all; `a` cycles all assignees → mine (`@me`); `L` cycles priority labels
   any → p0 → p1 → p2; `o` opens the selected issue in the browser. Lists are cached by query
-  for one minute so tab re-entry and filter flips do not re-hit `gh` while fresh. GitHub-only
-  via `gh`; no comment write or edit.
+  for one minute so tab re-entry and filter flips do not re-hit `gh` while fresh. Parent and
+  sub-issues nest under their parent when both are in the list (indent + `done/total`).
+  GitHub-only via `gh`; no comment write or edit.
 - **Per-tab reviewr panes.** `toggle` / `open` / `close` scope to the current herdr tab when
   `HERDR_TAB_ID` is set, so each herdr tab can keep its own reviewr instance.
 

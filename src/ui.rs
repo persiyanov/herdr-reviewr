@@ -3219,11 +3219,12 @@ fn issue_nav_rows(app: &App, width: usize, now: std::time::SystemTime) -> Vec<Is
         return Vec::new();
     };
     let p = app.palette();
+    let present: std::collections::HashSet<u64> = s.issues.iter().map(|i| i.number).collect();
     s.issues
         .iter()
         .enumerate()
         .map(|(index, issue)| IssueNavRow {
-            spans: issue_row(issue, width, now, p),
+            spans: issue_row(issue, width, now, p, &present),
             cursor: Some(index),
         })
         .collect()
@@ -3234,29 +3235,43 @@ fn issue_row(
     width: usize,
     now: std::time::SystemTime,
     p: &Palette,
+    present: &std::collections::HashSet<u64>,
 ) -> Vec<Span<'static>> {
+    // One nesting level: sub-issues under a parent also in the list (specs/issue-tab.md).
+    let indent = "  ".repeat(issue.tree_depth(present));
     let number = format!("#{} ", issue.number);
     let age = forge::relative_age(&issue.updated_at, now);
     let state_glyph = match issue.state {
         crate::issue::IssueState::Open => ("●", p.green),
         crate::issue::IssueState::Closed => ("○", p.overlay0),
     };
-    let trailing = if age.is_empty() {
-        String::new()
+    // Parent progress from subIssuesSummary, e.g. ` 1/3`, when the issue has children.
+    let progress = if issue.sub_total > 0 {
+        format!(" {}/{}", issue.sub_completed, issue.sub_total)
     } else {
-        format!("  {age}")
+        String::new()
     };
-    let budget = width
-        .saturating_sub(2 + number.width() + trailing.width())
-        .max(1);
+    let trailing = match (progress.is_empty(), age.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => progress,
+        (true, false) => format!("  {age}"),
+        (false, false) => format!("{progress}  {age}"),
+    };
+    let fixed = indent.width() + 2 + number.width() + trailing.width();
+    let budget = width.saturating_sub(fixed).max(1);
     // Titles prefer the leading words (unlike file paths, which elide the head).
     let title = truncate_width(&issue.title, budget);
-    vec![
-        Span::styled(format!("{} ", state_glyph.0), Style::default().fg(state_glyph.1)),
-        Span::styled(number, Style::default().fg(p.yellow)),
-        Span::styled(title, text_style(p)),
-        Span::styled(trailing, Style::default().fg(p.overlay0)),
-    ]
+    let mut spans = Vec::with_capacity(5);
+    if !indent.is_empty() {
+        spans.push(Span::raw(indent));
+    }
+    spans.push(Span::styled(format!("{} ", state_glyph.0), Style::default().fg(state_glyph.1)));
+    spans.push(Span::styled(number, Style::default().fg(p.yellow)));
+    spans.push(Span::styled(title, text_style(p)));
+    if !trailing.is_empty() {
+        spans.push(Span::styled(trailing, Style::default().fg(p.overlay0)));
+    }
+    spans
 }
 
 fn settle_issue_nav_scroll(
@@ -3339,6 +3354,19 @@ fn render_issue_read(frame: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(Span::styled(piece, h1)));
         }
         lines.push(Line::raw(""));
+        if let Some(parent) = issue.parent_number {
+            lines.push(Line::from(Span::styled(
+                format!("sub-issue of #{parent}"),
+                Style::default().fg(p.overlay0),
+            )));
+            lines.push(Line::raw(""));
+        } else if issue.sub_total > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("sub-issues: {}/{}", issue.sub_completed, issue.sub_total),
+                Style::default().fg(p.overlay0),
+            )));
+            lines.push(Line::raw(""));
+        }
         if !issue.labels.is_empty() {
             let labels = issue.labels.join(", ");
             lines.push(Line::from(Span::styled(

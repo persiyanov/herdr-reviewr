@@ -2875,3 +2875,57 @@ fn issue_list_prefers_title_head_when_narrow() {
     assert!(nav.contains('…'), "clipped title marks the cut with a trailing ellipsis:\n{nav}");
 }
 
+#[test]
+fn issue_list_indents_sub_issues_under_parent() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::issue::{Issue, IssueQuery, IssueSnapshot, IssueState, IssueView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Issue).unwrap();
+    // Tree order already applied by fetch; paint with parent first, child second.
+    app.issue = IssueView::List(IssueSnapshot {
+        query: IssueQuery::default(),
+        issues: vec![
+            Issue {
+                number: 10,
+                title: "Parent epic".into(),
+                body: String::new(),
+                state: IssueState::Open,
+                author: "alice".into(),
+                updated_at: "2026-08-01T12:00:00Z".into(),
+                url: "https://github.com/o/r/issues/10".into(),
+                labels: vec![],
+                parent_number: None,
+                sub_completed: 1,
+                sub_total: 2,
+            },
+            Issue {
+                number: 12,
+                title: "Child task".into(),
+                body: String::new(),
+                state: IssueState::Open,
+                author: "alice".into(),
+                updated_at: "2026-08-01T12:00:00Z".into(),
+                url: "https://github.com/o/r/issues/12".into(),
+                labels: vec![],
+                parent_number: Some(10),
+                sub_completed: 0,
+                sub_total: 0,
+            },
+        ],
+        truncated: false,
+    });
+    let nav = right_column(&dump(&render_size(&app, 100, 20)), 60);
+    assert!(nav.contains("1/2"), "parent shows sub-issue progress:\n{nav}");
+    // Child row is indented (leading spaces before ● on the child line).
+    let child_line = nav
+        .lines()
+        .find(|l| l.contains("#12") && l.contains("Child"))
+        .unwrap_or_else(|| panic!("child row present:\n{nav}"));
+    assert!(
+        child_line.trim_start() != child_line && child_line.contains('●'),
+        "child row is indented:\n{child_line}"
+    );
+}

@@ -13,9 +13,9 @@ A read-only GitHub Issues list in reviewr's frame: filter chips in the header, i
 ```
  1 Changes  2 All files  3 PR  4 Issue    #42 Fix the pane     [open] [all] [any]
 ╭─ #42 · @alice ─────────────────────────╮╭─ Issues · open ──────────────╮
-│ labels: bug, ui                        ││ ● #42 Fix the pane        2d │
-│                                        ││ ● #41 Docs polish         5d │
-│ Details here…                          ││                              │
+│ labels: bug, ui                        ││ ● #10 Epic              1/2 2d│
+│                                        ││   ● #12 child a            1d│
+│ Details here…                          ││   ● #13 child b            5h│
 ╰────────────────────────────────────────╯╰──────────────────────────────╯
  12 open issues   i open · a all · L any · o open ↗ · …                    ?
 ```
@@ -40,9 +40,13 @@ v1 is **GitHub only** via `gh issue list`. No comment write, no edit, no close �
 - Navigator title `Issues · {state}` plus ` · mine` / ` · pN` when those filters are active; rows `#n title  age` with open/closed glyph
   (`●` green = open, `○` dim = closed). A title too wide for the row keeps its **head**
   and trails with `…` (not a path-style head elision).
+- **Parent / sub-issues.** Fetched via `parent` and `subIssuesSummary` on `gh issue list`. The list
+  is reordered so each child sits under its parent when both are in the current result (one
+  nesting level, two-space indent). A child whose parent is missing from the list (e.g. open
+  filter, closed parent) stays top-level. Parents with sub-issues show `done/total` before the age.
 - `j`/`k` or a click selects an issue; the read pane leads with the **full title** in markdown H1
-  style (bold mauve, wrapped — the navigator may have truncated it), then labels (if any), then
-  the body as markdown.
+  style (bold mauve, wrapped — the navigator may have truncated it), then a dim parent/sub
+  summary when relevant, then labels (if any), then the body as markdown.
 - Empty body shows a dim italic placeholder. Empty list shows `No {query} issues.`
 - `o` opens the selected issue URL in the browser; `r` refetches (bypasses the cache).
 - Authoring keys (`s`, `c`, `v`, `d`, `e`) are inert. The comments-list key is free for other tabs; priority uses `L` so it does not steal `l`.
@@ -69,6 +73,7 @@ v1 is **GitHub only** via `gh issue list`. No comment write, no edit, no close �
 - Linking issues to the current branch PR.
 - Arbitrary label pickers or multi-label OR queries beyond the p0/p1/p2 cycle.
 - Resolving the signed-in login for display (assignee filter uses `@me`).
+- Expand/collapse of sub-issue trees, multi-level nesting, or extra fetches for missing parents.
 
 ## Related specs
 
