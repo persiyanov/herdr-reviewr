@@ -434,7 +434,7 @@ fn schedule_poll_probe(pr: &mut PrCoordinator, tab: crate::app::Tab) {
 }
 
 /// Owns one in-flight GitHub issue list fetch. Simpler than the PR coordinator: no hold gate,
-/// no multi-input identity — filter + repository probe on each fetch is enough for v1.
+/// no multi-input identity — query + repository probe on each fetch is enough for v1.
 #[derive(Debug)]
 struct IssueCoordinator {
     generation: u64,
@@ -446,7 +446,7 @@ struct IssueCoordinator {
 #[derive(Debug)]
 struct ActiveIssueFetch {
     generation: u64,
-    filter: crate::issue::IssueFilter,
+    query: crate::issue::IssueQuery,
     cancelled: Arc<AtomicBool>,
     started: Instant,
 }
@@ -454,7 +454,7 @@ struct ActiveIssueFetch {
 #[derive(Debug)]
 struct TaggedIssue {
     generation: u64,
-    filter: crate::issue::IssueFilter,
+    query: crate::issue::IssueQuery,
     view: crate::issue::IssueView,
 }
 
@@ -508,11 +508,11 @@ impl IssueCoordinator {
         self.fetch_needed && self.active.is_none() && config_ready
     }
 
-    fn accepts(&self, tagged: &TaggedIssue, current_filter: crate::issue::IssueFilter) -> bool {
+    fn accepts(&self, tagged: &TaggedIssue, current: crate::issue::IssueQuery) -> bool {
         self.active.as_ref().is_some_and(|active| {
             active.generation == tagged.generation
-                && active.filter == tagged.filter
-                && tagged.filter == current_filter
+                && active.query == tagged.query
+                && tagged.query == current
         })
     }
 }
@@ -1040,19 +1040,22 @@ fn event_loop(
                 pr.request_refresh(kind);
             }
 
-            let issue_fallback =
-                app.tab == crate::app::Tab::Issue && last_issue_poll.elapsed() >= ISSUE_POLL;
-            let issue_refresh = app
-                .issue_pending
-                .take()
-                .or(issue_fallback.then_some(crate::app::RefreshKind::Ambient));
-            if let Some(kind) = issue_refresh {
+            // Ambient poll only while the tab is active; resolve_issue_query skips the network
+            // when the active query's cache is still within the TTL (specs/issue-tab.md).
+            if app.issue_pending.is_none()
+                && app.tab == crate::app::Tab::Issue
+                && last_issue_poll.elapsed() >= ISSUE_POLL
+            {
+                last_issue_poll = Instant::now();
+                app.resolve_issue_query(crate::app::RefreshKind::Ambient);
+            }
+            if let Some(kind) = app.issue_pending.take() {
                 last_issue_poll = Instant::now();
                 issue.request(kind);
             }
 
             if let Ok(tagged) = issue_rx.try_recv() {
-                if issue.accepts(&tagged, app.issue_filter) {
+                if issue.accepts(&tagged, app.issue_query) {
                     issue.active = None;
                     app.apply_issue(tagged.view);
                     issue.wait_started = None;
@@ -1064,11 +1067,11 @@ fn event_loop(
             if issue.can_start(app.plugin_config().is_some()) {
                 issue.fetch_needed = false;
                 let generation = issue.generation;
-                let filter = app.issue_filter;
+                let query = app.issue_query;
                 let cancelled = Arc::new(AtomicBool::new(false));
                 issue.active = Some(ActiveIssueFetch {
                     generation,
-                    filter,
+                    query,
                     cancelled: cancelled.clone(),
                     started: Instant::now(),
                 });
@@ -1083,14 +1086,14 @@ fn event_loop(
                     let view = match crate::forge::fetch_input(&repo, base.as_deref(), &plugin_config)
                     {
                         Ok(input) => {
-                            crate::issue::fetch(&repo, &input, filter, &cancelled)
+                            crate::issue::fetch(&repo, &input, query, &cancelled)
                         }
-                        Err(crate::forge::PrInputError::TargetRead(message))
-                        | Err(crate::forge::PrInputError::BranchState { message, .. }) => {
-                            crate::issue::IssueView::GitError(message)
-                        }
+                        Err(
+                            crate::forge::PrInputError::TargetRead(message)
+                            | crate::forge::PrInputError::BranchState { message, .. },
+                        ) => crate::issue::IssueView::GitError(message),
                     };
-                    let _ = tx.send(TaggedIssue { generation, filter, view });
+                    let _ = tx.send(TaggedIssue { generation, query, view });
                 });
             }
 
@@ -1711,6 +1714,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             (Some(K::TabAllFiles), _) => app.set_tab(crate::app::Tab::AllFiles)?,
             (Some(K::TabPr), _) => app.set_tab(crate::app::Tab::Pr)?,
             (Some(K::CycleIssueFilter), _) => app.cycle_issue_filter(),
+            (Some(K::CycleIssueAssignee), _) => app.cycle_issue_assignee(),
+            (Some(K::CycleIssuePriority), _) => app.cycle_issue_priority(),
             (Some(K::OpenPr), _) => app.issue_open(),
             (Some(K::Search), _) => app.open_search(),
             (Some(K::NavigatorPosition), _) => app.cycle_navigator_position(),
@@ -1792,7 +1797,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::Find => app.open_find(),
             K::Keys => app.toggle_keys(),
             // `edit`/`delete` off the diff, and forge open/filter off their tabs, are inert.
-            K::Edit | K::Delete | K::OpenPr | K::CycleIssueFilter => {}
+            K::Edit
+            | K::Delete
+            | K::OpenPr
+            | K::CycleIssueFilter
+            | K::CycleIssueAssignee
+            | K::CycleIssuePriority => {}
         }
         return Ok(());
     }
@@ -1980,7 +1990,7 @@ pub fn handle_mouse(
         return Ok(());
     }
 
-    // The read-only Issue tab: same interaction shape as PR, with a filter chip instead of open.
+    // The read-only Issue tab: same interaction shape as PR, with filter chips instead of open.
     if app.tab == crate::app::Tab::Issue {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -1991,8 +2001,12 @@ pub fn handle_mouse(
                     ui::hit_header(area, app, keymap, m.column, m.row)
                 {
                     app.set_tab(tab)?;
-                } else if ui::hit_issue_filter(area, app, m.column, m.row) {
-                    app.cycle_issue_filter();
+                } else if let Some(chip) = ui::hit_issue_chip(area, app, m.column, m.row) {
+                    match chip {
+                        ui::IssueChip::State => app.cycle_issue_filter(),
+                        ui::IssueChip::Assignee => app.cycle_issue_assignee(),
+                        ui::IssueChip::Priority => app.cycle_issue_priority(),
+                    }
                 } else if ui::in_files_pane(area, app, m.column, m.row) {
                     app.focus = Focus::Files;
                     if let Some(i) = ui::issue_nav_hit(area, app, m.column, m.row) {

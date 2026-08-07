@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::Result;
 
@@ -41,6 +42,13 @@ enum DividerDrag {
         position: crate::config::NavigatorPosition,
     },
     Cancelled,
+}
+
+/// One cached Issue list result with its fetch time (specs/issue-tab.md TTL).
+#[derive(Clone, Debug)]
+struct IssueCacheEntry {
+    fetched_at: Instant,
+    view: crate::issue::IssueView,
 }
 
 /// Which pane has the keyboard.
@@ -365,8 +373,12 @@ pub enum FooterAction {
     MovePickerRow,
     ClosePicker,
     OpenPr,
-    /// Cycle the Issue tab's list filter (open → closed → all).
+    /// Cycle the Issue tab's state filter (open → closed → all).
     IssueFilter,
+    /// Cycle the Issue tab's assignee filter (all → mine).
+    IssueAssignee,
+    /// Cycle the Issue tab's priority-label filter (any → p0 → p1 → p2).
+    IssuePriority,
     Refresh,
     Tabs,
     Quit,
@@ -539,8 +551,11 @@ pub struct App {
     pub pr_pending: Option<RefreshKind>,
     /// The read-only `Issue` tab's view of GitHub issues (`src/issue.rs`).
     pub issue: crate::issue::IssueView,
-    /// Active list filter for the Issue tab (default: all open issues).
-    pub issue_filter: crate::issue::IssueFilter,
+    /// Active list query for the Issue tab (state × assignee × priority).
+    pub issue_query: crate::issue::IssueQuery,
+    /// Successful Issue lists keyed by query, with fetch time for the TTL cache
+    /// (specs/issue-tab.md). Cleared with the rest of the issue view on identity loss.
+    issue_cache: HashMap<crate::issue::IssueQuery, IssueCacheEntry>,
     /// Persistent same-input fetch remedy for the Issue tab.
     issue_notice: Option<String>,
     /// A same-input issue refresh that crossed the loading-indicator delay.
@@ -701,7 +716,8 @@ impl App {
             reveal_pr_nav: std::cell::Cell::new(true),
             pr_pending: None,
             issue: crate::issue::IssueView::Pending,
-            issue_filter: crate::issue::IssueFilter::Open,
+            issue_query: crate::issue::IssueQuery::default(),
+            issue_cache: HashMap::new(),
             issue_notice: None,
             issue_refreshing: false,
             issue_cursor: 0,
@@ -1843,7 +1859,9 @@ impl App {
             return Ok(());
         }
         if tab == Tab::Issue {
-            self.request_issue_refresh(RefreshKind::Ambient);
+            // TTL cache: re-entry within the window paints memory and skips `gh`
+            // (specs/issue-tab.md).
+            self.resolve_issue_query(RefreshKind::Ambient);
             return Ok(());
         }
         // Entering a file tab: bring its state into the diff fields if the other file tab holds
@@ -2074,6 +2092,7 @@ impl App {
     /// Clear a snapshot whose repository identity no longer matches.
     pub fn clear_issue(&mut self) {
         self.issue = crate::issue::IssueView::Pending;
+        self.issue_cache.clear();
         self.issue_notice = None;
         self.issue_refreshing = false;
         self.issue_cursor = 0;
@@ -2082,15 +2101,60 @@ impl App {
         self.reveal_issue_nav.set(true);
     }
 
+    /// State chip / legacy accessor for the open/closed/all dimension.
+    #[must_use]
+    pub fn issue_filter(&self) -> crate::issue::IssueFilter {
+        self.issue_query.state
+    }
+
+    /// Paint a cached list for the active query when one exists, and only queue a network
+    /// fetch when the cache is missing, stale, or the refresh is forced (`r`).
+    pub fn resolve_issue_query(&mut self, kind: RefreshKind) {
+        let query = self.issue_query;
+        let cached = self.issue_cache.get(&query).cloned();
+        let fresh = cached
+            .as_ref()
+            .is_some_and(|entry| entry.fetched_at.elapsed() < crate::issue::ISSUE_CACHE_TTL);
+        if let Some(entry) = cached {
+            if matches!(entry.view, crate::issue::IssueView::List(_)) {
+                self.paint_issue_view(entry.view);
+            }
+        } else if !matches!(self.issue, crate::issue::IssueView::List(_)) {
+            self.issue = crate::issue::IssueView::Pending;
+        }
+        let need_fetch = match kind {
+            RefreshKind::Forced => true,
+            RefreshKind::Ambient => !fresh,
+        };
+        if need_fetch {
+            self.request_issue_refresh(kind);
+            if kind == RefreshKind::Forced {
+                self.refresh_commanded = true;
+            }
+        }
+    }
+
     /// Apply a fetched issue view. Transient errors keep the last good list when one exists.
+    /// Successful lists are written into the per-query cache.
     pub fn apply_issue(&mut self, view: crate::issue::IssueView) {
         self.issue_refreshing = false;
+        if let crate::issue::IssueView::List(snapshot) = &view {
+            self.issue_cache.insert(
+                snapshot.query,
+                IssueCacheEntry { fetched_at: Instant::now(), view: view.clone() },
+            );
+        }
         let retry = view.retry_remedy(self.keymap().hint(crate::keymap::Action::Refresh));
         let has_list = matches!(self.issue, crate::issue::IssueView::List(_));
         if has_list && let Some(message) = retry {
             self.issue_notice = Some(message);
             return;
         }
+        self.paint_issue_view(view);
+    }
+
+    /// Install a view and reconcile the cursor by issue number (Continuity).
+    fn paint_issue_view(&mut self, view: crate::issue::IssueView) {
         self.issue_notice = None;
         let selected = self.issue_selected().map(|i| i.number);
         self.issue = view;
@@ -2189,16 +2253,23 @@ impl App {
         self.reveal_issue_nav.replace(false)
     }
 
-    /// Cycle the Issue list filter and refetch.
+    /// Cycle the Issue state filter (open → closed → all) and resolve via cache / fetch.
     pub fn cycle_issue_filter(&mut self) {
-        self.issue_filter = self.issue_filter.cycle();
-        // Keep place only if the new list still contains the selection — apply_issue does that
-        // after the fetch. Clear notice and show pending only when there is no list yet.
-        if !matches!(self.issue, crate::issue::IssueView::List(_)) {
-            self.issue = crate::issue::IssueView::Pending;
-        }
-        self.request_issue_refresh(RefreshKind::Forced);
-        self.refresh_commanded = true;
+        self.issue_query.state = self.issue_query.state.cycle();
+        // Prefer a fresh cache entry; only hit the network on miss/expiry (specs/issue-tab.md).
+        self.resolve_issue_query(RefreshKind::Ambient);
+    }
+
+    /// Cycle the Issue assignee filter (all → mine).
+    pub fn cycle_issue_assignee(&mut self) {
+        self.issue_query.assignee = self.issue_query.assignee.cycle();
+        self.resolve_issue_query(RefreshKind::Ambient);
+    }
+
+    /// Cycle the Issue priority-label filter (any → p0 → p1 → p2).
+    pub fn cycle_issue_priority(&mut self) {
+        self.issue_query.priority = self.issue_query.priority.cycle();
+        self.resolve_issue_query(RefreshKind::Ambient);
     }
 
     /// Open the selected issue in the browser.
@@ -3500,10 +3571,15 @@ impl App {
             return out;
         }
 
-        // The read-only Issue tab: filter cycle is primary; open the selected issue when one is
+        // The read-only Issue tab: state filter is primary; assignee and priority sit as row-1
+        // `Do` actions (the footer paints only one Primary). Open the selected issue when one is
         // selected. Same go/move bands as PR (no hunk/file steps).
         if self.tab == Tab::Issue {
-            let mut out = vec![(A::IssueFilter, Primary)];
+            let mut out = vec![
+                (A::IssueFilter, Primary),
+                (A::IssueAssignee, Do),
+                (A::IssuePriority, Do),
+            ];
             if self.issue_selected().is_some() {
                 out.push((A::OpenPr, Do));
             }
@@ -3958,6 +4034,44 @@ mod tests {
     use crate::config::NavigatorPosition;
     use crate::model::{Comment, Scope, Side};
     use std::path::PathBuf;
+
+    #[test]
+    fn issue_cache_skips_network_when_fresh() {
+        use crate::issue::{Issue, IssueAssignee, IssueQuery, IssueSnapshot, IssueState, IssueView};
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        let query = IssueQuery::default();
+        app.issue_query = query;
+        app.apply_issue(IssueView::List(IssueSnapshot {
+            query,
+            issues: vec![Issue {
+                number: 1,
+                title: "cached".into(),
+                body: String::new(),
+                state: IssueState::Open,
+                author: "a".into(),
+                updated_at: "2026-08-01T12:00:00Z".into(),
+                url: "https://github.com/o/r/issues/1".into(),
+                labels: vec![],
+            }],
+            truncated: false,
+        }));
+        app.issue_pending = None;
+        // Ambient resolve of the same query must not re-queue a fetch.
+        app.resolve_issue_query(super::RefreshKind::Ambient);
+        assert!(app.issue_pending.is_none(), "fresh cache skips ambient fetch");
+        assert_eq!(app.issue_selected().map(|i| i.number), Some(1));
+
+        // Cycling to mine with no cache entry should request a fetch.
+        app.cycle_issue_assignee();
+        assert_eq!(app.issue_query.assignee, IssueAssignee::Mine);
+        assert_eq!(app.issue_pending, Some(super::RefreshKind::Ambient));
+
+        // Forced refresh always queues even when the cache is fresh.
+        app.issue_query = query;
+        app.issue_pending = None;
+        app.resolve_issue_query(super::RefreshKind::Forced);
+        assert_eq!(app.issue_pending, Some(super::RefreshKind::Forced));
+    }
 
     #[test]
     fn the_read_pane_scroll_stops_at_the_bottom_edge() {

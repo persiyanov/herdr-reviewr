@@ -1,13 +1,15 @@
 //! GitHub Issues read path for the read-only `Issue` tab.
 //!
 //! v1 is GitHub-only via `gh issue list`. No comment write, no edit, no close — the tab mirrors
-//! open (default) / closed / all issues and opens the selected one in a browser. List filters
-//! are local presentation over the same repository identity the PR tab already resolves
-//! (`forge::fetch_input`).
+//! open (default) / closed / all issues, optional assignee and priority-label filters, and opens
+//! the selected one in a browser. Filters compose into one list call over the same repository
+//! identity the PR tab already resolves (`forge::fetch_input`). Successful lists are cached by
+//! query so tab re-entry and filter cycling do not hammer `gh` (specs/issue-tab.md).
 
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -17,8 +19,12 @@ use crate::git::Forge;
 /// How many issues one fetch returns. Matching the PR surface cap keeps list size predictable.
 const ISSUE_CAP: usize = 100;
 
+/// Freshness window for a cached list result. Matches the ambient poll so re-entry within the
+/// window paints memory only (specs/issue-tab.md).
+pub const ISSUE_CACHE_TTL: Duration = Duration::from_mins(1);
+
 /// Which issue set the navigator lists. Default is every open issue in the repository.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum IssueFilter {
     #[default]
     Open,
@@ -54,6 +60,105 @@ impl IssueFilter {
     }
 }
 
+/// Assignee dimension. Default lists every assignee; `Mine` is `gh --assignee @me`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum IssueAssignee {
+    #[default]
+    All,
+    Mine,
+}
+
+impl IssueAssignee {
+    #[must_use]
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::All => Self::Mine,
+            Self::Mine => Self::All,
+        }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Mine => "mine",
+        }
+    }
+}
+
+/// Priority-label dimension. Cycles any → p0 → p1 → p2; each non-`Any` value is a single
+/// `gh --label` name (case as GitHub stores it; we pass lowercase `pN`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum IssuePriority {
+    #[default]
+    Any,
+    P0,
+    P1,
+    P2,
+}
+
+impl IssuePriority {
+    #[must_use]
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Any => Self::P0,
+            Self::P0 => Self::P1,
+            Self::P1 => Self::P2,
+            Self::P2 => Self::Any,
+        }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::P0 => "p0",
+            Self::P1 => "p1",
+            Self::P2 => "p2",
+        }
+    }
+
+    /// `Some` label name for `gh --label`, or `None` when unfiltered.
+    #[must_use]
+    pub fn gh_label(self) -> Option<&'static str> {
+        match self {
+            Self::Any => None,
+            Self::P0 => Some("p0"),
+            Self::P1 => Some("p1"),
+            Self::P2 => Some("p2"),
+        }
+    }
+}
+
+/// Full list query: state × assignee × priority. Cache key and `gh` argument source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct IssueQuery {
+    pub state: IssueFilter,
+    pub assignee: IssueAssignee,
+    pub priority: IssuePriority,
+}
+
+impl IssueQuery {
+    /// Compact summary for empty states: `open`, `open · mine`, `closed · p1`, …
+    #[must_use]
+    pub fn summary(self) -> String {
+        let mut parts = vec![self.state.label().to_string()];
+        if self.assignee != IssueAssignee::All {
+            parts.push(self.assignee.label().to_string());
+        }
+        if self.priority != IssuePriority::Any {
+            parts.push(self.priority.label().to_string());
+        }
+        parts.join(" · ")
+    }
+
+    /// Navigator title suffix after `Issues · `.
+    #[must_use]
+    pub fn nav_title(self) -> String {
+        self.summary()
+    }
+}
+
 /// One GitHub issue row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Issue {
@@ -74,10 +179,10 @@ pub enum IssueState {
     Closed,
 }
 
-/// A successful list fetch for one filter.
+/// A successful list fetch for one query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IssueSnapshot {
-    pub filter: IssueFilter,
+    pub query: IssueQuery,
     pub issues: Vec<Issue>,
     /// `true` when the fetch hit the cap — more issues may exist on GitHub.
     pub truncated: bool,
@@ -90,7 +195,7 @@ pub enum IssueView {
     Pending,
     /// Work crossed the loading-indicator delay without a snapshot.
     Loading,
-    /// A list (possibly empty) for the active filter.
+    /// A list (possibly empty) for the active query.
     List(IssueSnapshot),
     /// `gh` is not on `PATH`.
     NoCli,
@@ -131,15 +236,15 @@ impl IssueView {
     }
 }
 
-/// Read issues for one already-derived forge input and filter.
+/// Read issues for one already-derived forge input and query.
 #[must_use]
 pub fn fetch(
     repo: &Path,
     input: &PrFetchInput,
-    filter: IssueFilter,
+    query: IssueQuery,
     cancelled: &AtomicBool,
 ) -> IssueView {
-    match fetch_inner(repo, input, filter, cancelled) {
+    match fetch_inner(repo, input, query, cancelled) {
         Ok(view) => view,
         Err(error) => error.into(),
     }
@@ -148,7 +253,7 @@ pub fn fetch(
 fn fetch_inner(
     repo: &Path,
     input: &PrFetchInput,
-    filter: IssueFilter,
+    query: IssueQuery,
     cancelled: &AtomicBool,
 ) -> Result<IssueView, IssueError> {
     let target = match &input.repository {
@@ -168,19 +273,18 @@ fn fetch_inner(
     }
 
     let repo_slug = format!("{}/{}", target.owner(), target.name());
-    let state = filter.gh_state();
     let host = target.host();
-    let json = gh_issue_list(repo, host, &repo_slug, state, cancelled)?;
+    let json = gh_issue_list(repo, host, &repo_slug, query, cancelled)?;
     let issues = parse_issues(&json)?;
     let truncated = issues.len() >= ISSUE_CAP;
-    Ok(IssueView::List(IssueSnapshot { filter, issues, truncated }))
+    Ok(IssueView::List(IssueSnapshot { query, issues, truncated }))
 }
 
 fn gh_issue_list(
     repo: &Path,
     host: &str,
     repo_slug: &str,
-    state: &str,
+    query: IssueQuery,
     cancelled: &AtomicBool,
 ) -> Result<String, IssueError> {
     // `gh issue list` has no `--hostname` flag. Pin the host with the `[HOST/]OWNER/REPO`
@@ -197,12 +301,18 @@ fn gh_issue_list(
         "--repo",
         &repo_arg,
         "--state",
-        state,
+        query.state.gh_state(),
         "--limit",
         &ISSUE_CAP.to_string(),
         "--json",
         "number,title,body,state,author,updatedAt,url,labels",
     ]);
+    if query.assignee == IssueAssignee::Mine {
+        cmd.args(["--assignee", "@me"]);
+    }
+    if let Some(label) = query.priority.gh_label() {
+        cmd.args(["--label", label]);
+    }
     forge::run_provider(
         &mut cmd,
         cancelled,
@@ -289,6 +399,28 @@ mod tests {
     }
 
     #[test]
+    fn assignee_and_priority_cycle() {
+        assert_eq!(IssueAssignee::All.cycle(), IssueAssignee::Mine);
+        assert_eq!(IssueAssignee::Mine.cycle(), IssueAssignee::All);
+        assert_eq!(IssuePriority::Any.cycle(), IssuePriority::P0);
+        assert_eq!(IssuePriority::P0.cycle(), IssuePriority::P1);
+        assert_eq!(IssuePriority::P1.cycle(), IssuePriority::P2);
+        assert_eq!(IssuePriority::P2.cycle(), IssuePriority::Any);
+        assert_eq!(IssuePriority::P1.gh_label(), Some("p1"));
+        assert_eq!(IssuePriority::Any.gh_label(), None);
+    }
+
+    #[test]
+    fn query_summary_omits_default_assignee_and_priority() {
+        let q = IssueQuery::default();
+        assert_eq!(q.summary(), "open");
+        let mine = IssueQuery { assignee: IssueAssignee::Mine, ..IssueQuery::default() };
+        assert_eq!(mine.summary(), "open · mine");
+        let p0 = IssueQuery { priority: IssuePriority::P0, ..IssueQuery::default() };
+        assert_eq!(p0.summary(), "open · p0");
+    }
+
+    #[test]
     fn parse_issues_reads_gh_json_shape() {
         let json = r#"[
           {
@@ -321,5 +453,4 @@ mod tests {
         assert_eq!(issues[0].labels, vec!["bug", "ui"]);
         assert_eq!(issues[1].state, IssueState::Closed);
     }
-
 }

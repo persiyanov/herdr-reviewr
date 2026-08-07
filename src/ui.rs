@@ -1491,7 +1491,9 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::PickResult => ("↑↓".into(), "pick"),
         A::OpenResult => ("enter".into(), "open"),
         A::OpenPr => (hint(K::OpenPr), "open ↗"),
-        A::IssueFilter => (hint(K::CycleIssueFilter), app.issue_filter.label()),
+        A::IssueFilter => (hint(K::CycleIssueFilter), app.issue_query.state.label()),
+        A::IssueAssignee => (hint(K::CycleIssueAssignee), app.issue_query.assignee.label()),
+        A::IssuePriority => (hint(K::CycleIssuePriority), app.issue_query.priority.label()),
         A::Refresh => (hint(K::Refresh), "refresh"),
         A::Tabs => (
             format!(
@@ -1653,7 +1655,7 @@ fn footer_row1(app: &App, w: usize) -> (Vec<Span<'static>>, Vec<FooterAction>) {
         let budget = w.saturating_sub(used + primary_w + reserve + 4).max(8);
         let more = if s.truncated { "+" } else { "" };
         let text = truncate_width(
-            &format!("{} {} issues{more}   ", s.issues.len(), s.filter.label()),
+            &format!("{} {} issues{more}   ", s.issues.len(), s.query.summary()),
             budget,
         );
         used += text.chars().count();
@@ -3093,28 +3095,57 @@ pub fn hit_pr_open(area: Rect, app: &App, col: u16, row: u16) -> bool {
 
 // --- Issue tab (GitHub issues, read-only) ---------------------------------------
 
-/// Issue tab header: tabs, then a right-aligned filter chip `[open]` and optional selected title.
+/// Which Issue header filter chip a click landed on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IssueChip {
+    State,
+    Assignee,
+    Priority,
+}
+
+/// The three right-anchored chips: `[state] [assignee] [priority]`.
+fn issue_chip_labels(app: &App) -> [String; 3] {
+    [
+        format!("[{}]", app.issue_query.state.label()),
+        format!("[{}]", app.issue_query.assignee.label()),
+        format!("[{}]", app.issue_query.priority.label()),
+    ]
+}
+
+/// Total display width of the chip cluster including single-space gaps between chips.
+fn issue_chips_width(app: &App) -> usize {
+    let chips = issue_chip_labels(app);
+    chips.iter().map(|c| c.width()).sum::<usize>() + chips.len().saturating_sub(1)
+}
+
+/// Issue tab header: tabs, then right-aligned filter chips and optional selected title.
 fn render_issue_header(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
     let bar = Style::default().bg(p.surface0);
     let mut spans = tab_bar_spans(app);
     let lead_tabs: usize = spans.iter().map(Span::width).sum();
     let w = area.width as usize;
-    let filter = format!("[{}]", app.issue_filter.label());
-    let filter_w = filter.width();
+    let chips = issue_chip_labels(app);
+    let chips_w = issue_chips_width(app);
     let title = app
         .issue_selected()
         .map(|i| format!("#{} {}", i.number, i.title))
         .unwrap_or_default();
-    let name = truncate_width(&title, w.saturating_sub(lead_tabs + filter_w + 2).max(4));
+    let name = truncate_width(&title, w.saturating_sub(lead_tabs + chips_w + 2).max(4));
     let name_w = name.width();
-    let pad = w.saturating_sub(lead_tabs + name_w + if name_w > 0 { 2 } else { 0 } + filter_w);
+    let pad = w.saturating_sub(lead_tabs + name_w + if name_w > 0 { 2 } else { 0 } + chips_w);
     spans.push(Span::styled(" ".repeat(pad), bar));
     if name_w > 0 {
         spans.push(Span::styled(name, bar.fg(p.subtext0)));
         spans.push(Span::styled("  ", bar));
     }
-    spans.push(Span::styled(filter, bar.fg(p.lavender).add_modifier(Modifier::BOLD)));
+    let chip_style = bar.fg(p.lavender).add_modifier(Modifier::BOLD);
+    for (i, chip) in chips.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" ", bar));
+        }
+        spans.push(Span::styled(chip, chip_style));
+    }
     let used: usize = spans.iter().map(Span::width).sum();
     if used < w {
         spans.push(Span::styled(" ".repeat(w - used), bar));
@@ -3122,20 +3153,37 @@ fn render_issue_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Whether a click lands on the Issue header's right-anchored `[filter]` chip.
+/// Which Issue header filter chip contains `(col, row)`, if any.
 #[must_use]
-pub fn hit_issue_filter(area: Rect, app: &App, col: u16, row: u16) -> bool {
+pub fn hit_issue_chip(area: Rect, app: &App, col: u16, row: u16) -> Option<IssueChip> {
     if row != area.y {
-        return false;
+        return None;
     }
-    let filter_w = format!("[{}]", app.issue_filter.label()).width() as u16;
-    col >= area.width.saturating_sub(filter_w) && col < area.width
+    let chips = issue_chip_labels(app);
+    let total = issue_chips_width(app) as u16;
+    if total == 0 || col < area.width.saturating_sub(total) {
+        return None;
+    }
+    // Walk chips from the right edge: priority, assignee, state.
+    let mut right = area.width;
+    let order = [IssueChip::Priority, IssueChip::Assignee, IssueChip::State];
+    for (i, which) in order.into_iter().enumerate() {
+        let label = &chips[2 - i];
+        let w = label.width() as u16;
+        let left = right.saturating_sub(w);
+        if col >= left && col < right {
+            return Some(which);
+        }
+        // Gap of one column between chips (except after the leftmost).
+        right = left.saturating_sub(1);
+    }
+    None
 }
 
 /// Issue navigator: newest-list order from `gh` (updatedAt desc by default).
 fn render_issue_nav(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
-    let title = format!("Issues · {}", app.issue_filter.label());
+    let title = format!("Issues · {}", app.issue_query.nav_title());
     let block = bordered(&title, app.focus == Focus::Files, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -3303,7 +3351,7 @@ fn render_issue_read(frame: &mut Frame, app: &App, area: Rect) {
         body_meta = Some((offset, rendered));
     } else {
         let refresh = app.keymap().hint(crate::keymap::Action::Refresh);
-        for piece in wrap_text(&issue_empty_msg(&app.issue, app.issue_filter, refresh), width.max(1))
+        for piece in wrap_text(&issue_empty_msg(&app.issue, app.issue_query, refresh), width.max(1))
         {
             lines.push(Line::from(Span::styled(piece, Style::default().fg(p.overlay0))));
         }
@@ -3326,7 +3374,7 @@ fn render_issue_read(frame: &mut Frame, app: &App, area: Rect) {
 
 fn issue_empty_msg(
     view: &crate::issue::IssueView,
-    filter: crate::issue::IssueFilter,
+    query: crate::issue::IssueQuery,
     refresh: crate::keymap::Key,
 ) -> String {
     if let Some(message) = view.retry_remedy(refresh) {
@@ -3335,7 +3383,7 @@ fn issue_empty_msg(
     match view {
         crate::issue::IssueView::Loading => "loading…".into(),
         crate::issue::IssueView::Pending | crate::issue::IssueView::List(_) => {
-            format!("No {} issues.", filter.label())
+            format!("No {} issues.", query.summary())
         }
         crate::issue::IssueView::NeedsForgeRemote => {
             "The Issue tab needs a GitHub remote named upstream or origin.".into()

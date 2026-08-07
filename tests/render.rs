@@ -2792,14 +2792,14 @@ fn a_click_on_a_picker_row_moves_the_highlight_and_misses_stay_inert() {
 #[test]
 fn issue_tab_shows_filter_chip_and_empty_state() {
     use herdr_reviewr::app::Tab;
-    use herdr_reviewr::issue::{Issue, IssueFilter, IssueSnapshot, IssueState, IssueView};
+    use herdr_reviewr::issue::{Issue, IssueQuery, IssueSnapshot, IssueState, IssueView};
     let r = Repo::init();
     r.write("x.rs", "y\n");
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_tab(Tab::Issue).unwrap();
     app.issue = IssueView::List(IssueSnapshot {
-        filter: IssueFilter::Open,
+        query: IssueQuery::default(),
         issues: vec![Issue {
             number: 42,
             title: "Fix the pane".into(),
@@ -2814,11 +2814,21 @@ fn issue_tab_shows_filter_chip_and_empty_state() {
     });
     let out = render(&app);
     assert!(out.contains("4 Issue"), "tab label:\n{out}");
-    assert!(out.contains("[open]"), "filter chip:\n{out}");
+    assert!(out.contains("[open]"), "state chip:\n{out}");
+    assert!(out.contains("[all]"), "assignee chip:\n{out}");
+    assert!(out.contains("[any]"), "priority chip:\n{out}");
     assert!(out.contains("#42"), "issue number:\n{out}");
     assert!(out.contains("Fix the pane"), "issue title in list:\n{out}");
     assert!(out.contains("labels: bug"), "labels in read pane:\n{out}");
-    assert!(out.contains("i open") || out.contains("open"), "filter action in footer:\n{out}");
+    assert!(out.contains("i open") || out.contains("open"), "state filter in footer:\n{out}");
+    assert!(
+        out.contains("a all") || out.contains("a mine"),
+        "assignee filter in footer:\n{out}"
+    );
+    assert!(
+        out.contains("L any") || out.contains("L p0") || out.contains("L p1") || out.contains("L p2"),
+        "priority filter in footer:\n{out}"
+    );
 }
 
 #[test]
@@ -2826,7 +2836,7 @@ fn issue_list_prefers_title_head_when_narrow() {
     // Issue titles are prose: keep the leading words and trail with `…`, never path-style
     // head elision that would show only the unreadable tail.
     use herdr_reviewr::app::Tab;
-    use herdr_reviewr::issue::{Issue, IssueFilter, IssueSnapshot, IssueState, IssueView};
+    use herdr_reviewr::issue::{Issue, IssueQuery, IssueSnapshot, IssueState, IssueView};
     let r = Repo::init();
     r.write("x.rs", "y\n");
     r.commit_all("init");
@@ -2836,7 +2846,7 @@ fn issue_list_prefers_title_head_when_narrow() {
     let head = "HEADKEEP";
     let tail = "UNIQUETAILMARKERXYZZY";
     app.issue = IssueView::List(IssueSnapshot {
-        filter: IssueFilter::Open,
+        query: IssueQuery::default(),
         issues: vec![Issue {
             number: 1,
             title: format!(
