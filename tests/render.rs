@@ -2809,6 +2809,9 @@ fn issue_tab_shows_filter_chip_and_empty_state() {
             updated_at: "2026-08-01T12:00:00Z".into(),
             url: "https://github.com/o/r/issues/42".into(),
             labels: vec!["bug".into()],
+            parent_number: None,
+            sub_completed: 0,
+            sub_total: 0,
         }],
         truncated: false,
     });
@@ -2859,6 +2862,9 @@ fn issue_list_prefers_title_head_when_narrow() {
             updated_at: "2026-08-01T12:00:00Z".into(),
             url: "https://github.com/o/r/issues/1".into(),
             labels: vec![],
+            parent_number: None,
+            sub_completed: 0,
+            sub_total: 0,
         }],
         truncated: false,
     });
@@ -2868,3 +2874,4 @@ fn issue_list_prefers_title_head_when_narrow() {
     assert!(!nav.contains(tail), "title tail must elide, not crowd the head:\n{nav}");
     assert!(nav.contains('…'), "clipped title marks the cut with a trailing ellipsis:\n{nav}");
 }
+

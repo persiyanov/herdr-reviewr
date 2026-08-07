@@ -4052,6 +4052,9 @@ mod tests {
                 updated_at: "2026-08-01T12:00:00Z".into(),
                 url: "https://github.com/o/r/issues/1".into(),
                 labels: vec![],
+                parent_number: None,
+                sub_completed: 0,
+                sub_total: 0,
             }],
             truncated: false,
         }));

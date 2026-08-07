@@ -170,6 +170,23 @@ pub struct Issue {
     pub updated_at: String,
     pub url: String,
     pub labels: Vec<String>,
+    /// Parent issue number when this is a GitHub sub-issue (`parent.number`).
+    pub parent_number: Option<u64>,
+    /// Closed sub-issues under this issue (`subIssuesSummary.completed`).
+    pub sub_completed: u32,
+    /// Total sub-issues under this issue (`subIssuesSummary.total`).
+    pub sub_total: u32,
+}
+
+impl Issue {
+    /// Navigator indent depth: one level when the parent is also present in the list.
+    #[must_use]
+    pub fn tree_depth(&self, present: &std::collections::HashSet<u64>) -> usize {
+        match self.parent_number {
+            Some(parent) if present.contains(&parent) => 1,
+            _ => 0,
+        }
+    }
 }
 
 /// Lifecycle shown on a row and in the read pane.
@@ -275,7 +292,9 @@ fn fetch_inner(
     let repo_slug = format!("{}/{}", target.owner(), target.name());
     let host = target.host();
     let json = gh_issue_list(repo, host, &repo_slug, query, cancelled)?;
-    let issues = parse_issues(&json)?;
+    let mut issues = parse_issues(&json)?;
+    // Nest children under parents that landed in the same fetch (specs/issue-tab.md).
+    issues = order_as_tree(issues);
     let truncated = issues.len() >= ISSUE_CAP;
     Ok(IssueView::List(IssueSnapshot { query, issues, truncated }))
 }
@@ -305,7 +324,7 @@ fn gh_issue_list(
         "--limit",
         &ISSUE_CAP.to_string(),
         "--json",
-        "number,title,body,state,author,updatedAt,url,labels",
+        "number,title,body,state,author,updatedAt,url,labels,parent,subIssuesSummary",
     ]);
     if query.assignee == IssueAssignee::Mine {
         cmd.args(["--assignee", "@me"]);
@@ -364,9 +383,70 @@ fn parse_issues(json: &str) -> Result<Vec<Issue>, IssueError> {
             .flatten()
             .filter_map(|label| label["name"].as_str().map(str::to_string))
             .collect();
-        issues.push(Issue { number, title, body, state, author, updated_at, url, labels });
+        // `parent` is null or `{ "number": N, ... }`.
+        let parent_number = row.get("parent").and_then(|p| {
+            if p.is_null() {
+                None
+            } else {
+                p.get("number").and_then(Value::as_u64).filter(|&n| n > 0)
+            }
+        });
+        let summary = row.get("subIssuesSummary");
+        let sub_completed = summary
+            .and_then(|s| s.get("completed"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
+        let sub_total = summary
+            .and_then(|s| s.get("total"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
+        issues.push(Issue {
+            number,
+            title,
+            body,
+            state,
+            author,
+            updated_at,
+            url,
+            labels,
+            parent_number,
+            sub_completed,
+            sub_total,
+        });
     }
     Ok(issues)
+}
+
+/// Put each child immediately under its parent when both are in the list. One nesting level.
+/// Children whose parent is missing (e.g. closed parent while listing open) stay top-level.
+/// Relative order among roots and among siblings follows the input order.
+#[must_use]
+pub fn order_as_tree(issues: Vec<Issue>) -> Vec<Issue> {
+    use std::collections::{HashMap, HashSet};
+    let present: HashSet<u64> = issues.iter().map(|i| i.number).collect();
+    let mut children: HashMap<u64, Vec<Issue>> = HashMap::new();
+    let mut roots = Vec::new();
+    for issue in issues {
+        match issue.parent_number {
+            Some(parent) if present.contains(&parent) => {
+                children.entry(parent).or_default().push(issue);
+            }
+            _ => roots.push(issue),
+        }
+    }
+    let mut out = Vec::with_capacity(roots.len() + children.values().map(Vec::len).sum::<usize>());
+    for root in roots {
+        let number = root.number;
+        out.push(root);
+        if let Some(kids) = children.remove(&number) {
+            out.extend(kids);
+        }
+    }
+    // Orphans of parents that were themselves nested (multi-level) or removed — list flat.
+    for (_, kids) in children {
+        out.extend(kids);
+    }
+    out
 }
 
 #[derive(Debug)]
@@ -431,7 +511,9 @@ mod tests {
             "author": {"login": "alice"},
             "updatedAt": "2026-08-01T12:00:00Z",
             "url": "https://github.com/o/r/issues/42",
-            "labels": [{"name": "bug"}, {"name": "ui"}]
+            "labels": [{"name": "bug"}, {"name": "ui"}],
+            "parent": null,
+            "subIssuesSummary": {"completed": 1, "percentCompleted": 50, "total": 2}
           },
           {
             "number": 7,
@@ -441,7 +523,9 @@ mod tests {
             "author": {"login": "bob"},
             "updatedAt": "2026-07-01T12:00:00Z",
             "url": "https://github.com/o/r/issues/7",
-            "labels": []
+            "labels": [],
+            "parent": {"number": 42, "title": "Fix the pane"},
+            "subIssuesSummary": {"completed": 0, "percentCompleted": 0, "total": 0}
           }
         ]"#;
         let issues = parse_issues(json).unwrap();
@@ -451,6 +535,47 @@ mod tests {
         assert_eq!(issues[0].state, IssueState::Open);
         assert_eq!(issues[0].author, "alice");
         assert_eq!(issues[0].labels, vec!["bug", "ui"]);
+        assert_eq!(issues[0].parent_number, None);
+        assert_eq!(issues[0].sub_completed, 1);
+        assert_eq!(issues[0].sub_total, 2);
         assert_eq!(issues[1].state, IssueState::Closed);
+        assert_eq!(issues[1].parent_number, Some(42));
+    }
+
+    fn bare(number: u64, parent: Option<u64>) -> Issue {
+        Issue {
+            number,
+            title: format!("#{number}"),
+            body: String::new(),
+            state: IssueState::Open,
+            author: "a".into(),
+            updated_at: String::new(),
+            url: String::new(),
+            labels: vec![],
+            parent_number: parent,
+            sub_completed: 0,
+            sub_total: 0,
+        }
+    }
+
+    #[test]
+    fn order_as_tree_nests_children_under_present_parents() {
+        // Input: child, parent, other — output: parent, child, other.
+        let ordered = order_as_tree(vec![bare(2, Some(1)), bare(1, None), bare(3, None)]);
+        assert_eq!(
+            ordered.iter().map(|i| i.number).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn order_as_tree_leaves_orphan_children_top_level() {
+        // Parent #99 is not in the list (e.g. closed while listing open).
+        let ordered = order_as_tree(vec![bare(2, Some(99)), bare(1, None)]);
+        assert_eq!(
+            ordered.iter().map(|i| i.number).collect::<Vec<_>>(),
+            vec![2, 1],
+            "orphan child keeps its place among roots"
+        );
     }
 }
