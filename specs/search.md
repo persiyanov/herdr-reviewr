@@ -1,7 +1,7 @@
 ---
-Status: Current
+Status: Draft
 Created: 2026-07-18
-Last edited: 2026-07-31
+Last edited: 2026-08-08
 ---
 
 # Search
@@ -14,7 +14,7 @@ Full-screen file and code search over the worktree, opened with `/` from any tab
 above a full-width live preview. `tab` flips between the two search modes, keeping the query.
 
 ```
-┌ 1 Changes  2 All files  3 PR  [uncommitted]                                  ┐
+┌ 1 Changes  2 Files  3 PR  [uncommitted]                                      ┐
 │ > registry resolve█                                       files 3 │ code 37+ │
 │ ┌ results ────────────────────────────────────────────────────────────────┐ │
 │ │ src/llm_registry.py                                                     │ │

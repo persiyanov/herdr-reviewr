@@ -11,7 +11,7 @@ The terminal frame: the pane layout, the tabs, and how the view stays current.
 ## Overview
 
 ```
-┌ 1 Changes  2 All files  3 PR  [uncommitted]  9 changed  +42 −18 [ Send (3) ] ┐
+┌ 1 Changes  2 Files  3 PR  [uncommitted]                    9 changed  +42 −18 ┐
 │ ⋯  11 unmodified lines                       │ M llm_registry.py  +18 -8  │
 │ 40    def resolve(self, name):               │ M deep_research.py +155-62 │
 │ 41 ▌  from .z import w                         │ D old_runner.py    -47     │
@@ -26,7 +26,8 @@ The terminal frame: the pane layout, the tabs, and how the view stays current.
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- The header carries the three tabs with the active one highlighted, the active scope, the changed-file count with the scope's `+added −removed` totals, and a clickable `Send` button with the comment count (`input.md`).
+- The header carries the three tabs with the active one highlighted, the active scope, and the changed-file count with the scope's `+added −removed` totals, right-aligned one cell off the pane edge.
+- The `All files` tab's header label reads `Files`.
 - On the `branch` scope the header names the base after the scope, `vs dev`, the bare branch name however it resolved. Clicking it opens the base picker (`input.md`). With no resolving base it reads `no base`.
 - A skipped pick or `--base` shows after the base, `vs main · dev missing`.
 - A base name the header cannot fit truncates with a trailing `…`. The picker always shows it whole.
@@ -103,6 +104,7 @@ A layout change moves nothing else (`overview.md`), and both remembered shares p
 - No automatic position or content-sized navigator. Layout changes only through config, `p`, `z`, resize keys, or dragging.
 - No configured hidden default. The navigator starts visible, and only `navigator-hide` hides it.
 - No multi-file review stream. Each read pane shows one selected item.
+- No header `Send` button. Send lives on its keys and the footer (`input.md`).
 
 ## Related specs
 

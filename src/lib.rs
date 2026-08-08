@@ -1789,7 +1789,6 @@ pub fn handle_mouse(
                 match hit {
                     ui::HeaderHit::Tab(tab) => app.set_tab(tab)?,
                     ui::HeaderHit::Scope => app.set_scope(app.scope.cycle())?,
-                    ui::HeaderHit::Send => app.send_to_agent(),
                 }
             } else if let Some(i) =
                 ui::hit_file(area, app, m.column, m.row, app.file_rows.len(), app.file_scroll)

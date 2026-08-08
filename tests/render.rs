@@ -867,27 +867,21 @@ fn the_box_is_inserted_under_the_selected_line() {
 const AREA: Rect = Rect { x: 0, y: 0, width: 140, height: 40 };
 
 #[test]
-fn header_clicks_map_to_scope_and_send() {
+fn header_clicks_map_to_the_scope_chip() {
     let app = edited_app(); // scope uncommitted, no comments
     // Scan the header row instead of hardcoding columns, so the test survives changes
-    // to the label/button text.
+    // to the label text.
     let scope: Vec<u16> = (0..AREA.width)
         .filter(|&c| ui::hit_header(AREA, &app, app.keymap(), c, 0) == Some(HeaderHit::Scope))
         .collect();
-    let send: Vec<u16> = (0..AREA.width)
-        .filter(|&c| ui::hit_header(AREA, &app, app.keymap(), c, 0) == Some(HeaderHit::Send))
-        .collect();
 
     assert!(!scope.is_empty(), "scope chip is clickable");
-    assert!(!send.is_empty(), "send button is clickable");
-    assert!(scope.iter().max() < send.iter().min(), "scope is left of the button, no overlap");
-    assert!(*send.iter().max().unwrap() < AREA.width);
 
     let gap = scope.iter().max().unwrap() + 1;
     assert_eq!(
         ui::hit_header(AREA, &app, app.keymap(), gap, 0),
         None,
-        "the space between controls is inert"
+        "the space right of the chip is inert"
     );
     assert_eq!(
         ui::hit_header(AREA, &app, app.keymap(), scope[0], 5),
@@ -1200,7 +1194,7 @@ fn all_files_tab_bar_footer_and_count_read_for_the_tab() {
 
     let out = render(&app);
     assert!(out.contains("1 Changes"), "tab labels carry their switch digit:\n{out}");
-    assert!(out.contains("2 All files"));
+    assert!(out.contains("2 Files"));
     assert!(
         out.contains("1 changed"),
         "the changed count stays in the header on All files:\n{out}"
@@ -1219,30 +1213,6 @@ fn all_files_tab_bar_footer_and_count_read_for_the_tab() {
     let expanded = render(&app);
     assert!(expanded.contains("scope"), "the `?` expansion lists the scope keys:\n{expanded}");
     assert!(expanded.contains("move"), "and labels the movement band:\n{expanded}");
-}
-
-#[test]
-fn a_narrow_overflowing_header_does_not_mis_map_a_click_to_send() {
-    let r = Repo::init();
-    r.write("a.rs", "x\n");
-    r.commit_all("init");
-    r.write("a.rs", "y\n");
-    let app = app_on(&r);
-
-    // At a narrow pane width the two-tab header overflows and the Send button is off-screen.
-    // No on-screen column may map to Send — the old right-aligned hit-zone landed a phantom Send
-    // over the chip/tab region, swallowing those clicks as a Send.
-    let width: u16 = 34;
-    let area = Rect::new(0, 0, width, 40);
-    let phantom =
-        (0..width).any(|c| ui::hit_header(area, &app, app.keymap(), c, 0) == Some(HeaderHit::Send));
-    assert!(!phantom, "no on-screen column mis-maps to Send when the narrow header overflows");
-
-    // At a wide width the Send button is right-aligned and clickable.
-    let wide = Rect::new(0, 0, 140, 40);
-    let send =
-        (0..140).any(|c| ui::hit_header(wide, &app, app.keymap(), c, 0) == Some(HeaderHit::Send));
-    assert!(send, "Send is clickable when the header fits");
 }
 
 #[test]
@@ -1332,7 +1302,7 @@ fn header_tab_hits_align_with_wide_hint_keys() {
     let col_of = |needle: &str| row0[..row0.find(needle).unwrap()].chars().count() as u16;
     let area = Rect::new(0, 0, 140, 40);
     for (needle, tab) in
-        [("Changes", Tab::Changes), ("2 All files", Tab::AllFiles), ("3 PR", Tab::Pr)]
+        [("Changes", Tab::Changes), ("2 Files", Tab::AllFiles), ("3 PR", Tab::Pr)]
     {
         assert_eq!(
             ui::hit_header(area, &app, app.keymap(), col_of(needle), 0),

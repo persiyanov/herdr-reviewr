@@ -53,7 +53,7 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | `search`                                                 | open the search screen (`search.md`)        | `/`                                         | —                             |
 | `find`                                                   | open in-file find (`find-in-file.md`)       | `ctrl+f`                                    | —                             |
 | `keys`                                                   | toggle the footer's full shortcut list      | `?`                                         | —                             |
-| `send`                                                   | send all comments to the agent              | `s` / `S`                                   | click `Send`                  |
+| `send`                                                   | send all comments to the agent              | `s` / `S`                                   | —                             |
 | `copy`                                                   | copy all comments to the clipboard          | `y` / `Y`                                   | —                             |
 | `open-pr`                                                | open the PR in the browser (`pr-tab.md`)    | `o`                                         | click the status chip         |
 | `refresh`                                                | refresh now                                 | `r`                                         | —                             |

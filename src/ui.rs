@@ -444,7 +444,6 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
 pub enum HeaderHit {
     Tab(Tab),
     Scope,
-    Send,
 }
 
 /// Which header control a click at `(col, row)` lands on, if any. `keymap` must be the keymap
@@ -464,11 +463,8 @@ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) ->
     let prefix = header_prefix_len(&spans);
     let scope_start = prefix as u16;
     let scope_end = scope_start + scope_chip(app).len() as u16;
-    let button_start = send_button_col(app, prefix, area.width as usize) as u16;
     if (scope_start..scope_end).contains(&col) {
         Some(HeaderHit::Scope)
-    } else if col >= button_start && col < area.width {
-        Some(HeaderHit::Send)
     } else {
         None
     }
@@ -480,7 +476,7 @@ fn tab_labels(keymap: &Keymap) -> [(Tab, String); 3] {
     use crate::keymap::Action as K;
     [
         (Tab::Changes, format!("{} Changes", keymap.hint(K::TabChanges))),
-        (Tab::AllFiles, format!("{} All files", keymap.hint(K::TabAllFiles))),
+        (Tab::AllFiles, format!("{} Files", keymap.hint(K::TabAllFiles))),
         (Tab::Pr, format!("{} PR", keymap.hint(K::TabPr))),
     ]
 }
@@ -522,29 +518,15 @@ fn scope_chip(app: &App) -> String {
     format!("[{}]", app.scope.label())
 }
 
-fn send_button(app: &App) -> String {
-    format!("[ Send ({}) ]", app.store.len())
-}
-
 /// The header suffix: the active scope's changed-file count and its aggregate line totals, in
 /// [`stats_str`]'s grammar, so a zero side drops and an empty changeset shows the bare count.
-/// Shared so the painter and the hit-test place the right-aligned `Send` button at the same
-/// column. The totals' `−` is multi-byte, so the suffix is measured by display width; the scope
-/// chip and `Send` button are all-ASCII, so their byte `.len()` equals their display width.
+/// The totals' `−` is multi-byte, so the suffix is measured by display width; the scope chip
+/// is all-ASCII, so its byte `.len()` equals its display width.
 fn header_suffix(app: &App) -> String {
     let (added, removed) = app.changed_totals();
     let stats = stats_str(added, removed);
     let gap = if stats.is_empty() { "" } else { "  " };
-    format!("  {} changed{gap}{stats}", app.changed_count())
-}
-
-/// The column the `Send` button paints at, matching `render_tab_bar`'s layout: right-aligned
-/// when the header fits, packed left right after the suffix when the bar overflows (`pad`
-/// collapses to 0). `hit_header` must use this, not a bare right-alignment, or a `Send` click
-/// mis-fires (and on a narrow pane lands in a tab span) when the header overflows.
-fn send_button_col(app: &App, prefix: usize, width: usize) -> usize {
-    let before = prefix + scope_chip(app).len() + header_suffix(app).width();
-    before + width.saturating_sub(before + send_button(app).len())
+    format!("{} changed{gap}{stats}", app.changed_count())
 }
 
 /// The header's shared left side, painted by both tab bars: the lead pad, the three tab labels
@@ -576,30 +558,29 @@ fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let chip = scope_chip(app);
     let suffix = header_suffix(app);
-    let button = send_button(app);
     let prefix = header_prefix_len(&tab_spans(app.keymap()));
-    let used = prefix + chip.len() + suffix.width() + button.len();
-    let pad = (area.width as usize).saturating_sub(used);
+    // The suffix keeps the same edge pad as the tab strip's lead.
+    let used = prefix + chip.len() + suffix.width() + HEADER_LEAD.len();
+    // Right-align the suffix; at least one gap column when the bar overflows.
+    let pad = (area.width as usize).saturating_sub(used).max(1);
 
     // A quiet surface bar: the active tab in bright lavender, the inactive one dimmed, the
-    // clickable scope and Send controls accented so they read as buttons.
+    // clickable scope control accented so it reads as a button.
     let p = app.palette();
     let bar = Style::default().bg(p.surface0);
     let mut spans = tab_bar_spans(app);
     spans.push(Span::styled(chip, bar.fg(p.yellow).add_modifier(Modifier::BOLD)));
+    spans.push(Span::styled(" ".repeat(pad), bar));
     // The suffix repaints in parts so the totals get the file rows' green/red; the parts spell
-    // out `header_suffix`, which the `Send` column math measures.
+    // out `header_suffix`, which the alignment math measures.
     let (added, removed) = app.changed_totals();
-    spans.push(Span::styled(format!("  {} changed", app.changed_count()), bar.fg(p.overlay0)));
+    spans.push(Span::styled(format!("{} changed", app.changed_count()), bar.fg(p.overlay0)));
     let stats = stats_spans(added, removed, p);
     if !stats.is_empty() {
         spans.push(Span::styled("  ", bar));
         spans.extend(stats.into_iter().map(|s| Span::styled(s.content, s.style.bg(p.surface0))));
     }
-
-    let send_fg = if app.store.is_empty() { p.overlay0 } else { p.green };
-    spans.push(Span::styled(" ".repeat(pad), bar));
-    spans.push(Span::styled(button, bar.fg(send_fg).add_modifier(Modifier::BOLD)));
+    spans.push(Span::styled(HEADER_LEAD, bar));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 

@@ -1,7 +1,7 @@
 ---
-Status: Current
+Status: Draft
 Created: 2026-07-17
-Last edited: 2026-07-31
+Last edited: 2026-08-08
 ---
 
 # PR tab
@@ -15,7 +15,7 @@ The navigator shows checks and selects the description or a comment. The read pa
 The tab is labeled `PR` on every forge. Body text, the chip, the read pane's title, and the footer use the resolved forge's vocabulary (`forge-providers.md`). A repository that resolves to no forge takes the default vocabulary. A `finding` from a forge that returns no code context shows its body alone.
 
 ```
- 1 Changes  2 All files  3 PR    Deep research: GPT-5.5/5.4-mini upgrade…  deep-research  merged #226 ↗
+ 1 Changes  2 Files  3 PR    Deep research: GPT-5.5/5.4-mini upgrade…  deep-research  merged #226 ↗
 ╭─ @codex · manager.py:115 ──────────────────────────╮╭─ Checks & comments ──────────╮
 │ -    if primary_result.status == PERM_FAILURE:        ││ description                  │
 │ -        return primary_result                        ││                              │
