@@ -1,5 +1,5 @@
 ---
-Status: Draft
+Status: Current
 Created: 2026-06-23
 Last edited: 2026-08-08
 ---
@@ -30,7 +30,7 @@ The terminal frame: the pane layout, the tabs, and how the view stays current.
 - The `All files` tab's header label reads `Files`.
 - On the `branch` scope the header names the base after the scope, `vs dev`, the bare branch name however it resolved. Clicking it opens the base picker (`input.md`). With no resolving base it reads `no base`.
 - A skipped pick or `--base` shows after the base, `vs main · dev missing` — and after the empty state too, `no base · dev missing`, so a dormant choice never reads as never-chosen.
-- A base name the header cannot fit truncates with a trailing `…`. The picker always shows it whole.
+- A base name the header cannot fit truncates with a trailing `…`. The picker always shows it whole. Too narrow for even one column of the name, the base leaves the header rather than paint a nameless `vs`.
 - The header's line totals drop a zero side and vanish when nothing changed, like a file row's stats (`file-list.md`).
 - The active tab sets both panes: diff and changed files in `Changes`, content and repo tree in `All files`, checks and comments in `PR` (`diff-view.md`, `pr-tab.md`).
 - The comment input opens inline, directly under the last line of the selection, and grows as you type (`input.md`). It is never a footer band.

@@ -71,6 +71,16 @@ impl Repo {
         ]);
     }
 
+    /// Record `content` as the base-pick blob verbatim, bypassing `write_base_pick` — for
+    /// the values only a foreign writer could put on that shared ref.
+    pub fn write_raw_base_pick(&self, content: &str) {
+        let path = self.path().join("raw-pick");
+        std::fs::write(&path, content).unwrap();
+        let blob = self.git(&["hash-object", "-w", path.to_str().unwrap()]).trim().to_string();
+        self.git(&["update-ref", "refs/reviewr/base-pick", &blob]);
+        std::fs::remove_file(&path).unwrap();
+    }
+
     pub fn write(&self, rel: &str, contents: &str) {
         let path = self.path().join(rel);
         if let Some(parent) = path.parent() {

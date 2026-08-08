@@ -168,6 +168,31 @@ fn a_prefixed_flag_spelling_resolves_to_the_bare_name() {
     // shield carry the bare spelling (specs/tui.md, specs/forge-host.md).
     let winner = resolve_base(r.path(), Some("origin/main")).unwrap().status.winner.unwrap();
     assert_eq!(winner.name, "main");
+
+    // A prefixed spelling that resolves to nothing is skipped under the same bare name,
+    // so the header reads `· gone missing`, never `· origin/gone missing`.
+    let status = resolve_base(r.path(), Some("origin/gone")).unwrap().status;
+    assert_eq!(status.skipped.as_deref(), Some("gone"));
+}
+
+#[test]
+fn a_pick_git_could_never_have_written_is_no_pick() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    r.set_origin_default("main", "HEAD");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("base.rs", "2\n");
+    r.commit_all("diverge");
+
+    // The pick ref is shared repository state any tool can write, and a skipped pick paints
+    // its name in the header: a blob carrying control bytes is no pick at all, so nothing
+    // can smuggle an escape sequence into the frame (specs/review-model.md).
+    r.write_raw_base_pick("dev\u{1b}]0;pwned\u{7}");
+    assert_eq!(read_base_pick(r.path()).unwrap(), None);
+    let status = resolve_base(r.path(), None).unwrap().status;
+    assert_eq!(status.skipped, None, "a malformed pick is not a recorded choice either");
+    assert_eq!(status.winner.unwrap().name, "main");
 }
 
 #[test]
@@ -284,6 +309,11 @@ fn list_branches_merges_names_newest_first_and_hides_the_checked_out() {
     r.git(&["add", "-A"]);
     r.git_env(&["commit", "-q", "-m", "one"], &[("GIT_COMMITTER_DATE", "2026-01-01T00:00:00")]);
     r.git(&["branch", "older"]);
+    // Every branch gets its own commit date, so the asserted order follows the contract
+    // rather than git's tie-break between two branches sharing a timestamp.
+    r.write("a.rs", "1b\n");
+    r.git(&["add", "-A"]);
+    r.git_env(&["commit", "-q", "-m", "middle"], &[("GIT_COMMITTER_DATE", "2026-02-01T00:00:00")]);
     r.set_origin_default("main", "HEAD");
     r.git(&["checkout", "-q", "-b", "feature"]);
     r.write("a.rs", "2\n");

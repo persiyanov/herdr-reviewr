@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Pick the base branch.** `B` opens a picker on the `branch` scope, and so does a click on the
+  base name in the header. Rows are every local and origin branch by recent commit, the open PR's
+  target starred first and the default branch marked `default`. Type to filter, `enter` picks. The
+  choice is remembered per repository, so a repo whose trunk is `dev` stops diffing against `main`.
+- **The header names the base.** The `branch` scope reads `vs dev`, so what the diff compares
+  against is always on screen. A recorded choice whose branch is gone reads `vs main · dev missing`,
+  and a repo where nothing resolves reads `no base`.
+
+### Changed
+- **The base branch resolves through one chain.** `--base`, then your pick, then `origin/HEAD`,
+  and no guessing anywhere in it. A repo with no `origin/HEAD` and no pick shows `no base` and
+  invites a pick instead of silently comparing against `main`.
+- **`base_branches` is retired.** The key no longer exists, and a config still carrying it fails
+  to load like any other unknown key. Drop the key and press `B` to choose a base instead.
+- **The `All files` tab is now `Files`,** and the changed-file count and line totals sit at the
+  right of the header. The header's `Send` button is gone — send with the `send` key or from the
+  comments list.
+
 ## [0.29.0] — 2026-08-01
 
 ### Changed

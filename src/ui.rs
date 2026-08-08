@@ -565,6 +565,11 @@ fn base_parts(app: &App, keymap: &Keymap, width: u16) -> Option<(String, String,
         + 1;
     let budget = (width as usize).saturating_sub(fixed);
     let name = truncate_width(&name, budget);
+    if name.is_empty() {
+        // Not even one column for the name: the base leaves the header whole rather than
+        // paint a nameless `vs` the click would still claim (`specs/tui.md`).
+        return None;
+    }
     let tail = truncate_width(&tail, budget.saturating_sub(name.width()));
     Some((lead, name, tail))
 }
@@ -886,31 +891,6 @@ fn comment_card_lines(c: &Comment, width: usize, p: &Palette) -> Vec<Line<'stati
         Span::styled(format!("╰{}╯", "─".repeat(box_w.saturating_sub(2))), border),
     ]));
     lines
-}
-
-/// Truncate `s` to `max` display columns keeping the tail behind a leading `…` — for
-/// input echoes, where the newest characters are the ones the user must see. Zero
-/// columns fit nothing, not a bare `…`.
-fn truncate_left(s: &str, max: usize) -> String {
-    if s.width() <= max {
-        return s.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut tail: Vec<char> = Vec::new();
-    let mut w = 0;
-    for ch in s.chars().rev() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if w + cw > max - 1 {
-            break;
-        }
-        tail.push(ch);
-        w += cw;
-    }
-    let mut out = String::from("…");
-    out.extend(tail.into_iter().rev());
-    out
 }
 
 /// Truncate `s` to `max` display columns, marking a cut with a trailing `…`. Zero columns
@@ -2088,7 +2068,7 @@ fn base_picker_popup(area: Rect, app: &App) -> Rect {
     menu_popup(area, app, widest, BASE_PICKER_TITLE, bp.rows.len().max(1) + 3)
 }
 
-const BASE_PICKER_TITLE: &str = "Pick base";
+const BASE_PICKER_TITLE: &str = "Pick base branch";
 
 fn base_picker_scroll(bp: &crate::app::BasePicker, rows: usize) -> usize {
     menu_scroll(bp.cursor, bp.filtered().len(), rows)
@@ -2109,14 +2089,22 @@ fn render_base_picker(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // The filter line: the typed query, or a dim invitation while it is empty. An
-    // overlong query keeps its tail, so what was just typed stays visible.
-    let filter = if bp.query.is_empty() {
-        Line::from(Span::styled(" type to filter…", Style::default().fg(p.overlay0)))
+    // The filter line: the query with the comment editor's block caret, or a dim invitation
+    // while it is empty. The single line cannot wrap, so it scrolls horizontally to keep the
+    // caret in view — what was just typed stays visible (`specs/input.md` Base picker).
+    let mut filter = if bp.query.is_empty() {
+        let mut line = row_with_caret("", 0, p);
+        line.spans.push(Span::styled(" type to filter…", Style::default().fg(p.overlay0)));
+        line
     } else {
-        let echo = truncate_left(&bp.query, (inner.width as usize).saturating_sub(1));
-        Line::from(Span::styled(format!(" {echo}"), text_style(p)))
+        let chars: Vec<char> = bp.query.chars().collect();
+        let caret_col = bp.caret.min(chars.len());
+        let avail = (inner.width as usize).saturating_sub(2);
+        let start = caret_col.saturating_sub(avail.saturating_sub(1));
+        let visible: String = chars[start.min(chars.len())..].iter().collect();
+        row_with_caret(&visible, caret_col - start, p)
     };
+    filter.spans.insert(0, Span::styled(" ", text_style(p)));
     frame.render_widget(Paragraph::new(filter), Rect { height: 1, ..inner });
 
     let list_area = Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner };

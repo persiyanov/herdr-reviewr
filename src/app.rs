@@ -130,6 +130,9 @@ pub struct BasePicker {
     pub cursor: usize,
     /// The typed filter, matching anywhere in the name.
     pub query: String,
+    /// The caret in `query`, a char index — the filter edits with the comment editor's
+    /// controls, like every other text field (`specs/input.md`).
+    pub caret: usize,
 }
 
 /// One base picker row (`specs/input.md` Base picker).
@@ -144,8 +147,8 @@ pub struct BaseChoice {
 }
 
 impl BasePicker {
-    /// The filtered view: indices into `rows` whose names contain the query, the
-    /// case-insensitive anywhere-match the key table names (`specs/input.md`).
+    /// The filtered view: indices into `rows` whose name contains the query, matched
+    /// case-insensitively and anywhere in the name (`specs/input.md` Base picker).
     pub fn filtered(&self) -> Vec<usize> {
         let q = self.query.to_lowercase();
         (0..self.rows.len()).filter(|&i| self.rows[i].name.to_lowercase().contains(&q)).collect()
@@ -2625,13 +2628,14 @@ impl App {
     // character-wise and multi-byte safe.
 
     /// The mode's editable text and caret: the comment draft while composing, the search
-    /// query while the overlay is open, nothing otherwise.
+    /// query, the find query, the base picker's filter, nothing otherwise.
     fn active_field(&mut self) -> Option<(&mut String, &mut usize)> {
         match self.mode {
             Mode::Composing { .. } => Some((&mut self.input, &mut self.caret)),
             Mode::Search => self.search.as_mut().map(|s| (&mut s.query, &mut s.caret)),
             Mode::Find => self.find.as_mut().map(|f| (&mut f.query, &mut f.caret)),
-            Mode::Normal | Mode::List | Mode::Picker | Mode::BasePick => None,
+            Mode::BasePick => self.base_picker.as_mut().map(|b| (&mut b.query, &mut b.caret)),
+            Mode::Normal | Mode::List | Mode::Picker => None,
         }
     }
 
@@ -2642,6 +2646,9 @@ impl App {
     /// (specs/search.md).
     fn edit_input(&mut self, f: impl FnOnce(&mut Vec<char>, &mut usize)) {
         let searching = self.mode == Mode::Search;
+        // The highlighted branch's own row, read before the filter narrows under it.
+        let highlighted =
+            self.base_picker.as_ref().and_then(|bp| bp.filtered().get(bp.cursor).copied());
         let Some((text, caret_ref)) = self.active_field() else { return };
         let mut v: Vec<char> = text.chars().collect();
         let mut caret = (*caret_ref).min(v.len());
@@ -2653,6 +2660,18 @@ impl App {
         if searching && changed {
             self.search_dirty = true;
         }
+        if changed && self.mode == Mode::BasePick {
+            self.refilter_base_picker(highlighted);
+        }
+    }
+
+    /// Re-seat the base picker's highlight after a filter edit: it follows its own row into
+    /// the narrowed view when the row survives, else rests on the first match
+    /// (`specs/overview.md` Continuity).
+    fn refilter_base_picker(&mut self, highlighted: Option<usize>) {
+        let Some(bp) = self.base_picker.as_mut() else { return };
+        let filtered = bp.filtered();
+        bp.cursor = highlighted.and_then(|h| filtered.iter().position(|&i| i == h)).unwrap_or(0);
     }
 
     /// Move the caret with a function of the current `Vec<char>` view; a no-op without an
@@ -3655,7 +3674,7 @@ impl App {
         rows.sort_by_key(|r| (!r.starred, !r.is_default));
         let current = self.branch_base.winner.as_ref().map(|b| b.name.as_str());
         let cursor = current.and_then(|c| rows.iter().position(|r| r.name == c)).unwrap_or(0);
-        self.base_picker = Some(BasePicker { rows, cursor, query: String::new() });
+        self.base_picker = Some(BasePicker { rows, cursor, query: String::new(), caret: 0 });
         self.mode = Mode::BasePick;
     }
 
@@ -3683,28 +3702,6 @@ impl App {
         {
             bp.cursor = row;
         }
-    }
-
-    /// Append `ch` to the filter (`specs/input.md`).
-    pub fn base_picker_input(&mut self, ch: char) {
-        self.base_picker_edit(|q| q.push(ch));
-    }
-
-    /// Delete the last filter character (`specs/input.md`).
-    pub fn base_picker_backspace(&mut self) {
-        self.base_picker_edit(|q| {
-            q.pop();
-        });
-    }
-
-    /// Apply one filter edit. The highlight follows its row into the re-filtered view when
-    /// it survives, else rests on the first match (`specs/overview.md` Continuity).
-    fn base_picker_edit(&mut self, f: impl FnOnce(&mut String)) {
-        let Some(bp) = self.base_picker.as_mut() else { return };
-        let highlighted = bp.filtered().get(bp.cursor).copied();
-        f(&mut bp.query);
-        let filtered = bp.filtered();
-        bp.cursor = highlighted.and_then(|h| filtered.iter().position(|&i| i == h)).unwrap_or(0);
     }
 
     /// Pick the highlighted branch: persist it as the repo pick — or clear the pick when
@@ -4032,6 +4029,7 @@ mod tests {
             }],
             cursor: 0,
             query: "d".to_string(),
+            caret: 1,
         });
         old.branch_base = crate::git::BaseStatus {
             winner: Some(crate::git::ResolvedBase {

@@ -1502,18 +1502,21 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
     }
 
     // The base picker: every printable narrows the filter — the bound shortcuts included, so
-    // a branch named `qa` is typable — the arrows move the highlight, `enter` picks, `esc`
-    // cancels, and everything else is inert (`specs/input.md` Base picker).
+    // a branch named `qa` is typable — and the filter edits with the comment editor's
+    // controls, like every other text field. `↑`/`↓` (and `ctrl+n`/`p`) move the highlight,
+    // so the single-line filter keeps `←`/`→` for its caret, `enter` picks, `esc` cancels
+    // (`specs/input.md` Base picker).
     if app.mode == Mode::BasePick {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let word = alt || ctrl;
         match key.code {
             Esc => app.close_base_picker(),
             Enter => app.base_picker_pick()?,
-            KeyCode::Backspace => app.base_picker_backspace(),
             Down => app.base_picker_move(1),
             Up => app.base_picker_move(-1),
-            Char(c) if !ctrl && !alt => app.base_picker_input(c),
-            _ => {}
+            Char('n') if ctrl => app.base_picker_move(1),
+            Char('p') if ctrl => app.base_picker_move(-1),
+            code => apply_text_edit(app, code, ctrl, alt, word),
         }
         return Ok(());
     }

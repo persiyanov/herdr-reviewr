@@ -5202,8 +5202,8 @@ fn typing_filters_and_enter_picks_the_highlight() {
     app.set_scope(Scope::Branch).unwrap();
     assert_eq!(app.branch_base.winner.as_ref().map(|b| b.name.as_str()), Some("main"));
     app.open_base_picker();
-    app.base_picker_input('d');
-    app.base_picker_input('e');
+    app.input_push('d');
+    app.input_push('e');
     let bp = app.base_picker.as_ref().unwrap();
     assert_eq!(bp.filtered().len(), 1, "the filter matches anywhere in the name");
     app.base_picker_pick().unwrap();
@@ -5227,7 +5227,7 @@ fn a_pick_retags_the_world_input() {
     app.set_scope(Scope::Branch).unwrap();
     let stale = app.world_input();
     app.open_base_picker();
-    app.base_picker_input('d');
+    app.input_push('d');
     app.base_picker_pick().unwrap();
     assert_ne!(app.world_input(), stale, "an in-flight build's tag no longer matches");
 }
@@ -5259,15 +5259,57 @@ fn a_filter_with_no_match_leaves_enter_inert_and_backspace_recovers() {
     app.set_scope(Scope::Branch).unwrap();
     app.open_base_picker();
     for ch in "zzz".chars() {
-        app.base_picker_input(ch);
+        app.input_push(ch);
     }
     assert!(app.base_picker.as_ref().unwrap().filtered().is_empty());
     app.base_picker_pick().unwrap();
     assert_eq!(app.mode, Mode::BasePick, "enter does nothing with no matching branch");
-    app.base_picker_backspace();
-    app.base_picker_backspace();
-    app.base_picker_backspace();
+    app.input_backspace();
+    app.input_backspace();
+    app.input_backspace();
     assert_eq!(app.base_picker.as_ref().unwrap().filtered().len(), 2);
+}
+
+#[test]
+fn a_repo_with_no_pickable_branch_refuses_to_open_the_picker() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+
+    // One branch, checked out, and no origin default: nothing to choose, so the picker
+    // refuses with the cause rather than opening empty (`specs/input.md` Base picker).
+    app.open_base_picker();
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.base_picker.is_none());
+    assert_eq!(app.status, "no branches to pick");
+}
+
+#[test]
+fn the_filter_edits_with_the_comment_editors_controls() {
+    let r = based_repo();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    for ch in "release dev".chars() {
+        app.input_push(ch);
+    }
+
+    // The filter is a text field like every other one: `ctrl+w` drops a word, the caret
+    // moves, and an insert lands at the caret (`specs/input.md` Base picker).
+    app.input_delete_word();
+    assert_eq!(app.base_picker.as_ref().unwrap().query, "release ");
+    app.input_kill_to_start();
+    assert_eq!(app.base_picker.as_ref().unwrap().query, "");
+    for ch in "dv".chars() {
+        app.input_push(ch);
+    }
+    app.caret_left();
+    app.input_push('e');
+    let bp = app.base_picker.as_ref().unwrap();
+    assert_eq!(bp.query, "dev");
+    assert_eq!(bp.rows[bp.filtered()[bp.cursor]].name, "dev", "the narrowed view still picks");
 }
 
 #[test]
@@ -5279,7 +5321,7 @@ fn the_highlight_follows_its_row_through_a_narrowing_filter() {
     app.base_picker_move(1); // main -> dev
     let bp = app.base_picker.as_ref().unwrap();
     assert_eq!(bp.rows[bp.filtered()[bp.cursor]].name, "dev");
-    app.base_picker_input('d');
+    app.input_push('d');
     let bp = app.base_picker.as_ref().unwrap();
     assert_eq!(
         bp.rows[bp.filtered()[bp.cursor]].name,
@@ -5318,7 +5360,7 @@ fn the_base_picker_owns_the_whole_footer_bar_and_survives_a_config_error() {
     );
 
     // The config error leaves the picker open for recovery to carry (`specs/tui.md`).
-    app.base_picker_input('d');
+    app.input_push('d');
     app.set_config_error("theme = \"not-a-theme\"".to_string());
     assert_eq!(app.mode, Mode::BasePick);
     assert_eq!(app.base_picker.as_ref().unwrap().query, "d");

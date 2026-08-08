@@ -1,5 +1,5 @@
 ---
-Status: Draft
+Status: Current
 Created: 2026-07-17
 Last edited: 2026-08-08
 ---
@@ -20,7 +20,7 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 - A key hint in the header or the footer shows its action's first bound key.
 - The comments list acts through the same bindings and closes on `esc` and the `comments` binding.
 - The agent picker acts through the `down` / `up` bindings and closes on `esc`.
-- The base picker filters through typed characters, moves through the arrows, and closes on `esc`.
+- The base picker filters through a text field with the comment editor's controls, moves through the arrows, and closes on `esc`.
 - Prose and mockups elsewhere show the default keys.
 
 | action                                                   | does                                        | keys                                        | mouse                         |
@@ -191,7 +191,7 @@ Row 1's primary and actions follow the cursor:
 
 ### Comment editor
 
-A plain-text field that edits at the caret, not only at the end. The search input shares these controls, without the newline inserts (`search.md`). An empty box shows a dim `Leave a comment…` placeholder. `e` preloads the existing text with the caret at the end.
+A plain-text field that edits at the caret, not only at the end. The search input and the base picker's filter share these controls, without the newline inserts (`search.md`). An empty box shows a dim `Leave a comment…` placeholder. `e` preloads the existing text with the caret at the end.
 
 ```
 ┌ comment · llm_registry.py:41 ───────────┐
@@ -248,13 +248,15 @@ The list holds one row per branch name, remote-tracking and local names merged. 
 
 The highlight opens on the current base, else the first row. The highlight is place state (`overview.md`).
 
-| key               | does                                             |
-| ----------------- | ------------------------------------------------ |
-| typed character   | narrow the list, matching anywhere in the name   |
-| `backspace`       | delete the last filter character                 |
-| `↓` / `↑`         | move the highlight                               |
-| `enter`           | pick the highlighted branch                      |
-| `esc`             | cancel                                           |
+| key                 | does                                            |
+| ------------------- | ----------------------------------------------- |
+| typed character     | narrow the list, matching anywhere in the name  |
+| `↓` / `↑`           | move the highlight                              |
+| `ctrl+n` / `ctrl+p` | move the highlight                              |
+| `enter`             | pick the highlighted branch                     |
+| `esc`               | cancel                                          |
+
+The filter is a text field with the comment editor's controls, above. `↑` and `↓` move the highlight, so the single-line filter keeps `←` and `→` for its caret.
 
 - A click moves the highlight. A click on the highlighted row picks.
 - A filter matching no branch shows `no branches match`, and `enter` does nothing.

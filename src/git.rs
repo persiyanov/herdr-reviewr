@@ -549,12 +549,12 @@ pub struct BaseStatus {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BaseResolution {
     pub status: BaseStatus,
-    pub candidates: Vec<(String, String)>,
-    pub recorded: Vec<String>,
+    candidates: Vec<(String, String)>,
+    recorded: Vec<String>,
 }
 
 impl BaseResolution {
-    pub fn oids(&self) -> Vec<String> {
+    fn oids(&self) -> Vec<String> {
         self.candidates.iter().map(|(_, oid)| oid.clone()).collect()
     }
 }
@@ -589,7 +589,7 @@ pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResoluti
         } else {
             match resolve_base_entry(repo, &entry)? {
                 Some(oid) => push(entry, oid, &mut candidates),
-                None => skipped = Some(flag.to_string()),
+                None => skipped = Some(entry),
             }
         }
     }
@@ -914,7 +914,20 @@ pub fn read_base_pick(repo: &Path) -> Result<Option<String>, GitFail> {
     }
     let name = String::from_utf8_lossy(&out.stdout);
     let name = name.trim();
-    Ok((!name.is_empty()).then(|| name.to_string()))
+    Ok(branch_name_shaped(name).then(|| name.to_string()))
+}
+
+/// Whether a recorded pick is shaped like the branch name reviewr writes there. The ref is
+/// shared repository state any tool can write, and a pick that resolves to nothing still
+/// paints its name in the header, so a value git could never have produced is no pick at
+/// all — the chain's skip-never-error contract (`specs/review-model.md`), and the rule git
+/// itself applies to a refname.
+fn branch_name_shaped(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && !value.contains("..")
+        && !value.contains("@{")
+        && value.bytes().all(|byte| byte > b' ' && byte != 0x7f)
 }
 
 /// Record `name` as the repository's pick. The ref write lands before the pick applies

@@ -2860,6 +2860,50 @@ fn an_overlong_base_name_truncates_with_an_ellipsis() {
 }
 
 #[test]
+fn a_narrow_header_never_maps_a_click_outside_the_painted_base() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    let long = format!("feature/{}", "x".repeat(60));
+    r.git(&["branch", &long]);
+    herdr_reviewr::git::write_base_pick(r.path(), &long).unwrap();
+    r.git(&["checkout", "-q", "-b", "work"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+
+    // The base label truncates to its budget at a narrow width, and the hit test walks the
+    // same arithmetic the paint does: every column it claims carries painted label, and the
+    // claim is one unbroken run (specs/tui.md).
+    for width in [40u16, 56, 72] {
+        let area = Rect { x: 0, y: 0, width, height: 12 };
+        let line0 = dump(&render_size(&app, width, 12)).lines().next().unwrap().to_string();
+        let cells: Vec<char> = line0.chars().collect();
+        let hits: Vec<u16> = (0..width)
+            .filter(|&c| ui::hit_header(area, &app, app.keymap(), c, 0) == Some(HeaderHit::Base))
+            .collect();
+        let Some((&first, &last)) = hits.first().zip(hits.last()) else { continue };
+        assert_eq!(
+            hits.len() as u16,
+            last - first + 1,
+            "width {width}: the base claims one unbroken run"
+        );
+        let claimed: String = hits.iter().map(|&c| cells[c as usize]).collect();
+        assert_ne!(claimed.trim(), "vs", "width {width}: a nameless `vs` is claimed: {line0}");
+        assert!(
+            !claimed.ends_with(' '),
+            "width {width}: the claim runs past the painted label: {line0}"
+        );
+        assert_eq!(
+            cells.get(last as usize + 1).copied(),
+            Some(' '),
+            "width {width}: the claim stops short of the painted label: {line0}"
+        );
+    }
+}
+
+#[test]
 fn an_overlong_skipped_tail_never_evicts_the_base_name() {
     let r = Repo::init();
     r.write("hello.rs", "alpha\n");

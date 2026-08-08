@@ -199,7 +199,7 @@ fn every_resolved_base_source_excludes_names() {
 
 #[test]
 fn a_dormant_pick_still_shields_its_name() {
-    // The picked `develop` no longer resolves (its refs are gone), but the record stands:
+    // The picked `develop` was never created, so it resolves to nothing, but the record stands:
     // an upstream naming it is still tracking a base, not publishing to it
     // (`specs/forge-host.md` Resolution — "resolved or recorded").
     let repo = worktree();

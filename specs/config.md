@@ -1,5 +1,5 @@
 ---
-Status: Draft
+Status: Current
 Created: 2026-07-10
 Last edited: 2026-08-08
 ---
