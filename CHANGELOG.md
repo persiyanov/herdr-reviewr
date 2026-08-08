@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **EditorConfig tab widths.** Hard tabs now use each file's local `.editorconfig`
+  `tab_width`, or its numeric `indent_size` fallback, in diffs, file views, and search.
+
 ## [0.30.1] — 2026-08-08
 
 ### Fixed

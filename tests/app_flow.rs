@@ -4240,7 +4240,7 @@ mod search_overlay {
     }
 
     fn code_hit(path: &str, line: u64, text: &str) -> CodeHit {
-        CodeHit { path: path.into(), line, text: text.into(), spans: vec![] }
+        CodeHit { path: path.into(), tab_width: 4, line, text: text.into(), spans: vec![] }
     }
 
     fn open(app: &mut App, keymap: &Keymap) {

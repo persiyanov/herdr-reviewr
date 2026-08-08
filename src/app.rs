@@ -1155,6 +1155,10 @@ impl App {
         self.diff_path = Some(path.clone());
         let (old, new) = self.content_sides(&path, previous_path.as_deref());
         self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
+        // Tab stops are display metadata, not highlighted content. Resolve them on every
+        // rebuild so editing a local `.editorconfig` repaints an unchanged open file on the
+        // next refresh without invalidating the expensive diff cache (`specs/diff-view.md`).
+        self.diff.tab_width = crate::editorconfig::tab_width(&self.repo, &self.diff.path);
         // Hold the new side as the preview's render input, the same current content the File
         // view previews. A non-markdown file, a notice, or a deleted file (empty new side)
         // holds nothing, so its toggle stays inert (specs/diff-view.md).
@@ -1204,10 +1208,13 @@ impl App {
         let oversize = std::fs::metadata(self.repo.join(path))
             .is_ok_and(|m| crate::diff::over_byte_budget(m.len() as usize));
         if oversize {
-            (FileDiff::too_large_notice(path.to_string()), String::new())
+            let mut diff = FileDiff::too_large_notice(path.to_string());
+            diff.tab_width = crate::editorconfig::tab_width(&self.repo, path);
+            (diff, String::new())
         } else {
             let content = worktree_content(&self.repo, path);
-            let diff = self.cache.get_file(path.to_string(), &content, &self.highlighter);
+            let mut diff = self.cache.get_file(path.to_string(), &content, &self.highlighter);
+            diff.tab_width = crate::editorconfig::tab_width(&self.repo, path);
             (diff, content)
         }
     }

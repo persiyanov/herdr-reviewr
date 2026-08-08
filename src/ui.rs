@@ -297,7 +297,7 @@ pub fn diff_row_heights(app: &App, area: Rect) -> Vec<usize> {
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let base = row_height(r, gutter_w, width, app.wrap);
+            let base = row_height(r, gutter_w, width, app.wrap, app.diff.tab_width);
             let card: usize = cards[i]
                 .iter()
                 .filter(|&&ci| Some(ci) != editing)
@@ -993,6 +993,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         width,
         h_scroll: app.h_scroll,
         wrap: app.wrap,
+        tab_width: app.diff.tab_width,
         focused: app.focus == Focus::Diff,
         pal: p,
         find: app
@@ -1100,13 +1101,14 @@ fn gutter_prefix_width(gutter_w: usize) -> usize {
 /// How many display rows a row needs: 1 for a fold or with wrap off, else the number of
 /// word-wrapped segments its (tab-expanded) content fills. Shares [`wrap_segments`] with
 /// the renderer so per-row geometry stays aligned with what gets painted.
-fn row_height(row: &Row, gutter_w: usize, width: usize, wrap: bool) -> usize {
+fn row_height(row: &Row, gutter_w: usize, width: usize, wrap: bool, tab_width: usize) -> usize {
     if !wrap || matches!(row, Row::Fold { .. }) {
         return 1;
     }
     let code_width = width.saturating_sub(gutter_prefix_width(gutter_w)).max(1);
     // The find highlight never changes wrapping, so height ignores it.
-    wrap_segments(&code_cells(row, false, &[]), code_width, ContinuationSpaces::Trim).len()
+    wrap_segments(&code_cells(row, false, &[], tab_width), code_width, ContinuationSpaces::Trim)
+        .len()
 }
 
 /// The diff-pane layout: constant for a frame.
@@ -1116,6 +1118,8 @@ struct RowLayout<'a> {
     width: usize,
     h_scroll: usize,
     wrap: bool,
+    /// Display columns between tab stops for this file (`specs/diff-view.md`).
+    tab_width: usize,
     /// Whether the diff pane is focused — dims the cursor row when it is not.
     focused: bool,
     /// The active palette for the change bars, row tints, and fills.
@@ -1138,7 +1142,7 @@ struct RowState {
 /// into `code_width`-wide rows; a continuation row carries a blank gutter so numbers
 /// stay aligned. With wrap off, the line is one row scrolled by `h_scroll`.
 fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'static>> {
-    let RowLayout { gutter_w, width, h_scroll, wrap, focused, pal, find } = layout;
+    let RowLayout { gutter_w, width, h_scroll, wrap, tab_width, focused, pal, find } = layout;
     let RowState { commented, cursor, selected } = state;
     if let Row::Fold { .. } = row {
         let label = if cursor {
@@ -1186,7 +1190,7 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
     // like word emphasis (specs/find-in-file.md).
     let hl_ranges =
         find.map(|(q, cs)| crate::app::find_match_ranges(&row.text(), q, cs)).unwrap_or_default();
-    let cells = code_cells(row, emph_on, &hl_ranges);
+    let cells = code_cells(row, emph_on, &hl_ranges, tab_width);
 
     let prefix_w = gutter_prefix_width(gutter_w);
     let code_width = width.saturating_sub(prefix_w).max(1);
@@ -1238,9 +1242,6 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
 pub(crate) fn rgb(c: crate::diff::Rgb) -> Color {
     Color::Rgb(c.0, c.1, c.2)
 }
-
-/// Tabs expand to this many columns.
-const TAB: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ContinuationSpaces {
@@ -1334,20 +1335,21 @@ struct Cell {
 /// char carries its column width, color, its word-emphasis flag (when `emph_on`), and whether it
 /// falls in an in-file find match (`hl_ranges`, char indices). Width comes from `unicode-width`
 /// so wide glyphs measure as the two columns they paint.
-fn code_cells(row: &Row, emph_on: bool, hl_ranges: &[(u32, u32)]) -> Vec<Cell> {
+fn code_cells(row: &Row, emph_on: bool, hl_ranges: &[(u32, u32)], tab_width: usize) -> Vec<Cell> {
     let emphasis = if emph_on { row.emphasis() } else { &[] };
     let in_emph = |i: u32| emphasis.iter().any(|&(a, b)| i >= a && i < b);
     let in_hl = |i: u32| hl_ranges.iter().any(|&(a, b)| i >= a && i < b);
     let mut cells = Vec::new();
     let mut idx = 0u32;
     let mut col = 0usize; // display column, so tab stops land right after wide glyphs too
+    let tab_width = tab_width.max(1);
     for s in row.spans() {
         let fg = rgb(s.color);
         for ch in s.text.chars() {
             let emph = in_emph(idx);
             let hl = in_hl(idx);
             if ch == '\t' {
-                for _ in 0..(TAB - col % TAB) {
+                for _ in 0..(tab_width - col % tab_width) {
                     cells.push(Cell { ch: ' ', w: 1, fg, emph, hl });
                     col += 1;
                 }
@@ -2501,7 +2503,7 @@ fn render_search_preview(
                 .as_ref()
                 .filter(|(l, _)| row.new_no() == Some(*l as u32))
                 .map(|(_, spans)| spans.as_slice());
-            search_preview_line(row, gw, width, hit, p)
+            search_preview_line(row, gw, width, hit, pv.diff.tab_width, p)
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), region);
@@ -2514,18 +2516,18 @@ fn search_preview_line(
     gw: usize,
     width: usize,
     hit: Option<&[(u32, u32)]>,
+    tab_width: usize,
     p: &Palette,
 ) -> Line<'static> {
     let num = row.new_no().map_or(String::new(), |n| n.to_string());
     let mut spans = vec![Span::styled(format!("{num:>gw$} "), Style::default().fg(p.overlay1))];
     match hit {
         None => {
+            let mut code = Vec::new();
             for sp in row.spans() {
-                spans.push(Span::styled(
-                    sp.text.replace('\t', "    "),
-                    Style::default().fg(rgb(sp.color)),
-                ));
+                code.push(Span::styled(sp.text.clone(), Style::default().fg(rgb(sp.color))));
             }
+            spans.extend(expand_span_tabs(code, tab_width));
             Line::from(spans)
         }
         Some(ranges) => {
@@ -2554,11 +2556,7 @@ fn search_preview_line(
                 Style::default().fg(colors.get(ci).map_or(p.text, |&(_, c)| c))
             };
             let emphasized = emphasized_spans(&text, &ranges, p.match_hl, base);
-            spans.extend(
-                emphasized
-                    .into_iter()
-                    .map(|sp| Span::styled(sp.content.replace('\t', "    "), sp.style)),
-            );
+            spans.extend(expand_span_tabs(emphasized, tab_width));
             let mut line = Line::from(spans);
             let pad = width.saturating_sub(line.width());
             if pad > 0 {
@@ -2567,6 +2565,30 @@ fn search_preview_line(
             line.style(Style::default().bg(p.cursor_bg(true)))
         }
     }
+}
+
+/// Expand hard tabs across styled spans without resetting the column at a syntax or match
+/// boundary. Search previews use spans directly rather than the diff renderer's [`Cell`]s.
+fn expand_span_tabs(spans: Vec<Span<'static>>, tab_width: usize) -> Vec<Span<'static>> {
+    let mut col = 0usize;
+    let tab_width = tab_width.max(1);
+    spans
+        .into_iter()
+        .map(|span| {
+            let mut text = String::new();
+            for ch in span.content.chars() {
+                if ch == '\t' {
+                    let spaces = tab_width - col % tab_width;
+                    text.push_str(&" ".repeat(spaces));
+                    col += spaces;
+                } else {
+                    text.push(ch);
+                    col += UnicodeWidthChar::width(ch).unwrap_or(0);
+                }
+            }
+            Span::styled(text, span.style)
+        })
+        .collect()
 }
 
 /// A code match row: `line:` dimmed, then the matched line. A too-wide row clips the line
@@ -2580,7 +2602,7 @@ fn search_code_row(
     let locator = format!("{:>5}: ", hit.line);
     let avail = width.saturating_sub(locator.width());
     // Expand tabs before the width and clip math run on the line (see `expand_tabs`).
-    let (text, match_spans) = expand_tabs(hit.text.trim_end(), &hit.spans);
+    let (text, match_spans) = expand_tabs(hit.text.trim_end(), &hit.spans, hit.tab_width);
     let text = text.as_str();
     // When the first matched span sits past the visible window, skip the line's head so
     // the match shows, marking the cut with a leading `…`. The engine's byte offset is
@@ -2624,26 +2646,37 @@ fn search_code_row(
     selectable_row(p, spans, width, fill)
 }
 
-/// Expand tabs to four spaces, shifting the match byte spans to keep them over the same
+/// Expand tabs to the file's tab stops, shifting match byte spans to keep them over the same
 /// characters. The engine reports match offsets into the raw line; a tab is zero display
 /// columns to the width math but real width on screen, so an un-expanded tab-indented row
-/// would skip the clip and overflow.
-fn expand_tabs(text: &str, spans: &[(u32, u32)]) -> (String, Vec<(u32, u32)>) {
+/// would skip the clip and overflow (`specs/search.md`, `specs/diff-view.md`).
+fn expand_tabs(text: &str, spans: &[(u32, u32)], tab_width: usize) -> (String, Vec<(u32, u32)>) {
     if !text.contains('\t') {
         return (text.to_string(), spans.to_vec());
     }
     let mut out = String::with_capacity(text.len());
-    let mut tabs = Vec::new();
+    let mut adjustments = Vec::new();
+    let mut added = 0usize;
+    let mut col = 0usize;
+    let tab_width = tab_width.max(1);
     for (i, c) in text.char_indices() {
         if c == '\t' {
-            out.push_str("    ");
-            tabs.push(i);
+            let spaces = tab_width - col % tab_width;
+            out.push_str(&" ".repeat(spaces));
+            col += spaces;
+            added += spaces - 1;
+            adjustments.push((i, added));
         } else {
             out.push(c);
+            col += UnicodeWidthChar::width(c).unwrap_or(0);
         }
     }
-    // Each tab strictly before an offset added three bytes; the tab positions are sorted.
-    let shift = |at: usize| -> u32 { (tabs.partition_point(|&t| t < at) * 3) as u32 };
+    // Entries are sorted by raw byte position and hold cumulative bytes added through that
+    // tab. A span at the tab itself stays before its expansion; later spans move past it.
+    let shift = |at: usize| -> u32 {
+        let n = adjustments.partition_point(|&(pos, _)| pos < at);
+        n.checked_sub(1).map_or(0, |i| adjustments[i].1 as u32)
+    };
     let spans =
         spans.iter().map(|&(s, e)| (s + shift(s as usize), e + shift(e as usize))).collect();
     (out, spans)

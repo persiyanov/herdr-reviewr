@@ -5,6 +5,7 @@
 //! its background scan, so a query never runs on the frame loop. Completions are
 //! generation-tagged and land latest-wins, like the world worker's (specs/tui.md Refresh).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
@@ -53,6 +54,8 @@ pub struct FileHit {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeHit {
     pub path: String,
+    /// Display columns between tab stops, resolved for `path` when the query runs.
+    pub tab_width: usize,
     /// 1-based line number.
     pub line: u64,
     pub text: String,
@@ -177,14 +180,22 @@ impl Engine {
         for m in &mut grep.matches {
             m.trim_leading_whitespace();
         }
+        let mut tab_widths = HashMap::new();
         let code: Vec<CodeHit> = grep
             .matches
             .iter()
-            .map(|m| CodeHit {
-                path: grep.files[m.file_index].relative_path(picker),
-                line: m.line_number,
-                text: m.line_content.clone(),
-                spans: m.match_byte_offsets.iter().copied().collect(),
+            .map(|m| {
+                let path = grep.files[m.file_index].relative_path(picker);
+                let tab_width = *tab_widths
+                    .entry(path.clone())
+                    .or_insert_with(|| crate::editorconfig::tab_width(&self.repo, &path));
+                CodeHit {
+                    path,
+                    tab_width,
+                    line: m.line_number,
+                    text: m.line_content.clone(),
+                    spans: m.match_byte_offsets.iter().copied().collect(),
+                }
             })
             .collect();
         let code_more = grep.next_file_offset != 0;
