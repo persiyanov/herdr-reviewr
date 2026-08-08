@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-18
-Last edited: 2026-08-08
+Last edited: 2026-08-09
 ---
 
 # Search
@@ -98,6 +98,7 @@ is useful before the first keystroke.
 - A file's first match emits a header row in the file-list row look, then its match rows.
 - A match row is `line:` dimmed, then the matched line, its leading indentation dropped so
   the match text aligns at the left.
+- Hard tabs use the matched file's EditorConfig tab width (`diff-view.md`).
 - A match row longer than the pane clips around its first matched span, keeping the
   emphasis visible.
 - The pick lands only on match rows in `Code` mode, only on file rows in `Files` mode.

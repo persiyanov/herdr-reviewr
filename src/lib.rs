@@ -13,6 +13,7 @@ pub mod azure_devops;
 pub mod browser;
 pub mod config;
 pub mod diff;
+pub mod editorconfig;
 pub mod export;
 pub mod file_list;
 pub mod forge;

@@ -135,6 +135,8 @@ pub struct FileDiff {
     pub previous_path: Option<String>,
     pub state: FileState,
     pub view: View,
+    /// Display columns between hard-tab stops, resolved for `path` from `EditorConfig`.
+    pub tab_width: usize,
     pub rows: Vec<Row>,
 }
 
@@ -165,6 +167,7 @@ impl FileDiff {
             previous_path: None,
             state: FileState::Normal,
             view: View::Diff,
+            tab_width: crate::editorconfig::DEFAULT_TAB_WIDTH,
             rows: Vec::new(),
         }
     }
@@ -184,6 +187,7 @@ impl FileDiff {
             previous_path: previous_path.clone(),
             state,
             view: View::Diff,
+            tab_width: crate::editorconfig::DEFAULT_TAB_WIDTH,
             rows: Vec::new(),
         };
         if old.contains('\0') || new.contains('\0') {
@@ -235,6 +239,7 @@ impl FileDiff {
             previous_path,
             state: FileState::Normal,
             view: View::Diff,
+            tab_width: crate::editorconfig::DEFAULT_TAB_WIDTH,
             rows: collapse_context(&rows),
         }
     }
@@ -248,6 +253,7 @@ impl FileDiff {
             previous_path: None,
             state,
             view: View::File,
+            tab_width: crate::editorconfig::DEFAULT_TAB_WIDTH,
             rows: Vec::new(),
         };
         if content.contains('\0') {
@@ -269,7 +275,14 @@ impl FileDiff {
                 }
             })
             .collect();
-        Self { path, previous_path: None, state: FileState::Normal, view: View::File, rows }
+        Self {
+            path,
+            previous_path: None,
+            state: FileState::Normal,
+            view: View::File,
+            tab_width: crate::editorconfig::DEFAULT_TAB_WIDTH,
+            rows,
+        }
     }
 
     /// The File-view `too_large` notice, for an over-budget file the caller declines to read.
@@ -280,6 +293,7 @@ impl FileDiff {
             previous_path: None,
             state: FileState::TooLarge,
             view: View::File,
+            tab_width: crate::editorconfig::DEFAULT_TAB_WIDTH,
             rows: Vec::new(),
         }
     }

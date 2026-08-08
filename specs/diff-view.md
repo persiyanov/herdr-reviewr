@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-24
-Last edited: 2026-07-20
+Last edited: 2026-08-09
 ---
 
 # Diff view
@@ -39,6 +39,7 @@ What the reviewer sees (unified view, a renamed TypeScript file):
 | `previous_path` | string? | the old path when renamed, absent otherwise                     |
 | `state`         | enum    | `normal` shows rows, `binary` and `too_large` show a notice     |
 | `view`          | enum    | `diff` shows change rows and folds, `file` shows all `context`  |
+| `tab_width`     | integer | display columns between hard-tab stops for this file            |
 | `rows`          | Row[]   | the render-and-cursor units, in display order                   |
 
 ### Row
@@ -129,7 +130,12 @@ Returning to source differs per view:
 - Long lines wrap by default, at word boundaries. A word wider than the column hard-breaks. A toggle switches to horizontal scroll (`←`/`→`), with the gutter pinned.
 - A wrapped continuation row has a blank gutter and drops the break's leading space.
 - A commented line shows its line number in the comment color. The change bar keeps its own color.
-- Tabs render as spaces, 4 by default.
+- Tabs render as spaces to the next tab stop. The width resolves for the displayed file from
+  `.editorconfig`: files are searched from the file's directory upward until `root = true` or
+  the filesystem root, matching sections in source order with closer files winning. A valid
+  `tab_width` applies; without one, a numeric `indent_size` applies; otherwise the width is 4.
+  `unset` removes an inherited value. Unreadable or malformed EditorConfig input falls back to
+  width 4. A refresh rereads the setting, including for an unchanged open file.
 
 ### Comment anchoring
 

@@ -231,6 +231,28 @@ fn tabs_expand_to_spaces_in_the_diff() {
 }
 
 #[test]
+fn local_editorconfig_sets_the_diff_tab_width() {
+    let r = Repo::init();
+    r.write(".editorconfig", "root = true\n[*.rs]\ntab_width = 2\n");
+    r.write("t.rs", "x\n");
+    r.commit_all("init");
+    r.write("t.rs", "x\n\tindented\n");
+
+    let mut app = app_on(&r);
+    let two = render(&app);
+    let two_col = two.lines().find(|l| l.contains("indented")).unwrap().find("indented").unwrap();
+    assert_eq!(app.diff.tab_width, 2);
+
+    // An EditorConfig-only edit is enough for refresh to repaint an unchanged open file.
+    r.write(".editorconfig", "root = true\n[*.rs]\ntab_width = 6\n");
+    app.reload().unwrap();
+    let six = render(&app);
+    let six_col = six.lines().find(|l| l.contains("indented")).unwrap().find("indented").unwrap();
+    assert_eq!(app.diff.tab_width, 6);
+    assert_eq!(six_col - two_col, 4, "the painted indentation follows the new tab stop");
+}
+
+#[test]
 fn a_long_line_wraps_across_display_rows() {
     let long: String = std::iter::repeat_n("abcd", 60).collect(); // 240 cols, wider than the pane
     let r = Repo::init();
@@ -2000,12 +2022,14 @@ mod search_screen_render {
                 code: vec![
                     CodeHit {
                         path: "src/registry.rs".into(),
+                        tab_width: 4,
                         line: 1,
                         text: "fn resolve() {}".into(),
                         spans: vec![(3, 6)],
                     },
                     CodeHit {
                         path: "src/registry.rs".into(),
+                        tab_width: 4,
                         line: 2,
                         text: "registry.resolve()".into(),
                         spans: vec![(0, 3)],
@@ -2146,6 +2170,7 @@ mod search_screen_render {
                 files: Vec::new(),
                 code: vec![CodeHit {
                     path: "a.rs".into(),
+                    tab_width: 4,
                     line: 30,
                     text: "line_30".into(),
                     spans: vec![(0, 7)],
@@ -2199,6 +2224,7 @@ mod search_screen_render {
                 // As the worker emits it: the trimmed line, offsets into the trimmed text.
                 code: vec![CodeHit {
                     path: "a.rs".into(),
+                    tab_width: 4,
                     line: 30,
                     text: "fn resolve() {}".into(),
                     spans: vec![(3, 10)], // "resolve" within the trimmed line
@@ -2374,6 +2400,7 @@ mod search_screen_render {
                 files: Vec::new(),
                 code: vec![CodeHit {
                     path: "a.rs".into(),
+                    tab_width: 4,
                     line: 1,
                     text: "alpha".into(),
                     spans: vec![(0, 5)],
@@ -2428,7 +2455,13 @@ mod search_row_emphasis {
         // first matched span (`needle_marker`, 13 bytes) rather than the un-shown head.
         let text = format!("{}needle_marker tail", "x".repeat(200));
         let start = 200u32;
-        let hit = CodeHit { path: "a.rs".into(), line: 1, text, spans: vec![(start, start + 13)] };
+        let hit = CodeHit {
+            path: "a.rs".into(),
+            tab_width: 4,
+            line: 1,
+            text,
+            spans: vec![(start, start + 13)],
+        };
         land_search_completion(&mut app, code_only(hit), 1);
         handle_key(&mut app, KeyEvent::from(KeyCode::Tab), AREA, default_keymap()).unwrap();
 
@@ -2476,6 +2509,7 @@ mod search_row_emphasis {
         // Two leading tabs, then `needle` — the match is at bytes 2..8 of the raw line.
         let hit = CodeHit {
             path: "a.rs".into(),
+            tab_width: 2,
             line: 1,
             text: "\t\tneedle here".into(),
             spans: vec![(2, 8)],
@@ -2487,8 +2521,8 @@ mod search_row_emphasis {
         let out = dump(&buf);
         let y = out.lines().position(|l| l.contains("needle")).unwrap();
         let row = out.lines().nth(y).unwrap();
-        // Eight spaces of expanded indent sit between the locator and `needle`.
-        assert!(row.contains("1:         needle"), "tabs expand to spaces: {row:?}");
+        // Two tabs at two-column stops put four spaces between the locator and `needle`.
+        assert!(row.contains("1:     needle"), "tabs expand to spaces: {row:?}");
         let x = row.find("needle").unwrap() as u16;
         let style = buf.cell((x, y as u16)).expect("cell").style();
         assert_eq!(
@@ -2515,6 +2549,7 @@ mod search_row_emphasis {
         let start = head.len() as u32; // 600 bytes in
         let hit = CodeHit {
             path: "a.rs".into(),
+            tab_width: 4,
             line: 1,
             text: format!("{head}needle tail"),
             spans: vec![(start, start + 6)],
