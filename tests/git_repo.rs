@@ -190,6 +190,12 @@ fn a_pick_git_could_never_have_written_is_no_pick() {
     // can smuggle an escape sequence into the frame (specs/review-model.md).
     r.write_raw_base_pick("dev\u{1b}]0;pwned\u{7}");
     assert_eq!(read_base_pick(r.path()).unwrap(), None);
+
+    // Nor a rev expression: `main~5` resolves to a commit no branch names, and the header
+    // would paint it as though a branch were chosen.
+    r.write_raw_base_pick("main~5");
+    assert_eq!(read_base_pick(r.path()).unwrap(), None);
+
     let status = resolve_base(r.path(), None).unwrap().status;
     assert_eq!(status.skipped, None, "a malformed pick is not a recorded choice either");
     assert_eq!(status.winner.unwrap().name, "main");

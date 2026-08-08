@@ -2883,7 +2883,13 @@ fn a_narrow_header_never_maps_a_click_outside_the_painted_base() {
         let hits: Vec<u16> = (0..width)
             .filter(|&c| ui::hit_header(area, &app, app.keymap(), c, 0) == Some(HeaderHit::Base))
             .collect();
-        let Some((&first, &last)) = hits.first().zip(hits.last()) else { continue };
+        let Some((&first, &last)) = hits.first().zip(hits.last()) else {
+            // Too narrow for even one column of the name: the base left the header whole,
+            // so nothing paints a nameless `vs` and nothing claims it (specs/tui.md).
+            assert!(!line0.contains("vs"), "width {width}: a nameless `vs` paints: {line0}");
+            assert!(line0.contains("[branch]"), "width {width}: the scope survives: {line0}");
+            continue;
+        };
         assert_eq!(
             hits.len() as u16,
             last - first + 1,

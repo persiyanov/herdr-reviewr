@@ -19,3 +19,4 @@ reviewr runs live beside a working agent, so every action must feel instant and 
 
 - A genuinely slow or hung external call (git under a busy agent, `gh`) may show a delayed loading state and, while it is outstanding, wake the loop more often to deliver promptly.
 - A large file or a first-visit diff may pay a one-time inline cost when async prefetch is not warranted; note it rather than building speculative machinery.
+- Opening the base picker reads its branch list inline, measured at ~30ms (`specs/input.md`). This is a deliberate, permanent exception: an async open would either flash an empty list or blank the frame, both of which this policy forbids above.

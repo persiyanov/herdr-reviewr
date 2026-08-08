@@ -2691,9 +2691,10 @@ impl App {
         });
     }
 
-    /// Insert pasted `text` at the caret as one unit, normalizing `\r\n`/`\r` to `\n`.
-    /// A single-line field takes newlines as spaces (specs/search.md, specs/input.md) — a
-    /// branch name pasted with its trailing newline still filters.
+    /// Insert pasted `text` at the caret as one unit, normalizing `\r\n`/`\r` to `\n`. The
+    /// single-line search and find queries take a newline as a space (specs/search.md); the
+    /// base picker's filter drops it, so a branch name pasted with the newline it was copied
+    /// with still matches its branch (specs/input.md).
     pub fn input_paste(&mut self, text: &str) {
         let mut norm = text.replace("\r\n", "\n").replace('\r', "\n");
         match self.mode {

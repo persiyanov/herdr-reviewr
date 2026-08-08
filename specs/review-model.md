@@ -63,6 +63,8 @@ The header names the base while the `branch` scope is active (`tui.md`). A base 
 
 Open decision: whether an open PR's target branch (`forge-host.md`) joins the chain between the pick and `origin/HEAD`, pending an interaction trial. The picker stars the PR target either way (`input.md`).
 
+Open decision: whether a name that exists both locally and on origin should resolve local first. Origin first diffs a stacked branch against a stale pushed tip. Local first diffs against a stale local `main`. The two failures are symmetric, so the order stays as it is until one is shown to hurt more.
+
 The installed pane passes no arguments, so `--base` serves standalone and dev runs.
 
 ### Ignored paths

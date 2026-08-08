@@ -927,6 +927,7 @@ fn branch_name_shaped(value: &str) -> bool {
         && !value.starts_with('-')
         && !value.contains("..")
         && !value.contains("@{")
+        && !value.contains(['~', '^', ':', '?', '*', '[', '\\'])
         && value.bytes().all(|byte| byte > b' ' && byte != 0x7f)
 }
 
