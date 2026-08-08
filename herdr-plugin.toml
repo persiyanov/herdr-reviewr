@@ -1,6 +1,6 @@
 id = "persiyanov.reviewr"
 name = "reviewr"
-version = "0.29.0"
+version = "0.30.0"
 # Turn tracking resolves each agent's `cwd` from `herdr agent list` to decide worktree
 # membership, and `cwd` is only verified present from 0.7.5 (docs/herdr-api-notes.md). On an
 # older herdr every agent would parse with no `cwd`, and `last turn` would never track.
