@@ -5203,7 +5203,7 @@ fn typing_filters_and_enter_picks_the_highlight() {
     let r = based_repo();
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
-    assert_eq!(app.branch_base.as_ref().map(|b| b.name.as_str()), Some("main"));
+    assert_eq!(app.branch_base.winner.as_ref().map(|b| b.name.as_str()), Some("main"));
     app.open_base_picker();
     app.base_picker_input('d');
     app.base_picker_input('e');
@@ -5211,7 +5211,7 @@ fn typing_filters_and_enter_picks_the_highlight() {
     assert_eq!(bp.filtered().len(), 1, "the filter matches anywhere in the name");
     app.base_picker_pick().unwrap();
     assert_eq!(app.mode, Mode::Normal, "a pick closes the picker");
-    assert_eq!(app.branch_base.as_ref().map(|b| b.name.as_str()), Some("dev"));
+    assert_eq!(app.branch_base.winner.as_ref().map(|b| b.name.as_str()), Some("dev"));
     let picked = r.git(&["show", "refs/reviewr/base-pick"]);
     assert_eq!(picked.trim(), "dev", "the pick persists in the private ref");
     assert!(
@@ -5241,13 +5241,13 @@ fn picking_the_default_clears_the_pick() {
     herdr_reviewr::git::write_base_pick(r.path(), "dev").unwrap();
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
-    assert_eq!(app.branch_base.as_ref().map(|b| b.name.as_str()), Some("dev"));
+    assert_eq!(app.branch_base.winner.as_ref().map(|b| b.name.as_str()), Some("dev"));
     app.open_base_picker();
     let bp = app.base_picker.as_ref().unwrap();
     assert_eq!(bp.rows[bp.cursor].name, "dev", "the highlight opens on the current base");
     app.base_picker_goto(0);
     app.base_picker_pick().unwrap();
-    assert_eq!(app.branch_base.as_ref().map(|b| b.name.as_str()), Some("main"));
+    assert_eq!(app.branch_base.winner.as_ref().map(|b| b.name.as_str()), Some("main"));
     assert_eq!(
         herdr_reviewr::git::read_base_pick(r.path()).unwrap(),
         None,
@@ -5300,7 +5300,7 @@ fn the_branch_scope_with_no_base_leads_the_footer_with_the_picker() {
     r.git(&["checkout", "-q", "-b", "feature"]);
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
-    assert!(app.branch_base.is_none(), "no origin/HEAD, no pick: nothing resolves");
+    assert!(app.branch_base.winner.is_none(), "no origin/HEAD, no pick: nothing resolves");
     assert!(app.entries.is_empty(), "the empty state is legible, never a guessed base");
     let bands: Vec<(FooterAction, Band)> = app.footer_bands();
     assert_eq!(bands[0], (FooterAction::BasePick, Band::Primary));

@@ -47,7 +47,7 @@ pub struct WorldInput {
 pub struct WorldSnapshot {
     pub changed: HashMap<String, Annotation>,
     pub entries: Vec<Entry>,
-    pub branch_base: Option<git::ResolvedBase>,
+    pub branch_base: git::BaseStatus,
 }
 
 /// Build the snapshot for `input`. The changeset is computed regardless of tab so the
@@ -61,7 +61,7 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
         return Ok(WorldSnapshot {
             changed: HashMap::new(),
             entries: Vec::new(),
-            branch_base: None,
+            branch_base: git::BaseStatus::default(),
         });
     }
     let (branch_base, changed) = build_changed(input)?;
@@ -78,26 +78,27 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
 /// The active scope's changed files and, on the `branch` scope, the base they diff against —
 /// the piece a scope switch rebuilds before its frame, so the header count and list never
 /// wear another scope's label (specs/tui.md).
-pub fn build_changed(input: &WorldInput) -> Result<(Option<git::ResolvedBase>, Vec<ChangedFile>)> {
+pub fn build_changed(input: &WorldInput) -> Result<(git::BaseStatus, Vec<ChangedFile>)> {
+    let none = git::BaseStatus::default;
     if !git::is_repo(&input.repo) {
-        return Ok((None, Vec::new()));
+        return Ok((none(), Vec::new()));
     }
     match input.scope {
         Scope::LastTurn => match input.turn_baseline.as_deref() {
-            Some(t) => Ok((None, git::changed_against_tree(&input.repo, t)?)),
-            None => Ok((None, Vec::new())),
+            Some(t) => Ok((none(), git::changed_against_tree(&input.repo, t)?)),
+            None => Ok((none(), Vec::new())),
         },
-        Scope::Uncommitted => Ok((None, git::changed_files(&input.repo, input.scope, None)?)),
+        Scope::Uncommitted => Ok((none(), git::changed_files(&input.repo, input.scope, None)?)),
         Scope::Branch => {
             // A resolve failure degrades to the no-base empty state instead of failing the
             // whole build — the header's `no base` is legible, a poll-time error loop is
             // not (specs/review-model.md Base branch).
             let Ok(resolution) = git::resolve_base(&input.repo, input.base.as_deref()) else {
-                return Ok((None, Vec::new()));
+                return Ok((none(), Vec::new()));
             };
-            let base_oid = resolution.winner.as_ref().map(|w| w.oid.clone());
+            let base_oid = resolution.status.winner.as_ref().map(|w| w.oid.clone());
             let changed = git::changed_files(&input.repo, input.scope, base_oid.as_deref())?;
-            Ok((resolution.winner, changed))
+            Ok((resolution.status, changed))
         }
     }
 }

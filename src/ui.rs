@@ -528,21 +528,20 @@ fn scope_chip(app: &App) -> String {
 }
 
 /// The `branch` scope's base label as `(lead, name, tail)`: `vs ` + the bare name however it
-/// resolved, the skipped-choice tail ` · <name> missing`, or the empty-state `no base` alone
-/// in the name slot with no lead (`specs/tui.md`). `None` off the `branch` scope.
+/// resolved, or the empty-state `no base` in the name slot with no lead. The skipped-choice
+/// tail ` · <name> missing` follows either, so a dormant choice never reads as never-chosen
+/// (`specs/tui.md`). `None` off the `branch` scope.
 fn base_label(app: &App) -> Option<(String, String, String)> {
     if app.scope != crate::model::Scope::Branch {
         return None;
     }
-    Some(match &app.branch_base {
-        Some(b) => {
-            let tail = match &b.skipped {
-                Some(missing) => format!(" · {missing} missing"),
-                None => String::new(),
-            };
-            ("vs ".to_string(), b.name.clone(), tail)
-        }
-        None => (String::new(), "no base".to_string(), String::new()),
+    let tail = match &app.branch_base.skipped {
+        Some(missing) => format!(" · {missing} missing"),
+        None => String::new(),
+    };
+    Some(match &app.branch_base.winner {
+        Some(b) => ("vs ".to_string(), b.name.clone(), tail),
+        None => (String::new(), "no base".to_string(), tail),
     })
 }
 

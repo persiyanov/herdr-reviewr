@@ -23,12 +23,12 @@ fn changed_files(
     scope: Scope,
     base: Option<&str>,
 ) -> anyhow::Result<Vec<ChangedFile>> {
-    let winner = resolve_base(repo, base).map_err(|e| anyhow::anyhow!("{}", e.0))?.winner;
+    let winner = resolve_base(repo, base).map_err(|e| anyhow::anyhow!("{}", e.0))?.status.winner;
     changed_files_oid(repo, scope, winner.as_ref().map(|w| w.oid.as_str()))
 }
 
 fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
-    let winner = resolve_base(repo, base).ok()?.winner?;
+    let winner = resolve_base(repo, base).ok()?.status.winner?;
     merge_base_oid(repo, &winner.oid)
 }
 
@@ -115,16 +115,16 @@ fn the_chain_is_flag_then_pick_then_default() {
     r.commit_all("diverge");
 
     // Default branch alone: `origin/HEAD` names `main` (specs/review-model.md).
-    let winner = resolve_base(r.path(), None).unwrap().winner.unwrap();
+    let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
     assert_eq!((winner.name.as_str(), winner.source), ("main", BaseSource::DefaultBranch));
 
     // A pick outranks the default.
     write_base_pick(r.path(), "picked-base").unwrap();
-    let winner = resolve_base(r.path(), None).unwrap().winner.unwrap();
+    let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
     assert_eq!((winner.name.as_str(), winner.source), ("picked-base", BaseSource::Pick));
 
     // The flag outranks the pick.
-    let winner = resolve_base(r.path(), Some("flagged-base")).unwrap().winner.unwrap();
+    let winner = resolve_base(r.path(), Some("flagged-base")).unwrap().status.winner.unwrap();
     assert_eq!((winner.name.as_str(), winner.source), ("flagged-base", BaseSource::Flag));
 }
 
@@ -158,8 +158,8 @@ fn a_nonexistent_flag_falls_through_and_reads_as_skipped() {
     // A `--base` naming no existing ref is skipped, not an error; the pick resolves, and
     // the header can name the dead flag (specs/review-model.md, specs/tui.md).
     assert_eq!(merge_base(r.path(), Some("no-such-ref")), Some(branch_point));
-    let winner = resolve_base(r.path(), Some("no-such-ref")).unwrap().winner.unwrap();
-    assert_eq!(winner.skipped.as_deref(), Some("no-such-ref"));
+    let status = resolve_base(r.path(), Some("no-such-ref")).unwrap().status;
+    assert_eq!(status.skipped.as_deref(), Some("no-such-ref"));
 }
 
 #[test]
@@ -174,7 +174,7 @@ fn a_prefixed_flag_spelling_resolves_to_the_bare_name() {
 
     // `--base origin/main` resolves as a verbatim rev, but the header and the PR name
     // shield carry the bare spelling (specs/tui.md, specs/forge-host.md).
-    let winner = resolve_base(r.path(), Some("origin/main")).unwrap().winner.unwrap();
+    let winner = resolve_base(r.path(), Some("origin/main")).unwrap().status.winner.unwrap();
     assert_eq!((winner.name.as_str(), winner.source), ("main", BaseSource::Flag));
 }
 
@@ -191,21 +191,36 @@ fn a_dormant_pick_is_skipped_and_reactivates() {
     write_base_pick(r.path(), "dev").unwrap();
 
     // The pick wins while its branch resolves.
-    let winner = resolve_base(r.path(), None).unwrap().winner.unwrap();
+    let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
     assert_eq!(winner.source, BaseSource::Pick);
 
     // The branch disappears: the pick is kept and skipped, the default wins, and the
     // header can say so (specs/review-model.md).
     r.git(&["branch", "-D", "dev"]);
-    let winner = resolve_base(r.path(), None).unwrap().winner.unwrap();
+    let status = resolve_base(r.path(), None).unwrap().status;
+    let winner = status.winner.unwrap();
     assert_eq!((winner.name.as_str(), winner.source), ("main", BaseSource::DefaultBranch));
-    assert_eq!(winner.skipped.as_deref(), Some("dev"));
+    assert_eq!(status.skipped.as_deref(), Some("dev"));
     assert_eq!(read_base_pick(r.path()).unwrap().as_deref(), Some("dev"));
 
     // The branch returns: the pick reactivates without a new choice.
     r.git(&["branch", "dev", "main"]);
-    let winner = resolve_base(r.path(), None).unwrap().winner.unwrap();
+    let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
     assert_eq!((winner.name.as_str(), winner.source), ("dev", BaseSource::Pick));
+}
+
+#[test]
+fn a_dormant_pick_survives_even_when_nothing_resolves() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    write_base_pick(r.path(), "gone").unwrap();
+
+    // No flag, no default, and the picked branch is missing: the skip still reports, so
+    // the header reads `no base · gone missing`, never a bare `no base` (specs/tui.md).
+    let status = resolve_base(r.path(), None).unwrap().status;
+    assert_eq!(status.winner, None);
+    assert_eq!(status.skipped.as_deref(), Some("gone"));
 }
 
 #[test]
@@ -241,6 +256,19 @@ fn default_branch_name_reads_the_origin_head_symref() {
     assert_eq!(default_branch_name(r.path()).unwrap(), None);
     set_origin_default(&r, "trunk", "HEAD");
     assert_eq!(default_branch_name(r.path()).unwrap().as_deref(), Some("trunk"));
+}
+
+#[test]
+fn a_dangling_origin_head_symref_names_no_default() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    set_origin_default(&r, "master", "HEAD");
+
+    // `fetch --prune` after a server-side rename deletes the target but leaves the
+    // symref: a name resolving to nothing is no default (specs/review-model.md).
+    r.git(&["update-ref", "-d", "refs/remotes/origin/master"]);
+    assert_eq!(default_branch_name(r.path()).unwrap(), None);
 }
 
 #[test]

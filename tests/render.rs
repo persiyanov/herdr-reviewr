@@ -2827,6 +2827,22 @@ fn without_a_resolving_base_the_header_reads_no_base() {
 }
 
 #[test]
+fn a_dormant_pick_shows_beside_the_empty_state() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    herdr_reviewr::git::write_base_pick(r.path(), "gone").unwrap();
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    assert!(
+        line0.contains("no base · gone missing"),
+        "a dormant choice never reads as never-chosen: {line0}"
+    );
+}
+
+#[test]
 fn an_overlong_base_name_truncates_with_an_ellipsis() {
     let r = Repo::init();
     r.write("hello.rs", "alpha\n");

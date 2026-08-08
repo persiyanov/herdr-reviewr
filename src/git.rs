@@ -531,14 +531,22 @@ pub enum BaseSource {
     DefaultBranch,
 }
 
-/// The `branch` scope's base as the header shows it: the winning source's bare name, its
-/// pinned commit, and the first recorded choice the chain skipped because it no longer
-/// resolves (`specs/review-model.md` Base branch, `specs/tui.md`).
+/// The winning base: the source's bare name and its pinned commit
+/// (`specs/review-model.md` Base branch).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedBase {
     pub name: String,
     pub oid: String,
     pub source: BaseSource,
+}
+
+/// The chain outcome the header paints: the winner and the first recorded choice the
+/// chain skipped because it no longer resolves. The skip rides beside the winner, not
+/// inside it, so it survives a chain where nothing resolves at all — a dormant pick
+/// never reads as never-chosen (`specs/tui.md`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BaseStatus {
+    pub winner: Option<ResolvedBase>,
     pub skipped: Option<String>,
 }
 
@@ -549,7 +557,7 @@ pub struct ResolvedBase {
 /// (`specs/forge-host.md` Resolution).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BaseResolution {
-    pub winner: Option<ResolvedBase>,
+    pub status: BaseStatus,
     pub candidates: Vec<(String, String)>,
     pub recorded: Vec<String>,
 }
@@ -624,10 +632,9 @@ pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResoluti
         name: name.clone(),
         oid: oid.clone(),
         source: *source,
-        skipped: skipped.clone(),
     });
     let candidates = candidates.into_iter().map(|(name, oid, _)| (name, oid)).collect();
-    Ok(BaseResolution { winner, candidates, recorded })
+    Ok(BaseResolution { status: BaseStatus { winner, skipped }, candidates, recorded })
 }
 
 /// The branch name `origin/HEAD` points at (`specs/review-model.md` Base branch). Some
@@ -638,7 +645,12 @@ pub fn default_branch_name(repo: &Path) -> Result<Option<String>, GitFail> {
     if let Some(name) =
         target.and_then(|t| t.strip_prefix("refs/remotes/origin/").map(str::to_string))
     {
-        return Ok(Some(name));
+        // `fetch --prune` can delete the target and leave the symref dangling: a name
+        // that resolves to nothing is no default, or the picker could never mark the
+        // clearing row and the name shield would carry a phantom (`specs/input.md`).
+        let probe = format!("refs/remotes/origin/{name}^{{commit}}");
+        let resolves = git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])?;
+        return Ok(resolves.map(|_| name));
     }
     let Some(oid) = git_tristate(
         repo,

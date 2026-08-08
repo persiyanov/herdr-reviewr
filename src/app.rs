@@ -428,9 +428,10 @@ pub enum Band {
 pub struct App {
     pub repo: PathBuf,
     pub base: Option<String>,
-    /// The `branch` scope's resolved base, carried by the latest landed snapshot — the
-    /// header names it and the diff builds against its OID (`specs/review-model.md`).
-    pub branch_base: Option<git::ResolvedBase>,
+    /// The `branch` scope's base outcome, carried by the latest landed snapshot — the
+    /// header names its winner (or the skip) and the diff builds against the winner's OID
+    /// (`specs/review-model.md`).
+    pub branch_base: git::BaseStatus,
     /// Bumped by each pick made in this pane, so an in-flight build that read the old pick
     /// fails the landing's input match instead of reverting the pick (`crate::world::WorldInput`).
     base_epoch: u64,
@@ -666,7 +667,7 @@ impl App {
         Self {
             repo,
             base,
-            branch_base: None,
+            branch_base: git::BaseStatus::default(),
             base_epoch: 0,
             scope,
             tab: Tab::Changes,
@@ -879,7 +880,7 @@ impl App {
                 // The header's base label describes the carried list, so it carries too —
                 // a fresh app would paint `no base` beside a populated frame
                 // (`specs/tui.md`).
-                self.branch_base = old.branch_base.take();
+                self.branch_base = std::mem::take(&mut old.branch_base);
                 self.diff = std::mem::take(&mut old.diff);
                 self.visible = std::mem::take(&mut old.visible);
                 self.expanded_folds = std::mem::take(&mut old.expanded_folds);
@@ -1279,8 +1280,11 @@ impl App {
                 (old, new)
             }
             Scope::Branch => {
-                let mb =
-                    self.branch_base.as_ref().and_then(|b| git::merge_base(&self.repo, &b.oid));
+                let mb = self
+                    .branch_base
+                    .winner
+                    .as_ref()
+                    .and_then(|b| git::merge_base(&self.repo, &b.oid));
                 let old =
                     mb.map(|m| git::file_content(&self.repo, &m, old_path)).unwrap_or_default();
                 (old, worktree_content(&self.repo, new_path))
@@ -3399,7 +3403,7 @@ impl App {
             // actions apply instead.
             out.push((A::Preview, Primary));
         } else if self.file_rows.is_empty()
-            && self.branch_base.is_none()
+            && self.branch_base.winner.is_none()
             && self.base_pick_available()
         {
             // The `branch` scope with no base: the picker is the way forward, and `b` would
@@ -3645,7 +3649,7 @@ impl App {
             .collect();
         // A stable sort, so recency still orders the promoted pair and the rest alike.
         rows.sort_by_key(|r| (!r.starred, !r.is_default));
-        let current = self.branch_base.as_ref().map(|b| b.name.as_str());
+        let current = self.branch_base.winner.as_ref().map(|b| b.name.as_str());
         let cursor = current.and_then(|c| rows.iter().position(|r| r.name == c)).unwrap_or(0);
         self.base_picker = Some(BasePicker { rows, cursor, query: String::new() });
         self.mode = Mode::BasePick;
@@ -4025,12 +4029,14 @@ mod tests {
             cursor: 0,
             query: "d".to_string(),
         });
-        old.branch_base = Some(crate::git::ResolvedBase {
-            name: "main".to_string(),
-            oid: "0".repeat(40),
-            source: crate::git::BaseSource::DefaultBranch,
+        old.branch_base = crate::git::BaseStatus {
+            winner: Some(crate::git::ResolvedBase {
+                name: "main".to_string(),
+                oid: "0".repeat(40),
+                source: crate::git::BaseSource::DefaultBranch,
+            }),
             skipped: None,
-        });
+        };
 
         let mut recovered = App::new(PathBuf::from("."), Scope::Branch, None);
         recovered.carry_authored_state_from(&mut old);
@@ -4040,7 +4046,7 @@ mod tests {
         assert_eq!(bp.rows[0].name, "dev");
         // The header's base rides with the carried frame — recovery never paints
         // `no base` beside a populated list (`specs/tui.md`).
-        let base = recovered.branch_base.as_ref().expect("the resolved base is carried");
+        let base = recovered.branch_base.winner.as_ref().expect("the resolved base is carried");
         assert_eq!(base.name, "main");
     }
 
