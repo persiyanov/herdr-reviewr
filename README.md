@@ -26,9 +26,9 @@ One persistent pane, pointed at a git worktree:
 - **Markdown preview** — flip a `.md` file between source and rendered view.
 - **Themes** — 18 palettes in dark and light.
 
-It never edits your worktree and sends nothing on its own. Its only git write is a private
-baseline ref under `refs/reviewr/`. The **PR** tab reads GitHub, GitLab, or Azure DevOps and
-never posts.
+It never edits your worktree and sends nothing on its own. Its only git writes are private
+refs under `refs/reviewr/`: the turn baseline and the base pick. The **PR** tab reads GitHub,
+GitLab, or Azure DevOps and never posts.
 
 ## Requirements
 
@@ -106,6 +106,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | --- | --- |
 | `1` `2` `3` | Switch tab — Changes / All files / PR |
 | `u` `b` `t` | Switch scope — uncommitted / branch / last turn |
+| `B` | Pick the branch scope's base |
 | `j` `k` · `↑` `↓` | Move cursor |
 | `]` `[` | Jump to next / previous hunk |
 | `f` `F` | Jump to next / previous file |
@@ -175,8 +176,8 @@ opens in your browser (`http`/`https` only), and an anchor link jumps to its hea
 
 - **uncommitted** — the working tree vs `HEAD` (staged, unstaged, and untracked).
 - **branch** — the working tree vs the merge-base with the base branch: **uncommitted** plus
-  the branch's commits. Default base `origin/main`, then `origin/master`, `main`, `master`
-  ([Base branch](#base-branch)).
+  the branch's commits. The base is your repo's default branch until you pick another with
+  `B` ([Base branch](#base-branch)).
 - **last turn** — everything that changed in this worktree since its most recent turn started
   ([Limitations](#limitations)).
 
@@ -193,7 +194,7 @@ CLI flags on the pane command:
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--poll <ms>` | `2000` | worktree poll interval (min `200`) |
-| `--base <ref>` | auto | base for `branch` scope, any rev, overrides `base_branches` |
+| `--base <ref>` | auto | base for `branch` scope, any rev, overrides the pick |
 | `--theme <name>` | `catppuccin` | UI + syntax theme (see below) |
 | `--wrap <on\|off>` | `on` | soft-wrap long diff lines (`w` toggles at runtime) |
 
@@ -211,7 +212,6 @@ The file accepts these keys:
 
 ```toml
 theme = "tokyo-night"
-base_branches = ["develop", "main", "master"]
 default_scope = "branch"
 navigator_position = "right"
 toggle_placement = "overlay"
@@ -263,16 +263,19 @@ the navigator altogether and brings it back.
 
 ### Base branch
 
-The **branch** scope diffs against the merge-base with the first base candidate that resolves,
-so one setting works across repos with different trunks. Default `main`, then `master`. Each
-checks `origin/<name>` first, then the local branch. For a `develop` trunk:
+The **branch** scope diffs against the merge-base with your repo's default branch, the one
+`origin/HEAD` names. The header shows the resolved base, `vs main`.
 
-```toml
-base_branches = ["develop", "main", "master"]
-```
+When the trunk is something else, or you review a stacked branch, press `B` (or click the
+base name) and pick the branch. The pick is stored in the repo, shared by every reviewr pane
+on it, and holds until you pick again. Choosing the default branch clears it.
 
-`--base <ref>` wins over the list and takes any rev (a branch, a tag, a SHA). When nothing in
-the list resolves, the branch `origin/HEAD` names is the fallback.
+`--base <ref>` pins the base for the pane and takes any rev (a branch, a tag, a SHA). It
+wins over the pick and disables the picker.
+
+A picked branch that is gone (deleted after a stacked review, or a typo) is skipped, and the
+header says so: `vs main · dev missing`. When nothing resolves, the scope stays empty and the
+header reads `no base`, with the footer offering `B pick base`.
 
 ### Keybindings
 
@@ -297,6 +300,7 @@ The action names and their defaults:
 | `next-hunk` / `prev-hunk` | `]` / `[` |
 | `next-file` / `prev-file` | `f` / `F` |
 | `scope-uncommitted` / `scope-branch` / `scope-last-turn` | `u` / `b` / `t` |
+| `base-pick` | `B` |
 | `tab-changes` / `tab-all-files` / `tab-pr` | `1` / `2` / `3` |
 | `wrap` | `w` |
 | `preview` | `m` |
