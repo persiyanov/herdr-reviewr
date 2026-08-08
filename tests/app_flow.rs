@@ -5310,6 +5310,15 @@ fn the_filter_edits_with_the_comment_editors_controls() {
     let bp = app.base_picker.as_ref().unwrap();
     assert_eq!(bp.query, "dev");
     assert_eq!(bp.rows[bp.filtered()[bp.cursor]].name, "dev", "the narrowed view still picks");
+
+    // A branch name pasted with the trailing newline it was copied with still filters:
+    // the single-line field takes a newline as a space (`specs/input.md`).
+    app.caret_end();
+    app.input_kill_to_start();
+    app.input_paste("dev\n");
+    let bp = app.base_picker.as_ref().unwrap();
+    assert_eq!(bp.query, "dev", "the trailing newline never lands in the query");
+    assert_eq!(bp.rows[bp.filtered()[bp.cursor]].name, "dev", "the pasted name filters");
 }
 
 #[test]

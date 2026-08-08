@@ -2692,11 +2692,16 @@ impl App {
     }
 
     /// Insert pasted `text` at the caret as one unit, normalizing `\r\n`/`\r` to `\n`.
-    /// The single-line search input takes newlines as spaces (specs/search.md).
+    /// A single-line field takes newlines as spaces (specs/search.md, specs/input.md) — a
+    /// branch name pasted with its trailing newline still filters.
     pub fn input_paste(&mut self, text: &str) {
         let mut norm = text.replace("\r\n", "\n").replace('\r', "\n");
-        if matches!(self.mode, Mode::Search | Mode::Find) {
-            norm = norm.replace('\n', " ");
+        match self.mode {
+            Mode::Search | Mode::Find => norm = norm.replace('\n', " "),
+            // No branch name holds a newline, so a name pasted with the one it was copied
+            // with filters as the bare name rather than matching nothing.
+            Mode::BasePick => norm.retain(|c| c != '\n'),
+            _ => {}
         }
         let norm: Vec<char> = norm.chars().collect();
         self.edit_input(|v, caret| {

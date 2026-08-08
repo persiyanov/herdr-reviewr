@@ -256,7 +256,7 @@ The highlight opens on the current base, else the first row. The highlight is pl
 | `enter`             | pick the highlighted branch                     |
 | `esc`               | cancel                                          |
 
-The filter is a text field with the comment editor's controls, above. `↑` and `↓` move the highlight, so the single-line filter keeps `←` and `→` for its caret.
+The filter is a text field with the comment editor's controls, above. `↑` and `↓` move the highlight, so the single-line filter keeps `←` and `→` for its caret. A pasted newline drops, so a branch name copied with its line ending filters as the bare name.
 
 - A click moves the highlight. A click on the highlighted row picks.
 - A filter matching no branch shows `no branches match`, and `enter` does nothing.
