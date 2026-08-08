@@ -1269,16 +1269,13 @@ fn reconcile_plugin_config(
         return ConfigGate::Unchanged;
     };
 
-    let bases_changed = previous.base_branches() != current.base_branches();
-    let file_changed = bases_changed || previous.theme() != current.theme();
-    let pr_changed = bases_changed || previous.forge_hosts() != current.forge_hosts();
+    let pr_changed = previous.forge_hosts() != current.forge_hosts();
     if pr_changed {
         pr.config_changed(app.tab == crate::app::Tab::Pr);
     }
-    if file_changed {
-        // `base_branches` participates in every Branch-scope derivation, and a theme change
-        // invalidates highlighted diffs. Rebuild before another input or frame can mix states;
-        // `reload` preserves the frozen diff while composing.
+    if previous.theme() != current.theme() {
+        // A theme change invalidates highlighted diffs. Rebuild before another input or
+        // frame can mix states; `reload` preserves the frozen diff while composing.
         if let Err(error) = app.reload() {
             app.status = format!("config refresh failed: {error}");
         }
@@ -1335,9 +1332,7 @@ fn apply_plugin_config_observation(
                 return false;
             } else if changed {
                 let current = app.plugin_config().expect("ready config");
-                if current.base_branches() != next.base_branches()
-                    || current.forge_hosts() != next.forge_hosts()
-                {
+                if current.forge_hosts() != next.forge_hosts() {
                     *epoch = epoch.wrapping_add(1);
                 }
                 app.set_plugin_config(next);
@@ -2569,8 +2564,11 @@ mod refresh_tests {
         assert_eq!(epoch, 0);
         assert!(!app.plugin_config().unwrap().auto_open());
 
-        std::fs::write(config_dir.path().join("config.toml"), "base_branches = [\"develop\"]\n")
-            .unwrap();
+        std::fs::write(
+            config_dir.path().join("config.toml"),
+            "github_host = \"github.example.com\"\n",
+        )
+        .unwrap();
         assert!(apply_plugin_config_observation(
             &mut app,
             &cfg,

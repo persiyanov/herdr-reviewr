@@ -463,11 +463,7 @@ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) ->
     let prefix = header_prefix_len(&spans);
     let scope_start = prefix as u16;
     let scope_end = scope_start + scope_chip(app).len() as u16;
-    if (scope_start..scope_end).contains(&col) {
-        Some(HeaderHit::Scope)
-    } else {
-        None
-    }
+    if (scope_start..scope_end).contains(&col) { Some(HeaderHit::Scope) } else { None }
 }
 
 /// The three tabs and their labels, left to right, each led by its `tab-*` action's hint key

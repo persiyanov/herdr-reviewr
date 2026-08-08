@@ -383,6 +383,9 @@ pub enum Band {
 pub struct App {
     pub repo: PathBuf,
     pub base: Option<String>,
+    /// The `branch` scope's resolved base, carried by the latest landed snapshot — the
+    /// header names it and the diff builds against its OID (`specs/review-model.md`).
+    pub branch_base: Option<git::ResolvedBase>,
     pub scope: Scope,
     /// The active tab; it drives both panes and selects the per-tab state in play.
     pub tab: Tab,
@@ -612,6 +615,7 @@ impl App {
         Self {
             repo,
             base,
+            branch_base: None,
             scope,
             tab: Tab::Changes,
             active_file_tab: Tab::Changes,
@@ -980,7 +984,6 @@ impl App {
             tab: self.tab,
             scope: self.scope,
             base: self.base.clone(),
-            base_branches: self.config_snapshot().base_branches().to_vec(),
             turn_baseline: self.turn_baseline.clone(),
             // `Changes` never reads the toggled set, so it stays out of that tab's tag —
             // a directory toggle there must not invalidate an in-flight build.
@@ -1001,6 +1004,11 @@ impl App {
         let open = self.diff_path.clone();
         self.changed = snapshot.changed;
         self.entries = snapshot.entries;
+        // The base and the changeset it produced land together, so the header name and the
+        // list it heads never disagree (specs/tui.md).
+        if self.scope == Scope::Branch {
+            self.branch_base = snapshot.branch_base;
+        }
         self.rebuild_file_rows();
         self.file_cursor = anchor
             .and_then(|a| self.row_of_anchor(&a))
@@ -1210,11 +1218,8 @@ impl App {
                 (old, new)
             }
             Scope::Branch => {
-                let mb = git::merge_base(
-                    &self.repo,
-                    self.base.as_deref(),
-                    self.config_snapshot().base_branches(),
-                );
+                let mb =
+                    self.branch_base.as_ref().and_then(|b| git::merge_base(&self.repo, &b.oid));
                 let old =
                     mb.map(|m| git::file_content(&self.repo, &m, old_path)).unwrap_or_default();
                 (old, worktree_content(&self.repo, new_path))
@@ -1760,7 +1765,10 @@ impl App {
                 self.stash.select_anchor = None;
                 // `All files` keeps its tree; only the changed set rebuilds before the frame.
                 // The tree's annotations refresh behind it via the worker (specs/tui.md).
-                let changed = crate::world::build_changed(&self.world_input())?;
+                let (branch_base, changed) = crate::world::build_changed(&self.world_input())?;
+                if self.scope == Scope::Branch {
+                    self.branch_base = branch_base;
+                }
                 self.changed = crate::world::annotate(&changed);
                 // Re-mark the tree in place — the rows are scope-independent, only their
                 // badges move, so the switch frame never shows the old scope's badges

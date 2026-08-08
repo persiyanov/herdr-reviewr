@@ -7,9 +7,10 @@ use std::path::Path;
 
 use common::Repo;
 use herdr_reviewr::git::{
-    all_files, changed_against_tree, changed_files as changed_files_with_config, file_content,
-    merge_base as merge_base_with_config, read_baseline_ref, snapshot_worktree, worktree_key,
-    write_baseline_ref,
+    BaseSource, all_files, changed_against_tree, changed_files as changed_files_oid,
+    clear_base_pick, default_branch_name, file_content, list_branches,
+    merge_base as merge_base_oid, read_base_pick, read_baseline_ref, resolve_base,
+    snapshot_worktree, worktree_key, write_base_pick, write_baseline_ref,
 };
 use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope};
 
@@ -17,23 +18,26 @@ fn by_path(files: &[ChangedFile]) -> HashMap<&str, &ChangedFile> {
     files.iter().map(|f| (f.path.as_str(), f)).collect()
 }
 
-fn bases() -> Vec<String> {
-    herdr_reviewr::config::DEFAULT_BASE_BRANCHES
-        .iter()
-        .map(|branch| (*branch).to_string())
-        .collect()
-}
-
 fn changed_files(
     repo: &Path,
     scope: Scope,
     base: Option<&str>,
 ) -> anyhow::Result<Vec<ChangedFile>> {
-    changed_files_with_config(repo, scope, base, &bases())
+    let winner = resolve_base(repo, base).map_err(|e| anyhow::anyhow!("{}", e.0))?.winner;
+    changed_files_oid(repo, scope, winner.as_ref().map(|w| w.oid.as_str()))
 }
 
 fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
-    merge_base_with_config(repo, base, &bases())
+    let winner = resolve_base(repo, base).ok()?.winner?;
+    merge_base_oid(repo, &winner.oid)
+}
+
+/// Fabricate a remote-tracking default branch without a real remote: a
+/// `refs/remotes/origin/<name>` ref at the given rev plus the `origin/HEAD` symref.
+fn set_origin_default(r: &Repo, name: &str, rev: &str) {
+    let oid = r.git(&["rev-parse", rev]).trim().to_string();
+    r.git(&["update-ref", &format!("refs/remotes/origin/{name}"), &oid]);
+    r.git(&["symbolic-ref", "refs/remotes/origin/HEAD", &format!("refs/remotes/origin/{name}")]);
 }
 
 #[test]
@@ -99,7 +103,33 @@ fn merge_base_is_the_branch_point() {
 }
 
 #[test]
-fn base_resolves_via_the_default_list_without_a_flag() {
+fn the_chain_is_flag_then_pick_then_default() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    set_origin_default(&r, "main", "HEAD");
+    r.git(&["branch", "picked-base"]);
+    r.git(&["branch", "flagged-base"]);
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("base.rs", "2\n");
+    r.commit_all("diverge");
+
+    // Default branch alone: `origin/HEAD` names `main` (specs/review-model.md).
+    let winner = resolve_base(r.path(), None).unwrap().winner.unwrap();
+    assert_eq!((winner.name.as_str(), winner.source), ("main", BaseSource::DefaultBranch));
+
+    // A pick outranks the default.
+    write_base_pick(r.path(), "picked-base").unwrap();
+    let winner = resolve_base(r.path(), None).unwrap().winner.unwrap();
+    assert_eq!((winner.name.as_str(), winner.source), ("picked-base", BaseSource::Pick));
+
+    // The flag outranks the pick.
+    let winner = resolve_base(r.path(), Some("flagged-base")).unwrap().winner.unwrap();
+    assert_eq!((winner.name.as_str(), winner.source), ("flagged-base", BaseSource::Flag));
+}
+
+#[test]
+fn base_resolves_via_the_pick_without_a_flag() {
     let r = Repo::init();
     r.write("base.rs", "1\n");
     r.commit_all("base");
@@ -108,12 +138,14 @@ fn base_resolves_via_the_default_list_without_a_flag() {
     r.write("base.rs", "2\n");
     r.commit_all("diverge");
 
-    // No flag: the default `base_branches` list skips the absent `origin/*` and finds `main`.
+    // No flag, no origin: only a recorded pick names the base (specs/review-model.md).
+    assert_eq!(merge_base(r.path(), None), None);
+    write_base_pick(r.path(), "main").unwrap();
     assert_eq!(merge_base(r.path(), None), Some(branch_point));
 }
 
 #[test]
-fn a_nonexistent_flag_falls_through_to_the_list() {
+fn a_nonexistent_flag_falls_through_and_reads_as_skipped() {
     let r = Repo::init();
     r.write("base.rs", "1\n");
     r.commit_all("base");
@@ -121,9 +153,97 @@ fn a_nonexistent_flag_falls_through_to_the_list() {
     r.git(&["checkout", "-q", "-b", "feature"]);
     r.write("base.rs", "2\n");
     r.commit_all("diverge");
+    write_base_pick(r.path(), "main").unwrap();
 
-    // A `--base` naming no existing ref is skipped, not an error; resolution uses the list.
+    // A `--base` naming no existing ref is skipped, not an error; the pick resolves, and
+    // the header can name the dead flag (specs/review-model.md, specs/tui.md).
     assert_eq!(merge_base(r.path(), Some("no-such-ref")), Some(branch_point));
+    let winner = resolve_base(r.path(), Some("no-such-ref")).unwrap().winner.unwrap();
+    assert_eq!(winner.skipped.as_deref(), Some("no-such-ref"));
+}
+
+#[test]
+fn a_dormant_pick_is_skipped_and_reactivates() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    set_origin_default(&r, "main", "HEAD");
+    r.git(&["branch", "dev"]);
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("base.rs", "2\n");
+    r.commit_all("diverge");
+    write_base_pick(r.path(), "dev").unwrap();
+
+    // The pick wins while its branch resolves.
+    let winner = resolve_base(r.path(), None).unwrap().winner.unwrap();
+    assert_eq!(winner.source, BaseSource::Pick);
+
+    // The branch disappears: the pick is kept and skipped, the default wins, and the
+    // header can say so (specs/review-model.md).
+    r.git(&["branch", "-D", "dev"]);
+    let winner = resolve_base(r.path(), None).unwrap().winner.unwrap();
+    assert_eq!((winner.name.as_str(), winner.source), ("main", BaseSource::DefaultBranch));
+    assert_eq!(winner.skipped.as_deref(), Some("dev"));
+    assert_eq!(read_base_pick(r.path()).unwrap().as_deref(), Some("dev"));
+
+    // The branch returns: the pick reactivates without a new choice.
+    r.git(&["branch", "dev", "main"]);
+    let winner = resolve_base(r.path(), None).unwrap().winner.unwrap();
+    assert_eq!((winner.name.as_str(), winner.source), ("dev", BaseSource::Pick));
+}
+
+#[test]
+fn the_pick_persists_in_a_private_ref_and_clears() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+
+    // Absent until written; a write survives re-reading (a fresh pane would reread the
+    // same ref); a clear removes it (specs/review-model.md).
+    assert_eq!(read_base_pick(r.path()).unwrap(), None);
+    write_base_pick(r.path(), "dev").unwrap();
+    assert_eq!(read_base_pick(r.path()).unwrap().as_deref(), Some("dev"));
+    write_base_pick(r.path(), "release/1.0").unwrap();
+    assert_eq!(read_base_pick(r.path()).unwrap().as_deref(), Some("release/1.0"));
+    clear_base_pick(r.path()).unwrap();
+    assert_eq!(read_base_pick(r.path()).unwrap(), None);
+
+    // The only ref the pick machinery touches lives under `refs/reviewr/` — the worktree,
+    // index, and branches stay untouched (specs/overview.md No writes).
+    write_base_pick(r.path(), "dev").unwrap();
+    let refs = r.git(&["for-each-ref", "--format=%(refname)"]);
+    let reviewr_refs: Vec<&str> = refs.lines().filter(|l| !l.starts_with("refs/heads/")).collect();
+    assert_eq!(reviewr_refs, ["refs/reviewr/base-pick"]);
+    assert_eq!(r.git(&["status", "--porcelain"]).trim(), "");
+}
+
+#[test]
+fn default_branch_name_reads_the_origin_head_symref() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    assert_eq!(default_branch_name(r.path()).unwrap(), None);
+    set_origin_default(&r, "trunk", "HEAD");
+    assert_eq!(default_branch_name(r.path()).unwrap().as_deref(), Some("trunk"));
+}
+
+#[test]
+fn list_branches_merges_names_newest_first_and_hides_the_checked_out() {
+    let r = Repo::init();
+    r.write("a.rs", "1\n");
+    r.git(&["add", "-A"]);
+    r.git_env(&["commit", "-q", "-m", "one"], &[("GIT_COMMITTER_DATE", "2026-01-01T00:00:00")]);
+    r.git(&["branch", "older"]);
+    set_origin_default(&r, "main", "HEAD");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("a.rs", "2\n");
+    r.commit_all("two");
+    r.git(&["branch", "newer"]);
+
+    // Local and origin names merge (main exists only as origin/main here), the newest
+    // commit sorts first, and the checked-out branch is not listed (specs/input.md).
+    let names = list_branches(r.path()).unwrap();
+    assert_eq!(names, ["newer", "main", "older"]);
 }
 
 #[test]
@@ -190,7 +310,7 @@ fn ignored_paths_never_enter_changes() {
 }
 
 #[test]
-fn branch_scope_falls_back_to_master_when_main_is_absent() {
+fn branch_scope_is_empty_without_a_recorded_base() {
     let r = Repo::init();
     r.write("base.rs", "1\n");
     r.commit_all("base");
@@ -199,9 +319,15 @@ fn branch_scope_falls_back_to_master_when_main_is_absent() {
     r.write("feature.rs", "x\n");
     r.commit_all("feature work");
 
-    // base = None → the fallback chain (origin/main, origin/master, main, master) finds master.
+    // base = None and nothing recorded → no base, and the scope lists nothing rather than
+    // guessing (specs/review-model.md).
     let files = changed_files(r.path(), Scope::Branch, None).unwrap();
-    assert!(files.iter().any(|f| f.path == "feature.rs"), "resolved master as the base ref");
+    assert!(files.is_empty(), "no source resolves, so the scope shows nothing");
+
+    // A pick of `master` brings the scope back.
+    write_base_pick(r.path(), "master").unwrap();
+    let files = changed_files(r.path(), Scope::Branch, None).unwrap();
+    assert!(files.iter().any(|f| f.path == "feature.rs"), "the pick names the base");
 }
 
 #[test]

@@ -32,6 +32,28 @@ impl Repo {
         self.dir.path().to_path_buf()
     }
 
+    /// Like [`Self::git`] with extra environment variables — a pinned committer date makes
+    /// commit-recency ordering deterministic without sleeping across a clock tick.
+    pub fn git_env(&self, args: &[&str], env: &[(&str, &str)]) -> String {
+        let out = Command::new("git")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@herdr.test")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@herdr.test")
+            .envs(env.iter().copied())
+            .arg("-C")
+            .arg(self.path())
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
     /// Run `git -C <repo> <args>`, asserting success, returning stdout.
     pub fn git(&self, args: &[&str]) -> String {
         let out = Command::new("git")

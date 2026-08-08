@@ -66,24 +66,8 @@ impl Config {
     }
 }
 
-/// The built-in base-branch candidates for the `branch` scope, used when `config.toml`
-/// sets no `base_branches` (`specs/review-model.md`).
-pub const DEFAULT_BASE_BRANCHES: [&str; 2] = ["main", "master"];
-
-/// One `base_branches` entry's canonical bare branch name: a leading `refs/heads/`,
-/// `refs/remotes/origin/`, or `origin/` prefix is stripped (`specs/config.md`).
-pub(crate) fn canonical_base(entry: &str) -> String {
-    entry
-        .strip_prefix("refs/remotes/origin/")
-        .or_else(|| entry.strip_prefix("refs/heads/"))
-        .or_else(|| entry.strip_prefix("origin/"))
-        .unwrap_or(entry)
-        .to_string()
-}
-
-const PLUGIN_CONFIG_KEYS: [&str; 11] = [
+const PLUGIN_CONFIG_KEYS: [&str; 10] = [
     "theme",
-    "base_branches",
     "default_scope",
     "navigator_position",
     "toggle_placement",
@@ -173,7 +157,6 @@ impl ToggleDirection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginConfig {
     theme: String,
-    base_branches: Vec<String>,
     default_scope: crate::model::Scope,
     navigator_position: NavigatorPosition,
     toggle_placement: TogglePlacement,
@@ -189,7 +172,6 @@ impl Default for PluginConfig {
     fn default() -> Self {
         Self {
             theme: crate::theme::DEFAULT.to_owned(),
-            base_branches: DEFAULT_BASE_BRANCHES.iter().map(|s| (*s).to_owned()).collect(),
             default_scope: crate::model::Scope::Uncommitted,
             navigator_position: NavigatorPosition::Right,
             toggle_placement: TogglePlacement::Split,
@@ -206,10 +188,6 @@ impl Default for PluginConfig {
 impl PluginConfig {
     pub fn theme(&self) -> &str {
         &self.theme
-    }
-
-    pub fn base_branches(&self) -> &[String] {
-        &self.base_branches
     }
 
     /// The scope a fresh reviewr pane is built with — startup and config recovery. A reread never
@@ -273,7 +251,6 @@ impl PluginConfig {
             .collect();
         serde_json::json!({
             "theme": self.theme,
-            "base_branches": self.base_branches,
             "default_scope": self.default_scope.name(),
             "navigator_position": self.navigator_position.as_str(),
             "toggle_placement": self.toggle_placement.as_str(),
@@ -367,44 +344,6 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             ));
         }
         theme.clone_into(&mut config.theme);
-    }
-    if let Some(value) = table.get("base_branches") {
-        let Some(values) = value.as_array() else {
-            return Err(value_error(
-                path,
-                "base_branches",
-                "a non-empty array of non-empty strings",
-            ));
-        };
-        if values.is_empty() {
-            return Err(value_error(
-                path,
-                "base_branches",
-                "a non-empty array of non-empty strings",
-            ));
-        }
-        let mut branches = Vec::with_capacity(values.len());
-        for value in values {
-            let Some(branch) = value.as_str() else {
-                return Err(value_error(
-                    path,
-                    "base_branches",
-                    "a non-empty array of non-empty strings",
-                ));
-            };
-            if !valid_ref_name(branch) {
-                return Err(value_error(
-                    path,
-                    "base_branches",
-                    "a non-empty array of Git ref names",
-                ));
-            }
-            let canonical = canonical_base(branch);
-            if !branches.contains(&canonical) {
-                branches.push(canonical);
-            }
-        }
-        config.base_branches = branches;
     }
     if let Some(value) = table.get("default_scope") {
         config.default_scope = match string_value(
@@ -648,28 +587,6 @@ pub(crate) fn valid_host_syntax(host: &str) -> bool {
     })
 }
 
-/// Git's `check-ref-format --allow-onelevel` rules, used without spawning Git from the shared
-/// configuration boundary. Base entries are names, not revision expressions.
-fn valid_ref_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "@"
-        && !name.starts_with('-')
-        && !name.starts_with('/')
-        && !name.ends_with('/')
-        && !name.ends_with('.')
-        && !name.contains("//")
-        && !name.contains("..")
-        && !name.contains("@{")
-        && name
-            .split('/')
-            .all(|part| !part.starts_with('.') && part.strip_suffix(".lock").is_none())
-        && name.bytes().all(|byte| {
-            byte > b' '
-                && byte != 0x7f
-                && !matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
-        })
-}
-
 /// Print the shared normalized configuration for the plugin action script. This is its own
 /// entrypoint (`--resolve-plugin-config`), so it resolves the config directory itself — and
 /// initializes the log itself, or the herdr-side diagnostics of a failed lookup would be
@@ -749,7 +666,6 @@ mod tests {
         std::fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.theme(), "gruvbox");
-        assert_eq!(config.base_branches(), PluginConfig::default().base_branches());
         assert_eq!(config.default_scope(), Scope::Uncommitted);
         assert_eq!(config.navigator_position(), NavigatorPosition::Right);
         assert_eq!(config.toggle_placement(), TogglePlacement::Split);
@@ -765,7 +681,6 @@ mod tests {
             dir.path().join("config.toml"),
             concat!(
                 "theme = \"tokyo-night\"\n",
-                "base_branches = [\"origin/dev\", \"main\"]\n",
                 "default_scope = \"last-turn\"\n",
                 "navigator_position = \"bottom\"\n",
                 "toggle_placement = \"overlay\"\n",
@@ -777,30 +692,12 @@ mod tests {
         .unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.theme(), "tokyo-night");
-        // Entries canonicalize to bare names at validation (`specs/config.md`).
-        assert_eq!(config.base_branches(), ["dev", "main"]);
         assert_eq!(config.default_scope(), Scope::LastTurn);
         assert_eq!(config.navigator_position(), NavigatorPosition::Bottom);
         assert_eq!(config.toggle_placement(), TogglePlacement::Overlay);
         assert_eq!(config.toggle_direction(), ToggleDirection::Down);
         assert!(!config.auto_open());
         assert_eq!(config.github_host(), Some("github.example.com"));
-    }
-
-    #[test]
-    fn base_entries_canonicalize_and_duplicates_collapse_to_the_first() {
-        assert_eq!(super::canonical_base("origin/main"), "main");
-        assert_eq!(super::canonical_base("refs/heads/main"), "main");
-        assert_eq!(super::canonical_base("refs/remotes/origin/main"), "main");
-        assert_eq!(super::canonical_base("release/1.0"), "release/1.0");
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("config.toml"),
-            "base_branches = [\"origin/main\", \"main\", \"refs/heads/master\"]\n",
-        )
-        .unwrap();
-        let config = super::plugin_config_in(dir.path()).unwrap();
-        assert_eq!(config.base_branches(), ["main", "master"]);
     }
 
     #[test]
@@ -812,6 +709,12 @@ mod tests {
         assert!(error.contains(path.to_str().unwrap()));
         assert!(error.contains("unknown key \"poll\""));
 
+        // The retired `base_branches` key fails like any unknown key: the base is a picked,
+        // per-repo choice now, never configuration (`specs/config.md`, `specs/review-model.md`).
+        std::fs::write(&path, "base_branches = [\"dev\"]\n").unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("unknown key \"base_branches\""));
+
         std::fs::write(&path, "theme = [\n").unwrap();
         assert!(
             super::plugin_config_in(dir.path()).unwrap_err().to_string().contains("syntax error")
@@ -822,12 +725,6 @@ mod tests {
     fn every_invalid_value_fails_instead_of_falling_back() {
         let cases = [
             ("theme = \"unknown\"\n", "`theme`"),
-            ("base_branches = []\n", "`base_branches`"),
-            ("base_branches = [\"\"]\n", "`base_branches`"),
-            ("base_branches = [\"main^{commit}\"]\n", "`base_branches`"),
-            ("base_branches = [\"feature branch\"]\n", "`base_branches`"),
-            ("base_branches = [\"-main\"]\n", "`base_branches`"),
-            ("base_branches = [\"main\", 1]\n", "`base_branches`"),
             ("default_scope = \"weekly\"\n", "`default_scope`"),
             ("default_scope = \"last turn\"\n", "`default_scope`"),
             ("navigator_position = \"center\"\n", "`navigator_position`"),

@@ -472,7 +472,7 @@ fn fetch_input_inner(
             local: crate::git::PrLocalState::default(),
         });
     };
-    let local = match crate::git::pr_local(repo, base, config.base_branches()) {
+    let local = match crate::git::pr_local(repo, base) {
         Ok(local) => local,
         Err(error) => {
             let (current, _) = crate::git::remote_identities(repo, &config.forge_hosts())

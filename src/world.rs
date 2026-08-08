@@ -25,19 +25,25 @@ pub struct WorldInput {
     pub repo: PathBuf,
     pub tab: Tab,
     pub scope: Scope,
+    /// The `--base` flag, resolved fresh per build. The pick is read from its ref at build
+    /// time, so it is derived output, never input identity — a pick made in another pane
+    /// must land here as newer content, not be discarded as a mismatch
+    /// (specs/review-model.md).
     pub base: Option<String>,
-    pub base_branches: Vec<String>,
     /// The `last-turn` baseline tree the changed set diffs against; `None` before a turn.
     pub turn_baseline: Option<String>,
     /// Expanded ignored directories whose children the `All files` tree loads.
     pub toggled_dirs: HashSet<String>,
 }
 
-/// The derived state one refresh produces: the scope changeset and the navigator entries.
+/// The derived state one refresh produces: the scope changeset, the navigator entries, and
+/// the `branch` scope's resolved base. The base rides the snapshot so the header name and
+/// the changeset it heads land whole, from one build (specs/tui.md).
 #[derive(Debug)]
 pub struct WorldSnapshot {
     pub changed: HashMap<String, Annotation>,
     pub entries: Vec<Entry>,
+    pub branch_base: Option<git::ResolvedBase>,
 }
 
 /// Build the snapshot for `input`. The changeset is computed regardless of tab so the
@@ -48,9 +54,13 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
     // Outside a git repo, an empty snapshot paints the quiet empty state rather than a
     // failing status line every poll (specs/herdr-host.md).
     if !git::is_repo(&input.repo) {
-        return Ok(WorldSnapshot { changed: HashMap::new(), entries: Vec::new() });
+        return Ok(WorldSnapshot {
+            changed: HashMap::new(),
+            entries: Vec::new(),
+            branch_base: None,
+        });
     }
-    let changed = build_changed(input)?;
+    let (branch_base, changed) = build_changed(input)?;
     let changed_map = annotate(&changed);
     let entries = match input.tab {
         // The whole worktree (ignored included), with expanded ignored dirs loaded lazily.
@@ -58,26 +68,29 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
         // `Changes` (the `PR` tab never builds a snapshot).
         _ => changed.iter().map(Entry::from_changed).collect(),
     };
-    Ok(WorldSnapshot { changed: changed_map, entries })
+    Ok(WorldSnapshot { changed: changed_map, entries, branch_base })
 }
 
-/// The active scope's changed files alone — the piece a scope switch rebuilds before its
-/// frame, so the header count and list never wear another scope's label (specs/tui.md).
-pub fn build_changed(input: &WorldInput) -> Result<Vec<ChangedFile>> {
+/// The active scope's changed files and, on the `branch` scope, the base they diff against —
+/// the piece a scope switch rebuilds before its frame, so the header count and list never
+/// wear another scope's label (specs/tui.md).
+pub fn build_changed(input: &WorldInput) -> Result<(Option<git::ResolvedBase>, Vec<ChangedFile>)> {
     if !git::is_repo(&input.repo) {
-        return Ok(Vec::new());
+        return Ok((None, Vec::new()));
     }
     match input.scope {
         Scope::LastTurn => match input.turn_baseline.as_deref() {
-            Some(t) => git::changed_against_tree(&input.repo, t),
-            None => Ok(Vec::new()),
+            Some(t) => Ok((None, git::changed_against_tree(&input.repo, t)?)),
+            None => Ok((None, Vec::new())),
         },
-        _ => git::changed_files(
-            &input.repo,
-            input.scope,
-            input.base.as_deref(),
-            &input.base_branches,
-        ),
+        Scope::Uncommitted => Ok((None, git::changed_files(&input.repo, input.scope, None)?)),
+        Scope::Branch => {
+            let resolution = git::resolve_base(&input.repo, input.base.as_deref())
+                .map_err(|e| anyhow::anyhow!("{}", e.0))?;
+            let base_oid = resolution.winner.as_ref().map(|w| w.oid.clone());
+            let changed = git::changed_files(&input.repo, input.scope, base_oid.as_deref())?;
+            Ok((resolution.winner, changed))
+        }
     }
 }
 

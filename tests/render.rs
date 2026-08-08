@@ -1301,8 +1301,7 @@ fn header_tab_hits_align_with_wide_hint_keys() {
     let row0 = out.lines().next().unwrap().to_string();
     let col_of = |needle: &str| row0[..row0.find(needle).unwrap()].chars().count() as u16;
     let area = Rect::new(0, 0, 140, 40);
-    for (needle, tab) in
-        [("Changes", Tab::Changes), ("2 Files", Tab::AllFiles), ("3 PR", Tab::Pr)]
+    for (needle, tab) in [("Changes", Tab::Changes), ("2 Files", Tab::AllFiles), ("3 PR", Tab::Pr)]
     {
         assert_eq!(
             ui::hit_header(area, &app, app.keymap(), col_of(needle), 0),

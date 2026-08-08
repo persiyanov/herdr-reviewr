@@ -11,19 +11,20 @@ use herdr_reviewr::config::{PluginConfig, plugin_config_in};
 use herdr_reviewr::forge::{Association, PrInputError, assoc_history, fetch_input, resolve_pick};
 use herdr_reviewr::git::{
     GitFail, PrLocalState, RepositoryIdentity, ahead_behind_oids, contains_commit,
-    pr_local as pr_local_with_config,
 };
 use std::io::Write;
 use std::path::Path;
 
-/// A repo on branch `work` (one commit past `main`), with a GitHub `origin` remote and
-/// `origin/main` tracking-ref at `main`'s tip — the baseline every test builds on.
+/// A repo on branch `work` (one commit past `main`), with a GitHub `origin` remote,
+/// `origin/main` tracking-ref at `main`'s tip, and `origin/HEAD` naming `main` the
+/// default branch — the baseline every test builds on.
 fn worktree() -> Repo {
     let repo = Repo::init();
     repo.write("a.txt", "one\n");
     repo.commit_all("base");
     repo.git(&["remote", "add", "origin", "https://github.com/owner/repo.git"]);
     repo.git(&["update-ref", "refs/remotes/origin/main", "main"]);
+    repo.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
     repo.git(&["switch", "-qc", "work"]);
     repo.write("b.txt", "two\n");
     repo.commit_all("feature");
@@ -39,8 +40,7 @@ fn defaults() -> PluginConfig {
 }
 
 fn pr_local(repo: &Path, base: Option<&str>) -> Result<PrLocalState, GitFail> {
-    let config = defaults();
-    pr_local_with_config(repo, base, config.base_branches())
+    herdr_reviewr::git::pr_local(repo, base)
 }
 
 fn assert_target(identity: &RepositoryIdentity, host: &str, owner: &str, name: &str) {
@@ -174,9 +174,9 @@ fn a_recorded_upstream_joins_the_names_unless_it_names_a_base() {
 }
 
 #[test]
-fn secondary_configured_bases_also_exclude_names() {
-    // Gitflow: `develop` wins the pin, but a tip on `main` history must still
-    // contribute no name — every configured base excludes.
+fn every_resolved_base_source_excludes_names() {
+    // Gitflow: the picked `develop` wins the pin, but a tip on the default `main`'s
+    // history must still contribute no name — every source that resolved excludes.
     let repo = worktree();
     repo.git(&["switch", "-qc", "develop", "main"]);
     repo.write("d.txt", "dev\n");
@@ -191,14 +191,8 @@ fn secondary_configured_bases_also_exclude_names() {
     // The worktree parks at main's tip with zero work of its own.
     repo.git(&["switch", "-qC", "work", "main"]);
 
-    let config_dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        config_dir.path().join("config.toml"),
-        "base_branches = [\"develop\", \"main\"]\n",
-    )
-    .unwrap();
-    let config = plugin_config_in(config_dir.path()).unwrap();
-    let local = pr_local_with_config(repo.path(), None, config.base_branches()).expect("pr_local");
+    herdr_reviewr::git::write_base_pick(repo.path(), "develop").unwrap();
+    let local = pr_local(repo.path(), None).expect("pr_local");
     let develop_tip = repo.git(&["rev-parse", "origin/develop"]).trim().to_string();
     assert_eq!(local.base_oid.as_deref(), Some(develop_tip.as_str()), "develop wins the pin");
     assert_eq!(local.names, ["work"], "a tip on main history contributes no name");
@@ -460,12 +454,12 @@ fn fetch_input_changes_only_with_derived_query_state() {
     let head_changed = fetch_input(repo.path(), None, &defaults()).unwrap();
     assert_ne!(head_changed, names_changed);
 
-    // A different base pin changes the input.
-    let config_dir = tempfile::tempdir().unwrap();
-    std::fs::write(config_dir.path().join("config.toml"), "base_branches = [\"work\"]\n").unwrap();
-    let custom = plugin_config_in(config_dir.path()).unwrap();
-    let base_changed = fetch_input(repo.path(), None, &custom).unwrap();
+    // A base pick written by any pane changes the input; clearing it restores the default.
+    herdr_reviewr::git::write_base_pick(repo.path(), "work").unwrap();
+    let base_changed = fetch_input(repo.path(), None, &defaults()).unwrap();
     assert_ne!(base_changed, head_changed);
+    herdr_reviewr::git::clear_base_pick(repo.path()).unwrap();
+    assert_eq!(fetch_input(repo.path(), None, &defaults()).unwrap(), head_changed);
 }
 
 #[test]

@@ -495,23 +495,20 @@ pub struct PrLocalState {
 
 /// Derive the pinned `HEAD`, the pinned base, and the branch's forge names
 /// (`specs/forge-host.md` Resolution).
-pub fn pr_local(
-    repo: &Path,
-    base_flag: Option<&str>,
-    config_bases: &[String],
-) -> Result<PrLocalState, GitFail> {
+pub fn pr_local(repo: &Path, base_flag: Option<&str>) -> Result<PrLocalState, GitFail> {
     let Some(branch) = git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])? else {
         return Ok(PrLocalState { detached: true, ..PrLocalState::default() });
     };
     let head_oid = git_tristate(repo, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])?;
-    let bases = resolve_bases(repo, base_flag, config_bases)?;
+    let resolution = resolve_base(repo, base_flag)?;
+    let bases = resolution.oids();
     let mut names = vec![branch.clone()];
     let push_name = |name: String, names: &mut Vec<String>| {
         if !names.contains(&name) {
             names.push(name);
         }
     };
-    if let Some(upstream) = recorded_upstream(repo, &branch, base_flag, config_bases, &bases)? {
+    if let Some(upstream) = recorded_upstream(repo, &branch, &resolution.names(), &bases)? {
         push_name(upstream, &mut names);
     }
     if let Some(head) = &head_oid
@@ -526,43 +523,137 @@ pub fn pr_local(
     Ok(PrLocalState { head_oid, base_oid: bases.into_iter().next(), names, detached: false })
 }
 
-/// Every resolved base OID in precedence order, deduped: the `--base` flag (verbatim rev
-/// first, then as a canonical entry), each canonical `config_bases` entry, then the default
-/// branch `origin/HEAD` names (`specs/review-model.md`). Frontier names must lie beyond all of them.
-fn resolve_bases(
-    repo: &Path,
-    base_flag: Option<&str>,
-    config_bases: &[String],
-) -> Result<Vec<String>, GitFail> {
-    let mut out: Vec<String> = Vec::new();
-    let push = |oid: Option<String>, out: &mut Vec<String>| {
-        if let Some(oid) = oid
-            && !out.contains(&oid)
-        {
-            out.push(oid);
+/// Where the winning base came from (`specs/review-model.md` Base branch).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BaseSource {
+    Flag,
+    Pick,
+    DefaultBranch,
+}
+
+/// The `branch` scope's base as the header shows it: the winning source's bare name, its
+/// pinned commit, and the first recorded choice the chain skipped because it no longer
+/// resolves (`specs/review-model.md` Base branch, `specs/tui.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedBase {
+    pub name: String,
+    pub oid: String,
+    pub source: BaseSource,
+    pub skipped: Option<String>,
+}
+
+/// One pass over the base chain. `candidates` keeps every source that resolved, in
+/// precedence order and deduped by OID — the PR frontier walk needs all of them, not just
+/// the winner (`pr_local`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BaseResolution {
+    pub winner: Option<ResolvedBase>,
+    pub candidates: Vec<(String, String)>,
+}
+
+impl BaseResolution {
+    pub fn oids(&self) -> Vec<String> {
+        self.candidates.iter().map(|(_, oid)| oid.clone()).collect()
+    }
+    fn names(&self) -> Vec<String> {
+        self.candidates.iter().map(|(name, _)| name.clone()).collect()
+    }
+}
+
+/// Resolve the base chain: the `--base` flag, then the repo pick, then the branch
+/// `origin/HEAD` names (`specs/review-model.md` Base branch). A source that resolves to no
+/// ref is skipped, never an error; a skipped flag or pick that would have outranked the
+/// winner is recorded for the header (`specs/tui.md`).
+pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResolution, GitFail> {
+    let mut candidates: Vec<(String, String, BaseSource)> = Vec::new();
+    let mut skipped: Option<String> = None;
+    let push = |name: String, oid: String, source: BaseSource, c: &mut Vec<_>| {
+        if !c.iter().any(|(_, o, _): &(String, String, BaseSource)| *o == oid) {
+            c.push((name, oid, source));
         }
     };
     if let Some(flag) = base_flag.filter(|b| !b.is_empty()) {
         // The flag is the power-user escape hatch: any rev works verbatim (a SHA, a tag,
-        // `upstream/main`), and a branch-entry spelling falls back to canonical resolution.
+        // `upstream/main`), and a branch-name spelling falls back to prefix-stripped
+        // resolution.
         let probe = format!("{flag}^{{commit}}");
-        let verbatim = git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])?;
-        if let Some(oid) = verbatim {
-            push(Some(oid), &mut out);
+        if let Some(oid) = git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])? {
+            push(flag.to_string(), oid, BaseSource::Flag, &mut candidates);
         } else {
-            let entry = crate::config::canonical_base(flag);
-            push(resolve_base_entry(repo, &entry)?, &mut out);
+            let entry = strip_base_prefix(flag);
+            match resolve_base_entry(repo, &entry)? {
+                Some(oid) => push(entry, oid, BaseSource::Flag, &mut candidates),
+                None => skipped = Some(flag.to_string()),
+            }
         }
     }
-    for entry in config_bases {
-        push(resolve_base_entry(repo, entry)?, &mut out);
+    if let Some(pick) = read_base_pick(repo)? {
+        match resolve_base_entry(repo, &pick)? {
+            Some(oid) => push(pick, oid, BaseSource::Pick, &mut candidates),
+            // Only a failure that outranks the eventual winner reads as skipped.
+            None if candidates.is_empty() => skipped = skipped.or(Some(pick)),
+            None => {}
+        }
     }
-    let default_branch = git_tristate(
+    if let Some(name) = default_branch_name(repo)?
+        && let Some(oid) = resolve_base_entry(repo, &name)?
+    {
+        push(name, oid, BaseSource::DefaultBranch, &mut candidates);
+    }
+    let winner = candidates.first().map(|(name, oid, source)| ResolvedBase {
+        name: name.clone(),
+        oid: oid.clone(),
+        source: *source,
+        skipped: skipped.clone(),
+    });
+    let candidates = candidates.into_iter().map(|(name, oid, _)| (name, oid)).collect();
+    Ok(BaseResolution { winner, candidates })
+}
+
+/// The branch name `origin/HEAD` points at, when the symref is present
+/// (`specs/review-model.md` Base branch).
+pub fn default_branch_name(repo: &Path) -> Result<Option<String>, GitFail> {
+    let target = git_tristate(repo, &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])?;
+    Ok(target.and_then(|t| t.strip_prefix("refs/remotes/origin/").map(str::to_string)))
+}
+
+/// Strip the ref prefixes a `--base` branch name may carry (`specs/review-model.md`).
+pub(crate) fn strip_base_prefix(entry: &str) -> String {
+    ["refs/remotes/origin/", "refs/heads/", "origin/"]
+        .iter()
+        .find_map(|p| entry.strip_prefix(p))
+        .unwrap_or(entry)
+        .to_string()
+}
+
+/// Every branch name for the base picker: `refs/heads` and `refs/remotes/origin` merged by
+/// bare name, newest commit first, `origin/HEAD` and the checked-out branch excluded
+/// (`specs/input.md` Base picker).
+pub fn list_branches(repo: &Path) -> Result<Vec<String>, GitFail> {
+    let checked_out = git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    let out = git_strict(
         repo,
-        &["rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD^{commit}"],
+        &[
+            "for-each-ref",
+            "refs/heads",
+            "refs/remotes/origin",
+            "--sort=-committerdate",
+            "--format=%(refname)",
+        ],
     )?;
-    push(default_branch, &mut out);
-    Ok(out)
+    let mut names: Vec<String> = Vec::new();
+    for line in out.lines() {
+        let name =
+            line.strip_prefix("refs/remotes/origin/").or_else(|| line.strip_prefix("refs/heads/"));
+        let Some(name) = name else { continue };
+        if name == "HEAD" || checked_out.as_deref() == Some(name) {
+            continue;
+        }
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    }
+    Ok(names)
 }
 
 /// The `origin` remote-tracking tips as `(OID, bare name)`, `origin/HEAD` excluded — one
@@ -695,8 +786,8 @@ fn remote_identity(
     Err(GitFail(format!("git {args:?}: {}", stderr.trim())))
 }
 
-/// One canonical `base_branches` entry pinned to an OID: `refs/remotes/origin/<name>`,
-/// then `refs/heads/<name>` (`specs/config.md`).
+/// One base branch name pinned to an OID: `refs/remotes/origin/<name>`, then
+/// `refs/heads/<name>` (`specs/review-model.md` Base branch).
 fn resolve_base_entry(repo: &Path, name: &str) -> Result<Option<String>, GitFail> {
     for prefix in ["refs/remotes/origin/", "refs/heads/"] {
         let probe = format!("{prefix}{name}^{{commit}}");
@@ -718,8 +809,7 @@ fn resolve_base_entry(repo: &Path, name: &str) -> Result<Option<String>, GitFail
 fn recorded_upstream(
     repo: &Path,
     branch: &str,
-    base_flag: Option<&str>,
-    config_bases: &[String],
+    base_names: &[String],
     base_oids: &[String],
 ) -> Result<Option<String>, GitFail> {
     let out = git_strict(
@@ -729,10 +819,7 @@ fn recorded_upstream(
     let dest = out.lines().next().unwrap_or("").trim();
     let Some(rest) = dest.strip_prefix("refs/remotes/") else { return Ok(None) };
     let Some((_, name)) = rest.split_once('/') else { return Ok(None) };
-    if name.is_empty()
-        || config_bases.iter().any(|entry| entry == name)
-        || base_flag.is_some_and(|flag| crate::config::canonical_base(flag) == name)
-    {
+    if name.is_empty() || base_names.iter().any(|entry| entry == name) {
         return Ok(None);
     }
     // A pruned upstream ref no longer resolves; the record still carries the name
@@ -772,17 +859,79 @@ pub fn ahead_behind_oids(
     Ok(Some((ahead, behind)))
 }
 
-/// The merge-base commit of the winning base and `HEAD` using one base-config snapshot.
-/// Base entries resolve per `specs/review-model.md` precedence, `origin/HEAD` last.
-pub fn merge_base(repo: &Path, base: Option<&str>, config_bases: &[String]) -> Option<String> {
-    let base = resolve_bases(repo, base, config_bases).ok()?.into_iter().next()?;
-    git_line(repo, &["merge-base", &base, "HEAD"])
+/// The merge-base commit of the resolved base OID and `HEAD`
+/// (`specs/review-model.md` Base branch).
+pub fn merge_base(repo: &Path, base_oid: &str) -> Option<String> {
+    git_line(repo, &["merge-base", base_oid, "HEAD"])
 }
 
 /// The content of `path` at `rev` (`git show <rev>:<path>`). Empty when the path does
 /// not exist at that rev — an added file against its old side, say.
 pub fn file_content(repo: &Path, rev: &str, path: &str) -> String {
     git_lenient(repo, &["show", &format!("{rev}:{path}")])
+}
+
+// --- base pick (branch scope) --------------------------------------------------
+//
+// See `specs/review-model.md` Base branch. The pick is one branch name per repository:
+// a blob under one private ref, and refs are shared across a repository's worktrees, so
+// every pane reads the same pick.
+
+const BASE_PICK_REF: &str = "refs/reviewr/base-pick";
+
+/// The recorded pick's branch name, or `None` when no pick is recorded.
+pub fn read_base_pick(repo: &Path) -> Result<Option<String>, GitFail> {
+    if git_tristate(repo, &["rev-parse", "--verify", "--quiet", BASE_PICK_REF])?.is_none() {
+        return Ok(None);
+    }
+    let name = git_strict(repo, &["cat-file", "blob", BASE_PICK_REF])?;
+    let name = name.trim();
+    Ok((!name.is_empty()).then(|| name.to_string()))
+}
+
+/// Record `name` as the repository's pick. The ref write lands before the pick applies
+/// (`specs/review-model.md`), so a crash between the two loses nothing.
+pub fn write_base_pick(repo: &Path, name: &str) -> Result<(), GitFail> {
+    let blob = git_stdin(repo, &["hash-object", "-w", "--stdin"], name)?;
+    git_strict(repo, &["update-ref", BASE_PICK_REF, blob.trim()])?;
+    Ok(())
+}
+
+/// Drop the recorded pick — choosing the default branch clears it
+/// (`specs/review-model.md`).
+pub fn clear_base_pick(repo: &Path) -> Result<(), GitFail> {
+    git_strict(repo, &["update-ref", "-d", BASE_PICK_REF])?;
+    Ok(())
+}
+
+/// Run git with `input` piped to stdin, any non-zero exit a failure.
+fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .env("LC_ALL", "C")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| GitFail(format!("git {args:?}: {e}")))?;
+    child
+        .stdin
+        .take()
+        .expect("stdin piped")
+        .write_all(input.as_bytes())
+        .map_err(|e| GitFail(format!("git {args:?}: {e}")))?;
+    let out = child.wait_with_output().map_err(|e| GitFail(format!("git {args:?}: {e}")))?;
+    if !out.status.success() {
+        return Err(GitFail(format!(
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 // --- turn baseline (last-turn scope) -------------------------------------------
@@ -897,13 +1046,13 @@ fn diff_base(repo: &Path) -> String {
     }
 }
 
-/// The changed files for `scope`, sorted by path. `base` overrides the base-config snapshot.
+/// The changed files for `scope`, sorted by path. `branch_base` is the resolved base OID
+/// for the `branch` scope ([`resolve_base`]'s winner); with none the scope lists nothing.
 /// `last-turn` is resolved separately by [`changed_against_tree`], so it lists nothing here.
 pub fn changed_files(
     repo: &Path,
     scope: Scope,
-    base: Option<&str>,
-    config_bases: &[String],
+    branch_base: Option<&str>,
 ) -> Result<Vec<ChangedFile>> {
     let (numstat, name_status) = match scope {
         Scope::Uncommitted => {
@@ -915,7 +1064,7 @@ pub fn changed_files(
                 git(repo, &["diff", &base, "--name-status", "-z"])?,
             )
         }
-        Scope::Branch => match merge_base(repo, base, config_bases) {
+        Scope::Branch => match branch_base.and_then(|b| merge_base(repo, b)) {
             Some(r) => (
                 git(repo, &["diff", &r, "--numstat", "-z"])?,
                 git(repo, &["diff", &r, "--name-status", "-z"])?,

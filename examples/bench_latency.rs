@@ -39,21 +39,21 @@ fn main() {
     let label = args.next().unwrap_or_else(|| repo.display().to_string());
     assert!(git::is_repo(&repo), "not a git repo: {}", repo.display());
     let hl = Highlighter::new(theme::resolve(None).syntax);
-    let bases: Vec<String> = vec!["main".into(), "master".into()];
     println!("== {label} ==");
 
     // --- Components of reload() -------------------------------------------------
-    let changed = git::changed_files(&repo, Scope::Uncommitted, None, &bases).unwrap();
+    let changed = git::changed_files(&repo, Scope::Uncommitted, None).unwrap();
     row(
         "changed_files (uncommitted)",
         sample(5, || {
-            git::changed_files(&repo, Scope::Uncommitted, None, &bases).unwrap();
+            git::changed_files(&repo, Scope::Uncommitted, None).unwrap();
         }),
     );
     row(
-        "changed_files (branch)",
+        "changed_files (branch, incl. resolve)",
         sample(5, || {
-            git::changed_files(&repo, Scope::Branch, None, &bases).unwrap();
+            let base = git::resolve_base(&repo, None).ok().and_then(|r| r.winner);
+            git::changed_files(&repo, Scope::Branch, base.map(|w| w.oid).as_deref()).unwrap();
         }),
     );
     let all = git::all_files(&repo).unwrap();
@@ -160,7 +160,7 @@ fn main() {
     row(
         "TAB SWITCH -> All files (reload, no reopen)",
         sample(3, || {
-            git::changed_files(&repo, Scope::Uncommitted, None, &bases).unwrap();
+            git::changed_files(&repo, Scope::Uncommitted, None).unwrap();
             git::all_files(&repo).unwrap();
         }),
     );
