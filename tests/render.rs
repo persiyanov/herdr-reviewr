@@ -2762,8 +2762,7 @@ fn based_app() -> (Repo, App) {
     let r = Repo::init();
     r.write("hello.rs", "alpha\n");
     r.commit_all("init");
-    r.git(&["update-ref", "refs/remotes/origin/main", "main"]);
-    r.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    r.set_origin_default("main", "main");
     r.git(&["branch", "dev"]);
     r.git(&["checkout", "-q", "-b", "feature"]);
     r.write("hello.rs", "alpha\nBETA\n");
@@ -2802,8 +2801,7 @@ fn a_skipped_pick_warns_beside_the_resolved_base() {
     let r = Repo::init();
     r.write("hello.rs", "alpha\n");
     r.commit_all("init");
-    r.git(&["update-ref", "refs/remotes/origin/main", "main"]);
-    r.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    r.set_origin_default("main", "main");
     herdr_reviewr::git::write_base_pick(r.path(), "gone").unwrap();
     r.git(&["checkout", "-q", "-b", "feature"]);
     let mut app = app_on(&r);
@@ -2866,8 +2864,7 @@ fn an_overlong_skipped_tail_never_evicts_the_base_name() {
     let r = Repo::init();
     r.write("hello.rs", "alpha\n");
     r.commit_all("init");
-    r.git(&["update-ref", "refs/remotes/origin/main", "main"]);
-    r.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    r.set_origin_default("main", "main");
     let long = format!("feature/{}", "x".repeat(80));
     herdr_reviewr::git::write_base_pick(r.path(), &long).unwrap();
     r.git(&["checkout", "-q", "-b", "work"]);

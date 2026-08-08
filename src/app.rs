@@ -1057,6 +1057,16 @@ impl App {
         }
     }
 
+    /// Adopt a build's base outcome — the one rule for both writers (the landed snapshot
+    /// and the scope switch's synchronous rebuild): only the `branch` scope owns a base,
+    /// and the base and the changeset it produced land together, so the header name and
+    /// the list it heads never disagree (specs/tui.md).
+    fn adopt_branch_base(&mut self, base: git::BaseStatus) {
+        if self.scope == Scope::Branch {
+            self.branch_base = base;
+        }
+    }
+
     /// Reconcile a built snapshot into the view — the one place a world result touches place
     /// state, by identity first, then fallback, then clamp (`specs/overview.md` Continuity).
     pub fn reconcile_world(&mut self, snapshot: crate::world::WorldSnapshot) {
@@ -1066,11 +1076,7 @@ impl App {
         let open = self.diff_path.clone();
         self.changed = snapshot.changed;
         self.entries = snapshot.entries;
-        // The base and the changeset it produced land together, so the header name and the
-        // list it heads never disagree (specs/tui.md).
-        if self.scope == Scope::Branch {
-            self.branch_base = snapshot.branch_base;
-        }
+        self.adopt_branch_base(snapshot.branch_base);
         self.rebuild_file_rows();
         self.file_cursor = anchor
             .and_then(|a| self.row_of_anchor(&a))
@@ -1839,9 +1845,7 @@ impl App {
             // `All files` keeps its tree; only the changed set rebuilds before the frame.
             // The tree's annotations refresh behind it via the worker (specs/tui.md).
             let (branch_base, changed) = crate::world::build_changed(&self.world_input())?;
-            if self.scope == Scope::Branch {
-                self.branch_base = branch_base;
-            }
+            self.adopt_branch_base(branch_base);
             self.changed = crate::world::annotate(&changed);
             // Re-mark the tree in place — the rows are base-independent, only their
             // badges move, so the switch frame never shows the old base's badges
@@ -3621,7 +3625,8 @@ impl App {
         if !self.base_pick_available() || self.mode != Mode::Normal {
             return;
         }
-        let names = match git::list_branches(&self.repo) {
+        let default = git::default_branch_name(&self.repo).ok().flatten();
+        let names = match git::list_branches(&self.repo, default.as_deref()) {
             Ok(names) => names,
             Err(e) => {
                 self.status = e.0;
@@ -3634,7 +3639,6 @@ impl App {
             self.status = "no branches to pick".to_string();
             return;
         }
-        let default = git::default_branch_name(&self.repo).ok().flatten();
         let target = self
             .pr_snapshot()
             .filter(|s| s.state == forge::PrState::Open)
@@ -4033,7 +4037,6 @@ mod tests {
             winner: Some(crate::git::ResolvedBase {
                 name: "main".to_string(),
                 oid: "0".repeat(40),
-                source: crate::git::BaseSource::DefaultBranch,
             }),
             skipped: None,
         };

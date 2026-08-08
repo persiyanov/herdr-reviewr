@@ -56,22 +56,19 @@ impl Repo {
 
     /// Run `git -C <repo> <args>`, asserting success, returning stdout.
     pub fn git(&self, args: &[&str]) -> String {
-        let out = Command::new("git")
-            .env("GIT_AUTHOR_NAME", "Test")
-            .env("GIT_AUTHOR_EMAIL", "test@herdr.test")
-            .env("GIT_COMMITTER_NAME", "Test")
-            .env("GIT_COMMITTER_EMAIL", "test@herdr.test")
-            .arg("-C")
-            .arg(self.path())
-            .args(args)
-            .output()
-            .expect("git");
-        assert!(
-            out.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        self.git_env(args, &[])
+    }
+
+    /// Fabricate a remote-tracking default branch without a real remote: a
+    /// `refs/remotes/origin/<name>` ref at the given rev plus the `origin/HEAD` symref.
+    pub fn set_origin_default(&self, name: &str, rev: &str) {
+        let oid = self.git(&["rev-parse", rev]).trim().to_string();
+        self.git(&["update-ref", &format!("refs/remotes/origin/{name}"), &oid]);
+        self.git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            &format!("refs/remotes/origin/{name}"),
+        ]);
     }
 
     pub fn write(&self, rel: &str, contents: &str) {

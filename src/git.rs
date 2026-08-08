@@ -508,7 +508,7 @@ pub fn pr_local(repo: &Path, base_flag: Option<&str>) -> Result<PrLocalState, Gi
             names.push(name);
         }
     };
-    if let Some(upstream) = recorded_upstream(repo, &branch, &resolution.base_names(), &bases)? {
+    if let Some(upstream) = recorded_upstream(repo, &branch, &resolution.recorded, &bases)? {
         push_name(upstream, &mut names);
     }
     if let Some(head) = &head_oid
@@ -523,21 +523,12 @@ pub fn pr_local(repo: &Path, base_flag: Option<&str>) -> Result<PrLocalState, Gi
     Ok(PrLocalState { head_oid, base_oid: bases.into_iter().next(), names, detached: false })
 }
 
-/// Where the winning base came from (`specs/review-model.md` Base branch).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BaseSource {
-    Flag,
-    Pick,
-    DefaultBranch,
-}
-
 /// The winning base: the source's bare name and its pinned commit
 /// (`specs/review-model.md` Base branch).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedBase {
     pub name: String,
     pub oid: String,
-    pub source: BaseSource,
 }
 
 /// The chain outcome the header paints: the winner and the first recorded choice the
@@ -552,9 +543,9 @@ pub struct BaseStatus {
 
 /// One pass over the base chain. `candidates` keeps every source that resolved, in
 /// precedence order and deduped by OID — the PR frontier walk needs all of them, not just
-/// the winner (`pr_local`). `recorded` keeps every source name the chain considered,
-/// resolved or not — a dormant pick still shields its name from the PR name lookup
-/// (`specs/forge-host.md` Resolution).
+/// the winner (`pr_local`). `recorded` keeps every source name the chain considered —
+/// every candidate's name and every dormant one's, since a pick that fails to resolve
+/// still shields its name from the PR name lookup (`specs/forge-host.md` Resolution).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BaseResolution {
     pub status: BaseStatus,
@@ -566,17 +557,6 @@ impl BaseResolution {
     pub fn oids(&self) -> Vec<String> {
         self.candidates.iter().map(|(_, oid)| oid.clone()).collect()
     }
-    /// The names the PR lookup must not treat as this branch's own: every resolved
-    /// candidate and every recorded choice (`specs/forge-host.md` Resolution).
-    fn base_names(&self) -> Vec<String> {
-        let mut names = self.recorded.clone();
-        for (name, _) in &self.candidates {
-            if !names.contains(name) {
-                names.push(name.clone());
-            }
-        }
-        names
-    }
 }
 
 /// Resolve the base chain: the `--base` flag, then the repo pick, then the branch
@@ -584,12 +564,12 @@ impl BaseResolution {
 /// ref is skipped, never an error; a skipped flag or pick that would have outranked the
 /// winner is recorded for the header (`specs/tui.md`).
 pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResolution, GitFail> {
-    let mut candidates: Vec<(String, String, BaseSource)> = Vec::new();
+    let mut candidates: Vec<(String, String)> = Vec::new();
     let mut recorded: Vec<String> = Vec::new();
     let mut skipped: Option<String> = None;
-    let push = |name: String, oid: String, source: BaseSource, c: &mut Vec<_>| {
-        if !c.iter().any(|(_, o, _): &(String, String, BaseSource)| *o == oid) {
-            c.push((name, oid, source));
+    let push = |name: String, oid: String, c: &mut Vec<(String, String)>| {
+        if !c.iter().any(|(_, o)| *o == oid) {
+            c.push((name, oid));
         }
     };
     let record = |name: String, r: &mut Vec<String>| {
@@ -605,10 +585,10 @@ pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResoluti
         record(entry.clone(), &mut recorded);
         let probe = format!("{flag}^{{commit}}");
         if let Some(oid) = git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])? {
-            push(entry, oid, BaseSource::Flag, &mut candidates);
+            push(entry, oid, &mut candidates);
         } else {
             match resolve_base_entry(repo, &entry)? {
-                Some(oid) => push(entry, oid, BaseSource::Flag, &mut candidates),
+                Some(oid) => push(entry, oid, &mut candidates),
                 None => skipped = Some(flag.to_string()),
             }
         }
@@ -616,7 +596,7 @@ pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResoluti
     if let Some(pick) = read_base_pick(repo)? {
         record(pick.clone(), &mut recorded);
         match resolve_base_entry(repo, &pick)? {
-            Some(oid) => push(pick, oid, BaseSource::Pick, &mut candidates),
+            Some(oid) => push(pick, oid, &mut candidates),
             // Only a failure that outranks the eventual winner reads as skipped.
             None if candidates.is_empty() => skipped = skipped.or(Some(pick)),
             None => {}
@@ -625,15 +605,11 @@ pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResoluti
     if let Some(name) = default_branch_name(repo)? {
         record(name.clone(), &mut recorded);
         if let Some(oid) = resolve_base_entry(repo, &name)? {
-            push(name, oid, BaseSource::DefaultBranch, &mut candidates);
+            push(name, oid, &mut candidates);
         }
     }
-    let winner = candidates.first().map(|(name, oid, source)| ResolvedBase {
-        name: name.clone(),
-        oid: oid.clone(),
-        source: *source,
-    });
-    let candidates = candidates.into_iter().map(|(name, oid, _)| (name, oid)).collect();
+    let winner =
+        candidates.first().map(|(name, oid)| ResolvedBase { name: name.clone(), oid: oid.clone() });
     Ok(BaseResolution { status: BaseStatus { winner, skipped }, candidates, recorded })
 }
 
@@ -673,12 +649,12 @@ pub(crate) fn strip_base_prefix(entry: &str) -> String {
 
 /// Every branch name for the base picker: `refs/heads` and `refs/remotes/origin` merged by
 /// bare name, newest commit first, `origin/HEAD` and the checked-out branch excluded —
-/// except the default branch, which stays listed so its row can clear a pick even while
-/// checked out (`specs/input.md` Base picker).
-pub fn list_branches(repo: &Path) -> Result<Vec<String>, GitFail> {
-    let default = default_branch_name(repo)?;
+/// except the `default` branch, which stays listed so its row can clear a pick even while
+/// checked out (`specs/input.md` Base picker). The caller passes the default it already
+/// resolved, so one picker open runs the resolution once.
+pub fn list_branches(repo: &Path, default: Option<&str>) -> Result<Vec<String>, GitFail> {
     let checked_out = git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])?
-        .filter(|name| default.as_deref() != Some(name));
+        .filter(|name| default != Some(name));
     let out = git_strict(
         repo,
         &[

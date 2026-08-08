@@ -470,7 +470,7 @@ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) ->
         return Some(HeaderHit::Scope);
     }
     if let Some((lead, name, tail)) = base_parts(app, keymap, area.width) {
-        let base_start = scope_end + 1;
+        let base_start = scope_end + BASE_GAP.len() as u16;
         let base_end = base_start + (lead.width() + name.width() + tail.width()) as u16;
         if (base_start..base_end).contains(&col) {
             return Some(HeaderHit::Base);
@@ -492,6 +492,10 @@ fn tab_labels(keymap: &Keymap) -> [(Tab, String); 3] {
 const HEADER_LEAD: &str = " ";
 const TAB_GAP: &str = "  ";
 const HEADER_GAP: &str = "  ";
+/// The gap between the scope chip and the base label — one spelling shared by the paint,
+/// the width math, and the click hit-test, so the painted text and the clickable region
+/// can never drift apart.
+const BASE_GAP: &str = " ";
 /// The reserved indicator cell at the end of the tab strip: one gap column plus one glyph
 /// column, always present so nothing shifts when the glyph appears (specs/tui.md).
 const INDICATOR_CELL: usize = 2;
@@ -554,7 +558,7 @@ fn base_parts(app: &App, keymap: &Keymap, width: u16) -> Option<(String, String,
     // Everything else on the line plus the base's own gap and the suffix's minimum gap.
     let fixed = header_prefix_len(&tab_spans(keymap))
         + scope_chip(app).len()
-        + 1
+        + BASE_GAP.len()
         + lead.width()
         + header_suffix(app).width()
         + HEADER_LEAD.len()
@@ -605,9 +609,9 @@ fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let chip = scope_chip(app);
     let base = base_parts(app, app.keymap(), area.width);
-    let base_width = base
-        .as_ref()
-        .map_or(0, |(lead, name, tail)| 1 + lead.width() + name.width() + tail.width());
+    let base_width = base.as_ref().map_or(0, |(lead, name, tail)| {
+        BASE_GAP.len() + lead.width() + name.width() + tail.width()
+    });
     let suffix = header_suffix(app);
     let prefix = header_prefix_len(&tab_spans(app.keymap()));
     // The suffix keeps the same edge pad as the tab strip's lead.
@@ -625,7 +629,7 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         // An empty lead is the `no base` state, worn as a warning; a resolved name wears the
         // clickable accent, and the skipped tail warns beside it (`specs/tui.md`).
         let warn = lead.is_empty();
-        spans.push(Span::styled(" ", bar));
+        spans.push(Span::styled(BASE_GAP, bar));
         spans.push(Span::styled(lead, bar.fg(p.overlay0)));
         spans.push(Span::styled(name, bar.fg(if warn { p.peach } else { p.lavender })));
         if !tail.is_empty() {
@@ -882,6 +886,31 @@ fn comment_card_lines(c: &Comment, width: usize, p: &Palette) -> Vec<Line<'stati
         Span::styled(format!("╰{}╯", "─".repeat(box_w.saturating_sub(2))), border),
     ]));
     lines
+}
+
+/// Truncate `s` to `max` display columns keeping the tail behind a leading `…` — for
+/// input echoes, where the newest characters are the ones the user must see. Zero
+/// columns fit nothing, not a bare `…`.
+fn truncate_left(s: &str, max: usize) -> String {
+    if s.width() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut tail: Vec<char> = Vec::new();
+    let mut w = 0;
+    for ch in s.chars().rev() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > max - 1 {
+            break;
+        }
+        tail.push(ch);
+        w += cw;
+    }
+    let mut out = String::from("…");
+    out.extend(tail.into_iter().rev());
+    out
 }
 
 /// Truncate `s` to `max` display columns, marking a cut with a trailing `…`. Zero columns
@@ -2080,11 +2109,13 @@ fn render_base_picker(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // The filter line: the typed query, or a dim invitation while it is empty.
+    // The filter line: the typed query, or a dim invitation while it is empty. An
+    // overlong query keeps its tail, so what was just typed stays visible.
     let filter = if bp.query.is_empty() {
         Line::from(Span::styled(" type to filter…", Style::default().fg(p.overlay0)))
     } else {
-        Line::from(Span::styled(format!(" {}", bp.query), text_style(p)))
+        let echo = truncate_left(&bp.query, (inner.width as usize).saturating_sub(1));
+        Line::from(Span::styled(format!(" {echo}"), text_style(p)))
     };
     frame.render_widget(Paragraph::new(filter), Rect { height: 1, ..inner });
 

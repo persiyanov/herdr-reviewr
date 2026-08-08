@@ -2709,8 +2709,7 @@ fn switching_scope_on_all_files_remarks_in_place() {
     r.write("a.rs", "one\n");
     r.write("b.rs", "two\n");
     r.commit_all("init");
-    r.git(&["update-ref", "refs/remotes/origin/main", "main"]);
-    r.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    r.set_origin_default("main", "main");
     r.git(&["checkout", "-q", "-b", "feature"]);
     r.write("b.rs", "TWO\n");
     r.commit_all("committed change to b"); // committed on the branch
@@ -2954,8 +2953,7 @@ fn changing_scope_on_all_files_snaps_the_changes_diff_to_the_top() {
     }
     r.write("a.rs", &body);
     r.commit_all("base");
-    r.git(&["update-ref", "refs/remotes/origin/main", "main"]);
-    r.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    r.set_origin_default("main", "main");
     r.git(&["checkout", "-b", "feature"]);
     r.write("a.rs", &body.replace("line 5", "LINE 5"));
     r.commit_all("feature edit"); // a.rs differs from base → changed in branch scope
@@ -5161,8 +5159,7 @@ fn based_repo() -> Repo {
     let r = Repo::init();
     r.write("a.rs", "one\n");
     r.commit_all("init");
-    r.git(&["update-ref", "refs/remotes/origin/main", "main"]);
-    r.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    r.set_origin_default("main", "main");
     r.git(&["branch", "dev"]);
     r.git(&["checkout", "-q", "-b", "feature"]);
     r.write("a.rs", "two\n");

@@ -7,10 +7,10 @@ use std::path::Path;
 
 use common::Repo;
 use herdr_reviewr::git::{
-    BaseSource, all_files, changed_against_tree, changed_files as changed_files_oid,
-    clear_base_pick, default_branch_name, file_content, list_branches,
-    merge_base as merge_base_oid, read_base_pick, read_baseline_ref, resolve_base,
-    snapshot_worktree, worktree_key, write_base_pick, write_baseline_ref,
+    all_files, changed_against_tree, changed_files as changed_files_oid, clear_base_pick,
+    default_branch_name, file_content, list_branches, merge_base as merge_base_oid, read_base_pick,
+    read_baseline_ref, resolve_base, snapshot_worktree, worktree_key, write_base_pick,
+    write_baseline_ref,
 };
 use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope};
 
@@ -30,14 +30,6 @@ fn changed_files(
 fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
     let winner = resolve_base(repo, base).ok()?.status.winner?;
     merge_base_oid(repo, &winner.oid)
-}
-
-/// Fabricate a remote-tracking default branch without a real remote: a
-/// `refs/remotes/origin/<name>` ref at the given rev plus the `origin/HEAD` symref.
-fn set_origin_default(r: &Repo, name: &str, rev: &str) {
-    let oid = r.git(&["rev-parse", rev]).trim().to_string();
-    r.git(&["update-ref", &format!("refs/remotes/origin/{name}"), &oid]);
-    r.git(&["symbolic-ref", "refs/remotes/origin/HEAD", &format!("refs/remotes/origin/{name}")]);
 }
 
 #[test]
@@ -107,7 +99,7 @@ fn the_chain_is_flag_then_pick_then_default() {
     let r = Repo::init();
     r.write("base.rs", "1\n");
     r.commit_all("base");
-    set_origin_default(&r, "main", "HEAD");
+    r.set_origin_default("main", "HEAD");
     r.git(&["branch", "picked-base"]);
     r.git(&["branch", "flagged-base"]);
     r.git(&["checkout", "-q", "-b", "feature"]);
@@ -116,16 +108,16 @@ fn the_chain_is_flag_then_pick_then_default() {
 
     // Default branch alone: `origin/HEAD` names `main` (specs/review-model.md).
     let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
-    assert_eq!((winner.name.as_str(), winner.source), ("main", BaseSource::DefaultBranch));
+    assert_eq!(winner.name, "main");
 
     // A pick outranks the default.
     write_base_pick(r.path(), "picked-base").unwrap();
     let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
-    assert_eq!((winner.name.as_str(), winner.source), ("picked-base", BaseSource::Pick));
+    assert_eq!(winner.name, "picked-base");
 
     // The flag outranks the pick.
     let winner = resolve_base(r.path(), Some("flagged-base")).unwrap().status.winner.unwrap();
-    assert_eq!((winner.name.as_str(), winner.source), ("flagged-base", BaseSource::Flag));
+    assert_eq!(winner.name, "flagged-base");
 }
 
 #[test]
@@ -167,7 +159,7 @@ fn a_prefixed_flag_spelling_resolves_to_the_bare_name() {
     let r = Repo::init();
     r.write("base.rs", "1\n");
     r.commit_all("base");
-    set_origin_default(&r, "main", "HEAD");
+    r.set_origin_default("main", "HEAD");
     r.git(&["checkout", "-q", "-b", "feature"]);
     r.write("base.rs", "2\n");
     r.commit_all("diverge");
@@ -175,7 +167,7 @@ fn a_prefixed_flag_spelling_resolves_to_the_bare_name() {
     // `--base origin/main` resolves as a verbatim rev, but the header and the PR name
     // shield carry the bare spelling (specs/tui.md, specs/forge-host.md).
     let winner = resolve_base(r.path(), Some("origin/main")).unwrap().status.winner.unwrap();
-    assert_eq!((winner.name.as_str(), winner.source), ("main", BaseSource::Flag));
+    assert_eq!(winner.name, "main");
 }
 
 #[test]
@@ -183,7 +175,7 @@ fn a_dormant_pick_is_skipped_and_reactivates() {
     let r = Repo::init();
     r.write("base.rs", "1\n");
     r.commit_all("base");
-    set_origin_default(&r, "main", "HEAD");
+    r.set_origin_default("main", "HEAD");
     r.git(&["branch", "dev"]);
     r.git(&["checkout", "-q", "-b", "feature"]);
     r.write("base.rs", "2\n");
@@ -192,21 +184,21 @@ fn a_dormant_pick_is_skipped_and_reactivates() {
 
     // The pick wins while its branch resolves.
     let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
-    assert_eq!(winner.source, BaseSource::Pick);
+    assert_eq!(winner.name, "dev");
 
     // The branch disappears: the pick is kept and skipped, the default wins, and the
     // header can say so (specs/review-model.md).
     r.git(&["branch", "-D", "dev"]);
     let status = resolve_base(r.path(), None).unwrap().status;
     let winner = status.winner.unwrap();
-    assert_eq!((winner.name.as_str(), winner.source), ("main", BaseSource::DefaultBranch));
+    assert_eq!(winner.name, "main");
     assert_eq!(status.skipped.as_deref(), Some("dev"));
     assert_eq!(read_base_pick(r.path()).unwrap().as_deref(), Some("dev"));
 
     // The branch returns: the pick reactivates without a new choice.
     r.git(&["branch", "dev", "main"]);
     let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
-    assert_eq!((winner.name.as_str(), winner.source), ("dev", BaseSource::Pick));
+    assert_eq!(winner.name, "dev");
 }
 
 #[test]
@@ -254,7 +246,7 @@ fn default_branch_name_reads_the_origin_head_symref() {
     r.write("base.rs", "1\n");
     r.commit_all("base");
     assert_eq!(default_branch_name(r.path()).unwrap(), None);
-    set_origin_default(&r, "trunk", "HEAD");
+    r.set_origin_default("trunk", "HEAD");
     assert_eq!(default_branch_name(r.path()).unwrap().as_deref(), Some("trunk"));
 }
 
@@ -263,7 +255,7 @@ fn a_dangling_origin_head_symref_names_no_default() {
     let r = Repo::init();
     r.write("base.rs", "1\n");
     r.commit_all("base");
-    set_origin_default(&r, "master", "HEAD");
+    r.set_origin_default("master", "HEAD");
 
     // `fetch --prune` after a server-side rename deletes the target but leaves the
     // symref: a name resolving to nothing is no default (specs/review-model.md).
@@ -292,7 +284,7 @@ fn list_branches_merges_names_newest_first_and_hides_the_checked_out() {
     r.git(&["add", "-A"]);
     r.git_env(&["commit", "-q", "-m", "one"], &[("GIT_COMMITTER_DATE", "2026-01-01T00:00:00")]);
     r.git(&["branch", "older"]);
-    set_origin_default(&r, "main", "HEAD");
+    r.set_origin_default("main", "HEAD");
     r.git(&["checkout", "-q", "-b", "feature"]);
     r.write("a.rs", "2\n");
     r.commit_all("two");
@@ -300,7 +292,7 @@ fn list_branches_merges_names_newest_first_and_hides_the_checked_out() {
 
     // Local and origin names merge (main exists only as origin/main here), the newest
     // commit sorts first, and the checked-out branch is not listed (specs/input.md).
-    let names = list_branches(r.path()).unwrap();
+    let names = list_branches(r.path(), default_branch_name(r.path()).unwrap().as_deref()).unwrap();
     assert_eq!(names, ["newer", "main", "older"]);
 }
 
@@ -313,11 +305,11 @@ fn the_checked_out_default_branch_stays_listed() {
     r.git(&["branch", "dev"]);
     r.write("a.rs", "2\n");
     r.commit_all("two");
-    set_origin_default(&r, "main", "HEAD");
+    r.set_origin_default("main", "HEAD");
 
     // Checked out on the default branch itself: its row stays, or a recorded pick could
     // never be cleared from the picker (specs/input.md).
-    let names = list_branches(r.path()).unwrap();
+    let names = list_branches(r.path(), default_branch_name(r.path()).unwrap().as_deref()).unwrap();
     assert_eq!(names, ["main", "dev"]);
 }
 

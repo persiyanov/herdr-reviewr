@@ -23,8 +23,7 @@ fn worktree() -> Repo {
     repo.write("a.txt", "one\n");
     repo.commit_all("base");
     repo.git(&["remote", "add", "origin", "https://github.com/owner/repo.git"]);
-    repo.git(&["update-ref", "refs/remotes/origin/main", "main"]);
-    repo.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    repo.set_origin_default("main", "main");
     repo.git(&["switch", "-qc", "work"]);
     repo.write("b.txt", "two\n");
     repo.commit_all("feature");
@@ -226,8 +225,7 @@ fn an_upstream_on_a_base_resolved_without_its_name_is_excluded_by_tip() {
     repo.git(&["branch", "-qm", "develop"]);
     repo.write("d.txt", "dev\n");
     repo.commit_all("develop work");
-    repo.git(&["update-ref", "refs/remotes/origin/develop", "develop"]);
-    repo.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/develop"]);
+    repo.set_origin_default("develop", "develop");
     let develop_tip = repo.git(&["rev-parse", "develop"]).trim().to_string();
     repo.git(&["switch", "-qc", "work"]);
     repo.write("b.txt", "two\n");
