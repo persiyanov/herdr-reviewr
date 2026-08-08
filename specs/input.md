@@ -1,7 +1,7 @@
 ---
-Status: Current
+Status: Draft
 Created: 2026-07-17
-Last edited: 2026-07-31
+Last edited: 2026-08-08
 ---
 
 # Input
@@ -20,6 +20,7 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 - A key hint in the header or the footer shows its action's first bound key.
 - The comments list acts through the same bindings and closes on `esc` and the `comments` binding.
 - The agent picker acts through the `down` / `up` bindings and closes on `esc`.
+- The base picker filters through typed characters, moves through the arrows, and closes on `esc`.
 - Prose and mockups elsewhere show the default keys.
 
 | action                                                   | does                                        | keys                                        | mouse                         |
@@ -33,6 +34,7 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | —                                                        | scroll the viewport, selection put          | —                                           | wheel over the pane           |
 | —                                                        | scroll the diff horizontally (wrap off)     | `←` / `→`                                   | —                             |
 | `scope-uncommitted` / `scope-branch` / `scope-last-turn` | switch scope                                | `u` / `b` / `t`                             | click the scope chip to cycle |
+| `base-pick`                                              | open the base picker                        | `B`                                         | click the base name           |
 | `tab-changes` / `tab-all-files` / `tab-pr`               | switch tab                                  | `1` / `2` / `3`                             | click a tab name              |
 | —                                                        | expand the fold under the cursor            | `→`                                         | click the `⋯` row             |
 | —                                                        | open a link in rendered markdown            | —                                           | click the link                |
@@ -63,7 +65,7 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 
 `navigator-hide` hides the navigator and shows it again in place (`tui.md`). On the file tabs it is never inert in `Normal` mode, so the way back is always the key that hid it. On `PR` it is inert and stays out of the footer (`tui.md`). While the navigator is hidden, `navigator-position`, `navigator-grow`, and `navigator-shrink` are inert. In `Normal` mode, `tab` then shows the navigator and focuses it. Every other mode keeps its own `tab` meaning (`search.md`).
 
-Outside the hidden-state rules above, these four navigator actions work from either main pane on every tab. While the comment editor is open, their printable characters are text. In the comments list and the agent picker they are inert. Those local modes omit the navigator actions from the footer.
+Outside the hidden-state rules above, these four navigator actions work from either main pane on every tab. While the comment editor is open, their printable characters are text. In the comments list, the agent picker, and the base picker they are inert. Those local modes omit the navigator actions from the footer.
 
 A divider drag belongs to the navigator position and split axis at mouse-down. A keypress, terminal resize, or config-driven layout change cancels it. A cancelled drag keeps its last painted share, and the cancelling keypress still performs its own action. After cancellation, drag events are consumed until mouse-up rather than becoming a selection in the read pane.
 
@@ -94,7 +96,7 @@ The steps and the skips share the rest:
 - Adjacency is the list's visible order, so a collapsed subtree is skipped.
 - Opening a file this way moves the list selection onto it.
 - With no target in the pressed direction, a press does nothing.
-- Both are inert while a line selection is live and while the comments list or the agent picker is open.
+- Both are inert while a line selection is live and while the comments list, the agent picker, or the base picker is open.
 - The `PR` tab has neither.
 
 ### Footer
@@ -142,8 +144,9 @@ The `?` expansion:
 
 - It lists every shortcut applicable in the current context that is not already on row 1, wrapped
   below row 1 in three labeled bands, each a dim label then its keys. `do`: the cursor's actions.
-  `go`: the global actions, each shown only where it works — scope, search, find, wrap, the comments
-  list, copy, refresh, the tabs, the pane toggle, the navigator position and hide keys, quit. `move`:
+  `go`: the global actions, each shown only where it works — scope, the base picker, search, find,
+  wrap, the comments list, copy, refresh, the tabs, the pane toggle, the navigator position and hide
+  keys, quit. `move`:
   down and up, the hunk and file steps, the page keys. An empty band is dropped, and a key that would
   not work in the current state never appears. The hunk step shows only where it works, the `Changes`
   diff and never a preview (see Changeset traversal). `PR` has no hunk or file steps. The hide key's
@@ -173,6 +176,7 @@ Row 1's primary and actions follow the cursor:
 | a collapsed directory                    | `→ expand`                     | `z hide`                          |
 | an expanded directory                    | `← collapse`                   | `z hide`                          |
 | nothing to review (awaiting turn)        | `u/b/t scope`                  | `r refresh`                       |
+| the `branch` scope with no base          | `B pick base`                  | `u/t scope · r refresh`           |
 | an empty read pane, navigator hidden     | `z show`                       | `tab files`                       |
 
 - An armed crossing outranks the cursor's own action and leads row 1, since only the footer says the next press leaves the file. It is the one movement key on row 1 (see Changeset traversal). While it is armed, the `move` band drops the hunk step, whose key row 1 now shows.
@@ -180,8 +184,8 @@ Row 1's primary and actions follow the cursor:
 - When the awaiting-turn state and the hidden empty read pane match at once, the awaiting-turn row wins, and `z show` still joins its actions.
 - `scope`, `search`, and `find` are global, not cursor actions, so the `go` band carries them, never row 1 — `search` in every context, `find` wherever the read pane has content (`search.md`, `find-in-file.md`). `scope` leads row 1 only where nothing else does, an empty or notice diff.
 - Movement keys never sit on row 1. The `move` band shows them.
-- The comment editor, the comments list, the agent picker, the search screen, and the find band show their own one-row footer, without `?`. The expansion's open state is kept and restored when they close.
-- `?` (the `keys` action) toggles the expansion in `Normal` mode only. It is text in the comment editor and the search and find inputs, and inert in the comments list and the agent picker.
+- The comment editor, the comments list, the agent picker, the base picker, the search screen, and the find band show their own one-row footer, without `?`. The expansion's open state is kept and restored when they close.
+- `?` (the `keys` action) toggles the expansion in `Normal` mode only. It is text in the comment editor, the search and find inputs, and the base picker's filter, and inert in the comments list and the agent picker.
 - The changed-file count and line totals live in the header. The footer carries only the comment count, inside `s send N`.
 - On `PR` row 1 carries the PR state line and `o open ↗` per `pr-tab.md`, and `?` expands to the rest.
 
@@ -232,6 +236,30 @@ Only the unmodified `enter` sends. `Alt+Enter` and `Shift+Enter` insert a newlin
 - `esc` cancels with or without a modifier, so no keystroke traps the reviewer in the picker.
 - A picker taller than the pane scrolls with the highlight.
 - `esc` returns to the view the send was issued from, the comments list and the find band included.
+
+### Base picker
+
+`base-pick` opens the picker over the body, like the comments list (`tui.md`). It works on the file tabs while the `branch` scope is active and no `--base` flag was passed. Elsewhere it is inert and stays out of the footer. While the comment editor is open, the base-name click is inert like the key.
+
+The list holds one row per branch name, remote-tracking and local names merged. The checked-out branch is not listed. Rows sort by most recent commit. Two rows outrank that order:
+
+- The open PR's target sorts first, starred (`forge-host.md`).
+- The default branch sorts next, marked `default`. Choosing it clears the pick (`review-model.md`).
+
+The highlight opens on the current base, else the first row. The highlight is place state (`overview.md`).
+
+| key               | does                                             |
+| ----------------- | ------------------------------------------------ |
+| typed character   | narrow the list, matching anywhere in the name   |
+| `backspace`       | delete the last filter character                 |
+| `↓` / `↑`         | move the highlight                               |
+| `enter`           | pick the highlighted branch                      |
+| `esc`             | cancel                                           |
+
+- A click moves the highlight. A click on the highlighted row picks.
+- A filter matching no branch shows `no branches match`, and `enter` does nothing.
+- A pick applies immediately: the changeset rebuilds and the header renames (`review-model.md`).
+- A picker taller than the pane scrolls with the highlight.
 
 ## Non-goals
 

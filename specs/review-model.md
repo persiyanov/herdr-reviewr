@@ -1,7 +1,7 @@
 ---
-Status: Current
+Status: Draft
 Created: 2026-06-23
-Last edited: 2026-07-31
+Last edited: 2026-08-08
 ---
 
 # Review model
@@ -39,21 +39,31 @@ A scope selects which changes `Changes` shows and which files `All files` annota
 
 ### Base branch
 
-The `branch` scope diffs against the merge-base of the base branch and `HEAD`. The first source with a resolving entry wins:
+The `branch` scope diffs against the merge-base of the base branch and `HEAD`. The base is always a recorded choice, never inferred. The first source that resolves wins:
 
-| # | source                           | base is                                               |
-| - | -------------------------------- | ----------------------------------------------------- |
-| 1 | `--base <ref>` flag              | any rev, resolved verbatim, else as a canonical entry |
-| 2 | `base_branches` in `config.toml` | the first listed entry that resolves                  |
-| 3 | `origin/HEAD`                    | the default branch it names, when present             |
+| # | source              | base is                                            |
+| - | ------------------- | -------------------------------------------------- |
+| 1 | `--base <ref>` flag | any rev, resolved verbatim, else as a branch name  |
+| 2 | the repo pick       | the branch chosen in the base picker (`input.md`)  |
+| 3 | `origin/HEAD`       | the default branch it names, when present          |
 
-`base_branches` defaults to `["main", "master"]`, and entries canonicalize and resolve per `config.md`.
+A branch name resolves through `refs/remotes/origin/<name>`, then `refs/heads/<name>`. A leading `refs/heads/`, `refs/remotes/origin/`, or `origin/` prefix on a `--base` name is stripped first. A source that resolves to no ref is skipped, never an error. When no source resolves, `branch` shows nothing and the footer offers the picker (`input.md`). The other scopes are unaffected.
 
-- The list is re-read on refresh.
-- A listed entry that resolves to no ref is skipped, never an error.
-- When no candidate exists, `branch` shows nothing. The other scopes are unaffected.
-- The installed pane passes no arguments, so `--base` serves standalone and dev runs.
-- With no config directory (`config.md`), reviewr reads no config file.
+The pick:
+
+- The pick is one branch name per repository, shared by its worktrees.
+- The pick persists in a private ref under `refs/reviewr/` and survives pane restarts (`overview.md`).
+- The pick applies only after its ref write lands.
+- The pick reaches every other pane of the repository at that pane's next refresh.
+- The pick clears when the chosen branch is the one `origin/HEAD` names.
+- The pick is kept and skipped while its branch does not resolve. It reactivates when the branch resolves again.
+- The pick can only be replaced, never cleared, in a repository with no default branch.
+
+The header names the base while the `branch` scope is active (`tui.md`). A base change rebuilds the changeset on the next frame, never waiting for a poll.
+
+Open decision: whether an open PR's target branch (`forge-host.md`) joins the chain between the pick and `origin/HEAD`, pending an interaction trial. The picker stars the PR target either way (`input.md`).
+
+The installed pane passes no arguments, so `--base` serves standalone and dev runs.
 
 ### Ignored paths
 
@@ -146,6 +156,8 @@ How the agent pane is found and filled is in `herdr-host.md`.
 - No categories, severities, or threads. Text only.
 - No line-number rebasing as the diff shifts.
 - No auto-submit of the agent prompt.
+- No inferred base branch. The reflog and the commit graph never choose a base.
+- No global base list. A base is chosen per repository, never once for every repository.
 
 ## Related specs
 

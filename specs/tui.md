@@ -1,7 +1,7 @@
 ---
-Status: Current
+Status: Draft
 Created: 2026-06-23
-Last edited: 2026-07-31
+Last edited: 2026-08-08
 ---
 
 # TUI
@@ -27,11 +27,14 @@ The terminal frame: the pane layout, the tabs, and how the view stays current.
 ```
 
 - The header carries the three tabs with the active one highlighted, the active scope, the changed-file count with the scope's `+added −removed` totals, and a clickable `Send` button with the comment count (`input.md`).
+- On the `branch` scope the header names the base after the scope, `vs dev`, the bare branch name however it resolved. Clicking it opens the base picker (`input.md`). With no resolving base it reads `no base`.
+- A skipped pick or `--base` shows after the base, `vs main · dev missing`.
+- A base name the header cannot fit truncates with a trailing `…`. The picker always shows it whole.
 - The header's line totals drop a zero side and vanish when nothing changed, like a file row's stats (`file-list.md`).
 - The active tab sets both panes: diff and changed files in `Changes`, content and repo tree in `All files`, checks and comments in `PR` (`diff-view.md`, `pr-tab.md`).
 - The comment input opens inline, directly under the last line of the selection, and grows as you type (`input.md`). It is never a footer band.
 - The footer is a live action bar (`input.md`).
-- The comments list and the agent picker open as popups over the body (`input.md`, `herdr-host.md`). While one is open, every painted color in the header and the body recedes halfway to the theme base. The footer stays bright.
+- The comments list, the agent picker, and the base picker open as popups over the body (`input.md`, `herdr-host.md`). While one is open, every painted color in the header and the body recedes halfway to the theme base. The footer stays bright.
 - The review loop is the same in `Changes` and `All files`. `PR` is a read-only mirror. Comments are one set across the authoring tabs and export together.
 
 The navigator has one global position across all tabs, and the position derives the split direction.
@@ -86,7 +89,7 @@ A layout change moves nothing else (`overview.md`), and both remembered shares p
 ## Failure semantics
 
 - A poll never touches the comment input or saved comments. Draft text and caret survive every refresh.
-- A config error and its automatic-reload remedy replace the view. Saved comments, an open composer or comments list, and the footer's shortcut expansion all survive it (`config.md`).
+- A config error and its automatic-reload remedy replace the view. Saved comments, an open composer, comments list, or base picker, and the footer's shortcut expansion all survive it (`config.md`).
 - A poll that finds no change makes no visible update: no flicker, no lost selection or scroll.
 - A refresh in flight never delays input or a paint.
 - A first open of a very large file can briefly block.

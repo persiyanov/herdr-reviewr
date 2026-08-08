@@ -1,7 +1,7 @@
 ---
-Status: Current
+Status: Draft
 Created: 2026-07-10
-Last edited: 2026-07-31
+Last edited: 2026-08-08
 ---
 
 # Configuration
@@ -14,7 +14,6 @@ A valid file may set any subset of the supported keys. A missing file and an omi
 
 ```toml
 theme = "tokyo-night"
-base_branches = ["develop", "main", "master"]
 default_scope = "branch"
 navigator_position = "bottom"
 toggle_placement = "overlay"
@@ -33,7 +32,6 @@ find    = ["ctrl+f"]
 | key                  | value                                                                              |
 | -------------------- | ---------------------------------------------------------------------------------- |
 | `theme`              | one name from the theme set in `theme.md`                                          |
-| `base_branches`      | non-empty array of non-empty branch names, `origin/` and `refs/` prefixes accepted |
 | `default_scope`      | `uncommitted`, `branch`, or `last-turn`                                            |
 | `navigator_position` | `right`, `left`, `top`, or `bottom`                                                |
 | `toggle_placement`   | `split`, `overlay`, `zoomed`, or `tab`                                             |
@@ -88,8 +86,6 @@ An error names the config path and the read, syntax, key, or value failure. It s
 An invalid first read blocks the plugin exactly like a later invalid read. A blocked pane keeps rereading the file and answers only the default `quit` key. A valid read clears the error and rebuilds the pane from fresh inputs without a reinstall or restart (`tui.md`).
 
 ## Key semantics
-
-Each `base_branches` entry canonicalizes to one bare branch name: a leading `refs/heads/`, `refs/remotes/origin/`, or `origin/` prefix is stripped. Duplicate entries collapse to the first occurrence. A consumer resolves an entry through `refs/remotes/origin/<name>`, then `refs/heads/<name>` (`review-model.md`). A repository may lack every ref a valid `base_branches` list names. That is runtime absence, never an invalid config.
 
 A hostname is recognized by at most one forge. A host key naming another host key's value, or any forge's built-in host, `*.visualstudio.com` included, is an invalid value (→ CFG-WHOLE-FILE).
 
