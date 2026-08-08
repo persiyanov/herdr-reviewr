@@ -90,12 +90,12 @@ pub fn build_changed(input: &WorldInput) -> Result<(git::BaseStatus, Vec<Changed
         },
         Scope::Uncommitted => Ok((none(), git::changed_files(&input.repo, input.scope, None)?)),
         Scope::Branch => {
-            // A resolve failure degrades to the no-base empty state instead of failing the
-            // whole build — the header's `no base` is legible, a poll-time error loop is
-            // not (specs/review-model.md Base branch).
-            let Ok(resolution) = git::resolve_base(&input.repo, input.base.as_deref()) else {
-                return Ok((none(), Vec::new()));
-            };
+            // A resolve failure fails the build whole, so the landing keeps the stale
+            // frame and reports — degrading to an empty snapshot would blank a populated
+            // view over a transient error (specs/overview.md Continuity). A chain where
+            // nothing resolves is not a failure: it returns the legible no-base state.
+            let resolution = git::resolve_base(&input.repo, input.base.as_deref())
+                .map_err(|e| anyhow::anyhow!("{}", e.0))?;
             let base_oid = resolution.status.winner.as_ref().map(|w| w.oid.clone());
             let changed = git::changed_files(&input.repo, input.scope, base_oid.as_deref())?;
             Ok((resolution.status, changed))
