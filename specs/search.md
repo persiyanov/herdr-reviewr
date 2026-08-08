@@ -73,6 +73,8 @@ results.
   while the engine holds more. While warming, the count slot is empty.
 - The query edits with the comment editor's controls, newlines excluded (`input.md`). A
   paste lands whole, its newlines as spaces.
+- The terminal cursor follows the query insertion point in display cells, anchoring an IME candidate
+  window after wide characters.
 - Every edit re-queries both modes, off the frame loop. Typing never blocks.
 - A result set paints only while it matches the query as typed. A superseded set is
   discarded. While a query is in flight, the previous results stay.

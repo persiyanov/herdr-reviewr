@@ -211,6 +211,10 @@ A plain-text field that edits at the caret, not only at the end. The search inpu
 - A paste arrives whole via bracketed paste. A multi-line paste keeps its newlines. `\r\n` and `\r` normalize to `\n`.
 - A paste outside the comment editor and the search input is ignored. It never starts or mutates a comment.
 - Movement, insertion, and deletion are character-wise. Multi-byte and wide characters count as whole characters.
+- The terminal cursor follows the painted comment caret in display cells, anchoring an IME candidate
+  window after wide characters.
+- The painted block caret covers a character under the insertion point. At the end of input, the
+  terminal cursor alone marks the insertion point.
 - `↑`/`↓` move by wrapped rows. `Home`/`End` and the kill keys act on the logical line, the run of text between explicit newlines.
 - `Alt+b`/`Alt+f` always survive as ESC-prefixed sequences. The modified arrows work where the terminal delivers them. The character arrows, `Home`/`End`, and `Ctrl+A`/`Ctrl+E` always work.
 

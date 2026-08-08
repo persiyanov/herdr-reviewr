@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Input IME anchoring.** The terminal cursor follows comment, search, and find insertion points
+  using display-cell widths, keeping CJK IME candidate windows at the input position and avoiding
+  a trailing caret ghost after Backspace deletes a wide character.
+
 ## [0.29.0] — 2026-08-01
 
 ### Changed

@@ -9,7 +9,7 @@
 use std::rc::Rc;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -343,7 +343,7 @@ fn composer_lines(app: &App, content_w: usize) -> Vec<Line<'static>> {
     let p = app.palette();
     if app.input.is_empty() {
         return vec![Line::from(vec![
-            Span::styled(" ", caret_style(p)),
+            Span::raw(" "),
             Span::styled("Leave a comment…", Style::default().fg(p.overlay0)),
         ])];
     }
@@ -366,7 +366,7 @@ fn caret_style(p: &Palette) -> Style {
     Style::default().fg(p.surface0).bg(p.peach)
 }
 
-/// One box row with the caret block over the character at `col` (a trailing block at the end).
+/// One box row with the caret block over the character at `col`.
 fn row_with_caret(text: &str, col: usize, p: &Palette) -> Line<'static> {
     let chars: Vec<char> = text.chars().collect();
     let col = col.min(chars.len());
@@ -375,8 +375,6 @@ fn row_with_caret(text: &str, col: usize, p: &Palette) -> Line<'static> {
     if col < chars.len() {
         spans.push(Span::styled(chars[col].to_string(), caret_style(p)));
         spans.push(Span::raw(chars[col + 1..].iter().collect::<String>()));
-    } else {
-        spans.push(Span::styled(" ".to_string(), caret_style(p)));
     }
     Line::from(spans)
 }
@@ -416,6 +414,43 @@ fn caret_rowcol(rows: &[(usize, String)], caret: usize) -> (usize, usize) {
     let row = rows.iter().rposition(|(start, _)| *start <= caret).unwrap_or(0);
     let (start, text) = &rows[row];
     (row, (caret - start).min(text.chars().count()))
+}
+
+/// Map the comment caret to its wrapped row and terminal-cell column.
+fn composer_caret_cell_position(input: &str, caret: usize, content_w: usize) -> (usize, usize) {
+    let rows = box_rows(input, content_w);
+    let (row, char_col) = caret_rowcol(&rows, caret);
+    let prefix: String = rows[row].1.chars().take(char_col).collect();
+    (row, prefix.width())
+}
+
+/// The visible tail of a single-line input and its caret in character and display-cell columns.
+fn single_line_caret_view(input: &str, caret: usize, width: usize) -> (String, usize, usize) {
+    let chars: Vec<char> = input.chars().collect();
+    let caret = caret.min(chars.len());
+    let mut start = caret;
+    let mut caret_cell_col = 0;
+    let before_limit = width.saturating_sub(1); // leave a cell for the terminal cursor
+    while start > 0 {
+        let cell_w = UnicodeWidthChar::width(chars[start - 1]).unwrap_or(0);
+        if caret_cell_col + cell_w > before_limit {
+            break;
+        }
+        caret_cell_col += cell_w;
+        start -= 1;
+    }
+
+    let mut end = start;
+    let mut visible_w = 0;
+    while end < chars.len() {
+        let cell_w = UnicodeWidthChar::width(chars[end]).unwrap_or(0);
+        if visible_w + cell_w > width && end > start {
+            break;
+        }
+        visible_w += cell_w;
+        end += 1;
+    }
+    (chars[start..end].iter().collect(), caret - start, caret_cell_col)
 }
 
 /// The new caret char index after moving up (`down == false`) or down one wrapped row, keeping
@@ -1377,19 +1412,17 @@ fn render_find_band(frame: &mut Frame, app: &App, area: Rect) {
     let count_w = count.width();
     let label = "find ";
     let query_w = width.saturating_sub(label.width() + count_w + 1).max(1);
+    let (visible, caret_char_col, caret_cell_col) =
+        single_line_caret_view(&f.query, f.caret, query_w);
 
     let mut spans = vec![Span::styled(label, Style::default().fg(p.subtext0))];
     if f.query.is_empty() {
-        spans.extend(row_with_caret("", 0, p).spans);
+        spans.push(Span::raw(" "));
         spans.push(Span::styled("find in file…", dim));
     } else {
         // Scroll the query so the caret stays visible on a query longer than the band, and bound
-        // the slice to `query_w` so a long tail never pushes the count off the right edge.
-        let caret_col = f.caret.min(f.query.chars().count());
-        let chars: Vec<char> = f.query.chars().collect();
-        let start = caret_col.saturating_sub(query_w.saturating_sub(1));
-        let visible: String = chars[start.min(chars.len())..].iter().take(query_w).collect();
-        spans.extend(row_with_caret(&visible, caret_col - start, p).spans);
+        // the slice to `query_w` cells so a long tail never pushes the count off the right edge.
+        spans.extend(row_with_caret(&visible, caret_char_col, p).spans);
     }
 
     let mut line = Line::from(spans);
@@ -1400,6 +1433,13 @@ fn render_find_band(frame: &mut Frame, app: &App, area: Rect) {
         line.push_span(Span::styled(count, dim));
     }
     frame.render_widget(Paragraph::new(line), area);
+
+    // The terminal cursor anchors IME candidate windows (`specs/find-in-file.md`).
+    let cursor_x =
+        area.x.saturating_add(label.width() as u16).saturating_add(caret_cell_col as u16);
+    if cursor_x < area.right() {
+        frame.set_cursor_position(Position::new(cursor_x, area.y));
+    }
 }
 
 /// The inline comment input box, drawn at `area` (under the selection in the diff).
@@ -1415,6 +1455,39 @@ fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
     let content_w = composer_content_width(area.width as usize);
     let body = Paragraph::new(composer_lines(app, content_w)).block(block);
     frame.render_widget(body, area);
+
+    // The terminal cursor anchors IME candidate windows, so it follows the painted caret
+    // in display-cell coordinates (`specs/input.md`).
+    let (caret_row, caret_col) = composer_caret_cell_position(&app.input, app.caret, content_w);
+    let cursor_x = area.x.saturating_add(1).saturating_add(caret_col as u16);
+    let cursor_y = area.y.saturating_add(1).saturating_add(caret_row as u16);
+    if cursor_x < area.right() && cursor_y < area.bottom() {
+        frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{composer_caret_cell_position, single_line_caret_view};
+
+    #[test]
+    fn comment_caret_uses_display_cells() {
+        assert_eq!(composer_caret_cell_position("abc", 3, 20), (0, 3));
+        assert_eq!(composer_caret_cell_position("日本", 2, 20), (0, 4));
+        assert_eq!(composer_caret_cell_position("a日本b", 3, 20), (0, 5));
+    }
+
+    #[test]
+    fn comment_caret_follows_the_existing_wrap_rows() {
+        // `a日` fills three cells, so `本b` starts the next row at cell zero.
+        assert_eq!(composer_caret_cell_position("a日本b", 3, 3), (1, 2));
+    }
+
+    #[test]
+    fn single_line_caret_view_uses_display_cells() {
+        assert_eq!(single_line_caret_view("abcdef", 6, 4), ("def".to_string(), 3, 3));
+        assert_eq!(single_line_caret_view("a日本b", 3, 4), ("本b".to_string(), 1, 2));
+    }
 }
 
 /// The key glyph and label for a footer action; an empty label renders the glyph alone. The
@@ -2086,26 +2159,27 @@ fn render_search(frame: &mut Frame, app: &App, body: Rect) {
         Span::styled(code_chip, if files_mode { inactive } else { active }),
     ]);
     let query_w = l.band.width.saturating_sub(chips_w + 1);
-    let mut input = if s.query.is_empty() {
+    let (mut input, caret_cell_col) = if s.query.is_empty() {
         // An empty query shows a dim placeholder a space past the caret (specs/search.md).
         let mut line = row_with_caret("", 0, p);
         line.spans.push(Span::styled(" Search files and code…", dim));
-        line
+        (line, 0)
     } else {
         // The single-line query cannot wrap, so scroll it horizontally to keep the caret
         // in view — a longer query otherwise clips the caret off the right edge.
-        let caret_col = s.caret.min(s.query.chars().count());
-        let chars: Vec<char> = s.query.chars().collect();
         let avail = (query_w as usize).saturating_sub(2); // after the "> " prompt
-        let start = caret_col.saturating_sub(avail.saturating_sub(1));
-        let visible: String = chars[start.min(chars.len())..].iter().collect();
-        row_with_caret(&visible, caret_col - start, p)
+        let (visible, caret_char_col, caret_cell_col) =
+            single_line_caret_view(&s.query, s.caret, avail);
+        (row_with_caret(&visible, caret_char_col, p), caret_cell_col)
     };
     input.spans.insert(0, Span::styled("> ", Style::default().fg(p.peach)));
-    frame.render_widget(
-        Paragraph::new(input),
-        Rect::new(l.band.x, l.band.y, query_w, l.band.height),
-    );
+    let input_area = Rect::new(l.band.x, l.band.y, query_w, l.band.height);
+    frame.render_widget(Paragraph::new(input), input_area);
+    // The terminal cursor anchors IME candidate windows (`specs/search.md`).
+    let cursor_x = input_area.x.saturating_add(2).saturating_add(caret_cell_col as u16);
+    if cursor_x < input_area.right() {
+        frame.set_cursor_position(Position::new(cursor_x, input_area.y));
+    }
     if l.band.width > chips_w {
         frame.render_widget(
             Paragraph::new(chips),

@@ -122,6 +122,24 @@ fn the_caret_block_sits_on_the_character_at_the_caret() {
 }
 
 #[test]
+fn backspacing_a_wide_character_leaves_the_terminal_cursor_unpainted() {
+    let mut app = edited_app();
+    composing(&mut app);
+    app.input_push('日');
+    app.input_push('本');
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    terminal.draw(|f| ui::render(f, &app)).unwrap();
+
+    app.input_backspace();
+    terminal.draw(|f| ui::render(f, &app)).unwrap();
+
+    let cursor = terminal.backend().cursor_position();
+    let cell = terminal.backend().buffer().cell(cursor).unwrap();
+    assert_eq!(cell.bg, ratatui::style::Color::Reset);
+    assert_eq!(cell.symbol(), " ");
+}
+
+#[test]
 fn caret_vertical_moves_between_wrapped_rows() {
     // "abcdef" hard-wraps at width 3 to "abc"/"def"; caret 4 (def col 1) up → 1; 1 down → 4.
     assert_eq!(ui::caret_vertical("abcdef", 4, 3, false), 1);

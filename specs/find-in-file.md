@@ -27,6 +27,8 @@ Literal search within the open file in the read pane, opened with `ctrl+f`: ever
 - Opening the band focuses the read pane and clears a live selection (`diff-view.md`).
 - The band is one row at the foot of the read pane: the label `find`, the query with its caret, and the match count at the right. The read pane loses that row while the band is open.
 - The query is the search input's field: the comment editor's controls, newlines excluded, a paste's newlines flattened to spaces (`input.md`, `search.md`).
+- The terminal cursor follows the query insertion point in display cells, anchoring an IME candidate
+  window after wide characters.
 - An empty query shows a dim placeholder, lights nothing, and leaves the count blank.
 - While the band is open it owns the keymap. Every printable key is query text, so the review keys (`n`, `u`, `1`, …) lose their review action. Only the steps and `esc` act. Every other key is inert.
 - The find key is inert while composing a comment, in the comments list, and in the agent picker (`input.md`).
