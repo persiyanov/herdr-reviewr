@@ -77,6 +77,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     let popup: Option<fn(&mut Frame, &App, Rect)> = match app.mode {
         Mode::List => Some(render_comments_list),
         Mode::Picker => Some(render_agent_picker),
+        Mode::BasePick => Some(render_base_picker),
         Mode::Normal | Mode::Composing { .. } | Mode::Search | Mode::Find => None,
     };
     if let Some(render_popup) = popup {
@@ -444,6 +445,8 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
 pub enum HeaderHit {
     Tab(Tab),
     Scope,
+    /// The `branch` scope's base label; the click opens the base picker (`specs/tui.md`).
+    Base,
 }
 
 /// Which header control a click at `(col, row)` lands on, if any. `keymap` must be the keymap
@@ -463,7 +466,17 @@ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) ->
     let prefix = header_prefix_len(&spans);
     let scope_start = prefix as u16;
     let scope_end = scope_start + scope_chip(app).len() as u16;
-    if (scope_start..scope_end).contains(&col) { Some(HeaderHit::Scope) } else { None }
+    if (scope_start..scope_end).contains(&col) {
+        return Some(HeaderHit::Scope);
+    }
+    if let Some((lead, name, tail)) = base_parts(app, keymap, area.width) {
+        let base_start = scope_end + 1;
+        let base_end = base_start + (lead.width() + name.width() + tail.width()) as u16;
+        if (base_start..base_end).contains(&col) {
+            return Some(HeaderHit::Base);
+        }
+    }
+    None
 }
 
 /// The three tabs and their labels, left to right, each led by its `tab-*` action's hint key
@@ -514,6 +527,65 @@ fn scope_chip(app: &App) -> String {
     format!("[{}]", app.scope.label())
 }
 
+/// The `branch` scope's base label as `(lead, name, tail)`: `vs ` + the bare name however it
+/// resolved, the skipped-choice tail ` · <name> missing`, or the empty-state `no base` alone
+/// in the name slot with no lead (`specs/tui.md`). `None` off the `branch` scope.
+fn base_label(app: &App) -> Option<(String, String, String)> {
+    if app.scope != crate::model::Scope::Branch {
+        return None;
+    }
+    Some(match &app.branch_base {
+        Some(b) => {
+            let tail = match &b.skipped {
+                Some(missing) => format!(" · {missing} missing"),
+                None => String::new(),
+            };
+            ("vs ".to_string(), b.name.clone(), tail)
+        }
+        None => (String::new(), "no base".to_string(), String::new()),
+    })
+}
+
+/// The base label as painted: the name truncated with a trailing `…` to what the header can
+/// fit (`specs/tui.md`) — one source for the paint and the click hit-test.
+fn base_parts(app: &App, keymap: &Keymap, width: u16) -> Option<(String, String, String)> {
+    let (lead, name, tail) = base_label(app)?;
+    // Everything else on the line plus the base's own gap and the suffix's minimum gap.
+    let fixed = header_prefix_len(&tab_spans(keymap))
+        + scope_chip(app).len()
+        + 1
+        + lead.width()
+        + tail.width()
+        + header_suffix(app).width()
+        + HEADER_LEAD.len()
+        + 1;
+    let name_max = (width as usize).saturating_sub(fixed);
+    Some((lead, truncate_ellipsis(&name, name_max), tail))
+}
+
+/// Truncate `s` to `max` display columns with a trailing `…` (`specs/tui.md`).
+fn truncate_ellipsis(s: &str, max: usize) -> String {
+    if s.width() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let budget = max - 1;
+    let mut out = String::new();
+    let mut w = 0;
+    for ch in s.chars() {
+        let cw = ch.to_string().width();
+        if w + cw > budget {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
 /// The header suffix: the active scope's changed-file count and its aggregate line totals, in
 /// [`stats_str`]'s grammar, so a zero side drops and an empty changeset shows the bare count.
 /// The totals' `−` is multi-byte, so the suffix is measured by display width; the scope chip
@@ -553,10 +625,14 @@ fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
 
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let chip = scope_chip(app);
+    let base = base_parts(app, app.keymap(), area.width);
+    let base_width = base
+        .as_ref()
+        .map_or(0, |(lead, name, tail)| 1 + lead.width() + name.width() + tail.width());
     let suffix = header_suffix(app);
     let prefix = header_prefix_len(&tab_spans(app.keymap()));
     // The suffix keeps the same edge pad as the tab strip's lead.
-    let used = prefix + chip.len() + suffix.width() + HEADER_LEAD.len();
+    let used = prefix + chip.len() + base_width + suffix.width() + HEADER_LEAD.len();
     // Right-align the suffix; at least one gap column when the bar overflows.
     let pad = (area.width as usize).saturating_sub(used).max(1);
 
@@ -566,6 +642,17 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     let bar = Style::default().bg(p.surface0);
     let mut spans = tab_bar_spans(app);
     spans.push(Span::styled(chip, bar.fg(p.yellow).add_modifier(Modifier::BOLD)));
+    if let Some((lead, name, tail)) = base {
+        // An empty lead is the `no base` state, worn as a warning; a resolved name wears the
+        // clickable accent, and the skipped tail warns beside it (`specs/tui.md`).
+        let warn = lead.is_empty();
+        spans.push(Span::styled(" ", bar));
+        spans.push(Span::styled(lead, bar.fg(p.overlay0)));
+        spans.push(Span::styled(name, bar.fg(if warn { p.peach } else { p.lavender })));
+        if !tail.is_empty() {
+            spans.push(Span::styled(tail, bar.fg(p.peach)));
+        }
+    }
     spans.push(Span::styled(" ".repeat(pad), bar));
     // The suffix repaints in parts so the totals get the file rows' green/red; the parts spell
     // out `header_suffix`, which the alignment math measures.
@@ -1448,6 +1535,24 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         // The digits are literal, so they are spelled; the two movement keys are bound, so they
         // read off the keymap like every other hint (`specs/input.md`).
         A::MovePickerRow => (format!("1-9 {} {}", hint(K::Down), hint(K::Up)), "move"),
+        A::BasePick => (hint(K::BasePick), "pick base"),
+        A::PickBaseRow => ("enter".into(), "pick"),
+        // Every printable is filter text in the base picker, so only the arrows move
+        // (`specs/input.md` Base picker).
+        A::MoveBaseRow => ("↑↓".into(), "move"),
+        A::ScopeOther => {
+            use crate::model::Scope;
+            let others: Vec<String> = [
+                (Scope::Uncommitted, K::ScopeUncommitted),
+                (Scope::Branch, K::ScopeBranch),
+                (Scope::LastTurn, K::ScopeLastTurn),
+            ]
+            .into_iter()
+            .filter(|(scope, _)| app.scope != *scope)
+            .map(|(_, action)| hint(action))
+            .collect();
+            (others.join("/"), "scope")
+        }
         A::Search => (hint(K::Search), "search"),
         A::Find => (hint(K::Find), "find"),
         A::Wrap => (hint(K::Wrap), "wrap"),
@@ -1921,6 +2026,125 @@ pub fn hit_picker_row(area: Rect, app: &App, col: u16, row: u16) -> Option<usize
     }
     let index = picker_scroll(app, inner.height as usize) + (row - inner.y) as usize;
     (index < app.picker_rows.len()).then_some(index)
+}
+
+// --- Base picker (specs/input.md Base picker) ----------------------------------------------
+
+/// A row's dim trail: `default` on the default branch, whose pick clears the record
+/// (`specs/input.md` Base picker).
+fn base_trail(row: &crate::app::BaseChoice) -> &'static str {
+    if row.is_default { "default" } else { "" }
+}
+
+/// The names pad to the widest, so the dim `default` mark starts in one column.
+fn base_name_width(bp: &crate::app::BasePicker) -> usize {
+    bp.rows.iter().map(|r| r.name.width()).max().unwrap_or(0)
+}
+
+/// Sized like the agent picker's box, plus the filter line above the rows. The box holds its
+/// full-list size while the filter narrows, so the frame never jumps under typing.
+fn base_picker_popup(area: Rect, app: &App) -> Rect {
+    let Some(bp) = &app.base_picker else { return Rect::default() };
+    let body = panes(area, app).body;
+    let name_width = base_name_width(bp);
+    // The star lead + the padded name + the dim trail, then the two borders.
+    let widest =
+        bp.rows.iter().map(|r| 3 + name_width + 2 + base_trail(r).width()).max().unwrap_or(0);
+    let title = framed_title(BASE_PICKER_TITLE).width() + 2;
+    let w = (widest + 3).max(title).max(PICKER_MIN_WIDTH).min(body.width as usize) as u16;
+    let h = (bp.rows.len().max(1) + 3).min(body.height as usize) as u16;
+    body_popup(area, app, w, h)
+}
+
+const BASE_PICKER_TITLE: &str = "Pick base";
+
+/// The first visible filtered row, so the highlight stays on screen in a picker taller than
+/// the pane (`specs/input.md`).
+fn base_picker_scroll(bp: &crate::app::BasePicker, rows: usize) -> usize {
+    if rows == 0 || bp.cursor < rows {
+        return 0;
+    }
+    (bp.cursor + 1).saturating_sub(rows).min(bp.filtered().len().saturating_sub(rows))
+}
+
+fn render_base_picker(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(bp) = &app.base_picker else { return };
+    let p = app.palette();
+    let popup = base_picker_popup(area, app);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p.mauve))
+        .title(framed_title(BASE_PICKER_TITLE));
+    let inner = picker_inner(popup);
+    frame.render_widget(block, popup);
+    if inner.height == 0 {
+        return;
+    }
+
+    // The filter line: the typed query, or a dim invitation while it is empty.
+    let filter = if bp.query.is_empty() {
+        Line::from(Span::styled(" type to filter…", Style::default().fg(p.overlay0)))
+    } else {
+        Line::from(Span::styled(format!(" {}", bp.query), text_style(p)))
+    };
+    frame.render_widget(Paragraph::new(filter), Rect { height: 1, ..inner });
+
+    let list_area = Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner };
+    let filtered = bp.filtered();
+    if filtered.is_empty() {
+        let none = Line::from(Span::styled(" no branches match", Style::default().fg(p.overlay0)));
+        frame.render_widget(Paragraph::new(none), list_area);
+        return;
+    }
+    let name_width = base_name_width(bp);
+    let first = base_picker_scroll(bp, list_area.height as usize);
+    let items: Vec<ListItem> = filtered
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(list_area.height as usize)
+        .map(|(vi, &ri)| {
+            let row = &bp.rows[ri];
+            // The star marks the open PR's target; the name is the only part at full
+            // brightness, like the agent picker's rows (`specs/input.md`).
+            let lead = if row.starred { " ★ " } else { "   " };
+            let pad = name_width.saturating_sub(row.name.width());
+            let spans = vec![
+                Span::styled(lead.to_string(), Style::default().fg(p.yellow)),
+                Span::styled(row.name.clone(), text_style(p)),
+                Span::styled(
+                    format!("{}  {}", " ".repeat(pad), base_trail(row)),
+                    Style::default().fg(p.overlay0),
+                ),
+            ];
+            selectable_row(
+                p,
+                spans,
+                list_area.width as usize,
+                (vi == bp.cursor).then_some(p.surface2),
+            )
+        })
+        .collect();
+    frame.render_widget(List::new(items), list_area);
+}
+
+/// The filtered base-picker row under the pointer (`specs/input.md`). `None` on the border,
+/// the title, and the filter line, so those clicks stay inert.
+pub fn hit_base_picker_row(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
+    let bp = app.base_picker.as_ref()?;
+    let inner = picker_inner(base_picker_popup(area, app));
+    let list_y = inner.y + 1;
+    if col < inner.x
+        || col >= inner.x + inner.width
+        || row < list_y
+        || row >= inner.y + inner.height
+    {
+        return None;
+    }
+    let rows = inner.height.saturating_sub(1) as usize;
+    let index = base_picker_scroll(bp, rows) + (row - list_y) as usize;
+    (index < bp.filtered().len()).then_some(index)
 }
 
 // --- Search screen (specs/search.md) -------------------------------------------------------

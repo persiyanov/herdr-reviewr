@@ -16,6 +16,7 @@ pub enum Action {
     ScopeUncommitted,
     ScopeBranch,
     ScopeLastTurn,
+    BasePick,
     TabChanges,
     TabAllFiles,
     TabPr,
@@ -84,7 +85,7 @@ impl std::fmt::Display for Key {
 
 /// Every action with its config name and default keys — the single source the default keymap,
 /// the name lookup, and the config error message are built from.
-const ACTIONS: [(Action, &str, &[Key]); 33] = [
+const ACTIONS: [(Action, &str, &[Key]); 34] = [
     (Action::Down, "down", &[Key::plain('j')]),
     (Action::Up, "up", &[Key::plain('k')]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -94,6 +95,7 @@ const ACTIONS: [(Action, &str, &[Key]); 33] = [
     (Action::ScopeUncommitted, "scope-uncommitted", &[Key::plain('u')]),
     (Action::ScopeBranch, "scope-branch", &[Key::plain('b')]),
     (Action::ScopeLastTurn, "scope-last-turn", &[Key::plain('t')]),
+    (Action::BasePick, "base-pick", &[Key::plain('B')]),
     (Action::TabChanges, "tab-changes", &[Key::plain('1')]),
     (Action::TabAllFiles, "tab-all-files", &[Key::plain('2')]),
     (Action::TabPr, "tab-pr", &[Key::plain('3')]),

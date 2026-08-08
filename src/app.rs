@@ -119,6 +119,39 @@ struct ArmedCross {
     path: String,
 }
 
+/// The base picker's state while it is open (`specs/input.md` Base picker). The rows freeze
+/// at open; the filter and highlight are the reviewer's own place state.
+#[derive(Clone, Debug)]
+pub struct BasePicker {
+    /// Every pickable branch name: the open PR's target starred first, the default branch
+    /// next, the rest by commit recency, the checked-out branch excluded.
+    pub rows: Vec<BaseChoice>,
+    /// The highlighted row, an index into the filtered view.
+    pub cursor: usize,
+    /// The typed filter, matching anywhere in the name.
+    pub query: String,
+}
+
+/// One base picker row (`specs/input.md` Base picker).
+#[derive(Clone, Debug)]
+pub struct BaseChoice {
+    pub name: String,
+    /// The open PR's target, shown starred.
+    pub starred: bool,
+    /// The default branch, marked `default`. Choosing it clears the pick
+    /// (`specs/review-model.md`).
+    pub is_default: bool,
+}
+
+impl BasePicker {
+    /// The filtered view: indices into `rows` whose names contain the query, the
+    /// case-insensitive anywhere-match the key table names (`specs/input.md`).
+    pub fn filtered(&self) -> Vec<usize> {
+        let q = self.query.to_lowercase();
+        (0..self.rows.len()).filter(|&i| self.rows[i].name.to_lowercase().contains(&q)).collect()
+    }
+}
+
 /// The interaction mode the UI is in.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -132,6 +165,9 @@ pub enum Mode {
     /// Choosing which agent a `Send` goes to (`specs/herdr-host.md`). Its rows and highlight
     /// live in [`App::picker_rows`] and [`App::picker_cursor`].
     Picker,
+    /// Choosing the `branch` scope's base (`specs/input.md` Base picker). Its state lives in
+    /// [`App::base_picker`].
+    BasePick,
     /// The search screen, replacing the body from any tab (specs/search.md). Its state
     /// lives in [`App::search`].
     Search,
@@ -150,7 +186,7 @@ impl Mode {
     /// `Search` replaces the body rather than holding a place in it, and `Find` is a band the
     /// reviewer navigates the live diff with. Neither freezes anything, so neither is modal here.
     pub fn is_modal(&self) -> bool {
-        matches!(self, Mode::Composing { .. } | Mode::List | Mode::Picker)
+        matches!(self, Mode::Composing { .. } | Mode::List | Mode::Picker | Mode::BasePick)
     }
 }
 
@@ -357,6 +393,15 @@ pub enum FooterAction {
     PickAgent,
     MovePickerRow,
     ClosePicker,
+    /// Open the base picker (`specs/input.md` Base picker).
+    BasePick,
+    /// The base picker's own bar: pick the highlight and move it. Every printable is
+    /// filter text there, so the move hint names the arrows alone.
+    PickBaseRow,
+    MoveBaseRow,
+    /// The two scopes to switch away to, from the branch-scope no-base row — `b` is the
+    /// scope already showing, so its hint would offer a no-op (`specs/input.md`).
+    ScopeOther,
     OpenPr,
     Refresh,
     Tabs,
@@ -498,6 +543,9 @@ pub struct App {
     /// The agent this session last sent to, which arms the picker's highlight. Only a
     /// successful send sets it (`specs/herdr-host.md`).
     pub last_sent_pane: Option<String>,
+    /// The base picker's rows, filter, and highlight while `Mode::BasePick` is open
+    /// (`specs/input.md` Base picker).
+    pub base_picker: Option<BasePicker>,
     pub mode: Mode,
     pub input: String,
     /// The comment editor's caret: a char index into `input` (`0..=chars().count()`).
@@ -661,6 +709,7 @@ impl App {
             picker_cursor: 0,
             picker_over: Mode::Normal,
             last_sent_pane: None,
+            base_picker: None,
             mode: Mode::Normal,
             input: String::new(),
             caret: 0,
@@ -811,7 +860,7 @@ impl App {
             // restored and the picker's frozen rows are not either (specs/search.md,
             // specs/find-in-file.md, specs/herdr-host.md).
             Mode::Normal | Mode::Search | Mode::Find | Mode::Picker => {}
-            Mode::List | Mode::Composing { .. } => {
+            Mode::List | Mode::Composing { .. } | Mode::BasePick => {
                 self.scope = old.scope;
                 self.tab = old.tab;
                 self.active_file_tab = old.active_file_tab;
@@ -842,6 +891,9 @@ impl App {
                 self.mode = old.mode.clone();
                 self.input = std::mem::take(&mut old.input);
                 self.caret = old.caret;
+                // The base picker survives recovery whole — rows, filter, and highlight
+                // (`specs/tui.md`).
+                self.base_picker = old.base_picker.take();
             }
         }
     }
@@ -1740,48 +1792,53 @@ impl App {
         self.ensure_config_ready()?;
         if self.scope != scope && !self.composing() {
             self.scope = scope;
-            // A scope switch changes the Changes changeset (and each file's old side), so the
-            // Changes tab snaps to the top of the new scope: reset its cursor, folds, and diff
-            // scroll, and drop cached diffs. The `All files` listing and File view are
-            // scope-independent (only the annotations move), so its own state is held by `reload`.
-            // The Changes state is the active one on `Changes` and the stashed one while `All
-            // files` is shown — reset whichever holds it, so a return to Changes never lands on a
-            // stale scroll or a pre-expanded fold.
-            self.cache = DiffCache::new();
-            if self.tab == Tab::Changes {
-                self.file_cursor = 0;
-                self.expanded_folds.clear();
-                self.reset_diff_view();
-                // The changed set rebuilds before the frame, so the list never shows another
-                // scope's files under the new scope's label (specs/tui.md). In `Changes` the
-                // changeset is the whole snapshot, so this is the full (cheap) reload.
-                self.reload()?;
-            } else {
-                self.stash.file_cursor = 0;
-                self.stash.expanded_folds.clear();
-                self.stash.diff_cursor = 0;
-                self.stash.diff_scroll = 0;
-                self.stash.h_scroll = 0;
-                self.stash.select_anchor = None;
-                // `All files` keeps its tree; only the changed set rebuilds before the frame.
-                // The tree's annotations refresh behind it via the worker (specs/tui.md).
-                let (branch_base, changed) = crate::world::build_changed(&self.world_input())?;
-                if self.scope == Scope::Branch {
-                    self.branch_base = branch_base;
-                }
-                self.changed = crate::world::annotate(&changed);
-                // Re-mark the tree in place — the rows are scope-independent, only their
-                // badges move, so the switch frame never shows the old scope's badges
-                // under the new scope's header (policies/ux-responsiveness.md). The tree
-                // itself still refreshes behind the switch.
-                for entry in &mut self.entries {
-                    entry.annotation = self.changed.get(&entry.path).cloned();
-                }
-                self.rebuild_file_rows();
-                self.request_world_refresh(false, false);
-            }
+            self.rebase_changes()?;
             // An explicit switch reveals the cursor (a poll does not).
             self.reveal_files = true;
+        }
+        Ok(())
+    }
+
+    /// Rebuild the views after the changeset's base moved — a scope switch or a base pick.
+    /// The change replaces the Changes changeset (and each file's old side), so the Changes
+    /// tab snaps to the top: reset its cursor, folds, and diff scroll, and drop cached diffs.
+    /// The `All files` listing and File view are base-independent (only the annotations
+    /// move), so its own state is held by `reload`. The Changes state is the active one on
+    /// `Changes` and the stashed one while `All files` is shown — reset whichever holds it,
+    /// so a return to Changes never lands on a stale scroll or a pre-expanded fold.
+    fn rebase_changes(&mut self) -> Result<()> {
+        self.cache = DiffCache::new();
+        if self.tab == Tab::Changes {
+            self.file_cursor = 0;
+            self.expanded_folds.clear();
+            self.reset_diff_view();
+            // The changed set rebuilds before the frame, so the list never shows another
+            // base's files under the new base's label (specs/tui.md). In `Changes` the
+            // changeset is the whole snapshot, so this is the full (cheap) reload.
+            self.reload()?;
+        } else {
+            self.stash.file_cursor = 0;
+            self.stash.expanded_folds.clear();
+            self.stash.diff_cursor = 0;
+            self.stash.diff_scroll = 0;
+            self.stash.h_scroll = 0;
+            self.stash.select_anchor = None;
+            // `All files` keeps its tree; only the changed set rebuilds before the frame.
+            // The tree's annotations refresh behind it via the worker (specs/tui.md).
+            let (branch_base, changed) = crate::world::build_changed(&self.world_input())?;
+            if self.scope == Scope::Branch {
+                self.branch_base = branch_base;
+            }
+            self.changed = crate::world::annotate(&changed);
+            // Re-mark the tree in place — the rows are base-independent, only their
+            // badges move, so the switch frame never shows the old base's badges
+            // under the new base's header (policies/ux-responsiveness.md). The tree
+            // itself still refreshes behind the switch.
+            for entry in &mut self.entries {
+                entry.annotation = self.changed.get(&entry.path).cloned();
+            }
+            self.rebuild_file_rows();
+            self.request_world_refresh(false, false);
         }
         Ok(())
     }
@@ -2557,7 +2614,7 @@ impl App {
             Mode::Composing { .. } => Some((&mut self.input, &mut self.caret)),
             Mode::Search => self.search.as_mut().map(|s| (&mut s.query, &mut s.caret)),
             Mode::Find => self.find.as_mut().map(|f| (&mut f.query, &mut f.caret)),
-            Mode::Normal | Mode::List | Mode::Picker => None,
+            Mode::Normal | Mode::List | Mode::Picker | Mode::BasePick => None,
         }
     }
 
@@ -2772,7 +2829,12 @@ impl App {
                 };
                 Some(c.location())
             }
-            Mode::Normal | Mode::List | Mode::Picker | Mode::Search | Mode::Find => None,
+            Mode::Normal
+            | Mode::List
+            | Mode::Picker
+            | Mode::BasePick
+            | Mode::Search
+            | Mode::Find => None,
         }
     }
 
@@ -3262,6 +3324,9 @@ impl App {
             Mode::Picker => {
                 return vec![(A::PickAgent, Primary), (A::ClosePicker, Do), (A::MovePickerRow, Do)];
             }
+            Mode::BasePick => {
+                return vec![(A::PickBaseRow, Primary), (A::ClosePicker, Do), (A::MoveBaseRow, Do)];
+            }
             Mode::Search => {
                 // With nothing pickable — warming, errored, or no matches — only the
                 // mode flip and the exit are offered, so the bar never lists a key that
@@ -3324,6 +3389,16 @@ impl App {
             // scope, send, and band actions. With the file list focused, the tree's own
             // actions apply instead.
             out.push((A::Preview, Primary));
+        } else if self.file_rows.is_empty()
+            && self.branch_base.is_none()
+            && self.base_pick_available()
+        {
+            // The `branch` scope with no base: the picker is the way forward, and `b` would
+            // re-select the scope already showing, so only the other two offer
+            // (`specs/input.md`, `specs/review-model.md`).
+            out.push((A::BasePick, Primary));
+            out.push((A::ScopeOther, Do));
+            out.push((A::Refresh, Do));
         } else if self.file_rows.is_empty() {
             // Nothing in scope to review: only switching scope or refreshing is useful.
             out.push((A::Scope, Primary));
@@ -3385,8 +3460,12 @@ impl App {
         // The `go` band: the keys that work anywhere. `scope` and `refresh` only when they are not
         // already row-1 actions (the empty / no-diff states above lead with them), and the pane
         // toggle only when it is not the primary — so a band never repeats a row-1 key.
-        if !out.iter().any(|&(a, _)| a == A::Scope) {
+        if !out.iter().any(|&(a, _)| a == A::Scope || a == A::ScopeOther) {
             out.push((A::Scope, Go));
+        }
+        // The base picker's key shows only where it works (`specs/input.md`).
+        if self.base_pick_available() && !out.iter().any(|&(a, _)| a == A::BasePick) {
+            out.push((A::BasePick, Go));
         }
         out.push((A::Search, Go));
         // In-file find shows wherever the read pane has content to search (specs/find-in-file.md).
@@ -3513,6 +3592,129 @@ impl App {
         let Some(agent) = self.picker_rows.get(self.picker_cursor).cloned() else { return };
         self.close_picker();
         self.export_to_agent(&agent);
+    }
+
+    /// Whether the base picker can open here: a file tab, the `branch` scope, and no
+    /// `--base` flag (`specs/input.md` Base picker).
+    #[must_use]
+    pub fn base_pick_available(&self) -> bool {
+        self.tab.is_file_tab() && self.scope == Scope::Branch && self.base.is_none()
+    }
+
+    /// Open the base picker: one row per branch name, the open PR's target starred first,
+    /// the default branch next, the rest by commit recency (`specs/input.md` Base picker).
+    /// The highlight opens on the current base, else the first row.
+    pub fn open_base_picker(&mut self) {
+        if !self.base_pick_available() || self.mode != Mode::Normal {
+            return;
+        }
+        let names = match git::list_branches(&self.repo) {
+            Ok(names) => names,
+            Err(e) => {
+                self.status = e.0;
+                return;
+            }
+        };
+        if names.is_empty() {
+            // Nothing to choose: refuse with the cause, like an empty send
+            // (`specs/input.md` Base picker).
+            self.status = "no branches to pick".to_string();
+            return;
+        }
+        let default = git::default_branch_name(&self.repo).ok().flatten();
+        let target = self
+            .pr_snapshot()
+            .filter(|s| s.state == forge::PrState::Open)
+            .map(|s| s.base_ref.clone());
+        let mut rows: Vec<BaseChoice> = names
+            .into_iter()
+            .map(|name| BaseChoice {
+                starred: target.as_deref() == Some(name.as_str()),
+                is_default: default.as_deref() == Some(name.as_str()),
+                name,
+            })
+            .collect();
+        // A stable sort, so recency still orders the promoted pair and the rest alike.
+        rows.sort_by_key(|r| (!r.starred, !r.is_default));
+        let current = self.branch_base.as_ref().map(|b| b.name.as_str());
+        let cursor = current.and_then(|c| rows.iter().position(|r| r.name == c)).unwrap_or(0);
+        self.base_picker = Some(BasePicker { rows, cursor, query: String::new() });
+        self.mode = Mode::BasePick;
+    }
+
+    pub fn close_base_picker(&mut self) {
+        if self.mode == Mode::BasePick {
+            self.mode = Mode::Normal;
+        }
+        self.base_picker = None;
+    }
+
+    /// Move the highlight through the filtered view (`specs/input.md`).
+    pub fn base_picker_move(&mut self, delta: isize) {
+        let Some(bp) = self.base_picker.as_mut() else { return };
+        let len = bp.filtered().len();
+        if len > 0 {
+            bp.cursor = step(bp.cursor.min(len - 1), delta, len);
+        }
+    }
+
+    /// Move the highlight to filtered `row`, for a click. A row past the end is inert
+    /// (`specs/input.md`).
+    pub fn base_picker_goto(&mut self, row: usize) {
+        if let Some(bp) = self.base_picker.as_mut()
+            && row < bp.filtered().len()
+        {
+            bp.cursor = row;
+        }
+    }
+
+    /// Append `ch` to the filter (`specs/input.md`).
+    pub fn base_picker_input(&mut self, ch: char) {
+        self.base_picker_edit(|q| q.push(ch));
+    }
+
+    /// Delete the last filter character (`specs/input.md`).
+    pub fn base_picker_backspace(&mut self) {
+        self.base_picker_edit(|q| {
+            q.pop();
+        });
+    }
+
+    /// Apply one filter edit. The highlight follows its row into the re-filtered view when
+    /// it survives, else rests on the first match (`specs/overview.md` Continuity).
+    fn base_picker_edit(&mut self, f: impl FnOnce(&mut String)) {
+        let Some(bp) = self.base_picker.as_mut() else { return };
+        let highlighted = bp.filtered().get(bp.cursor).copied();
+        f(&mut bp.query);
+        let filtered = bp.filtered();
+        bp.cursor = highlighted.and_then(|h| filtered.iter().position(|&i| i == h)).unwrap_or(0);
+    }
+
+    /// Pick the highlighted branch: persist it as the repo pick — or clear the pick when
+    /// the highlight is the default branch — then rebuild the changeset against it, so the
+    /// list and the header rename together (`specs/input.md`, `specs/review-model.md`).
+    /// With no filter match there is no highlight, and `enter` does nothing.
+    pub fn base_picker_pick(&mut self) -> Result<()> {
+        let Some(bp) = &self.base_picker else { return Ok(()) };
+        let Some(&row) = bp.filtered().get(bp.cursor) else { return Ok(()) };
+        let choice = bp.rows[row].clone();
+        self.close_base_picker();
+        let write = if choice.is_default {
+            git::clear_base_pick(&self.repo)
+        } else {
+            git::write_base_pick(&self.repo, &choice.name)
+        };
+        if let Err(e) = write {
+            self.status = e.0;
+            return Ok(());
+        }
+        self.rebase_changes()?;
+        // The queued refresh's generation bump invalidates any in-flight build that read
+        // the old pick — the pick is derived state, not input identity, so the tag alone
+        // would not reject it (`specs/review-model.md`).
+        self.request_world_refresh(false, false);
+        self.reveal_files = true;
+        Ok(())
     }
 
     /// Export to one decided pane. Nothing re-resolves it, so a pane that closed while the
@@ -3797,6 +3999,30 @@ mod tests {
         assert_eq!(recovered.last_sent_pane.as_deref(), Some("w8:p2"));
         // A picker that was open when the config broke does not come back with it.
         assert_eq!(recovered.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn config_recovery_carries_the_base_picker_whole() {
+        // The base picker survives recovery with its rows, filter, and highlight
+        // (`specs/tui.md`).
+        let mut old = App::blocked(PathBuf::from("."), Scope::Branch, None);
+        old.mode = Mode::BasePick;
+        old.base_picker = Some(super::BasePicker {
+            rows: vec![super::BaseChoice {
+                name: "dev".to_string(),
+                starred: false,
+                is_default: false,
+            }],
+            cursor: 0,
+            query: "d".to_string(),
+        });
+
+        let mut recovered = App::new(PathBuf::from("."), Scope::Branch, None);
+        recovered.carry_authored_state_from(&mut old);
+        assert_eq!(recovered.mode, Mode::BasePick);
+        let bp = recovered.base_picker.as_ref().expect("the picker state is carried");
+        assert_eq!(bp.query, "d");
+        assert_eq!(bp.rows[0].name, "dev");
     }
 
     #[test]

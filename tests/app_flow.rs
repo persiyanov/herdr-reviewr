@@ -5152,3 +5152,162 @@ fn the_picker_owns_the_whole_footer_bar() {
         vec![FooterAction::PickAgent, FooterAction::ClosePicker, FooterAction::MovePickerRow]
     );
 }
+
+// --- Base picker (specs/input.md Base picker, specs/review-model.md) -----------------------
+
+/// A repo on branch `feature` with sibling branches `dev` and `main`, `origin/HEAD`
+/// naming `main` the default, and one committed edit to diff.
+fn based_repo() -> Repo {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    r.git(&["update-ref", "refs/remotes/origin/main", "main"]);
+    r.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    r.git(&["branch", "dev"]);
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("a.rs", "two\n");
+    r.commit_all("feature work");
+    r
+}
+
+#[test]
+fn the_base_picker_opens_only_on_the_branch_scope_without_a_flag() {
+    let r = based_repo();
+    let mut app = app_on(&r);
+    app.open_base_picker();
+    assert_eq!(app.mode, Mode::Normal, "the picker is inert off the branch scope");
+
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    assert_eq!(app.mode, Mode::BasePick);
+    let bp = app.base_picker.as_ref().expect("picker state");
+    let names: Vec<&str> = bp.rows.iter().map(|r| r.name.as_str()).collect();
+    assert!(!names.contains(&"feature"), "the checked-out branch is not listed");
+    assert_eq!(bp.rows[0].name, "main", "the default branch sorts ahead of recency");
+    assert!(bp.rows[0].is_default);
+    assert!(names.contains(&"dev"));
+    assert_eq!(bp.cursor, 0, "the highlight opens on the current base");
+    app.close_base_picker();
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.base_picker.is_none());
+
+    // A `--base` flag pins the base for the session, so the picker never opens.
+    let mut flagged = App::new(r.path_buf(), Scope::Branch, Some("dev".to_string()));
+    flagged.reload().unwrap();
+    flagged.open_base_picker();
+    assert_eq!(flagged.mode, Mode::Normal, "the flag disables the picker");
+}
+
+#[test]
+fn typing_filters_and_enter_picks_the_highlight() {
+    let r = based_repo();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    assert_eq!(app.branch_base.as_ref().map(|b| b.name.as_str()), Some("main"));
+    app.open_base_picker();
+    app.base_picker_input('d');
+    app.base_picker_input('e');
+    let bp = app.base_picker.as_ref().unwrap();
+    assert_eq!(bp.filtered().len(), 1, "the filter matches anywhere in the name");
+    app.base_picker_pick().unwrap();
+    assert_eq!(app.mode, Mode::Normal, "a pick closes the picker");
+    assert_eq!(app.branch_base.as_ref().map(|b| b.name.as_str()), Some("dev"));
+    let picked = r.git(&["show", "refs/reviewr/base-pick"]);
+    assert_eq!(picked.trim(), "dev", "the pick persists in the private ref");
+    assert!(
+        app.entries.iter().any(|e| e.path == "a.rs"),
+        "the changeset rebuilds against the picked base before the frame"
+    );
+}
+
+#[test]
+fn picking_the_default_clears_the_pick() {
+    let r = based_repo();
+    herdr_reviewr::git::write_base_pick(r.path(), "dev").unwrap();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    assert_eq!(app.branch_base.as_ref().map(|b| b.name.as_str()), Some("dev"));
+    app.open_base_picker();
+    let bp = app.base_picker.as_ref().unwrap();
+    assert_eq!(bp.rows[bp.cursor].name, "dev", "the highlight opens on the current base");
+    app.base_picker_goto(0);
+    app.base_picker_pick().unwrap();
+    assert_eq!(app.branch_base.as_ref().map(|b| b.name.as_str()), Some("main"));
+    assert_eq!(
+        herdr_reviewr::git::read_base_pick(r.path()).unwrap(),
+        None,
+        "choosing the default clears the pick rather than recording it"
+    );
+}
+
+#[test]
+fn a_filter_with_no_match_leaves_enter_inert_and_backspace_recovers() {
+    let r = based_repo();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    for ch in "zzz".chars() {
+        app.base_picker_input(ch);
+    }
+    assert!(app.base_picker.as_ref().unwrap().filtered().is_empty());
+    app.base_picker_pick().unwrap();
+    assert_eq!(app.mode, Mode::BasePick, "enter does nothing with no matching branch");
+    app.base_picker_backspace();
+    app.base_picker_backspace();
+    app.base_picker_backspace();
+    assert_eq!(app.base_picker.as_ref().unwrap().filtered().len(), 2);
+}
+
+#[test]
+fn the_highlight_follows_its_row_through_a_narrowing_filter() {
+    let r = based_repo();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    app.base_picker_move(1); // main -> dev
+    let bp = app.base_picker.as_ref().unwrap();
+    assert_eq!(bp.rows[bp.filtered()[bp.cursor]].name, "dev");
+    app.base_picker_input('d');
+    let bp = app.base_picker.as_ref().unwrap();
+    assert_eq!(
+        bp.rows[bp.filtered()[bp.cursor]].name,
+        "dev",
+        "the highlight keeps its row when the row survives the filter"
+    );
+}
+
+#[test]
+fn the_branch_scope_with_no_base_leads_the_footer_with_the_picker() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    r.git(&["branch", "dev"]);
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    assert!(app.branch_base.is_none(), "no origin/HEAD, no pick: nothing resolves");
+    assert!(app.entries.is_empty(), "the empty state is legible, never a guessed base");
+    let bands: Vec<(FooterAction, Band)> = app.footer_bands();
+    assert_eq!(bands[0], (FooterAction::BasePick, Band::Primary));
+    assert_eq!(bands[1], (FooterAction::ScopeOther, Band::Do));
+    assert_eq!(bands[2], (FooterAction::Refresh, Band::Do));
+}
+
+#[test]
+fn the_base_picker_owns_the_whole_footer_bar_and_survives_a_config_error() {
+    let r = based_repo();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    let bands: Vec<FooterAction> = app.footer_bands().into_iter().map(|(a, _)| a).collect();
+    assert_eq!(
+        bands,
+        vec![FooterAction::PickBaseRow, FooterAction::ClosePicker, FooterAction::MoveBaseRow]
+    );
+
+    // The config error leaves the picker open for recovery to carry (`specs/tui.md`).
+    app.base_picker_input('d');
+    app.set_config_error("theme = \"not-a-theme\"".to_string());
+    assert_eq!(app.mode, Mode::BasePick);
+    assert_eq!(app.base_picker.as_ref().unwrap().query, "d");
+}

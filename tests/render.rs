@@ -2753,3 +2753,94 @@ fn a_click_on_a_picker_row_moves_the_highlight_and_misses_stay_inert() {
     .unwrap();
     assert_eq!(app.picker_cursor, 2, "a click moves the highlight to the clicked row");
 }
+
+// --- Header base label (specs/tui.md) ------------------------------------------------------
+
+/// A repo on branch `feature` past `main`, with `origin/HEAD` naming `main` the default.
+/// The repo rides along: opening the picker shells out to git at click time.
+fn based_app() -> (Repo, App) {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.git(&["update-ref", "refs/remotes/origin/main", "main"]);
+    r.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    r.git(&["branch", "dev"]);
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    (r, app)
+}
+
+#[test]
+fn the_branch_header_names_the_base_and_its_click_opens_the_picker() {
+    let (_repo, mut app) = based_app();
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    assert!(line0.contains("[branch] vs main"), "the bare base name follows the scope: {line0}");
+
+    let base: Vec<u16> = (0..AREA.width)
+        .filter(|&c| ui::hit_header(AREA, &app, app.keymap(), c, 0) == Some(HeaderHit::Base))
+        .collect();
+    assert!(!base.is_empty(), "the base label is clickable");
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Left),
+        column: base[0],
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    };
+    let keymap = app.keymap().clone();
+    handle_mouse(&mut app, click, AREA, &[], &keymap).unwrap();
+    let frame = render(&app);
+    assert!(frame.contains("Pick base"), "the click opens the picker popup");
+    assert!(frame.contains("dev"), "the sibling branch is a row");
+    assert!(frame.contains("default"), "the default branch is marked");
+}
+
+#[test]
+fn a_skipped_pick_warns_beside_the_resolved_base() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.git(&["update-ref", "refs/remotes/origin/main", "main"]);
+    r.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    herdr_reviewr::git::write_base_pick(r.path(), "gone").unwrap();
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    assert!(line0.contains("vs main · gone missing"), "the dormant pick reads as skipped: {line0}");
+}
+
+#[test]
+fn without_a_resolving_base_the_header_reads_no_base() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let frame = render(&app);
+    let line0 = frame.lines().next().unwrap().to_string();
+    assert!(line0.contains("[branch] no base"), "the empty state is named: {line0}");
+    assert!(frame.contains("pick base"), "the footer advertises the picker");
+}
+
+#[test]
+fn an_overlong_base_name_truncates_with_an_ellipsis() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    let long = format!("feature/{}", "x".repeat(80));
+    r.git(&["branch", &long]);
+    herdr_reviewr::git::write_base_pick(r.path(), &long).unwrap();
+    r.git(&["checkout", "-q", "-b", "work"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = dump(&render_size(&app, 80, 20)).lines().next().unwrap().to_string();
+    assert!(line0.contains("vs feature/x"), "the name paints up to the fit: {line0}");
+    assert!(line0.contains('…'), "the overflow truncates with a trailing ellipsis: {line0}");
+    assert!(line0.contains("1 changed"), "the right-aligned stats survive the long name: {line0}");
+}
