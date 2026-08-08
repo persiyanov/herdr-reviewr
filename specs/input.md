@@ -241,7 +241,7 @@ Only the unmodified `enter` sends. `Alt+Enter` and `Shift+Enter` insert a newlin
 
 `base-pick` opens the picker over the body, like the comments list (`tui.md`). It works on the file tabs while the `branch` scope is active and no `--base` flag was passed. Elsewhere it is inert and stays out of the footer. While the comment editor is open, the base-name click is inert like the key.
 
-The list holds one row per branch name, remote-tracking and local names merged. The checked-out branch is not listed. Rows sort by most recent commit. Two rows outrank that order:
+The list holds one row per branch name, remote-tracking and local names merged. The checked-out branch is not listed, unless it is the default branch, whose row must stay reachable to clear a pick. Rows sort by most recent commit. Two rows outrank that order:
 
 - The open PR's target sorts first, starred (`forge-host.md`).
 - The default branch sorts next, marked `default`. Choosing it clears the pick (`review-model.md`).

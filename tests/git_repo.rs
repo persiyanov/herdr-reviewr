@@ -163,6 +163,22 @@ fn a_nonexistent_flag_falls_through_and_reads_as_skipped() {
 }
 
 #[test]
+fn a_prefixed_flag_spelling_resolves_to_the_bare_name() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    set_origin_default(&r, "main", "HEAD");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("base.rs", "2\n");
+    r.commit_all("diverge");
+
+    // `--base origin/main` resolves as a verbatim rev, but the header and the PR name
+    // shield carry the bare spelling (specs/tui.md, specs/forge-host.md).
+    let winner = resolve_base(r.path(), Some("origin/main")).unwrap().winner.unwrap();
+    assert_eq!((winner.name.as_str(), winner.source), ("main", BaseSource::Flag));
+}
+
+#[test]
 fn a_dormant_pick_is_skipped_and_reactivates() {
     let r = Repo::init();
     r.write("base.rs", "1\n");
@@ -228,6 +244,20 @@ fn default_branch_name_reads_the_origin_head_symref() {
 }
 
 #[test]
+fn a_plain_ref_origin_head_names_the_matching_tip() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    let oid = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+    r.git(&["update-ref", "refs/remotes/origin/trunk", &oid]);
+
+    // Some clones carry `origin/HEAD` as a plain ref, not a symref: the default is the
+    // origin tip at the same commit (specs/review-model.md).
+    r.git(&["update-ref", "refs/remotes/origin/HEAD", &oid]);
+    assert_eq!(default_branch_name(r.path()).unwrap().as_deref(), Some("trunk"));
+}
+
+#[test]
 fn list_branches_merges_names_newest_first_and_hides_the_checked_out() {
     let r = Repo::init();
     r.write("a.rs", "1\n");
@@ -244,6 +274,23 @@ fn list_branches_merges_names_newest_first_and_hides_the_checked_out() {
     // commit sorts first, and the checked-out branch is not listed (specs/input.md).
     let names = list_branches(r.path()).unwrap();
     assert_eq!(names, ["newer", "main", "older"]);
+}
+
+#[test]
+fn the_checked_out_default_branch_stays_listed() {
+    let r = Repo::init();
+    r.write("a.rs", "1\n");
+    r.git(&["add", "-A"]);
+    r.git_env(&["commit", "-q", "-m", "one"], &[("GIT_COMMITTER_DATE", "2026-01-01T00:00:00")]);
+    r.git(&["branch", "dev"]);
+    r.write("a.rs", "2\n");
+    r.commit_all("two");
+    set_origin_default(&r, "main", "HEAD");
+
+    // Checked out on the default branch itself: its row stays, or a recorded pick could
+    // never be cleared from the picker (specs/input.md).
+    let names = list_branches(r.path()).unwrap();
+    assert_eq!(names, ["main", "dev"]);
 }
 
 #[test]

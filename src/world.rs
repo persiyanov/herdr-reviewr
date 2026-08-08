@@ -30,6 +30,10 @@ pub struct WorldInput {
     /// must land here as newer content, not be discarded as a mismatch
     /// (specs/review-model.md).
     pub base: Option<String>,
+    /// Bumped by this pane's own pick, so a build that read the previous pick fails the
+    /// landing's input-equality gate instead of reverting the picked base. Another pane's
+    /// pick leaves it alone — see `base` above.
+    pub base_epoch: u64,
     /// The `last-turn` baseline tree the changed set diffs against; `None` before a turn.
     pub turn_baseline: Option<String>,
     /// Expanded ignored directories whose children the `All files` tree loads.
@@ -85,8 +89,12 @@ pub fn build_changed(input: &WorldInput) -> Result<(Option<git::ResolvedBase>, V
         },
         Scope::Uncommitted => Ok((None, git::changed_files(&input.repo, input.scope, None)?)),
         Scope::Branch => {
-            let resolution = git::resolve_base(&input.repo, input.base.as_deref())
-                .map_err(|e| anyhow::anyhow!("{}", e.0))?;
+            // A resolve failure degrades to the no-base empty state instead of failing the
+            // whole build — the header's `no base` is legible, a poll-time error loop is
+            // not (specs/review-model.md Base branch).
+            let Ok(resolution) = git::resolve_base(&input.repo, input.base.as_deref()) else {
+                return Ok((None, Vec::new()));
+            };
             let base_oid = resolution.winner.as_ref().map(|w| w.oid.clone());
             let changed = git::changed_files(&input.repo, input.scope, base_oid.as_deref())?;
             Ok((resolution.winner, changed))

@@ -85,7 +85,7 @@ The tab shows the newest PR opened from the current branch. No branch, or no PR,
 A PR can live under a different branch name than the local one, so reviewr searches by up to three kinds of name:
 
 - the branch's own name,
-- the branch it tracks, unless that is a resolved base branch (tracking `main` is not publishing to it),
+- the branch it tracks, unless that name is a resolved or recorded base (tracking `main` is not publishing to it, and a pick that fails to resolve still names a base),
 - any `origin` branch pointing at this branch's work, so `git push origin HEAD:other-name` still finds the PR. A branch pointing at base history carries no work and does not count.
 
 Among the PRs found under those names, in the resolved repository only:

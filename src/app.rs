@@ -431,6 +431,9 @@ pub struct App {
     /// The `branch` scope's resolved base, carried by the latest landed snapshot — the
     /// header names it and the diff builds against its OID (`specs/review-model.md`).
     pub branch_base: Option<git::ResolvedBase>,
+    /// Bumped by each pick made in this pane, so an in-flight build that read the old pick
+    /// fails the landing's input match instead of reverting the pick (`crate::world::WorldInput`).
+    base_epoch: u64,
     pub scope: Scope,
     /// The active tab; it drives both panes and selects the per-tab state in play.
     pub tab: Tab,
@@ -664,6 +667,7 @@ impl App {
             repo,
             base,
             branch_base: None,
+            base_epoch: 0,
             scope,
             tab: Tab::Changes,
             active_file_tab: Tab::Changes,
@@ -872,6 +876,10 @@ impl App {
                 self.reveal_files = old.reveal_files;
                 self.reveal_diff = old.reveal_diff;
                 self.changed = std::mem::take(&mut old.changed);
+                // The header's base label describes the carried list, so it carries too —
+                // a fresh app would paint `no base` beside a populated frame
+                // (`specs/tui.md`).
+                self.branch_base = old.branch_base.take();
                 self.diff = std::mem::take(&mut old.diff);
                 self.visible = std::mem::take(&mut old.visible);
                 self.expanded_folds = std::mem::take(&mut old.expanded_folds);
@@ -1036,6 +1044,7 @@ impl App {
             tab: self.tab,
             scope: self.scope,
             base: self.base.clone(),
+            base_epoch: self.base_epoch,
             turn_baseline: self.turn_baseline.clone(),
             // `Changes` never reads the toggled set, so it stays out of that tab's tag —
             // a directory toggle there must not invalidate an in-flight build.
@@ -3708,11 +3717,11 @@ impl App {
             self.status = e.0;
             return Ok(());
         }
+        // Epoch first: any build still in flight read the old pick, and the bump makes its
+        // landing fail the input match instead of reverting this one
+        // (`crate::world::WorldInput`).
+        self.base_epoch = self.base_epoch.wrapping_add(1);
         self.rebase_changes()?;
-        // The queued refresh's generation bump invalidates any in-flight build that read
-        // the old pick — the pick is derived state, not input identity, so the tag alone
-        // would not reject it (`specs/review-model.md`).
-        self.request_world_refresh(false, false);
         self.reveal_files = true;
         Ok(())
     }
@@ -4016,6 +4025,12 @@ mod tests {
             cursor: 0,
             query: "d".to_string(),
         });
+        old.branch_base = Some(crate::git::ResolvedBase {
+            name: "main".to_string(),
+            oid: "0".repeat(40),
+            source: crate::git::BaseSource::DefaultBranch,
+            skipped: None,
+        });
 
         let mut recovered = App::new(PathBuf::from("."), Scope::Branch, None);
         recovered.carry_authored_state_from(&mut old);
@@ -4023,6 +4038,10 @@ mod tests {
         let bp = recovered.base_picker.as_ref().expect("the picker state is carried");
         assert_eq!(bp.query, "d");
         assert_eq!(bp.rows[0].name, "dev");
+        // The header's base rides with the carried frame — recovery never paints
+        // `no base` beside a populated list (`specs/tui.md`).
+        let base = recovered.branch_base.as_ref().expect("the resolved base is carried");
+        assert_eq!(base.name, "main");
     }
 
     #[test]

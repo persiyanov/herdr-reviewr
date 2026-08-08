@@ -546,8 +546,10 @@ fn base_label(app: &App) -> Option<(String, String, String)> {
     })
 }
 
-/// The base label as painted: the name truncated with a trailing `…` to what the header can
-/// fit (`specs/tui.md`) — one source for the paint and the click hit-test.
+/// The base label as painted: truncated with a trailing `…` to what the header can fit,
+/// the name first and the skipped tail only in what remains, so a long missing name can
+/// never evict the resolved base (`specs/tui.md`) — one source for the paint and the
+/// click hit-test.
 fn base_parts(app: &App, keymap: &Keymap, width: u16) -> Option<(String, String, String)> {
     let (lead, name, tail) = base_label(app)?;
     // Everything else on the line plus the base's own gap and the suffix's minimum gap.
@@ -555,35 +557,13 @@ fn base_parts(app: &App, keymap: &Keymap, width: u16) -> Option<(String, String,
         + scope_chip(app).len()
         + 1
         + lead.width()
-        + tail.width()
         + header_suffix(app).width()
         + HEADER_LEAD.len()
         + 1;
-    let name_max = (width as usize).saturating_sub(fixed);
-    Some((lead, truncate_ellipsis(&name, name_max), tail))
-}
-
-/// Truncate `s` to `max` display columns with a trailing `…` (`specs/tui.md`).
-fn truncate_ellipsis(s: &str, max: usize) -> String {
-    if s.width() <= max {
-        return s.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let budget = max - 1;
-    let mut out = String::new();
-    let mut w = 0;
-    for ch in s.chars() {
-        let cw = ch.to_string().width();
-        if w + cw > budget {
-            break;
-        }
-        out.push(ch);
-        w += cw;
-    }
-    out.push('…');
-    out
+    let budget = (width as usize).saturating_sub(fixed);
+    let name = truncate_width(&name, budget);
+    let tail = truncate_width(&tail, budget.saturating_sub(name.width()));
+    Some((lead, name, tail))
 }
 
 /// The header suffix: the active scope's changed-file count and its aggregate line totals, in
@@ -905,10 +885,14 @@ fn comment_card_lines(c: &Comment, width: usize, p: &Palette) -> Vec<Line<'stati
     lines
 }
 
-/// Truncate `s` to `max` display columns, marking a cut with a trailing `…`.
+/// Truncate `s` to `max` display columns, marking a cut with a trailing `…`. Zero columns
+/// fit nothing, not a bare `…`.
 fn truncate_width(s: &str, max: usize) -> String {
     if s.width() <= max {
         return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
     }
     let mut out = String::new();
     let mut w = 0;
@@ -1913,24 +1897,61 @@ fn body_popup(area: Rect, app: &App, w: u16, h: u16) -> Rect {
 /// Three short rows in an 80%-tall box would be mostly empty (`specs/herdr-host.md`).
 const PICKER_MIN_WIDTH: usize = 34;
 
-fn picker_popup(area: Rect, app: &App) -> Rect {
+/// The box any picker menu paints: `widest` row content plus the two borders and one column
+/// of air — the air sits inside the row, so the selection fill still reaches both borders.
+/// Never narrower than the floor, so a picker of short names still reads as a deliberate
+/// dialog.
+fn menu_popup(area: Rect, app: &App, widest: usize, title: &str, lines: usize) -> Rect {
     let body = panes(area, app).body;
+    let title = framed_title(title).width() + 2;
+    let w = (widest + 3).max(title).max(PICKER_MIN_WIDTH).min(body.width as usize) as u16;
+    let h = lines.min(body.height as usize) as u16;
+    body_popup(area, app, w, h)
+}
+
+/// The first visible row, so the highlight stays on screen in a menu taller than the pane
+/// (`specs/input.md`).
+fn menu_scroll(cursor: usize, total: usize, rows: usize) -> usize {
+    if rows == 0 || cursor < rows {
+        return 0;
+    }
+    (cursor + 1).saturating_sub(rows).min(total.saturating_sub(rows))
+}
+
+/// The menu row under the pointer, its list starting `top` rows below `inner`'s top and
+/// scrolled to `first` — `None` outside the list, so border, title, and filter clicks stay
+/// inert (`specs/input.md`).
+fn menu_hit(
+    inner: Rect,
+    top: u16,
+    first: usize,
+    total: usize,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
+    let list_y = inner.y + top;
+    if col < inner.x
+        || col >= inner.x + inner.width
+        || row < list_y
+        || row >= inner.y + inner.height
+    {
+        return None;
+    }
+    let index = first + (row - list_y) as usize;
+    (index < total).then_some(index)
+}
+
+fn picker_popup(area: Rect, app: &App) -> Rect {
     let name_width = picker_name_width(app);
-    // " N  " + the padded name + "  " + the dim trail, then the two borders. The highlight is
-    // a row fill, not a glyph, so it costs no width.
+    // " N  " + the padded name + "  " + the dim trail. The highlight is a row fill, not a
+    // glyph, so it costs no width.
     let widest = app
         .picker_rows
         .iter()
         .map(|row| 4 + name_width + 2 + picker_trail(app, row).width())
         .max()
         .unwrap_or(0);
-    let title = framed_title(&picker_title(app)).width() + 2;
-    // Rows, the two borders, and one column of air after the longest trail — the air sits
-    // inside the row, so the selection fill still reaches both borders. Never narrower than
-    // the floor, so a picker of short names still reads as a deliberate dialog.
-    let w = (widest + 3).max(title).max(PICKER_MIN_WIDTH).min(body.width as usize) as u16;
-    let h = (app.picker_rows.len() + 2).min(body.height as usize) as u16;
-    body_popup(area, app, w, h)
+    menu_popup(area, app, widest, &picker_title(app), app.picker_rows.len() + 2)
 }
 
 /// The popup's row region, from the same `Block` shape the renderer draws, so the hit test
@@ -1960,13 +1981,8 @@ fn picker_title(app: &App) -> String {
     format!("Send {n} {noun} to")
 }
 
-/// The first visible row, so the highlight stays on screen in a picker taller than the pane
-/// (`specs/input.md`).
 fn picker_scroll(app: &App, rows: usize) -> usize {
-    if rows == 0 || app.picker_cursor < rows {
-        return 0;
-    }
-    (app.picker_cursor + 1).saturating_sub(rows).min(app.picker_rows.len().saturating_sub(rows))
+    menu_scroll(app.picker_cursor, app.picker_rows.len(), rows)
 }
 
 fn render_agent_picker(frame: &mut Frame, app: &App, area: Rect) {
@@ -2013,19 +2029,11 @@ fn render_agent_picker(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(List::new(items), inner);
 }
 
-/// The picker row under the pointer, for click-to-highlight (`specs/input.md`). `None`
-/// anywhere else, including the border and the title, so those clicks stay inert.
+/// The picker row under the pointer, for click-to-highlight (`specs/input.md`).
 pub fn hit_picker_row(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
     let inner = picker_inner(picker_popup(area, app));
-    if col < inner.x
-        || col >= inner.x + inner.width
-        || row < inner.y
-        || row >= inner.y + inner.height
-    {
-        return None;
-    }
-    let index = picker_scroll(app, inner.height as usize) + (row - inner.y) as usize;
-    (index < app.picker_rows.len()).then_some(index)
+    let first = picker_scroll(app, inner.height as usize);
+    menu_hit(inner, 0, first, app.picker_rows.len(), col, row)
 }
 
 // --- Base picker (specs/input.md Base picker) ----------------------------------------------
@@ -2045,26 +2053,17 @@ fn base_name_width(bp: &crate::app::BasePicker) -> usize {
 /// full-list size while the filter narrows, so the frame never jumps under typing.
 fn base_picker_popup(area: Rect, app: &App) -> Rect {
     let Some(bp) = &app.base_picker else { return Rect::default() };
-    let body = panes(area, app).body;
     let name_width = base_name_width(bp);
-    // The star lead + the padded name + the dim trail, then the two borders.
+    // The star lead + the padded name + the dim trail.
     let widest =
         bp.rows.iter().map(|r| 3 + name_width + 2 + base_trail(r).width()).max().unwrap_or(0);
-    let title = framed_title(BASE_PICKER_TITLE).width() + 2;
-    let w = (widest + 3).max(title).max(PICKER_MIN_WIDTH).min(body.width as usize) as u16;
-    let h = (bp.rows.len().max(1) + 3).min(body.height as usize) as u16;
-    body_popup(area, app, w, h)
+    menu_popup(area, app, widest, BASE_PICKER_TITLE, bp.rows.len().max(1) + 3)
 }
 
 const BASE_PICKER_TITLE: &str = "Pick base";
 
-/// The first visible filtered row, so the highlight stays on screen in a picker taller than
-/// the pane (`specs/input.md`).
 fn base_picker_scroll(bp: &crate::app::BasePicker, rows: usize) -> usize {
-    if rows == 0 || bp.cursor < rows {
-        return 0;
-    }
-    (bp.cursor + 1).saturating_sub(rows).min(bp.filtered().len().saturating_sub(rows))
+    menu_scroll(bp.cursor, bp.filtered().len(), rows)
 }
 
 fn render_base_picker(frame: &mut Frame, app: &App, area: Rect) {
@@ -2129,22 +2128,13 @@ fn render_base_picker(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(List::new(items), list_area);
 }
 
-/// The filtered base-picker row under the pointer (`specs/input.md`). `None` on the border,
-/// the title, and the filter line, so those clicks stay inert.
+/// The filtered base-picker row under the pointer, the filter line skipped
+/// (`specs/input.md`).
 pub fn hit_base_picker_row(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
     let bp = app.base_picker.as_ref()?;
     let inner = picker_inner(base_picker_popup(area, app));
-    let list_y = inner.y + 1;
-    if col < inner.x
-        || col >= inner.x + inner.width
-        || row < list_y
-        || row >= inner.y + inner.height
-    {
-        return None;
-    }
-    let rows = inner.height.saturating_sub(1) as usize;
-    let index = base_picker_scroll(bp, rows) + (row - list_y) as usize;
-    (index < bp.filtered().len()).then_some(index)
+    let first = base_picker_scroll(bp, inner.height.saturating_sub(1) as usize);
+    menu_hit(inner, 1, first, bp.filtered().len(), col, row)
 }
 
 // --- Search screen (specs/search.md) -------------------------------------------------------

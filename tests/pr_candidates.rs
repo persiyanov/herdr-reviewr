@@ -199,6 +199,20 @@ fn every_resolved_base_source_excludes_names() {
 }
 
 #[test]
+fn a_dormant_pick_still_shields_its_name() {
+    // The picked `develop` no longer resolves (its refs are gone), but the record stands:
+    // an upstream naming it is still tracking a base, not publishing to it
+    // (`specs/forge-host.md` Resolution — "resolved or recorded").
+    let repo = worktree();
+    herdr_reviewr::git::write_base_pick(repo.path(), "develop").unwrap();
+    repo.git(&["config", "branch.work.remote", "origin"]);
+    repo.git(&["config", "branch.work.merge", "refs/heads/develop"]);
+
+    let local = pr_local(repo.path(), None).expect("pr_local");
+    assert_eq!(local.names, ["work"], "the dormant pick's name never joins");
+}
+
+#[test]
 fn an_upstream_on_a_base_resolved_without_its_name_is_excluded_by_tip() {
     // The `develop`-default repo under the stock `main`/`master` config: the base
     // resolves only through `origin/HEAD`, so no configured entry carries its name.

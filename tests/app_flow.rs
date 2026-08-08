@@ -5221,6 +5221,21 @@ fn typing_filters_and_enter_picks_the_highlight() {
 }
 
 #[test]
+fn a_pick_retags_the_world_input() {
+    // The pick is read from its ref at build time, so it is not input identity on its
+    // own: the pick must bump the tag, or a build launched before it lands afterwards
+    // and reverts the picked base (`specs/tui.md`).
+    let r = based_repo();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let stale = app.world_input();
+    app.open_base_picker();
+    app.base_picker_input('d');
+    app.base_picker_pick().unwrap();
+    assert_ne!(app.world_input(), stale, "an in-flight build's tag no longer matches");
+}
+
+#[test]
 fn picking_the_default_clears_the_pick() {
     let r = based_repo();
     herdr_reviewr::git::write_base_pick(r.path(), "dev").unwrap();

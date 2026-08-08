@@ -2844,3 +2844,24 @@ fn an_overlong_base_name_truncates_with_an_ellipsis() {
     assert!(line0.contains('…'), "the overflow truncates with a trailing ellipsis: {line0}");
     assert!(line0.contains("1 changed"), "the right-aligned stats survive the long name: {line0}");
 }
+
+#[test]
+fn an_overlong_skipped_tail_never_evicts_the_base_name() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.git(&["update-ref", "refs/remotes/origin/main", "main"]);
+    r.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+    let long = format!("feature/{}", "x".repeat(80));
+    herdr_reviewr::git::write_base_pick(r.path(), &long).unwrap();
+    r.git(&["checkout", "-q", "-b", "work"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = dump(&render_size(&app, 80, 20)).lines().next().unwrap().to_string();
+    assert!(line0.contains("vs main"), "the resolved name keeps first claim: {line0}");
+    assert!(line0.contains("· feature/x"), "the skipped tail paints in what remains: {line0}");
+    assert!(line0.contains('…'), "the tail truncates with a trailing ellipsis: {line0}");
+    assert!(line0.contains("1 changed"), "the right-aligned stats survive the long tail: {line0}");
+}

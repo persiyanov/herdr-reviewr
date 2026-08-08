@@ -508,7 +508,7 @@ pub fn pr_local(repo: &Path, base_flag: Option<&str>) -> Result<PrLocalState, Gi
             names.push(name);
         }
     };
-    if let Some(upstream) = recorded_upstream(repo, &branch, &resolution.names(), &bases)? {
+    if let Some(upstream) = recorded_upstream(repo, &branch, &resolution.base_names(), &bases)? {
         push_name(upstream, &mut names);
     }
     if let Some(head) = &head_oid
@@ -544,19 +544,30 @@ pub struct ResolvedBase {
 
 /// One pass over the base chain. `candidates` keeps every source that resolved, in
 /// precedence order and deduped by OID — the PR frontier walk needs all of them, not just
-/// the winner (`pr_local`).
+/// the winner (`pr_local`). `recorded` keeps every source name the chain considered,
+/// resolved or not — a dormant pick still shields its name from the PR name lookup
+/// (`specs/forge-host.md` Resolution).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BaseResolution {
     pub winner: Option<ResolvedBase>,
     pub candidates: Vec<(String, String)>,
+    pub recorded: Vec<String>,
 }
 
 impl BaseResolution {
     pub fn oids(&self) -> Vec<String> {
         self.candidates.iter().map(|(_, oid)| oid.clone()).collect()
     }
-    fn names(&self) -> Vec<String> {
-        self.candidates.iter().map(|(name, _)| name.clone()).collect()
+    /// The names the PR lookup must not treat as this branch's own: every resolved
+    /// candidate and every recorded choice (`specs/forge-host.md` Resolution).
+    fn base_names(&self) -> Vec<String> {
+        let mut names = self.recorded.clone();
+        for (name, _) in &self.candidates {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        names
     }
 }
 
@@ -566,21 +577,28 @@ impl BaseResolution {
 /// winner is recorded for the header (`specs/tui.md`).
 pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResolution, GitFail> {
     let mut candidates: Vec<(String, String, BaseSource)> = Vec::new();
+    let mut recorded: Vec<String> = Vec::new();
     let mut skipped: Option<String> = None;
     let push = |name: String, oid: String, source: BaseSource, c: &mut Vec<_>| {
         if !c.iter().any(|(_, o, _): &(String, String, BaseSource)| *o == oid) {
             c.push((name, oid, source));
         }
     };
+    let record = |name: String, r: &mut Vec<String>| {
+        if !name.is_empty() && !r.contains(&name) {
+            r.push(name);
+        }
+    };
     if let Some(flag) = base_flag.filter(|b| !b.is_empty()) {
         // The flag is the power-user escape hatch: any rev works verbatim (a SHA, a tag,
         // `upstream/main`), and a branch-name spelling falls back to prefix-stripped
-        // resolution.
+        // resolution. The header and the name shield use the bare spelling either way.
+        let entry = strip_base_prefix(flag);
+        record(entry.clone(), &mut recorded);
         let probe = format!("{flag}^{{commit}}");
         if let Some(oid) = git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])? {
-            push(flag.to_string(), oid, BaseSource::Flag, &mut candidates);
+            push(entry, oid, BaseSource::Flag, &mut candidates);
         } else {
-            let entry = strip_base_prefix(flag);
             match resolve_base_entry(repo, &entry)? {
                 Some(oid) => push(entry, oid, BaseSource::Flag, &mut candidates),
                 None => skipped = Some(flag.to_string()),
@@ -588,6 +606,7 @@ pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResoluti
         }
     }
     if let Some(pick) = read_base_pick(repo)? {
+        record(pick.clone(), &mut recorded);
         match resolve_base_entry(repo, &pick)? {
             Some(oid) => push(pick, oid, BaseSource::Pick, &mut candidates),
             // Only a failure that outranks the eventual winner reads as skipped.
@@ -595,10 +614,11 @@ pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResoluti
             None => {}
         }
     }
-    if let Some(name) = default_branch_name(repo)?
-        && let Some(oid) = resolve_base_entry(repo, &name)?
-    {
-        push(name, oid, BaseSource::DefaultBranch, &mut candidates);
+    if let Some(name) = default_branch_name(repo)? {
+        record(name.clone(), &mut recorded);
+        if let Some(oid) = resolve_base_entry(repo, &name)? {
+            push(name, oid, BaseSource::DefaultBranch, &mut candidates);
+        }
     }
     let winner = candidates.first().map(|(name, oid, source)| ResolvedBase {
         name: name.clone(),
@@ -607,14 +627,27 @@ pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResoluti
         skipped: skipped.clone(),
     });
     let candidates = candidates.into_iter().map(|(name, oid, _)| (name, oid)).collect();
-    Ok(BaseResolution { winner, candidates })
+    Ok(BaseResolution { winner, candidates, recorded })
 }
 
-/// The branch name `origin/HEAD` points at, when the symref is present
-/// (`specs/review-model.md` Base branch).
+/// The branch name `origin/HEAD` points at (`specs/review-model.md` Base branch). Some
+/// clones carry `origin/HEAD` as a plain ref instead of a symref — then the name is the
+/// origin tip whose commit matches it.
 pub fn default_branch_name(repo: &Path) -> Result<Option<String>, GitFail> {
     let target = git_tristate(repo, &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])?;
-    Ok(target.and_then(|t| t.strip_prefix("refs/remotes/origin/").map(str::to_string)))
+    if let Some(name) =
+        target.and_then(|t| t.strip_prefix("refs/remotes/origin/").map(str::to_string))
+    {
+        return Ok(Some(name));
+    }
+    let Some(oid) = git_tristate(
+        repo,
+        &["rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD^{commit}"],
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(origin_tips(repo)?.into_iter().find_map(|(tip, name)| (tip == oid).then_some(name)))
 }
 
 /// Strip the ref prefixes a `--base` branch name may carry (`specs/review-model.md`).
@@ -627,10 +660,13 @@ pub(crate) fn strip_base_prefix(entry: &str) -> String {
 }
 
 /// Every branch name for the base picker: `refs/heads` and `refs/remotes/origin` merged by
-/// bare name, newest commit first, `origin/HEAD` and the checked-out branch excluded
-/// (`specs/input.md` Base picker).
+/// bare name, newest commit first, `origin/HEAD` and the checked-out branch excluded —
+/// except the default branch, which stays listed so its row can clear a pick even while
+/// checked out (`specs/input.md` Base picker).
 pub fn list_branches(repo: &Path) -> Result<Vec<String>, GitFail> {
-    let checked_out = git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    let default = default_branch_name(repo)?;
+    let checked_out = git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])?
+        .filter(|name| default.as_deref() != Some(name));
     let out = git_strict(
         repo,
         &[
@@ -879,12 +915,16 @@ pub fn file_content(repo: &Path, rev: &str, path: &str) -> String {
 
 const BASE_PICK_REF: &str = "refs/reviewr/base-pick";
 
-/// The recorded pick's branch name, or `None` when no pick is recorded.
+/// The recorded pick's branch name, or `None` when no pick is recorded. One git call, so a
+/// concurrent clear from another pane can never split the read the way an exists-then-read
+/// pair would; a failed read is no pick, matching the chain's skip-never-error contract
+/// (`specs/review-model.md`).
 pub fn read_base_pick(repo: &Path) -> Result<Option<String>, GitFail> {
-    if git_tristate(repo, &["rev-parse", "--verify", "--quiet", BASE_PICK_REF])?.is_none() {
+    let out = run_git(repo, &["cat-file", "blob", BASE_PICK_REF])?;
+    if !out.status.success() {
         return Ok(None);
     }
-    let name = git_strict(repo, &["cat-file", "blob", BASE_PICK_REF])?;
+    let name = String::from_utf8_lossy(&out.stdout);
     let name = name.trim();
     Ok((!name.is_empty()).then(|| name.to_string()))
 }
