@@ -488,6 +488,76 @@ fn the_footer_shows_the_action_for_the_context() {
 }
 
 #[test]
+fn uncommitted_changes_advertise_git_actions_in_the_collapsed_footer() {
+    let mut app = edited_app();
+    on_changed_line(&mut app);
+    let footer = footer_line(&render(&app));
+    for hint in ["C commit", "D discard", "P push"] {
+        assert!(footer.contains(hint), "the collapsed footer advertises {hint}:\n{footer}");
+    }
+    assert!(!app.keys_expanded, "the shortcut expansion was not needed");
+
+    let narrow = footer_line(&render_at(&app, 40));
+    assert!(narrow.contains("c comment"), "the primary survives:\n{narrow}");
+    assert!(narrow.contains("C commit"), "Git actions precede cursor actions:\n{narrow}");
+    assert!(!narrow.contains("v select"), "the trailing cursor action trims first:\n{narrow}");
+    assert!(narrow.trim_end().ends_with('?'), "trimmed actions remain discoverable:\n{narrow}");
+}
+
+#[test]
+fn collapsed_git_action_hints_follow_the_resolved_keymap() {
+    let app = rebound_app("commit = [\"x\"]\ndiscard = [\"X\"]\npush = [\"g\"]\n");
+    let footer = footer_line(&render(&app));
+    assert!(footer.contains("x commit"), "commit uses its rebound hint:\n{footer}");
+    assert!(footer.contains("X discard"), "discard uses its rebound hint:\n{footer}");
+    assert!(footer.contains("g push"), "push uses its rebound hint:\n{footer}");
+}
+
+#[test]
+fn collapsed_git_action_hints_track_their_exact_context() {
+    let repo = Repo::init();
+    repo.write("clean.rs", "clean\n");
+    repo.commit_all("init");
+    let clean = app_on(&repo);
+    let footer = footer_line(&render(&clean));
+    assert!(footer.contains("P push"), "push is available on an empty changeset:\n{footer}");
+    assert!(!footer.contains("C commit"), "commit needs changes:\n{footer}");
+    assert!(!footer.contains("D discard"), "discard needs a current file:\n{footer}");
+
+    let mut branch = edited_app();
+    branch.set_scope(Scope::Branch).unwrap();
+    let branch_footer = footer_line(&render(&branch));
+    assert!(
+        !["C commit", "D discard", "P push"].iter().any(|hint| branch_footer.contains(hint)),
+        "Git actions stay out of the branch scope:\n{branch_footer}"
+    );
+
+    let mut last_turn = edited_app();
+    last_turn.set_scope(Scope::LastTurn).unwrap();
+    let last_turn_footer = footer_line(&render(&last_turn));
+    assert!(
+        !["C commit", "D discard", "P push"].iter().any(|hint| last_turn_footer.contains(hint)),
+        "Git actions stay out of the last-turn scope:\n{last_turn_footer}"
+    );
+
+    let mut all_files = edited_app();
+    all_files.set_tab(Tab::AllFiles).unwrap();
+    let all_files_footer = footer_line(&render(&all_files));
+    assert!(
+        !["C commit", "D discard", "P push"].iter().any(|hint| all_files_footer.contains(hint)),
+        "Git actions stay out of All files:\n{all_files_footer}"
+    );
+
+    let mut pr = edited_app();
+    pr.set_tab(Tab::Pr).unwrap();
+    let pr_footer = footer_line(&render(&pr));
+    assert!(
+        !["C commit", "D discard", "P push"].iter().any(|hint| pr_footer.contains(hint)),
+        "Git actions stay out of PR:\n{pr_footer}"
+    );
+}
+
+#[test]
 fn the_footer_trims_trailing_actions_to_fit_keeping_the_primary_and_the_more_hint() {
     let mut app = edited_app();
     on_changed_line(&mut app); // diff focus, content line → c comment · v select … ?
@@ -2631,7 +2701,7 @@ fn neither_popup_reaches_the_footer_that_advertises_its_keys() {
         agent_row("w8:p2", "release-bot", "idle", "Grip Outreach Campaign"),
     ];
 
-    // Both popups place through one rule, `body_popup`, so at every pane size the footer keeps
+    // These popups place through one rule, `body_popup`, so at every pane size the footer keeps
     // naming the keys the popup is listening for — it is the only surface that does
     // (`specs/tui.md`).
     for h in 8..=30u16 {
@@ -2650,6 +2720,52 @@ fn neither_popup_reaches_the_footer_that_advertises_its_keys() {
             );
         }
     }
+}
+
+#[test]
+fn git_action_dialogs_render_their_state_and_modal_footer() {
+    let repo = Repo::init();
+    repo.write("hello.rs", "alpha\nbeta\n");
+    repo.commit_all("init");
+    repo.write("hello.rs", "alpha\nBETA\n");
+    let mut app = app_on(&repo);
+    app.open_commit_dialog();
+    let request = app.repo_action_request.take().unwrap();
+    let herdr_reviewr::repo_actions::Request::OpenCommit { files } = request else {
+        panic!("commit preparation")
+    };
+    let selection = herdr_reviewr::repo_actions::guard(repo.path(), &files).unwrap();
+    app.land_repo_action(herdr_reviewr::repo_actions::Completion {
+        kind: herdr_reviewr::repo_actions::Kind::PrepareCommit,
+        result: Ok(herdr_reviewr::repo_actions::Success::CommitDialog(selection)),
+    });
+    let files = render(&app);
+    assert!(files.contains("Commit files"), "{files}");
+    assert!(files.contains("[x]"), "all files start selected: {files}");
+    assert!(files.contains("enter message"), "{files}");
+
+    app.continue_commit();
+    app.input_paste("subject\n\nbody");
+    let message = render(&app);
+    assert!(message.contains("Commit 1 files"), "{message}");
+    assert!(message.contains("subject"), "{message}");
+    assert!(message.contains("shift+enter newline"), "{message}");
+
+    app.close_repo_dialog();
+    app.open_discard_dialog();
+    let request = app.repo_action_request.take().unwrap();
+    let herdr_reviewr::repo_actions::Request::OpenDiscard { file } = request else {
+        panic!("discard preparation")
+    };
+    let selection = herdr_reviewr::repo_actions::guard(repo.path(), &[file]).unwrap();
+    app.land_repo_action(herdr_reviewr::repo_actions::Completion {
+        kind: herdr_reviewr::repo_actions::Kind::PrepareDiscard,
+        result: Ok(herdr_reviewr::repo_actions::Success::DiscardDialog(selection)),
+    });
+    let discard = render(&app);
+    assert!(discard.contains("Discard changes?"), "{discard}");
+    assert!(discard.contains("enter discard"), "{discard}");
+    assert!(discard.contains("All staged and unstaged changes"), "{discard}");
 }
 
 #[test]

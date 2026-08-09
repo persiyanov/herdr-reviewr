@@ -50,6 +50,7 @@ to move the work forward.
 - Keyboard and mouse input (`input.md`).
 - Full-screen search over the worktree: fuzzy file names and literal code with a live preview, ranking owned by the engine (`search.md`).
 - In-file find in the read pane: literal match highlighting and match-to-match stepping (`find-in-file.md`).
+- Explicit commit, confirmed single-file discard, and upstream push from uncommitted Changes (`git-actions.md`).
 
 ## Roadmap
 
@@ -89,8 +90,8 @@ Newer content paints over the old in place, reconciling the reviewer's place as 
 
 | Always true                                                                                                                                                 |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| reviewr never commits, stages, or mutates the worktree, the index, or any branch. Its only git writes are private refs under `refs/reviewr/`: the turn baseline and the base pick.  |
-| reviewr never writes to a forge. It reads the pull request through the forge's official CLI and opens links in the browser, nothing more.                   |
+| **Explicit writes only**: reviewr mutates Git only after `C` commit, confirmed `D` discard, or `P` push in uncommitted Changes. Its other Git writes stay private refs under `refs/reviewr/`. |
+| reviewr never writes through a forge API. The PR tab reads through the forge's official CLI; only explicit Git push writes remotely.                       |
 | A comment, saved or being typed, is never lost to a refresh or the agent's edits. Only the reviewer removes it, and only an explicit export takes it out.   |
 
 ## Related specs
@@ -102,6 +103,7 @@ Newer content paints over the old in place, reconciling the reviewer's place as 
 - [input](./input.md)
 - [search](./search.md)
 - [find-in-file](./find-in-file.md)
+- [git-actions](./git-actions.md)
 - [tui](./tui.md)
 - [pr-tab](./pr-tab.md)
 - [herdr-host](./herdr-host.md)

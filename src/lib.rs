@@ -26,6 +26,7 @@ pub mod log;
 pub mod markdown;
 pub mod model;
 pub mod proc;
+pub mod repo_actions;
 pub mod search;
 pub mod theme;
 pub mod turn;
@@ -710,6 +711,13 @@ fn event_loop(
     )> = None;
     let mut search_generation = 0_u64;
     let mut search_inflight = false;
+    // Explicit repository writes share one serialized worker. The frame loop only queues and
+    // lands them, so hooks and network pushes never hold input or paint.
+    let (repo_action_tx, repo_action_job_rx) = mpsc::channel();
+    let (repo_action_res_tx, repo_action_rx) = mpsc::channel();
+    let _repo_action_worker =
+        crate::repo_actions::spawn(app.repo.clone(), repo_action_job_rx, repo_action_res_tx);
+    let mut repo_action_inflight = false;
     // When the tab-strip glyph turned on — the minimum-display clock (specs/tui.md).
     let mut glyph_since: Option<Instant> = None;
     let mut config_epoch = 0_u64;
@@ -851,6 +859,11 @@ fn event_loop(
                 // computed but unpainted until the next wake (policies/ux-responsiveness.md).
                 continue;
             }
+            if let Ok(completion) = repo_action_rx.try_recv() {
+                repo_action_inflight = false;
+                app.land_repo_action(completion);
+                continue;
+            }
             // A closed overlay owes no landing: without this, a still-warming engine's
             // periodic `indexing…` completions would re-arm the tight wake after `esc`
             // and spin the loop until the cold scan finishes.
@@ -896,6 +909,15 @@ fn event_loop(
                 && let Some((tx, _)) = &search_worker
             {
                 let _ = tx.send(crate::search::SearchJob::Track { path });
+            }
+
+            if let Some(request) = app.repo_action_request.take() {
+                repo_action_inflight = repo_action_tx.send(request).is_ok();
+                if !repo_action_inflight {
+                    app.repo_action_busy = None;
+                    app.mode = crate::app::Mode::Normal;
+                    app.status = "repository action worker unavailable".into();
+                }
             }
 
             // Dispatch the queued refresh after the frame above painted, so a switch stays
@@ -1055,6 +1077,9 @@ fn event_loop(
                 timeout = timeout.min(world_wake(builds));
             }
             if search_inflight {
+                timeout = timeout.min(WORKER_TIGHT_WAKE);
+            }
+            if repo_action_inflight {
                 timeout = timeout.min(WORKER_TIGHT_WAKE);
             }
             if let Some(wake) = glyph_wake {
@@ -1415,6 +1440,54 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
         return Ok(());
     }
 
+    if app.mode == Mode::CommitMessage {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let alt_or_shift = key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
+        let word = alt || ctrl;
+        match key.code {
+            Esc => app.back_to_commit_files(),
+            Enter if alt_or_shift => app.input_push('\n'),
+            Enter => app.submit_commit(),
+            Char('j') if ctrl => app.input_push('\n'),
+            Up => app.caret = ui::caret_vertical(&app.input, app.caret, 54, false),
+            Down => app.caret = ui::caret_vertical(&app.input, app.caret, 54, true),
+            code => apply_text_edit(app, code, ctrl, alt, word),
+        }
+        return Ok(());
+    }
+
+    if app.mode == Mode::CommitFiles {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let action = match key.code {
+            Char(c) => keymap.action_for(crate::keymap::Key { ctrl, alt, ch: c }),
+            Down => Some(K::Down),
+            Up => Some(K::Up),
+            _ => None,
+        };
+        match (action, key.code) {
+            (_, Esc) => app.close_repo_dialog(),
+            (_, Enter) if key.modifiers.is_empty() => app.continue_commit(),
+            (_, Char(' ')) if key.modifiers.is_empty() => app.commit_picker_toggle(),
+            (Some(K::Down), _) => app.commit_picker_move(1),
+            (Some(K::Up), _) => app.commit_picker_move(-1),
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    if app.mode == Mode::ConfirmDiscard {
+        match key.code {
+            Esc => app.close_repo_dialog(),
+            Enter if key.modifiers.is_empty() => app.confirm_discard(),
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    if app.mode == Mode::RepoBusy {
+        return Ok(());
+    }
+
     // The search screen: the query edits with the comment editor's caret controls,
     // newlines excluded — every edit re-queries off the frame loop. `tab` flips the
     // mode; the page keys scroll the preview (specs/search.md).
@@ -1605,6 +1678,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::Copy => {
                 app.export(&Clipboard);
             }
+            K::Commit => app.open_commit_dialog(),
+            K::Discard => app.open_discard_dialog(),
+            K::Push => app.start_push(),
             K::NextComment => app.jump_comment(1),
             K::PrevComment => app.jump_comment(-1),
             K::Comments => app.open_list(),
@@ -1728,6 +1804,12 @@ pub fn handle_mouse(
                     }
                     Some(i) => app.base_picker_goto(i),
                     None => {}
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) if app.mode == Mode::CommitFiles => {
+                if let Some(i) = ui::hit_commit_picker_row(area, app, m.column, m.row) {
+                    app.commit_picker_goto(i);
+                    app.commit_picker_toggle();
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if app.divider_drag_captured() => {

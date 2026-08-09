@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Commit, discard, and push from reviewr.** In uncommitted Changes, `C` selects files and commits
+  their current contents, `D` confirms before discarding the current file, and `P` pushes the
+  current branch, creating its upstream automatically when needed.
+
 ## [0.30.1] — 2026-08-08
 
 ### Fixed

@@ -152,7 +152,7 @@ reviewr only reads, so every failure degrades to a clear state. `Changes` and `A
 
 ## Non-goals
 
-- No writes to any forge: no posting, resolving, re-running checks, or merging. No routing PR feedback to the agent.
+- No forge API writes: no posting, resolving, re-running checks, or merging. Explicit Git push is specified separately in `git-actions.md`. No routing PR feedback to the agent.
 - No transport of its own. The forge's CLI owns hosts, credentials, and TLS.
 - No repository selector or cross-repository search.
 - No different parent repositories across sibling worktrees from one clone. Use a separate clone.

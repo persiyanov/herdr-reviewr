@@ -171,6 +171,14 @@ pub enum Mode {
     /// Choosing the `branch` scope's base (`specs/input.md` Base picker). Its state lives in
     /// [`App::base_picker`].
     BasePick,
+    /// Selecting uncommitted files for an explicit commit.
+    CommitFiles,
+    /// Writing the commit message after selecting files.
+    CommitMessage,
+    /// Confirming a destructive discard of one changed-file row.
+    ConfirmDiscard,
+    /// Waiting for a confirmed commit or discard to finish on the repository worker.
+    RepoBusy,
     /// The search screen, replacing the body from any tab (specs/search.md). Its state
     /// lives in [`App::search`].
     Search,
@@ -189,8 +197,26 @@ impl Mode {
     /// `Search` replaces the body rather than holding a place in it, and `Find` is a band the
     /// reviewer navigates the live diff with. Neither freezes anything, so neither is modal here.
     pub fn is_modal(&self) -> bool {
-        matches!(self, Mode::Composing { .. } | Mode::List | Mode::Picker | Mode::BasePick)
+        matches!(
+            self,
+            Mode::Composing { .. }
+                | Mode::List
+                | Mode::Picker
+                | Mode::BasePick
+                | Mode::CommitFiles
+                | Mode::CommitMessage
+                | Mode::ConfirmDiscard
+                | Mode::RepoBusy
+        )
     }
+}
+
+/// Frozen commit-picker rows and their opening repository guards.
+#[derive(Clone, Debug)]
+pub struct CommitDialog {
+    pub selection: crate::repo_actions::GuardedSelection,
+    pub checked: Vec<bool>,
+    pub cursor: usize,
 }
 
 /// The search screen's mode: which result set the list shows (specs/search.md).
@@ -387,6 +413,16 @@ pub enum FooterAction {
     Send,
     List,
     Copy,
+    Commit,
+    Discard,
+    Push,
+    ToggleCommitFile,
+    MoveCommitRow,
+    ContinueCommit,
+    RunCommit,
+    ConfirmDiscard,
+    Back,
+    Busy,
     Save,
     Newline,
     Cancel,
@@ -553,6 +589,14 @@ pub struct App {
     /// The base picker's rows, filter, and highlight while `Mode::BasePick` is open
     /// (`specs/input.md` Base picker).
     pub base_picker: Option<BasePicker>,
+    /// Frozen state for the two-step commit dialog.
+    pub commit_dialog: Option<CommitDialog>,
+    /// The single guarded row awaiting discard confirmation.
+    pub discard_dialog: Option<crate::repo_actions::GuardedSelection>,
+    /// A request painted once before the event loop dispatches it to the worker.
+    pub repo_action_request: Option<crate::repo_actions::Request>,
+    /// The serialized repository action currently running.
+    pub repo_action_busy: Option<crate::repo_actions::Kind>,
     pub mode: Mode,
     pub input: String,
     /// The comment editor's caret: a char index into `input` (`0..=chars().count()`).
@@ -718,6 +762,10 @@ impl App {
             picker_over: Mode::Normal,
             last_sent_pane: None,
             base_picker: None,
+            commit_dialog: None,
+            discard_dialog: None,
+            repo_action_request: None,
+            repo_action_busy: None,
             mode: Mode::Normal,
             input: String::new(),
             caret: 0,
@@ -861,6 +909,10 @@ impl App {
         // below may reinstate the stale stashed frame, so the pending request must survive
         // the swap or that frame never refreshes until the next poll.
         self.world_request = old.world_request.take();
+        // An accepted repository action cannot be undone by a later config error. Carry its
+        // queued/running identity so the worker completion still has a state to reconcile into.
+        self.repo_action_request = old.repo_action_request.take();
+        self.repo_action_busy = old.repo_action_busy;
         let old_mode = old.mode.clone();
         match old_mode {
             // `set_config_error` closes the search overlay, the find band, and the agent picker
@@ -868,7 +920,13 @@ impl App {
             // restored and the picker's frozen rows are not either (specs/search.md,
             // specs/find-in-file.md, specs/herdr-host.md).
             Mode::Normal | Mode::Search | Mode::Find | Mode::Picker => {}
-            Mode::List | Mode::Composing { .. } | Mode::BasePick => {
+            Mode::List
+            | Mode::Composing { .. }
+            | Mode::BasePick
+            | Mode::CommitFiles
+            | Mode::CommitMessage
+            | Mode::ConfirmDiscard
+            | Mode::RepoBusy => {
                 self.scope = old.scope;
                 self.tab = old.tab;
                 self.active_file_tab = old.active_file_tab;
@@ -906,6 +964,8 @@ impl App {
                 // The base picker survives recovery whole — rows, filter, and highlight
                 // (`specs/tui.md`).
                 self.base_picker = old.base_picker.take();
+                self.commit_dialog = old.commit_dialog.take();
+                self.discard_dialog = old.discard_dialog.take();
             }
         }
     }
@@ -2634,11 +2694,18 @@ impl App {
     /// query, the find query, the base picker's filter, nothing otherwise.
     fn active_field(&mut self) -> Option<(&mut String, &mut usize)> {
         match self.mode {
-            Mode::Composing { .. } => Some((&mut self.input, &mut self.caret)),
+            Mode::Composing { .. } | Mode::CommitMessage => {
+                Some((&mut self.input, &mut self.caret))
+            }
             Mode::Search => self.search.as_mut().map(|s| (&mut s.query, &mut s.caret)),
             Mode::Find => self.find.as_mut().map(|f| (&mut f.query, &mut f.caret)),
             Mode::BasePick => self.base_picker.as_mut().map(|b| (&mut b.query, &mut b.caret)),
-            Mode::Normal | Mode::List | Mode::Picker => None,
+            Mode::Normal
+            | Mode::List
+            | Mode::Picker
+            | Mode::CommitFiles
+            | Mode::ConfirmDiscard
+            | Mode::RepoBusy => None,
         }
     }
 
@@ -2878,6 +2945,10 @@ impl App {
             | Mode::List
             | Mode::Picker
             | Mode::BasePick
+            | Mode::CommitFiles
+            | Mode::CommitMessage
+            | Mode::ConfirmDiscard
+            | Mode::RepoBusy
             | Mode::Search
             | Mode::Find => None,
         }
@@ -3341,6 +3412,240 @@ impl App {
         }
     }
 
+    /// Repository writes are deliberately confined to the uncommitted Changes view.
+    pub fn repo_actions_available(&self) -> bool {
+        self.tab == Tab::Changes
+            && self.scope == Scope::Uncommitted
+            && self.mode == Mode::Normal
+            && self.repo_action_busy.is_none()
+    }
+
+    fn uncommitted_rows(&self) -> Vec<crate::model::ChangedFile> {
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let annotation = entry.annotation.as_ref()?;
+                Some(crate::model::ChangedFile {
+                    path: entry.path.clone(),
+                    kind: annotation.change,
+                    additions: annotation.additions,
+                    deletions: annotation.deletions,
+                    previous_path: entry.previous_path.clone(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn open_commit_dialog(&mut self) {
+        if !self.repo_actions_available() {
+            return;
+        }
+        let files = self.uncommitted_rows();
+        if files.is_empty() {
+            self.status = "no changes to commit".into();
+            return;
+        }
+        self.repo_action_request = Some(crate::repo_actions::Request::OpenCommit { files });
+        self.repo_action_busy = Some(crate::repo_actions::Kind::PrepareCommit);
+        self.mode = Mode::RepoBusy;
+        self.status = "preparing commit…".into();
+    }
+
+    pub fn commit_picker_move(&mut self, delta: isize) {
+        if let Some(dialog) = self.commit_dialog.as_mut()
+            && !dialog.selection.changes.is_empty()
+        {
+            dialog.cursor = step(dialog.cursor, delta, dialog.selection.changes.len());
+        }
+    }
+
+    pub fn commit_picker_toggle(&mut self) {
+        if let Some(dialog) = self.commit_dialog.as_mut()
+            && let Some(checked) = dialog.checked.get_mut(dialog.cursor)
+        {
+            *checked = !*checked;
+        }
+    }
+
+    pub fn commit_picker_goto(&mut self, row: usize) {
+        if let Some(dialog) = self.commit_dialog.as_mut()
+            && row < dialog.selection.changes.len()
+        {
+            dialog.cursor = row;
+        }
+    }
+
+    pub fn continue_commit(&mut self) {
+        let picked = self
+            .commit_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.checked.iter().any(|checked| *checked));
+        if picked {
+            self.mode = Mode::CommitMessage;
+        } else {
+            self.status = "select at least one file".into();
+        }
+    }
+
+    pub fn back_to_commit_files(&mut self) {
+        if self.mode == Mode::CommitMessage {
+            self.mode = Mode::CommitFiles;
+        }
+    }
+
+    pub fn close_repo_dialog(&mut self) {
+        if matches!(self.mode, Mode::CommitFiles | Mode::CommitMessage | Mode::ConfirmDiscard) {
+            self.mode = Mode::Normal;
+            self.commit_dialog = None;
+            self.discard_dialog = None;
+            self.input.clear();
+            self.caret = 0;
+        }
+    }
+
+    pub fn submit_commit(&mut self) {
+        if self.mode != Mode::CommitMessage || self.input.trim().is_empty() {
+            self.status = "commit message required".into();
+            return;
+        }
+        let Some(dialog) = &self.commit_dialog else { return };
+        let selection = dialog.selection.selected(&dialog.checked);
+        self.repo_action_request =
+            Some(crate::repo_actions::Request::Commit { selection, message: self.input.clone() });
+        self.repo_action_busy = Some(crate::repo_actions::Kind::Commit);
+        self.mode = Mode::RepoBusy;
+        self.status = "committing…".into();
+    }
+
+    pub fn open_discard_dialog(&mut self) {
+        if !self.repo_actions_available() {
+            return;
+        }
+        let path =
+            self.current_entry().map(|entry| entry.path.clone()).or_else(|| self.diff_path.clone());
+        let Some(file) = path
+            .and_then(|path| self.uncommitted_rows().into_iter().find(|file| file.path == path))
+        else {
+            return;
+        };
+        self.repo_action_request = Some(crate::repo_actions::Request::OpenDiscard { file });
+        self.repo_action_busy = Some(crate::repo_actions::Kind::PrepareDiscard);
+        self.mode = Mode::RepoBusy;
+        self.status = "preparing discard…".into();
+    }
+
+    pub fn confirm_discard(&mut self) {
+        if self.mode != Mode::ConfirmDiscard {
+            return;
+        }
+        let Some(selection) = self.discard_dialog.clone() else { return };
+        self.repo_action_request = Some(crate::repo_actions::Request::Discard { selection });
+        self.repo_action_busy = Some(crate::repo_actions::Kind::Discard);
+        self.mode = Mode::RepoBusy;
+        self.status = "discarding…".into();
+    }
+
+    pub fn start_push(&mut self) {
+        if !self.repo_actions_available() {
+            return;
+        }
+        self.repo_action_request = Some(crate::repo_actions::Request::Push);
+        self.repo_action_busy = Some(crate::repo_actions::Kind::Push);
+        self.status = "pushing…".into();
+    }
+
+    pub fn land_repo_action(&mut self, completion: crate::repo_actions::Completion) {
+        if self.repo_action_busy != Some(completion.kind) {
+            return;
+        }
+        self.repo_action_busy = None;
+        match completion.result {
+            Ok(crate::repo_actions::Success::CommitDialog(selection)) => {
+                self.commit_dialog = Some(CommitDialog {
+                    checked: vec![true; selection.changes.len()],
+                    selection,
+                    cursor: 0,
+                });
+                self.input.clear();
+                self.caret = 0;
+                self.mode = Mode::CommitFiles;
+                self.status.clear();
+                return;
+            }
+            Ok(crate::repo_actions::Success::DiscardDialog(selection)) => {
+                self.discard_dialog = Some(selection);
+                self.mode = Mode::ConfirmDiscard;
+                self.status.clear();
+                return;
+            }
+            Ok(crate::repo_actions::Success::Commit { oid, files, warning }) => {
+                self.mode = Mode::Normal;
+                self.commit_dialog = None;
+                self.input.clear();
+                self.caret = 0;
+                self.status = warning.map_or_else(
+                    || format!("committed {files} files as {oid}"),
+                    |warning| format!("committed {files} files as {oid}; {warning}"),
+                );
+            }
+            Ok(crate::repo_actions::Success::Discard { path }) => {
+                self.mode = Mode::Normal;
+                self.discard_dialog = None;
+                self.status = format!("discarded changes to {path}");
+            }
+            Ok(crate::repo_actions::Success::Push { branch }) => {
+                self.status = format!("pushed {branch}");
+            }
+            Err(error)
+                if matches!(
+                    completion.kind,
+                    crate::repo_actions::Kind::PrepareCommit
+                        | crate::repo_actions::Kind::PrepareDiscard
+                ) =>
+            {
+                self.mode = Mode::Normal;
+                self.status = format!(
+                    "{} unavailable: {error}",
+                    if completion.kind == crate::repo_actions::Kind::PrepareCommit {
+                        "commit"
+                    } else {
+                        "discard"
+                    }
+                );
+            }
+            Err(error) if error.contains("reopen the dialog") => {
+                self.mode = Mode::Normal;
+                self.commit_dialog = None;
+                self.discard_dialog = None;
+                self.input.clear();
+                self.caret = 0;
+                self.status = error;
+            }
+            Err(error) if completion.kind == crate::repo_actions::Kind::Commit => {
+                self.mode = Mode::CommitMessage;
+                self.status = format!("commit failed: {error}");
+            }
+            Err(error) => {
+                if completion.kind == crate::repo_actions::Kind::Discard {
+                    self.mode = Mode::Normal;
+                    self.discard_dialog = None;
+                }
+                self.status = format!(
+                    "{} failed: {error}",
+                    match completion.kind {
+                        crate::repo_actions::Kind::Commit => "commit",
+                        crate::repo_actions::Kind::PrepareCommit => "commit preparation",
+                        crate::repo_actions::Kind::Discard => "discard",
+                        crate::repo_actions::Kind::PrepareDiscard => "discard preparation",
+                        crate::repo_actions::Kind::Push => "push",
+                    }
+                );
+            }
+        }
+        self.request_world_refresh(true, false);
+        self.request_pr_refresh(RefreshKind::Forced);
+    }
+
     /// The footer's actions for the current context, tagged with their [`Band`] — row 1 (primary,
     /// send, the cursor's `Do` actions) and the `?`-expansion bands (`Go`, `Move`). Pure: a context
     /// → action mapping, unit-tested without a terminal. The renderer packs row 1, spills trimmed
@@ -3372,6 +3677,21 @@ impl App {
             Mode::BasePick => {
                 return vec![(A::PickBaseRow, Primary), (A::ClosePicker, Do), (A::MoveBaseRow, Do)];
             }
+            Mode::CommitFiles => {
+                return vec![
+                    (A::ContinueCommit, Primary),
+                    (A::Cancel, Do),
+                    (A::ToggleCommitFile, Do),
+                    (A::MoveCommitRow, Do),
+                ];
+            }
+            Mode::CommitMessage => {
+                return vec![(A::RunCommit, Primary), (A::Back, Do), (A::Newline, Do)];
+            }
+            Mode::ConfirmDiscard => {
+                return vec![(A::ConfirmDiscard, Primary), (A::Cancel, Do)];
+            }
+            Mode::RepoBusy => return vec![(A::Busy, Primary)],
             Mode::Search => {
                 // With nothing pickable — warming, errored, or no matches — only the
                 // mode flip and the exit are offered, so the bar never lists a key that
@@ -3494,6 +3814,27 @@ impl App {
         if let Some(forward) = self.armed_cross() {
             out[0].1 = Do;
             out.insert(0, (A::CrossFile { forward }, Primary));
+        }
+
+        // Explicit Git writes live only in uncommitted Changes. Put their applicable hints
+        // immediately after the primary so the collapsed footer advertises them before its
+        // trailing cursor actions; ordinary width trimming may still move the tail behind `?`.
+        // They remain contextual actions, never taking over the review flow's primary next step.
+        let repo_actions_here = self.tab == Tab::Changes
+            && self.scope == Scope::Uncommitted
+            && self.repo_action_busy.is_none();
+        if repo_actions_here {
+            let mut repo_actions = Vec::new();
+            if !self.entries.is_empty() {
+                repo_actions.push((A::Commit, Do));
+                if self.current_entry().is_some() || self.diff_path.is_some() {
+                    repo_actions.push((A::Discard, Do));
+                }
+            }
+            repo_actions.push((A::Push, Do));
+            let after_primary =
+                out.iter().position(|&(_, band)| band == Primary).map_or(0, |index| index + 1);
+            out.splice(after_primary..after_primary, repo_actions);
         }
 
         // `send` closes row 1 once a comment is written, after the cursor's actions and before the

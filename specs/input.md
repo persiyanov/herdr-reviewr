@@ -55,6 +55,9 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | `keys`                                                   | toggle the footer's full shortcut list      | `?`                                         | —                             |
 | `send`                                                   | send all comments to the agent              | `s` / `S`                                   | —                             |
 | `copy`                                                   | copy all comments to the clipboard          | `y` / `Y`                                   | —                             |
+| `commit`                                                 | select files and commit their current content | `C`                                       | click picker rows             |
+| `discard`                                                | confirm and discard the current file        | `D`                                         | —                             |
+| `push`                                                   | push the current branch to its upstream     | `P`                                         | —                             |
 | `open-pr`                                                | open the PR in the browser (`pr-tab.md`)    | `o`                                         | click the status chip         |
 | `refresh`                                                | refresh now                                 | `r`                                         | —                             |
 | `quit`                                                   | quit                                        | `q`                                         | —                             |
@@ -70,6 +73,10 @@ Outside the hidden-state rules above, these four navigator actions work from eit
 A divider drag belongs to the navigator position and split axis at mouse-down. A keypress, terminal resize, or config-driven layout change cancels it. A cancelled drag keeps its last painted share, and the cancelling keypress still performs its own action. After cancellation, drag events are consumed until mouse-up rather than becoming a selection in the read pane.
 
 Writing a comment: select a range or land on a line, press `c`, type into the inline box, `enter` saves and `esc` cancels. A saved comment renders as a read-only card spliced under its line, titled with its location, so written feedback stays on screen. `e` reopens the card as an edit box in place, hiding the card while editing. `d` deletes it. A successful send names the agent it added the comments to. A successful copy reports that they were copied. The transient status shows on the footer, pluralizes `comment`, and fades without covering the primary action.
+
+`C`, `D`, and `P` are explicit Git actions available only on `Changes` in the `uncommitted`
+scope (`git-actions.md`). Their uppercase defaults preserve lowercase comment, delete-comment, and
+navigator-position behavior.
 
 ## Behavior
 
@@ -101,9 +108,10 @@ The steps and the skips share the rest:
 
 ### Footer
 
-The footer is one row: the primary next step, the cursor's own actions, and `send` once a comment
-exists, closing with a `?`. Pressing `?` expands it to every shortcut that works here, and it stays
-until `?` or `esc`. It never lists a key that would not work in the current state.
+The footer is one row: the primary next step, the applicable Git actions in uncommitted Changes,
+the cursor's own actions, and `send` once a comment exists, closing with a `?`. Pressing `?`
+expands it to every shortcut that works here, and it stays until `?` or `esc`. It never lists a key
+that would not work in the current state.
 
 ```
  e edit · d delete · n/N jump · s send 2                                      ?
@@ -132,7 +140,7 @@ Row 1 is always shown:
 | primary | the most likely next step, in a bright accent, never dropped                      |
 | send    | `s send N`, present once any comment is written, after the primary, never dropped |
 | status  | the transient message, after `send`, truncated to fit                             |
-| actions | the cursor's other actions, in normal text, trimmed to fit                        |
+| actions | Git then cursor actions, in normal text, trimmed to fit                           |
 | more    | a `?` at the right, muted but legible — always present, and expands the rest      |
 
 A narrow row drops trailing actions to fit. The status outranks them, since the `?` panel repeats
@@ -184,6 +192,9 @@ Row 1's primary and actions follow the cursor:
 - When the awaiting-turn state and the hidden empty read pane match at once, the awaiting-turn row wins, and `z show` still joins its actions.
 - `scope`, `search`, and `find` are global, not cursor actions, so the `go` band carries them, never row 1 — `search` in every context, `find` wherever the read pane has content (`search.md`, `find-in-file.md`). `scope` leads row 1 only where nothing else does, an empty or notice diff.
 - Movement keys never sit on row 1. The `move` band shows them.
+- In uncommitted Changes, applicable Git actions follow the primary on row 1, before the cursor's
+  other actions: commit with changes, discard on a file, and push even with an empty changeset.
+  Narrow-width trimming moves the trailing actions behind `?` by the ordinary row-1 rule.
 - The comment editor, the comments list, the agent picker, the base picker, the search screen, and the find band show their own one-row footer, without `?`. The expansion's open state is kept and restored when they close.
 - `?` (the `keys` action) toggles the expansion in `Normal` mode only. It is text in the comment editor, the search and find inputs, and the base picker's filter, and inert in the comments list and the agent picker.
 - The changed-file count and line totals live in the header. The footer carries only the comment count, inside `s send N`.

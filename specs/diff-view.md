@@ -158,7 +158,7 @@ The viewer is read-only and recomputed on every refresh. It degrades rather than
 ## Non-goals
 
 - No alternate diff layouts. One unified column, a side-by-side split is roadmap.
-- No editing, staging, or reverting from the viewer.
+- No direct content editing or staging from the viewer. Confirmed whole-file discard is the explicit action in `git-actions.md`.
 - No line-number rebasing of comments. `review-model.md` owns comment anchoring, via the snippet.
 
 ## Related specs
@@ -168,3 +168,4 @@ The viewer is read-only and recomputed on every refresh. It degrades rather than
 - [theme](./theme.md)
 - [markdown](./markdown.md)
 - [find-in-file](./find-in-file.md)
+- [git-actions](./git-actions.md)
