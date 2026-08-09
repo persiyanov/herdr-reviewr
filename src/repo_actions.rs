@@ -341,12 +341,68 @@ fn push(repo: &Path) -> Result<Success> {
     let mut fields = upstream.trim_end().split('\0');
     let remote = fields.next().unwrap_or_default();
     let remote_ref = fields.next().unwrap_or_default();
-    if remote.is_empty() || remote_ref.is_empty() {
-        bail!("{branch} has no configured upstream");
+    if !remote.is_empty() && !remote_ref.is_empty() {
+        let refspec = format!("HEAD:{remote_ref}");
+        git(repo, &["push", "--porcelain", "--", remote, &refspec])?;
+        return Ok(Success::Push { branch: branch.to_string() });
     }
+
+    let remote = missing_upstream_remote(repo, branch)?;
+    let remote_ref = format!("refs/heads/{branch}");
     let refspec = format!("HEAD:{remote_ref}");
-    git(repo, &["push", "--porcelain", "--", remote, &refspec])?;
+    git(repo, &["push", "--porcelain", "--set-upstream", "--", &remote, &refspec])?;
     Ok(Success::Push { branch: branch.to_string() })
+}
+
+/// Pick the publication remote for a branch without tracking configuration. Explicit push intent
+/// wins; a broken explicit choice is an error instead of permission to silently publish elsewhere.
+fn missing_upstream_remote(repo: &Path, branch: &str) -> Result<String> {
+    let remotes = git_stdout(repo, &["remote"])?
+        .lines()
+        .map(str::trim)
+        .filter(|remote| !remote.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let branch_key = format!("branch.{branch}.pushRemote");
+    let explicit = if let Some(remote) = optional_config(repo, &branch_key)? {
+        Some((branch_key, remote))
+    } else {
+        optional_config(repo, "remote.pushDefault")?
+            .map(|remote| ("remote.pushDefault".to_string(), remote))
+    };
+
+    if let Some((key, remote)) = explicit {
+        if remote == "." || remotes.iter().any(|candidate| candidate == &remote) {
+            return Ok(remote);
+        }
+        bail!("{key} names missing remote {remote}");
+    }
+    if remotes.iter().any(|remote| remote == "origin") {
+        return Ok("origin".into());
+    }
+    match remotes.as_slice() {
+        [remote] => Ok(remote.clone()),
+        [] => bail!("{branch} has no configured upstream and the repository has no remotes"),
+        _ => bail!(
+            "{branch} has no configured upstream; configure branch.{branch}.pushRemote or remote.pushDefault"
+        ),
+    }
+}
+
+/// Read one optional Git config value while preserving real config-read failures.
+fn optional_config(repo: &Path, key: &str) -> Result<Option<String>> {
+    let out = run(repo, &["config", "--get", key])?;
+    if out.status.success() {
+        let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if value.is_empty() {
+            bail!("{key} is empty");
+        }
+        return Ok(Some(value));
+    }
+    if out.status.code() == Some(1) {
+        return Ok(None);
+    }
+    bail!("git config --get {key} failed: {}", String::from_utf8_lossy(&out.stderr).trim())
 }
 
 struct TempIndex {
@@ -528,23 +584,147 @@ mod tests {
         assert!(!repo.path().join("scratch").exists());
     }
 
-    #[test]
-    fn push_requires_and_uses_the_configured_upstream() {
+    fn committed_repo() -> TempDir {
         let repo = repo();
         write(repo.path(), "a", "a\n");
         git(repo.path(), &["add", "a"]).unwrap();
         git(repo.path(), &["commit", "-qm", "init"]).unwrap();
-        assert!(push(repo.path()).unwrap_err().to_string().contains("no configured upstream"));
+        repo
+    }
 
+    fn bare_remote() -> TempDir {
         let remote = TempDir::new().unwrap();
         git(remote.path(), &["init", "-q", "--bare"]).unwrap();
-        git(repo.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]).unwrap();
-        git(repo.path(), &["push", "-qu", "origin", "main"]).unwrap();
+        remote
+    }
+
+    fn add_remote(repo: &Path, name: &str, remote: &Path) {
+        git(repo, &["remote", "add", name, remote.to_str().unwrap()]).unwrap();
+    }
+
+    fn remote_head(remote: &Path) -> Option<String> {
+        let out = run(remote, &["rev-parse", "--verify", "refs/heads/main"]).unwrap();
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    #[test]
+    fn push_creates_origin_upstream_then_keeps_it_authoritative() {
+        let repo = committed_repo();
+        let origin = bare_remote();
+        let other = bare_remote();
+        add_remote(repo.path(), "origin", origin.path());
+        add_remote(repo.path(), "other", other.path());
+
+        assert_eq!(push(repo.path()).unwrap(), Success::Push { branch: "main".into() });
+        assert_eq!(
+            git_stdout(repo.path(), &["rev-parse", "--symbolic-full-name", "@{upstream}"])
+                .unwrap()
+                .trim(),
+            "refs/remotes/origin/main"
+        );
+        let first = git_stdout(repo.path(), &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(remote_head(origin.path()).as_deref(), Some(first.trim()));
+
+        // Once tracking exists it remains the destination, even if later push preferences differ.
+        git(repo.path(), &["config", "branch.main.pushRemote", "other"]).unwrap();
         write(repo.path(), "a", "b\n");
         git(repo.path(), &["commit", "-qam", "next"]).unwrap();
+        push(repo.path()).unwrap();
+        let second = git_stdout(repo.path(), &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(remote_head(origin.path()).as_deref(), Some(second.trim()));
+        assert_eq!(remote_head(other.path()), None);
+    }
+
+    #[test]
+    fn missing_upstream_remote_honors_push_precedence() {
+        let repo = committed_repo();
+        let branch_remote = bare_remote();
+        let default_remote = bare_remote();
+        let origin = bare_remote();
+        add_remote(repo.path(), "branch-publish", branch_remote.path());
+        add_remote(repo.path(), "default-publish", default_remote.path());
+        add_remote(repo.path(), "origin", origin.path());
+        git(repo.path(), &["config", "remote.pushDefault", "default-publish"]).unwrap();
+        git(repo.path(), &["config", "branch.main.pushRemote", "branch-publish"]).unwrap();
+
         assert_eq!(push(repo.path()).unwrap(), Success::Push { branch: "main".into() });
         let local = git_stdout(repo.path(), &["rev-parse", "HEAD"]).unwrap();
-        let remote_head = git_stdout(remote.path(), &["rev-parse", "refs/heads/main"]).unwrap();
-        assert_eq!(local, remote_head);
+        assert_eq!(remote_head(branch_remote.path()).as_deref(), Some(local.trim()));
+        assert_eq!(remote_head(default_remote.path()), None);
+        assert_eq!(remote_head(origin.path()), None);
+    }
+
+    #[test]
+    fn missing_upstream_remote_uses_push_default_then_origin_then_a_sole_remote() {
+        let with_default = committed_repo();
+        let preferred = bare_remote();
+        let origin = bare_remote();
+        add_remote(with_default.path(), "preferred", preferred.path());
+        add_remote(with_default.path(), "origin", origin.path());
+        git(with_default.path(), &["config", "remote.pushDefault", "preferred"]).unwrap();
+        push(with_default.path()).unwrap();
+        assert!(remote_head(preferred.path()).is_some());
+        assert_eq!(remote_head(origin.path()), None);
+
+        let with_origin = committed_repo();
+        let origin = bare_remote();
+        let other = bare_remote();
+        add_remote(with_origin.path(), "origin", origin.path());
+        add_remote(with_origin.path(), "other", other.path());
+        push(with_origin.path()).unwrap();
+        assert!(remote_head(origin.path()).is_some());
+        assert_eq!(remote_head(other.path()), None);
+
+        let with_one = committed_repo();
+        let publish = bare_remote();
+        add_remote(with_one.path(), "publish", publish.path());
+        push(with_one.path()).unwrap();
+        assert!(remote_head(publish.path()).is_some());
+        assert_eq!(
+            git_stdout(with_one.path(), &["rev-parse", "--symbolic-full-name", "@{upstream}"])
+                .unwrap()
+                .trim(),
+            "refs/remotes/publish/main"
+        );
+    }
+
+    #[test]
+    fn missing_upstream_remote_refuses_absent_ambiguous_and_invalid_destinations() {
+        let no_remote = committed_repo();
+        assert!(push(no_remote.path()).unwrap_err().to_string().contains("no remotes"));
+
+        let ambiguous = committed_repo();
+        let one = bare_remote();
+        let two = bare_remote();
+        add_remote(ambiguous.path(), "one", one.path());
+        add_remote(ambiguous.path(), "two", two.path());
+        assert!(
+            push(ambiguous.path())
+                .unwrap_err()
+                .to_string()
+                .contains("configure branch.main.pushRemote")
+        );
+
+        let origin = bare_remote();
+        add_remote(ambiguous.path(), "origin", origin.path());
+        git(ambiguous.path(), &["config", "branch.main.pushRemote", "missing"]).unwrap();
+        assert!(push(ambiguous.path()).unwrap_err().to_string().contains("missing remote missing"));
+        assert_eq!(remote_head(origin.path()), None, "an invalid explicit choice never falls back");
+    }
+
+    #[test]
+    fn failed_initial_push_does_not_create_tracking_configuration() {
+        let repo = committed_repo();
+        git(repo.path(), &["remote", "add", "origin", "/does/not/exist/reviewr.git"]).unwrap();
+        assert!(push(repo.path()).is_err());
+        assert_eq!(optional_config(repo.path(), "branch.main.remote").unwrap(), None);
+        assert_eq!(optional_config(repo.path(), "branch.main.merge").unwrap(), None);
+    }
+
+    #[test]
+    fn push_still_refuses_a_detached_head() {
+        let repo = committed_repo();
+        git(repo.path(), &["checkout", "-q", "--detach"]).unwrap();
+        assert!(push(repo.path()).unwrap_err().to_string().contains("detached HEAD"));
     }
 }

@@ -145,12 +145,14 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | --- | --- |
 | `C` | Select changed files, then write a commit message |
 | `D` | Confirm and discard all changes to the current file |
-| `P` | Push the current branch to its configured upstream |
+| `P` | Push the current branch, creating its upstream when needed |
 
 The commit picker starts with every changed file selected. Move with `j` / `k`, toggle with
 `Space`, and press `Enter` to write the message; plain `Enter` commits and
 `Shift+Enter` / `Alt+Enter` adds a message line. In the discard dialog, `Enter` confirms and
-`Esc` cancels.
+`Esc` cancels. A first push creates `<remote>/<local-branch>`, preferring the branch's configured
+push remote, the repository's default push remote, `origin`, then a sole remote. Ambiguous remote
+sets still refuse instead of guessing.
 
 **In the comment box**
 

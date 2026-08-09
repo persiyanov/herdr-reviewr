@@ -51,9 +51,13 @@ and removes its new path. No unrelated path changes.
 ## Push and safety
 
 `P` is offered even when the uncommitted list is empty. It pushes the attached current branch to
-its configured upstream only. It never creates tracking configuration, chooses a destination,
-forces, or prompts in the terminal. Missing upstream, detached HEAD, authentication, network, and
-non-fast-forward failures report through the status line.
+its configured upstream. With no configured upstream, it publishes `HEAD` under the local branch
+name and sets tracking after the push succeeds. The destination is the first configured choice in
+this order: `branch.<name>.pushRemote`, `remote.pushDefault`, `origin`, then the sole remote. A
+broken explicit choice, no remotes, or multiple remotes without another choice refuses rather than
+guessing. It never forces or prompts in the terminal. Detached HEAD, authentication, network, and
+non-fast-forward failures report through the status line; a failed initial push creates no tracking
+configuration.
 
 A commit/discard dialog records its opening `HEAD`, worktree content, and index state for every
 affected path. If `HEAD` or an affected path changes before execution, the action refuses and asks
