@@ -35,7 +35,7 @@ The terminal frame: the pane layout, the tabs, and how the view stays current.
 - The active tab sets both panes: diff and changed files in `Changes`, content and repo tree in `All files`, checks and comments in `PR` (`diff-view.md`, `pr-tab.md`).
 - The comment input opens inline, directly under the last line of the selection, and grows as you type (`input.md`). It is never a footer band.
 - The footer is a live action bar (`input.md`).
-- The comments list, the agent picker, and the base picker open as popups over the body (`input.md`, `herdr-host.md`). While one is open, every painted color in the header and the body recedes halfway to the theme base. The footer stays bright.
+- The comments list, pickers, commit message, and discard confirmation open as popups over the body (`input.md`, `git-actions.md`, `herdr-host.md`). While one is open, every painted color in the header and the body recedes halfway to the theme base. The footer stays bright.
 - The review loop is the same in `Changes` and `All files`. `PR` is a read-only mirror. Comments are one set across the authoring tabs and export together.
 
 The navigator has one global position across all tabs, and the position derives the split direction.
@@ -90,7 +90,7 @@ A layout change moves nothing else (`overview.md`), and both remembered shares p
 ## Failure semantics
 
 - A poll never touches the comment input or saved comments. Draft text and caret survive every refresh.
-- A config error and its automatic-reload remedy replace the view. Saved comments, an open composer, comments list, or base picker, and the footer's shortcut expansion all survive it (`config.md`).
+- A config error and its automatic-reload remedy replace the view. Saved comments, an open composer, comments list, base picker, or Git-action dialog, and the footer's shortcut expansion all survive it (`config.md`, `git-actions.md`).
 - A poll that finds no change makes no visible update: no flicker, no lost selection or scroll.
 - A refresh in flight never delays input or a paint.
 - A first open of a very large file can briefly block.
@@ -98,7 +98,7 @@ A layout change moves nothing else (`overview.md`), and both remembered shares p
 
 ## Non-goals
 
-- No editing, staging, or committing from the UI.
+- No general-purpose editing or staging UI. Git writes are limited to the explicit actions in `git-actions.md`.
 - No side-by-side split view. The diff is one unified column.
 - No per-tab navigator position. One position applies to every tab.
 - No automatic position or content-sized navigator. Layout changes only through config, `p`, `z`, resize keys, or dragging.
@@ -115,3 +115,4 @@ A layout change moves nothing else (`overview.md`), and both remembered shares p
 - [pr-tab](./pr-tab.md)
 - [review-model](./review-model.md)
 - [search](./search.md)
+- [git-actions](./git-actions.md)

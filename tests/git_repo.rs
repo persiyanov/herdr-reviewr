@@ -263,7 +263,7 @@ fn the_pick_persists_in_a_private_ref_and_clears() {
     assert_eq!(read_base_pick(r.path()).unwrap(), None);
 
     // The only ref the pick machinery touches lives under `refs/reviewr/` — the worktree,
-    // index, and branches stay untouched (specs/overview.md No writes).
+    // index, and branches stay untouched (specs/overview.md Explicit writes only).
     write_base_pick(r.path(), "dev").unwrap();
     let refs = r.git(&["for-each-ref", "--format=%(refname)"]);
     let reviewr_refs: Vec<&str> = refs.lines().filter(|l| !l.starts_with("refs/heads/")).collect();

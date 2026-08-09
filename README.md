@@ -24,11 +24,12 @@ One persistent pane, pointed at a git worktree:
 - **Find in file** — search the open file and step between every match.
 - **PR view** — the branch's pull request in the pane, read-only.
 - **Markdown preview** — flip a `.md` file between source and rendered view.
+- **Git actions** — select and commit files, discard one file with confirmation, or push upstream.
 - **Themes** — 18 palettes in dark and light.
 
-It never edits your worktree and sends nothing on its own. Its only git writes are private
-refs under `refs/reviewr/`: the turn baseline and the base pick. The **PR** tab reads GitHub,
-GitLab, or Azure DevOps and never posts.
+It sends and changes nothing on its own. Explicit `C` commit, confirmed `D` discard, and `P` push
+are the only user-facing Git writes; its automatic Git writes remain private refs under
+`refs/reviewr/`. The **PR** tab reads GitHub, GitLab, or Azure DevOps and never posts.
 
 ## Requirements
 
@@ -137,6 +138,19 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | `s` | Send comments to agent |
 | `y` | Copy comments to clipboard |
 | `esc` | Clear selection |
+
+**Git actions** (`Changes` → `uncommitted` only)
+
+| Key | Action |
+| --- | --- |
+| `C` | Select changed files, then write a commit message |
+| `D` | Confirm and discard all changes to the current file |
+| `P` | Push the current branch to its configured upstream |
+
+The commit picker starts with every changed file selected. Move with `j` / `k`, toggle with
+`Space`, and press `Enter` to write the message; plain `Enter` commits and
+`Shift+Enter` / `Alt+Enter` adds a message line. In the discard dialog, `Enter` confirms and
+`Esc` cancels.
 
 **In the comment box**
 
@@ -317,6 +331,7 @@ The action names and their defaults:
 | `keys` | `?` |
 | `send` | `s`, `S` |
 | `copy` | `y`, `Y` |
+| `commit` / `discard` / `push` | `C` / `D` / `P` |
 | `open-pr` | `o` |
 | `refresh` | `r` |
 | `quit` | `q` |

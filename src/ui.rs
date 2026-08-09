@@ -14,7 +14,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState,
+    ScrollbarState, Wrap,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -72,12 +72,16 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_footer(frame, app, p.status);
 
     // A popup paints last, over the page it scrims. One match decides both the scrim and what
-    // paints, so a mode can never scrim the page and then draw nothing. Both popups place through
+    // paints, so a mode can never scrim the page and then draw nothing. Every popup places through
     // `body_popup`, so the footer just drawn stays uncovered and keeps advertising their keys.
     let popup: Option<fn(&mut Frame, &App, Rect)> = match app.mode {
         Mode::List => Some(render_comments_list),
         Mode::Picker => Some(render_agent_picker),
         Mode::BasePick => Some(render_base_picker),
+        Mode::CommitFiles => Some(render_commit_files),
+        Mode::CommitMessage => Some(render_commit_message),
+        Mode::ConfirmDiscard => Some(render_discard_confirmation),
+        Mode::RepoBusy => Some(render_repo_busy),
         Mode::Normal | Mode::Composing { .. } | Mode::Search | Mode::Find => None,
     };
     if let Some(render_popup) = popup {
@@ -1519,6 +1523,16 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::Send => return (hint(K::Send), format!("send {}", app.store.len())),
         A::List => (hint(K::Comments), "list"),
         A::Copy => (hint(K::Copy), "copy"),
+        A::Commit => (hint(K::Commit), "commit"),
+        A::Discard => (hint(K::Discard), "discard"),
+        A::Push => (hint(K::Push), "push"),
+        A::ToggleCommitFile => ("space".into(), "toggle"),
+        A::MoveCommitRow => (format!("{} {}", hint(K::Down), hint(K::Up)), "move"),
+        A::ContinueCommit => ("enter".into(), "message"),
+        A::RunCommit => ("enter".into(), "commit"),
+        A::ConfirmDiscard => ("enter".into(), "discard"),
+        A::Back => ("esc".into(), "back"),
+        A::Busy => ("…".into(), "working"),
         A::Save => ("enter".into(), "save"),
         A::Newline => ("shift+enter".into(), "newline"),
         A::Cancel | A::ClosePicker => ("esc".into(), "cancel"),
@@ -1886,8 +1900,8 @@ fn render_comments_list(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(List::new(items), inner);
 }
 
-/// A popup box of `w` × `h`, centered in the body band and clamped to it. Both popups place
-/// through here, so neither can ever reach the footer — the one surface advertising the keys
+/// A popup box of `w` × `h`, centered in the body band and clamped to it. Every popup places
+/// through here, so none can ever reach the footer — the one surface advertising the keys
 /// the popup is listening for (`specs/tui.md`).
 fn body_popup(area: Rect, app: &App, w: u16, h: u16) -> Rect {
     let body = panes(area, app).body;
@@ -2035,6 +2049,129 @@ fn render_agent_picker(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
     frame.render_widget(List::new(items), inner);
+}
+
+fn commit_picker_popup(area: Rect, app: &App) -> Rect {
+    let widest = app
+        .commit_dialog
+        .as_ref()
+        .and_then(|dialog| {
+            dialog.selection.changes.iter().map(|change| 5 + change.file.path.width()).max()
+        })
+        .unwrap_or(0);
+    let lines = app.commit_dialog.as_ref().map_or(2, |dialog| dialog.selection.changes.len() + 2);
+    menu_popup(area, app, widest, "Commit files", lines)
+}
+
+fn render_commit_files(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(dialog) = &app.commit_dialog else { return };
+    let p = app.palette();
+    let popup = commit_picker_popup(area, app);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p.mauve))
+        .title(framed_title("Commit files"));
+    let inner = picker_inner(popup);
+    frame.render_widget(block, popup);
+    let first = menu_scroll(dialog.cursor, dialog.selection.changes.len(), inner.height as usize);
+    let items = dialog
+        .selection
+        .changes
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(inner.height as usize)
+        .map(|(index, change)| {
+            let mark = if dialog.checked[index] { "[x]" } else { "[ ]" };
+            let spans = vec![
+                Span::styled(format!(" {mark} "), Style::default().fg(p.lavender)),
+                Span::styled(change.file.path.clone(), text_style(p)),
+            ];
+            selectable_row(
+                p,
+                spans,
+                inner.width as usize,
+                (index == dialog.cursor).then_some(p.surface2),
+            )
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(List::new(items), inner);
+}
+
+/// Commit-picker row under the mouse, for click-to-toggle.
+pub fn hit_commit_picker_row(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
+    let dialog = app.commit_dialog.as_ref()?;
+    let inner = picker_inner(commit_picker_popup(area, app));
+    let first = menu_scroll(dialog.cursor, dialog.selection.changes.len(), inner.height as usize);
+    menu_hit(inner, 0, first, dialog.selection.changes.len(), col, row)
+}
+
+fn render_commit_message(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.palette();
+    let popup = body_popup(area, app, 62, 9);
+    frame.render_widget(Clear, popup);
+    let count = app
+        .commit_dialog
+        .as_ref()
+        .map_or(0, |dialog| dialog.checked.iter().filter(|checked| **checked).count());
+    let title = format!("Commit {count} files");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p.peach))
+        .title(framed_title(&title));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let width = inner.width.saturating_sub(2) as usize;
+    let mut lines = composer_lines(app, width.max(1));
+    if app.input.is_empty() {
+        lines[0].spans.push(Span::styled(" Commit message…", Style::default().fg(p.overlay0)));
+    }
+    frame.render_widget(
+        Paragraph::new(lines),
+        Rect { x: inner.x + 1, width: inner.width.saturating_sub(2), ..inner },
+    );
+}
+
+fn render_discard_confirmation(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(change) = app.discard_dialog.as_ref().and_then(|selection| selection.changes.first())
+    else {
+        return;
+    };
+    let p = app.palette();
+    let name = change.file.previous_path.as_ref().map_or_else(
+        || change.file.path.clone(),
+        |previous| format!("{previous} → {}", change.file.path),
+    );
+    let popup = body_popup(area, app, 58, 7);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p.red))
+        .title(framed_title("Discard changes?"));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let text = vec![
+        Line::from(Span::styled(format!(" {name}"), text_style(p))),
+        Line::raw(""),
+        Line::from(Span::styled(
+            " All staged and unstaged changes to this file will be lost.",
+            Style::default().fg(p.subtext0),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_repo_busy(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.palette();
+    let popup = body_popup(area, app, 34, 5);
+    frame.render_widget(Clear, popup);
+    let label = if app.status.is_empty() { "Working…" } else { app.status.as_str() };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p.mauve))
+        .title(framed_title(label));
+    frame.render_widget(block, popup);
 }
 
 /// The picker row under the pointer, for click-to-highlight (`specs/input.md`).

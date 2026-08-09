@@ -38,6 +38,9 @@ pub enum Action {
     Keys,
     Send,
     Copy,
+    Commit,
+    Discard,
+    Push,
     OpenPr,
     Refresh,
     Quit,
@@ -85,7 +88,7 @@ impl std::fmt::Display for Key {
 
 /// Every action with its config name and default keys — the single source the default keymap,
 /// the name lookup, and the config error message are built from.
-const ACTIONS: [(Action, &str, &[Key]); 34] = [
+const ACTIONS: [(Action, &str, &[Key]); 37] = [
     (Action::Down, "down", &[Key::plain('j')]),
     (Action::Up, "up", &[Key::plain('k')]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -117,6 +120,9 @@ const ACTIONS: [(Action, &str, &[Key]); 34] = [
     (Action::Keys, "keys", &[Key::plain('?')]),
     (Action::Send, "send", &[Key::plain('s'), Key::plain('S')]),
     (Action::Copy, "copy", &[Key::plain('y'), Key::plain('Y')]),
+    (Action::Commit, "commit", &[Key::plain('C')]),
+    (Action::Discard, "discard", &[Key::plain('D')]),
+    (Action::Push, "push", &[Key::plain('P')]),
     (Action::OpenPr, "open-pr", &[Key::plain('o')]),
     (Action::Refresh, "refresh", &[Key::plain('r')]),
     (Action::Quit, "quit", &[Key::plain('q')]),
