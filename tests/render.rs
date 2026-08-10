@@ -6,6 +6,7 @@ mod common;
 use common::{Repo, app_on, enter_tab};
 use herdr_reviewr::app::{App, BaseChoice, BasePicker, BaseProbe, Focus, Mode, Tab};
 use herdr_reviewr::config::NavigatorPosition;
+use herdr_reviewr::diff::FileState;
 use herdr_reviewr::herdr::AgentChoice;
 use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::model::Scope;
@@ -1236,6 +1237,52 @@ fn a_binary_file_shows_the_no_line_comments_message() {
 
     let out = render(&app);
     assert!(out.contains("binary — no line comments"), "binary diff message shown:\n{out}");
+}
+
+fn tiny_png_bytes(rgb: [u8; 3]) -> Vec<u8> {
+    use std::io::Cursor;
+    let img = image::RgbImage::from_pixel(4, 4, image::Rgb(rgb));
+    let mut buf = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .expect("encode png");
+    buf.into_inner()
+}
+
+#[test]
+fn an_image_file_shows_a_visual_preview_not_the_binary_notice() {
+    let r = Repo::init();
+    r.write_bytes("logo.png", &tiny_png_bytes([0x10, 0x20, 0x30]));
+    r.commit_all("init");
+    r.write_bytes("logo.png", &tiny_png_bytes([0xaa, 0xbb, 0xcc]));
+
+    let mut app = app_on(&r);
+    let idx = app.entries.iter().position(|f| f.path == "logo.png").expect("image listed");
+    app.select_file(idx).unwrap();
+
+    assert_eq!(app.diff.state, FileState::Image);
+    assert!(app.image_active());
+    let out = render(&app);
+    assert!(
+        !out.contains("binary — no line comments"),
+        "image must not use the binary notice:\n{out}"
+    );
+    assert!(!out.contains("could not display image"), "halfblocks preview should paint:\n{out}");
+}
+
+#[test]
+fn an_image_file_does_not_accept_line_comments() {
+    let r = Repo::init();
+    r.write_bytes("pic.png", &tiny_png_bytes([1, 2, 3]));
+    r.commit_all("init");
+    r.write_bytes("pic.png", &tiny_png_bytes([9, 8, 7]));
+
+    let mut app = app_on(&r);
+    let idx = app.entries.iter().position(|f| f.path == "pic.png").unwrap();
+    app.select_file(idx).unwrap();
+    app.focus = Focus::Diff;
+    app.start_comment();
+    assert!(!matches!(app.mode, Mode::Composing { .. }), "image preview is read-only");
 }
 
 #[test]

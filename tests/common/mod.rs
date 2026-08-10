@@ -89,6 +89,14 @@ impl Repo {
         std::fs::write(path, contents).expect("write");
     }
 
+    pub fn write_bytes(&self, rel: &str, contents: &[u8]) {
+        let path = self.path().join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(path, contents).expect("write");
+    }
+
     pub fn remove(&self, rel: &str) {
         std::fs::remove_file(self.path().join(rel)).expect("remove");
     }
