@@ -84,7 +84,8 @@ Open reviewr next to your agent:
 
 The footer shows the next step. Press `?` for every key that works right now.
 
-For a shortcut, bind a key to the toggle in your herdr config (user config, not the plugin manifest):
+For a shortcut, open herdr's user settings with `Ctrl+B`, then lowercase `s`, and add this block to
+`~/.config/herdr/config.toml` (keep the rest of your existing config):
 
 ```toml
 [[keys.command]]
@@ -93,7 +94,8 @@ type = "plugin_action"
 command = "persiyanov.reviewr.toggle"   # <plugin_id>.<action_id> — note the id, not the name
 ```
 
-`cmd+…` chords reach herdr. Many macOS terminals swallow `alt+…` themselves.
+Save the file, then press `Ctrl+B`, followed by `Shift+R`, to reload the config. The shortcut is
+now `Cmd+R`. `cmd+…` chords reach herdr; many macOS terminals swallow `alt+…` themselves.
 
 ## Controls
 
