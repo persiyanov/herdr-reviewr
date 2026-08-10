@@ -1819,13 +1819,28 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
     app.note_diff_width(inner.width as usize);
 
+    // Image preview: visual pane, no text rows (`specs/diff-view.md` Image preview).
+    if app.image_active() {
+        let size = ratatui::layout::Size::new(inner.width, inner.height);
+        if app.ensure_image_fitted(size) {
+            let painted = app.with_image_protocol(|protocol| {
+                crate::image_view::render_centered(frame, protocol, inner);
+            });
+            if painted.is_some() {
+                return;
+            }
+        }
+        frame.render_widget(dim_paragraph("could not display image", p), inner);
+        return;
+    }
+
     if app.visible.is_empty() {
         // `All files` is a content browser, not a diff, so its empty/notice copy avoids diff
         // vocabulary and never shows the last-turn "waiting" state.
         let gone = app.commits_gone_message();
         let msg = match app.tab {
             Tab::AllFiles => match app.diff.state {
-                FileState::Binary => "binary — no line comments",
+                FileState::Binary | FileState::Image => "binary — no line comments",
                 FileState::TooLarge => "file too large",
                 FileState::Normal if app.diff_path.is_some() => "empty file",
                 FileState::Normal => "select a file to read",
@@ -1835,6 +1850,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
             _ => match app.diff.state {
                 FileState::Binary => "binary — no line comments",
                 FileState::TooLarge => "file too large to diff",
+                FileState::Image => "could not display image",
                 FileState::Normal => "no diff",
             },
         };
@@ -3744,7 +3760,7 @@ fn render_search_preview(
         return;
     };
     let notice = match pv.diff.state {
-        FileState::Binary => Some("binary — no line comments"),
+        FileState::Binary | FileState::Image => Some("binary — no line comments"),
         FileState::TooLarge => Some("file too large"),
         FileState::Normal if pv.diff.rows.is_empty() => Some("no preview"),
         FileState::Normal => None,

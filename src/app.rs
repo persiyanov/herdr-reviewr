@@ -5,6 +5,7 @@
 //! whole interaction model is testable without a backend. `src/main.rs` owns the
 //! terminal and maps input events onto these methods.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -18,10 +19,12 @@ use crate::forge;
 use crate::git;
 use crate::herdr::{self, AgentChoice, SendTarget};
 use crate::highlight::Highlighter;
+use crate::image_view::{self, ContentKind, ImagePane};
 use crate::logln;
 use crate::model::{Comment, CommentStore, CommitPick, Rev, Scope, Side};
 use crate::theme::{self, Palette};
 use crate::world::{PickStatus, PickVerdict};
+use ratatui_image::picker::Picker;
 
 /// Navigator shares and bounds, as percentages of the body's split axis.
 const DEFAULT_SIDE_PCT: u16 = 32;
@@ -113,6 +116,9 @@ struct TabStash {
     /// Whether this tab has ever completed a reload. A never-visited tab has nothing worth
     /// painting, so its first entry loads before the frame instead of deferring.
     visited: bool,
+    /// Image preview state for the Changes tab (`specs/diff-view.md`). `All files` leaves
+    /// this empty in v1.
+    image_pane: Option<ImagePane>,
 }
 
 /// A file crossing offered by the footer, waiting for the hunk step that armed it to repeat: the
@@ -689,6 +695,16 @@ pub struct App {
     /// content does not render as a preview: a non-markdown file, a notice, or an empty new
     /// side (a deleted or empty file). One half of the `previewable()` signal.
     preview_text: String,
+    /// Fitted image protocol for the Changes Diff view when `diff.state` is `Image`
+    /// (`specs/diff-view.md` Image preview). Cleared for every non-image open.
+    /// `RefCell` so paint can fit the protocol into the pane area without `&mut App`.
+    image_pane: RefCell<Option<ImagePane>>,
+    /// True when the open file is an image but decode/encode failed — UI paints
+    /// `could not display image` instead of the binary notice.
+    image_failed: Cell<bool>,
+    /// Graphics-protocol picker for image encode. Defaults to halfblocks (tests); `run`
+    /// replaces it with a stdio-queried picker after alternate-screen entry.
+    image_picker: Picker,
     /// The preview's maximum useful scroll (rendered lines minus the viewport), noted
     /// by the renderer each frame so [`Self::preview_scroll_by`] can clamp. `usize::MAX`
     /// until the first paint.
@@ -908,6 +924,9 @@ impl App {
             preview: false,
             preview_scroll: 0,
             preview_text: String::new(),
+            image_pane: RefCell::new(None),
+            image_failed: Cell::new(false),
+            image_picker: Picker::halfblocks(),
             preview_max_scroll: std::cell::Cell::new(usize::MAX),
             preview_scrolled: false,
             pane_width: std::cell::Cell::new(0),
@@ -1428,6 +1447,7 @@ impl App {
             self.diff = FileDiff::empty();
             self.diff_path = None;
             self.visible.clear();
+            self.clear_image_pane();
             self.reset_diff_view();
             return;
         };
@@ -1459,7 +1479,39 @@ impl App {
             self.preview_max_scroll.set(usize::MAX);
         }
         self.diff_path = Some(path.clone());
-        let (old, new) = self.content_sides(&path, previous_path.as_deref());
+        let (old_bytes, new_bytes) = self.content_sides_bytes(&path, previous_path.as_deref());
+        let display = image_view::display_side(&old_bytes, &new_bytes);
+        match image_view::classify(display) {
+            ContentKind::Image => {
+                self.set_image_diff(path, previous_path, display);
+                return;
+            }
+            ContentKind::TooLarge => {
+                self.clear_image_pane();
+                self.diff = FileDiff::too_large_diff_notice(path, previous_path);
+                self.preview_text.clear();
+                self.rebuild_visible();
+                self.settle_read();
+                return;
+            }
+            ContentKind::Binary => {
+                // Display side is a non-image binary. Still run the text path when the other
+                // side might be text-only? Spec: non-image binary → binary notice. If either
+                // side has NUL, existing build also yields Binary — prefer the explicit notice.
+                self.clear_image_pane();
+                self.diff = FileDiff::binary_notice(path, previous_path);
+                self.preview_text.clear();
+                self.rebuild_visible();
+                self.settle_read();
+                return;
+            }
+            ContentKind::Text => {}
+        }
+        // Text display side, but the opposite side may still be binary — keep the historical
+        // NUL check inside `FileDiff::build` via the lossy string sides.
+        let old = String::from_utf8_lossy(&old_bytes).into_owned();
+        let new = String::from_utf8_lossy(&new_bytes).into_owned();
+        self.clear_image_pane();
         self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
         // Hold the new side as the preview's render input, the same current content the File
         // view previews. A non-markdown file, a notice, or a deleted file (empty new side)
@@ -1471,6 +1523,81 @@ impl App {
         }
         self.rebuild_visible();
         self.settle_read();
+    }
+
+    /// Open a decoded image in the Diff pane (`specs/diff-view.md` Image preview).
+    fn set_image_diff(&mut self, path: String, previous_path: Option<String>, bytes: &[u8]) {
+        self.preview_text.clear();
+        self.preview = false;
+        if let Some(image) = image_view::decode(bytes) {
+            let hash = image_view::bytes_hash(bytes);
+            // Reuse the fitted protocol when the same bytes are still open (a poll).
+            let reuse = self
+                .image_pane
+                .borrow()
+                .as_ref()
+                .is_some_and(|p| p.path == path && p.content_hash == hash);
+            if !reuse {
+                *self.image_pane.borrow_mut() = Some(ImagePane::new(path.clone(), hash, image));
+            }
+            self.image_failed.set(false);
+            self.diff = FileDiff::image_notice(path, previous_path);
+        } else {
+            self.clear_image_pane();
+            self.image_failed.set(true);
+            self.diff = FileDiff::image_notice(path, previous_path);
+        }
+        self.rebuild_visible();
+        self.settle_read();
+    }
+
+    fn clear_image_pane(&mut self) {
+        *self.image_pane.borrow_mut() = None;
+        self.image_failed.set(false);
+    }
+
+    /// Install the graphics picker discovered after alternate-screen entry (`lib::run`).
+    pub fn set_image_picker(&mut self, picker: Picker) {
+        self.image_picker = picker;
+        // Re-open the image so the protocol is encoded with the real terminal capability.
+        if self.diff.state == crate::diff::FileState::Image
+            && let Some(path) = self.diff_path.clone()
+        {
+            let previous = self.diff.previous_path.clone();
+            *self.image_pane.borrow_mut() = None;
+            self.set_diff(path, previous);
+        }
+    }
+
+    /// Fit the open image into `area` for paint. Returns whether a protocol is ready.
+    pub fn ensure_image_fitted(&self, area: ratatui::layout::Size) -> bool {
+        let mut pane = self.image_pane.borrow_mut();
+        let Some(pane) = pane.as_mut() else {
+            return false;
+        };
+        if pane.ensure_fitted(&self.image_picker, area) {
+            self.image_failed.set(false);
+            true
+        } else {
+            self.image_failed.set(true);
+            false
+        }
+    }
+
+    /// Whether the Diff pane should paint the image-error notice.
+    #[must_use]
+    pub fn image_display_failed(&self) -> bool {
+        self.diff.state == crate::diff::FileState::Image
+            && (self.image_failed.get() || self.image_pane.borrow().is_none())
+    }
+
+    /// Borrow the image pane for paint after a successful [`Self::ensure_image_fitted`].
+    pub fn with_image_protocol<R>(
+        &self,
+        f: impl FnOnce(&ratatui_image::protocol::Protocol) -> R,
+    ) -> Option<R> {
+        let pane = self.image_pane.borrow();
+        pane.as_ref().and_then(ImagePane::protocol).map(f)
     }
 
     /// Build the File view for `path`: its current worktree content as `Context` rows, no
@@ -1485,6 +1612,7 @@ impl App {
         }
         self.diff_path = Some(path.to_string());
         self.expanded_folds.clear(); // the File view has no folds
+        self.clear_image_pane(); // image preview is Changes-only in v1
         let (diff, content) = self.file_view(path);
         // Keep the preview's render input current without a per-frame rebuild. A file the
         // source view degrades to a notice never previews (specs/diff-view.md), so its
@@ -1586,12 +1714,19 @@ impl App {
     /// merge-base on the branch scope), new from the worktree. A rename reads its old side
     /// from `previous_path`, so the diff shows real edits, not a wholesale delete-and-add.
     fn content_sides(&self, path: &str, previous_path: Option<&str>) -> (String, String) {
+        let (old, new) = self.content_sides_bytes(path, previous_path);
+        (String::from_utf8_lossy(&old).into_owned(), String::from_utf8_lossy(&new).into_owned())
+    }
+
+    /// Raw old/new bytes for the current scope — image classification must not go through
+    /// UTF-8 lossy (`specs/diff-view.md` Image preview).
+    fn content_sides_bytes(&self, path: &str, previous_path: Option<&str>) -> (Vec<u8>, Vec<u8>) {
         let new_path = path;
         let old_path = previous_path.unwrap_or(new_path);
         match self.scope {
             Scope::Uncommitted => {
-                let old = git::file_content(&self.repo, "HEAD", old_path);
-                let new = worktree_content(&self.repo, new_path);
+                let old = git::file_bytes(&self.repo, "HEAD", old_path);
+                let new = worktree_bytes(&self.repo, new_path);
                 (old, new)
             }
             Scope::Branch => {
@@ -1600,25 +1735,24 @@ impl App {
                     .winner
                     .as_ref()
                     .and_then(|b| git::merge_base(&self.repo, b.oid()));
-                let old =
-                    mb.map(|m| git::file_content(&self.repo, &m, old_path)).unwrap_or_default();
-                (old, worktree_content(&self.repo, new_path))
+                let old = mb.map(|m| git::file_bytes(&self.repo, &m, old_path)).unwrap_or_default();
+                (old, worktree_bytes(&self.repo, new_path))
             }
             Scope::LastTurn => {
                 let old = self
                     .turn_baseline
                     .as_deref()
-                    .map(|b| git::file_content(&self.repo, b, old_path))
+                    .map(|b| git::file_bytes(&self.repo, b, old_path))
                     .unwrap_or_default();
-                (old, worktree_content(&self.repo, new_path))
+                (old, worktree_bytes(&self.repo, new_path))
             }
             // Both sides from the commits: `A^` and `B` (specs/diff-view.md).
             Scope::Commits => {
-                let Some(pick) = &self.commit_pick else { return (String::new(), String::new()) };
+                let Some(pick) = &self.commit_pick else { return (Vec::new(), Vec::new()) };
                 let old = git::parent_or_empty(&self.repo, &pick.oldest)
-                    .map(|a| git::file_content(&self.repo, &a, old_path))
+                    .map(|a| git::file_bytes(&self.repo, &a, old_path))
                     .unwrap_or_default();
-                (old, git::file_content(&self.repo, &pick.newest, new_path))
+                (old, git::file_bytes(&self.repo, &pick.newest, new_path))
             }
         }
     }
@@ -1713,6 +1847,12 @@ impl App {
         self.select_anchor = None;
     }
 
+    /// Whether the Diff pane is showing an image preview (no text rows).
+    #[must_use]
+    pub fn image_active(&self) -> bool {
+        self.diff.state == crate::diff::FileState::Image
+    }
+
     /// Scroll the diff horizontally by `delta` columns, clamped at the left edge. A no-op
     /// while wrap is on, since the renderer ignores `h_scroll` when wrapping — so the offset
     /// never silently accumulates and then jumps the view when wrap is toggled off.
@@ -1729,8 +1869,8 @@ impl App {
 
     /// Toggle line wrap; reset the horizontal scroll, which only applies with wrap off.
     pub fn toggle_wrap(&mut self) {
-        if self.preview_active() {
-            return; // the wrap toggle is inert in the preview (specs/diff-view.md)
+        if self.preview_active() || self.image_active() {
+            return; // wrap is inert in preview and image panes (specs/diff-view.md)
         }
         self.wrap = !self.wrap;
         self.h_scroll = 0;
@@ -2551,6 +2691,10 @@ impl App {
         std::mem::swap(&mut self.preview_scroll, &mut self.stash.preview_scroll);
         std::mem::swap(&mut self.preview_text, &mut self.stash.preview_text);
         std::mem::swap(&mut self.preview_scrolled, &mut self.stash.preview_scrolled);
+        {
+            let mut active = self.image_pane.borrow_mut();
+            std::mem::swap(&mut *active, &mut self.stash.image_pane);
+        }
         std::mem::swap(&mut self.tab_visited, &mut self.stash.visited);
     }
 
@@ -3160,8 +3304,8 @@ impl App {
     }
 
     pub fn start_comment(&mut self) {
-        if self.preview_active() {
-            return; // the preview is read-only (specs/diff-view.md)
+        if self.preview_active() || self.image_active() {
+            return; // preview and image panes are read-only (specs/diff-view.md)
         }
         if self.focus == Focus::Diff && self.has_anchorable_selection() {
             self.reveal_diff = true; // scroll the anchored line into view before the box opens
@@ -4947,9 +5091,12 @@ fn is_markdown_path(path: &str) -> bool {
 /// The working-tree content of `path`, lossily as UTF-8; empty when the file is
 /// absent (a deletion) or unreadable.
 fn worktree_content(repo: &std::path::Path, path: &str) -> String {
-    std::fs::read(repo.join(path))
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_default()
+    String::from_utf8_lossy(&worktree_bytes(repo, path)).into_owned()
+}
+
+/// Raw working-tree bytes of `path`; empty when absent or unreadable.
+fn worktree_bytes(repo: &std::path::Path, path: &str) -> Vec<u8> {
+    std::fs::read(repo.join(path)).unwrap_or_default()
 }
 
 fn line_in(c: &Comment, row: &Row) -> bool {
