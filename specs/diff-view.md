@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-24
-Last edited: 2026-07-20
+Last edited: 2026-07-25
 ---
 
 # Diff view
@@ -101,6 +101,7 @@ Entering carries the reading position, block-aligned, resolved against the paint
 - In Diff view, a row with no current-content line — a deletion, a fold — aligns by the nearest row above with one.
 - With no current-content line at or above the cursor, the preview opens at its top.
 - The horizontal offset always keeps its pre-entry value.
+- An external Markdown renderer opens at the preview top because its output has no source-block identities (`markdown.md`).
 
 Returning to source differs per view:
 
@@ -108,6 +109,7 @@ Returning to source differs per view:
 - In File view, returning puts the cursor on the top visible block's first source line, revealed.
 - In File view, a round-trip with no preview scroll input restores the exact source cursor and scroll. A refresh clamp is not a scroll input.
 - In File view, a forced return keeps the prior source position.
+- Returning from a scrolled external preview puts File view at the source top.
 
 ### Color
 

@@ -49,7 +49,7 @@ The tab is labeled `PR` on every forge. Body text, the chip, the read pane's tit
 - Comments list newest first, each row `@author anchor age`, with `outdated` or `resolved` markers where the forge receded the thread.
 - A non-empty PR description pins a `description` row at the top of the navigator, above the checks. An emptied description vanishes like a comment: the cursor clamps, the read pane resets.
 - The read pane shows the selected comment: a finding shows its `snippet` then the body, a review or plain comment shows its prose, the description row shows the PR description.
-- Bodies render as markdown (`markdown.md`). A finding's `snippet` stays plain `+`/`−`-colored lines.
+- Bodies always use reviewr's built-in Markdown renderer (`markdown.md`). A finding's `snippet` stays plain `+`/`−`-colored lines.
 - A human author is emphasized over the bots.
 - `j`/`k` or a click selects a description or comment and reveals it in the navigator viewport. Checks are not selectable.
 - The wheel over the navigator scrolls its viewport without changing the selection. The wheel over the read pane scrolls the read pane. `PageUp`/`PageDown` scroll the focused pane. Both panes stop with their last line at the bottom edge.

@@ -611,6 +611,8 @@ pub struct App {
     highlighter: Highlighter,
     /// The active palette every renderer paints from (`specs/theme.md`).
     palette: Palette,
+    /// The active resolved theme's intrinsic dark/light classification.
+    theme_appearance: crate::theme::Appearance,
     /// The active theme's name, so re-resolving to the same theme is a no-op.
     theme_name: &'static str,
     /// The `--theme` override name (highest precedence); `None` lets the config file decide.
@@ -620,10 +622,10 @@ pub struct App {
     /// The last theme name requested, so re-resolving the same name skips work and logging.
     requested_theme_name: Option<String>,
     cache: DiffCache,
-    /// The one-slot markdown render memo behind the PR read pane and the file tabs'
-    /// preview (`specs/markdown.md`). Interior-mutable so the renderer can fill it from
-    /// `&App`; cleared with the diff cache on a theme switch.
-    markdown_cache: std::cell::RefCell<crate::markdown::RenderCache>,
+    /// PR Markdown always uses this built-in-renderer cache (`specs/markdown.md`).
+    pr_markdown_cache: std::cell::RefCell<crate::markdown::RenderCache>,
+    /// File previews have a separate cache because they may use the configured external argv.
+    file_markdown_cache: std::cell::RefCell<crate::markdown::FileRenderCache>,
     /// The worker-owned turn baseline, mirrored from completions so the sync `last-turn`
     /// paths (the diff's old side, the scope-switch rebuild) read it without a round-trip.
     turn_baseline: Option<String>,
@@ -744,12 +746,16 @@ impl App {
             tab_visited: false,
             highlighter: Highlighter::new(theme.syntax),
             palette: theme.palette,
+            theme_appearance: theme.appearance,
             theme_name: theme.name,
             cli_theme_name: None,
             config: PluginConfigState::Ready(crate::config::PluginConfig::default()),
             requested_theme_name: None,
             cache: DiffCache::new(),
-            markdown_cache: std::cell::RefCell::new(crate::markdown::RenderCache::default()),
+            pr_markdown_cache: std::cell::RefCell::new(crate::markdown::RenderCache::default()),
+            file_markdown_cache: std::cell::RefCell::new(
+                crate::markdown::FileRenderCache::default(),
+            ),
             turn_baseline,
             agents_present: None,
         }
@@ -768,10 +774,12 @@ impl App {
         let theme = theme::resolve(name);
         if theme.name != self.theme_name {
             self.theme_name = theme.name;
+            self.theme_appearance = theme.appearance;
             self.palette = theme.palette;
             self.highlighter = Highlighter::new(theme.syntax);
             self.cache = DiffCache::new();
-            self.markdown_cache.borrow_mut().clear();
+            self.pr_markdown_cache.borrow_mut().clear();
+            self.file_markdown_cache.borrow_mut().clear();
         }
     }
 
@@ -1456,7 +1464,7 @@ impl App {
         else {
             return;
         };
-        let rendered = self.markdown_render(&self.preview_text, width);
+        let rendered = self.file_markdown_render(&self.preview_text, width);
         let after = rendered.meta.partition_point(|m| m.source_line <= target);
         let Some(last) = after.checked_sub(1) else {
             return;
@@ -1479,7 +1487,7 @@ impl App {
         if !scrolled || width == 0 || self.preview_text.is_empty() {
             return;
         }
-        let rendered = self.markdown_render(&self.preview_text, width);
+        let rendered = self.file_markdown_render(&self.preview_text, width);
         if rendered.meta.is_empty() || self.visible.is_empty() {
             return;
         }
@@ -1608,11 +1616,28 @@ impl App {
         }
     }
 
-    /// Render `text` as markdown wrapped to `width`, through the one-slot memo
-    /// (`specs/markdown.md`).
+    /// Render PR Markdown through the built-in renderer, regardless of the file-preview command.
     #[must_use]
-    pub(crate) fn markdown_render(&self, text: &str, width: usize) -> crate::markdown::Rendered {
-        self.markdown_cache.borrow_mut().get(text, width, &self.highlighter, &self.palette)
+    pub(crate) fn pr_markdown_render(&self, text: &str, width: usize) -> crate::markdown::Rendered {
+        self.pr_markdown_cache.borrow_mut().get(text, width, &self.highlighter, &self.palette)
+    }
+
+    /// Render a Markdown file preview through its configured argv, or the built-in renderer when
+    /// no command is configured or the command fails (`specs/markdown.md`).
+    #[must_use]
+    pub(crate) fn file_markdown_render(
+        &self,
+        text: &str,
+        width: usize,
+    ) -> crate::markdown::Rendered {
+        self.file_markdown_cache.borrow_mut().get(
+            text,
+            width,
+            self.config_snapshot().file_markdown_renderer(),
+            self.theme_appearance,
+            &self.highlighter,
+            &self.palette,
+        )
     }
 
     /// The navigator share remembered for the active side or stacked axis.
@@ -3979,6 +4004,58 @@ mod tests {
     use crate::config::NavigatorPosition;
     use crate::model::{Comment, Scope, Side};
     use std::path::PathBuf;
+
+    fn rendered_text(rendered: &crate::markdown::Rendered) -> Vec<String> {
+        rendered
+            .lines
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn external_renderer_applies_only_to_file_previews_and_falls_back_to_builtin() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "file_markdown_renderer = \"cat -\"\n").unwrap();
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        app.set_plugin_config(crate::config::plugin_config_in(dir.path()).unwrap());
+
+        let file = app.file_markdown_render("# File heading\n", 40);
+        assert_eq!(rendered_text(&file), ["# File heading"]); // `cat` proves stdin execution.
+
+        let pr = app.pr_markdown_render("# PR heading\n\n[link](https://example.com)", 40);
+        assert_eq!(rendered_text(&pr)[0], "PR heading");
+        assert_eq!(pr.anchors[0].0, "pr-heading");
+        assert!(!pr.meta.iter().all(|meta| meta.links.is_empty()));
+
+        std::fs::write(&path, "file_markdown_renderer = \"reviewr-command-that-does-not-exist\"\n")
+            .unwrap();
+        app.set_plugin_config(crate::config::plugin_config_in(dir.path()).unwrap());
+        let fallback = app.file_markdown_render("# Fallback heading", 40);
+        assert_eq!(rendered_text(&fallback), ["Fallback heading"]);
+        assert_eq!(fallback.anchors[0].0, "fallback-heading");
+    }
+
+    #[test]
+    fn external_renderer_style_follows_the_resolved_theme_and_cli_override() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            concat!(
+                "theme = \"tokyo-night\"\n",
+                "file_markdown_renderer = \"printf {style}:{width}\"\n",
+            ),
+        )
+        .unwrap();
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        app.set_plugin_config(crate::config::plugin_config_in(dir.path()).unwrap());
+
+        assert_eq!(rendered_text(&app.file_markdown_render("ignored", 37)), ["dark:37"]);
+
+        app.set_cli_theme(Some("catppuccin-latte".to_string()));
+        assert_eq!(rendered_text(&app.file_markdown_render("ignored", 41)), ["light:41"]);
+    }
 
     #[test]
     fn the_read_pane_scroll_stops_at_the_bottom_edge() {

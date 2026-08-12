@@ -1,12 +1,12 @@
 ---
 Status: Current
 Created: 2026-07-12
-Last edited: 2026-08-01
+Last edited: 2026-08-03
 ---
 
 # Markdown rendering
 
-How markdown text renders as styled terminal lines: one renderer behind the PR tab's bodies and the file tabs' preview.
+How reviewr's built-in and optional external Markdown renderers produce styled terminal lines for PR bodies and file previews.
 
 ## Overview
 
@@ -21,7 +21,9 @@ A comment body, rendered:
  See the failing run (https://ci.example/8123)    ← [text](url): accent text, dim destination
 ```
 
-The PR tab's description and comment bodies (`pr-tab.md`) and the markdown preview in both file tabs (`diff-view.md`) render through it.
+The PR tab always uses reviewr's built-in renderer. Both file tabs use it by default. A configured external command may replace it for file previews only (`config.md`).
+
+The built-in renderer provides these elements:
 
 | element                       | renders as                                                                     |
 | ----------------------------- | ------------------------------------------------------------------------------ |
@@ -43,13 +45,13 @@ The PR tab's description and comment bodies (`pr-tab.md`) and the markdown previ
 
 ## Behavior
 
-### Color and code
+### Built-in color and code
 
 - Every color comes from the active theme's palette (`theme.md`).
 - A fenced block highlights through the same highlighter and syntax theme as the diff panes (`diff-view.md`).
 - The language comes from the fence's info string. An unknown or absent language renders plain.
 
-### Layout
+### Built-in layout
 
 - Lines wrap at the pane width, at word boundaries. A word wider than the pane hard-breaks.
 - A wrapped continuation hangs under its block's content: list text aligns under list text, quoted text keeps its bars.
@@ -61,8 +63,9 @@ The PR tab's description and comment bodies (`pr-tab.md`) and the markdown previ
 - A column never shrinks below the smaller of its natural width and 8 cells. A table still over-wide at every floor renders as its source text.
 - A dim rule follows the header row. No separator line divides one body row from the next, however deep the cells wrap.
 
-### Links
+### Built-in links
 
+- The PR tab and built-in file previews provide link and heading interactions.
 - Clicking a link opens its destination in the browser.
 - The click target spans the link text and its dim destination, across every display row they wrap onto.
 - A click acts on the painted frame, so a concurrent refresh never redirects it.
@@ -74,11 +77,27 @@ The PR tab's description and comment bodies (`pr-tab.md`) and the markdown previ
 ### Input safety
 
 - A control character or an explicit bidirectional override renders as a visible placeholder, never raw.
-- A render is cached by its input text and pane width. A refresh with unchanged text recomputes nothing.
+- A built-in render is cached by its input text and width. An external file preview also keys on its command and the theme's dark/light appearance. A refresh with unchanged inputs recomputes nothing.
+
+### External file previews
+
+`file_markdown_renderer` supplies one command string for the `Changes` and `All files` previews. The command receives Markdown on standard input. reviewr executes its parsed arguments directly without a shell (`config.md`).
+
+- `{style}` in an argument becomes `dark` or `light` from the active resolved reviewr theme.
+- `{width}` in an argument becomes the preview pane's current width.
+- The child receives `CLICOLOR_FORCE=1`, so Glow keeps colors while its output is piped.
+- The child has a five-second wall-clock limit. reviewr kills and reaps it after the limit.
+- The captured output has a 16 MiB limit.
+- Output beyond 100,000 lines or 250,000 style runs falls back before ANSI conversion.
+- Select Graphic Rendition ANSI color and attribute sequences become terminal styles.
+- Every other terminal control sequence is removed.
+- A missing command, failed exit, timeout, excessive output, or invalid ANSI output falls back to the built-in renderer.
+
+External output has no Markdown identity metadata. Its links are not clickable and its headings are not jump targets. A preview opens at the top instead of following the source cursor. Returning from a scrolled `All files` preview returns to the source top.
 
 ## Failure semantics
 
-Every input renders. Malformed or partial markdown degrades toward plain paragraphs, never an error.
+Every input renders. Malformed Markdown degrades toward built-in plain paragraphs. An external renderer failure uses the complete built-in render.
 
 ## Non-goals
 

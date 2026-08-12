@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **External Markdown renderers for file previews.** `Changes` and `All files` can render Markdown
+  through a configured command such as Glow, with width and dark/light style placeholders. The
+  built-in renderer remains the default and failure fallback. PR descriptions and comments keep
+  their built-in clickable links and heading jumps.
+
 ## [0.30.2] — 2026-08-12
 
 ### Fixed

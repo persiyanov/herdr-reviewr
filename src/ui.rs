@@ -966,7 +966,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     // the rendered length so a refresh that shrank the file keeps the reader in range
     // (specs/diff-view.md).
     if app.preview_active() {
-        let rendered = app.markdown_render(app.preview_text(), width.max(1));
+        let rendered = app.file_markdown_render(app.preview_text(), width.max(1));
         // Scrolling stops with the last line at the pane's bottom edge; content that
         // fits the pane does not scroll.
         let max = rendered.lines.len().saturating_sub(height);
@@ -3169,7 +3169,7 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
             }
             lines.push(Line::raw(""));
         }
-        let mut rendered = app.markdown_render(&cm.body, width.max(1));
+        let mut rendered = app.pr_markdown_render(&cm.body, width.max(1));
         let offset = lines.len();
         lines.append(&mut rendered.lines);
         body_meta = Some((offset, rendered));
@@ -3187,7 +3187,7 @@ fn render_pr_read(frame: &mut Frame, app: &App, area: Rect) {
         }
     } else if app.pr_on_description() {
         if let Some(s) = app.pr_snapshot() {
-            let mut rendered = app.markdown_render(&s.body, width.max(1));
+            let mut rendered = app.pr_markdown_render(&s.body, width.max(1));
             let offset = lines.len();
             lines.append(&mut rendered.lines);
             body_meta = Some((offset, rendered));

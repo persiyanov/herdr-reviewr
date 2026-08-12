@@ -37,6 +37,7 @@ GitLab, or Azure DevOps and never posts.
 - A **truecolor** terminal with Unicode box-drawing.
 - **macOS or Linux.**
 - **`gh`** (GitHub), **`glab`** (GitLab), or **`az`** (Azure DevOps, with the `azure-devops` extension), authenticated. Only the **PR** tab needs one.
+- **`glow`** is optional. File previews use reviewr's built-in Markdown renderer unless configured otherwise.
 
 ## Install
 
@@ -158,8 +159,9 @@ jumps, and `Ctrl+W` / `Ctrl+U` / `Ctrl+K` deletes.
 | `o` | Open PR in browser |
 | `r` | Refresh |
 
-The mouse works too: click files and tabs, drag to select, scroll. A link in rendered markdown
-opens in your browser (`http`/`https` only), and an anchor link jumps to its heading.
+The mouse works too: click files and tabs, drag to select, scroll. A link in PR Markdown or a
+built-in file preview opens in your browser (`http`/`https` only), and an anchor link jumps to its
+heading. External file-preview renderers do not expose links.
 
 ## The three tabs
 
@@ -212,6 +214,7 @@ The file accepts these keys:
 
 ```toml
 theme = "tokyo-night"
+file_markdown_renderer = "glow -s {style} -w {width} -"
 default_scope = "branch"
 navigator_position = "right"
 toggle_placement = "overlay"
@@ -247,6 +250,31 @@ so a mismatched theme reads poorly. Available:
 
 Names match herdr's where both ship a palette. An unknown name is an error. The standalone
 `--theme` flag keeps its older fallback to `catppuccin`.
+
+### Markdown file renderer
+
+File previews in **Changes** and **All files** use reviewr's built-in Markdown renderer by
+default. To use Glow instead:
+
+```toml
+file_markdown_renderer = "glow -s {style} -w {width} -"
+```
+
+The value is one command string. Whitespace splits arguments and double quotes group an argument
+containing spaces. reviewr parses it into argv and starts the program directly; it never invokes a
+shell, so `|`, redirects, variables, and command substitutions do not work. The Markdown content
+goes only to stdin. `{style}` becomes `dark` or `light` from the active resolved reviewr theme,
+including a `--theme` override. `{width}` becomes the current preview width. Glow's final `-` tells
+it to read stdin.
+
+The command must finish within five seconds. If it is missing, fails, times out, emits too much
+output, or produces unusable ANSI, reviewr renders that preview with its complete built-in renderer.
+PR descriptions and comments always use the built-in renderer, preserving clickable links and
+heading jumps.
+
+External previews retain ANSI colors and formatting after terminal-control sanitization. They do
+not have clickable links, heading jumps, or source-block position mapping. They open at the top;
+returning from a scrolled **All files** preview returns to the source top.
 
 ### Navigator position
 
