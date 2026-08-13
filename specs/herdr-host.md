@@ -24,7 +24,7 @@ The binary paints its empty frame before the first git scan, so the pane never s
 
 ## Pane identity
 
-A reviewr pane is any pane running the review UI in its foreground process group, read live from herdr at each action and event. A wrapped launch like `cargo run` counts through its child. A flag run like `--resolve-plugin-config` is not the review UI and never counts.
+A reviewr pane is any pane running the review UI in its foreground process group, read live from herdr at each action and event. A wrapped launch like `cargo run` counts through its child. A non-UI run — `--resolve-plugin-config` anywhere in argv, or the `nav` subcommand in first position (`nav.md`) — is not the review UI and never counts.
 
 The review run labels its pane `reviewr` when the pane has no label, and a normal exit clears only a `reviewr` label, so a name the user gave the pane survives both ends. The label is display only: a failed write or a stale label changes nothing an action or the event reads.
 

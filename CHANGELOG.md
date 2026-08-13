@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **CLI navigation.** `herdr-reviewr nav [--tab changes|all|pr] [--scope uncommitted|branch|last-turn] [--file <path> | <path>]` steers the sidebar running on the repo from outside the pane — a script or a coding agent can put a specific diff on screen without synthesizing keypresses. The command lands within ~300 ms, shows its outcome in the status line, and is dropped whole while a comment, search, or overlay is open. `--repo <path>` targets a sidebar other than the current directory's.
+
 ## [0.30.4] — 2026-08-13
 
 ### Changed
