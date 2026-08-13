@@ -12,5 +12,16 @@ fn main() -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    // `nav` is the other non-UI invocation, recognized as the first argument only — a repo
+    // path happening to be named `nav` still opens the UI when it arrives behind a flag.
+    // The same first-argument read excludes it in `is_reviewr_pane` (specs/nav.md).
+    if std::env::args().nth(1).as_deref() == Some("nav") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        if let Err(error) = herdr_reviewr::nav_main(&args) {
+            eprintln!("reviewr: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     herdr_reviewr::run()
 }

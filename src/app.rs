@@ -2397,6 +2397,38 @@ impl App {
         Ok(())
     }
 
+    /// `nav`: put the cursor on the file at repo-relative `path` and open its diff,
+    /// expanding collapsed ancestors so the row exists (specs/nav.md). Focus lands on the
+    /// navigator, or stays on the read pane while the navigator is hidden (specs/tui.md).
+    /// `false` when the path is not in the active tab's entries (e.g. unchanged under the
+    /// current scope).
+    pub fn goto_file(&mut self, path: &str) -> bool {
+        if self.ensure_config_ready().is_err()
+            || !self.entries.iter().any(|e| e.path == path && !e.is_dir)
+        {
+            return false;
+        }
+        let mut expanded = false;
+        let mut prefix = path;
+        while let Some((dir, _)) = prefix.rsplit_once('/') {
+            expanded |= self.set_dir_expanded(dir, true);
+            prefix = dir;
+        }
+        if expanded {
+            self.apply_dir_change();
+        }
+        let row = self.file_rows.iter().position(|r| match &r.kind {
+            RowKind::File { index, .. } => self.entries[*index].path == path,
+            RowKind::Dir { .. } => false,
+        });
+        let Some(row) = row else { return false };
+        self.focus = if self.navigator_hidden_here() { Focus::Diff } else { Focus::Files };
+        self.file_cursor = row;
+        self.open_cursor_file();
+        self.reveal_files = true;
+        true
+    }
+
     /// Collapse or expand the directory under the cursor, then rebuild the tree. The cursor
     /// stays on the directory row (still present, now toggled).
     fn toggle_dir(&mut self) {
