@@ -50,6 +50,7 @@ to move the work forward.
 - Keyboard and mouse input (`input.md`).
 - Full-screen search over the worktree: fuzzy file names and literal code with a live preview, ranking owned by the engine (`search.md`).
 - In-file find in the read pane: literal match highlighting and match-to-match stepping (`find-in-file.md`).
+- CLI navigation: a one-shot command file steers tab, scope, and open file from outside the pane (`nav.md`).
 
 ## Roadmap
 
@@ -102,6 +103,7 @@ Newer content paints over the old in place, reconciling the reviewer's place as 
 - [input](./input.md)
 - [search](./search.md)
 - [find-in-file](./find-in-file.md)
+- [nav](./nav.md)
 - [tui](./tui.md)
 - [pr-tab](./pr-tab.md)
 - [herdr-host](./herdr-host.md)

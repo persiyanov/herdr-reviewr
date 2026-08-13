@@ -187,6 +187,22 @@ wins for the rest of the session.
 Every scope respects `.gitignore`, so build output never clutters **Changes**. To review a file,
 track it. **All files** still browses any ignored path.
 
+## CLI navigation
+
+`herdr-reviewr nav` steers the running sidebar from outside — a script or a coding agent puts a
+specific diff on screen without touching the pane:
+
+```bash
+herdr-reviewr nav --tab changes --scope branch --file src/lib.rs
+herdr-reviewr nav lib.rs              # bare path, resolved from the cwd — works in any subdir
+```
+
+`--tab` takes `changes`/`all`/`pr`, `--scope` takes `uncommitted`/`branch`/`last-turn`. All
+parts are optional and apply in tab → scope → file order. `--repo <path>` targets a sidebar
+other than the cwd's. The command lands within ~300 ms and reports in the sidebar's status
+line; while a comment, search, or overlay is open it is dropped and says so. A command sent
+with no sidebar running waits and applies when the next one opens on that repo.
+
 ## Configuration
 
 CLI flags on the pane command:

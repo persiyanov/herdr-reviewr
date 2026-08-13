@@ -103,11 +103,13 @@ panes_json=$("$H" pane list --workspace "$ws" 2>/dev/null) && [ -n "$panes_json"
   refuse "herdr pane list failed for $ws"
 
 # A reviewr pane runs the review UI in its foreground process group (specs/herdr-host.md,
-# Pane identity). A wrapped launch (`cargo run`) counts through its child; a flag run
-# (`--resolve-plugin-config`) never counts. The executable name in `argv0`/`argv[0]`
-# decides, never `name`: that field is a rewritable process title (docs/herdr-api-notes.md).
-# The flag exclusion mirrors the dispatch in `src/main.rs`, which recognizes the flag
-# anywhere in argv — a future non-UI flag must land in both halves.
+# Pane identity). A wrapped launch (`cargo run`) counts through its child; a non-UI run
+# (`--resolve-plugin-config` anywhere in argv, or the `nav` subcommand as the first
+# argument) never counts. The executable name in `argv0`/`argv[0]` decides, never `name`:
+# that field is a rewritable process title (docs/herdr-api-notes.md).
+# Each exclusion mirrors its dispatch in `src/main.rs` — the flag is recognized anywhere
+# in argv, the subcommand only in first position — and a future non-UI invocation must
+# land in both halves.
 # Takes the pane id and a scratch file for the call's stderr, which stays out of the JSON
 # handed to jq — a successful call with an advisory on stderr must not read as unreadable.
 # Returns 1 for a pane that is not the review UI — a pane the read reports gone exited
@@ -128,7 +130,8 @@ is_reviewr_pane() {
     [.result.process_info.foreground_processes[]
       | select((((.argv0 // "") | base) == "herdr-reviewr")
           or ((((.argv // [])[0] // "") | base) == "herdr-reviewr"))
-      | select(((.argv // []) | index("--resolve-plugin-config")) == null)]
+      | select(((.argv // []) | index("--resolve-plugin-config")) == null)
+      | select((((.argv // [])[1] // "")) != "nav")]
     | length' 2>/dev/null) || return 2
   # An empty count is a read that failed some new way, so the `[` error's status 2 refuses
   # it — a default here would pick the one outcome the failure semantics forbid.

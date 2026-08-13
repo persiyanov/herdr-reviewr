@@ -25,6 +25,7 @@ pub mod keymap;
 pub mod log;
 pub mod markdown;
 pub mod model;
+pub mod nav;
 pub mod proc;
 pub mod search;
 pub mod theme;
@@ -213,6 +214,10 @@ const FETCH_HANG: Duration = Duration::from_mins(1);
 const INDICATOR_DELAY: Duration = Duration::from_millis(200);
 /// Once lit, the glyph holds at least this long, so a fast landing still reads.
 const INDICATOR_MIN_SHOW: Duration = Duration::from_millis(300);
+
+/// Ceiling on the idle event wait, so a `herdr-reviewr nav` command file is noticed within
+/// this long even when the refresh poll would otherwise sleep for seconds (specs/nav.md).
+const NAV_POLL: Duration = Duration::from_millis(300);
 const PR_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
@@ -1063,6 +1068,9 @@ fn event_loop(
             if let Some(started) = pr.wait_started {
                 timeout = timeout.min(INDICATOR_DELAY.saturating_sub(started.elapsed()));
             }
+            // A `nav` command file only lands between wakeups, so bound the idle wait to
+            // keep its worst-case latency at NAV_POLL rather than the refresh interval.
+            timeout = timeout.min(NAV_POLL);
             if event::poll(timeout)? {
                 if !painted_frame.still_current(app) {
                     continue;
@@ -1127,6 +1135,9 @@ fn event_loop(
             }
             if app.should_quit {
                 break;
+            }
+            if let Some(cmd) = nav::take(&app.repo) {
+                apply_nav(app, &cmd);
             }
             if last_poll.elapsed() >= poll {
                 let config_gate = reconcile_plugin_config(
@@ -1348,6 +1359,111 @@ fn apply_plugin_config_observation(
             false
         }
     }
+}
+
+/// Apply a one-shot `nav` command: tab, then scope, then file (specs/nav.md). Applied only
+/// from `Normal` mode, so an external command never destroys a comment in progress or a
+/// half-typed search. Failures land in the status line — the CLI has already exited by the
+/// time the command applies. Public for the dispatch tests; the event loop is the runtime
+/// caller.
+pub fn apply_nav(app: &mut App, cmd: &nav::NavCommand) {
+    if app.mode != Mode::Normal {
+        app.status = "nav: ignored while an overlay or composer is open".into();
+        return;
+    }
+    let mut errors: Vec<String> = Vec::new();
+    if let Some(tab) = &cmd.tab {
+        match nav::parse_tab(tab) {
+            Some(tab) => {
+                if let Err(e) = app.set_tab(tab) {
+                    errors.push(e.to_string());
+                }
+            }
+            None => errors.push(format!("unknown tab {tab:?}")),
+        }
+    }
+    if let Some(scope) = &cmd.scope {
+        match nav::parse_scope(scope) {
+            Some(scope) => {
+                if let Err(e) = app.set_scope(scope) {
+                    errors.push(e.to_string());
+                }
+            }
+            None => errors.push(format!("unknown scope {scope:?}")),
+        }
+    }
+    if let Some(file) = &cmd.file {
+        if app.tab == crate::app::Tab::Pr {
+            errors.push("a file needs the Changes or All files tab".into());
+        } else if !app.goto_file(file) {
+            errors.push(format!("{file:?} is not in the {} scope", app.scope.label()));
+        }
+    }
+    app.status = if errors.is_empty() {
+        format!("nav: {}", cmd.file.as_deref().unwrap_or("ok"))
+    } else {
+        format!("nav: {}", errors.join("; "))
+    };
+    logln!("nav {:?} -> tab={:?} scope={:?} status={}", cmd, app.tab, app.scope, app.status);
+}
+
+/// `herdr-reviewr nav [--repo <path>] [--tab changes|all|pr] [--scope uncommitted|branch|last-turn]
+/// [--file <path> | <path>]` — write a command file for the running sidebar on the repo
+/// (specs/nav.md).
+pub fn nav_main(args: &[String]) -> Result<()> {
+    use anyhow::{Context, bail, ensure};
+    let mut repo: Option<std::path::PathBuf> = None;
+    let mut cmd = nav::NavCommand::default();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--repo" => {
+                repo = Some(it.next().context("--repo needs a path")?.into());
+            }
+            "--tab" => cmd.tab = Some(it.next().context("--tab needs a value")?.clone()),
+            "--scope" => cmd.scope = Some(it.next().context("--scope needs a value")?.clone()),
+            "--file" => cmd.file = Some(it.next().context("--file needs a path")?.clone()),
+            other if !other.starts_with('-') && cmd.file.is_none() => {
+                cmd.file = Some(other.to_string());
+            }
+            other => bail!("unknown argument {other:?}"),
+        }
+    }
+    if let Some(tab) = &cmd.tab {
+        ensure!(nav::parse_tab(tab).is_some(), "unknown tab {tab:?} (changes|all|pr)");
+    }
+    if let Some(scope) = &cmd.scope {
+        ensure!(
+            nav::parse_scope(scope).is_some(),
+            "unknown scope {scope:?} (uncommitted|branch|last-turn)"
+        );
+    }
+    ensure!(
+        cmd.tab.is_some() || cmd.scope.is_some() || cmd.file.is_some(),
+        "nothing to do: pass --tab, --scope, and/or a file"
+    );
+    let start = repo.unwrap_or(std::env::current_dir()?);
+    let repo = git::toplevel(&start).unwrap_or(start);
+    // The sidebar matches files by repo-relative path. An absolute argument re-roots
+    // lexically; a relative one resolves against the cwd first when that names a real
+    // file inside the repo, so `nav foo.rs` works from any subdirectory — and falls back
+    // to repo-relative otherwise, so a deleted file can still be named from anywhere.
+    if let Some(file) = &cmd.file {
+        let given = std::path::Path::new(file);
+        if given.is_absolute() {
+            if let Ok(stripped) = given.strip_prefix(&repo) {
+                cmd.file = Some(stripped.to_string_lossy().into_owned());
+            }
+        } else if let Ok(canon) = std::env::current_dir()?.join(given).canonicalize()
+            && let Ok(repo_canon) = repo.canonicalize()
+            && let Ok(stripped) = canon.strip_prefix(&repo_canon)
+        {
+            cmd.file = Some(stripped.to_string_lossy().into_owned());
+        }
+    }
+    let path = nav::write(&repo, &cmd)?;
+    println!("nav queued for {} at {}", repo.display(), path.display());
+    Ok(())
 }
 
 /// Diff scroll steps: a full page for `PageUp`/`PageDown`, half for `ctrl+u`/`ctrl+d`.
