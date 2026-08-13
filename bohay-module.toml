@@ -1,0 +1,68 @@
+id = "persiyanov.reviewr"
+name = "reviewr"
+version = "0.29.0"
+min_bohay_version = "0.9.6"
+platforms = ["macos", "linux"]
+description = "Review agent-written diffs beside the chat and add line comments to the agent input."
+
+# ── Settings (Settings → Modules → reviewr) ──────────────────────────────────
+# Delivered to the pane/actions as BOHAY_SETTING_<KEY>, so the shell never parses JSON.
+
+[[settings]]
+key = "placement"
+title = "Where the toggle opens the pane"
+type = "enum"
+options = ["split", "tab", "overlay"]
+default = "split"
+
+[[settings]]
+key = "auto_open"
+title = "Open a reviewr pane for each new workspace"
+type = "bool"
+default = false
+
+# ── Build ────────────────────────────────────────────────────────────────────
+# On `bohay module install`, download the prebuilt `herdr-reviewr` binary for this
+# platform from the matching GitHub Release into $BOHAY_MODULE_ROOT/bin (no Rust
+# toolchain needed). `bohay module link` skips the build step; for a local checkout,
+# build it yourself with `cargo build --release` (or `cargo install --path .`) and
+# copy the binary to ./bin/herdr-reviewr.
+
+[[build]]
+command = ["bash", "bohay/install.sh"]
+
+# ── The review pane ──────────────────────────────────────────────────────────
+# A module pane runs its argv in the module root, so we cd to the focused
+# workspace's cwd (the repo under review) before exec. The binary reviews its cwd.
+
+[[panes]]
+id = "pane"
+title = "reviewr"
+placement = "split"
+command = ["sh", "-c", "cd \"${BOHAY_WORKSPACE_CWD:-$PWD}\" 2>/dev/null; exec \"$BOHAY_MODULE_ROOT/bin/herdr-reviewr\""]
+
+# ── Right-click a pane or workspace → toggle / open / close the pane ──────────
+
+[[actions]]
+id = "toggle"
+title = "reviewr: toggle pane"
+contexts = ["pane", "workspace"]
+command = ["bash", "bohay/pane.sh", "toggle"]
+
+[[actions]]
+id = "open"
+title = "reviewr: open pane"
+contexts = ["pane", "workspace"]
+command = ["bash", "bohay/pane.sh", "open"]
+
+[[actions]]
+id = "close"
+title = "reviewr: close pane"
+contexts = ["pane", "workspace"]
+command = ["bash", "bohay/pane.sh", "close"]
+
+# ── Auto-open for a freshly created workspace (gated by the auto_open setting) ─
+
+[[events]]
+on = "workspace.created"
+command = ["bash", "bohay/pane.sh", "auto-open"]
