@@ -1586,9 +1586,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
                 let heights = ui::diff_row_heights(app, area);
                 app.expand_fold(&heights, ui::diff_viewport_height(area, app));
             }
-            K::Expand => {}
             K::Collapse if app.on_folder() => app.collapse_dir(),
-            K::Collapse => {}
             K::Down => app.move_cursor(1)?,
             K::Up => app.move_cursor(-1)?,
             K::NextHunk => app.next_hunk(),
@@ -1623,7 +1621,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::Find => app.open_find(),
             K::Keys => app.toggle_keys(),
             // `edit`/`delete` off the diff, and `open-pr` off the `PR` tab, are inert.
-            K::Edit | K::Delete | K::OpenPr => {}
+            // Expand and Collapse do nothing if the user's not on a fold or a directory
+            K::Expand | K::Collapse | K::Edit | K::Delete | K::OpenPr => {}
         }
         return Ok(());
     }
