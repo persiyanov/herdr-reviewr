@@ -28,7 +28,7 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | `down` / `up`                                            | move the cursor in the focused pane         | `j` / `k` / `↓` / `↑`                       | click a row                   |
 | `next-hunk` / `prev-hunk`                                | jump to the next / previous hunk            | `]` / `[`                                   | —                             |
 | `next-file` / `prev-file`                                | jump to the next / previous file            | `f` / `F`                                   | —                             |
-| —                                                        | collapse / expand a directory               | `h` / `l` / `←` / `→`                       | click the directory row       |
+| `collapse` / `expand`                                    | collapse / expand a directory               | `←` / `→`                       | click the directory row       |
 | —                                                        | switch focus between list and diff          | `tab`                                       | click a pane                  |
 | —                                                        | move a page                                 | `PageUp` / `PageDown` / `ctrl+u` / `ctrl+d` | —                             |
 | —                                                        | scroll the viewport, selection put          | —                                           | wheel over the pane           |
