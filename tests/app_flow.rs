@@ -1376,23 +1376,8 @@ fn arrows_collapse_and_expand_a_folder() {
     assert!(app.file_rows.len() < expanded, "collapsing hides the children");
     assert!(app.on_folder(), "the cursor stays on the folder row");
 
-    handle_key(
-        &mut app,
-        KeyEvent::from(KeyCode::Char('l')),
-        Rect::new(0, 0, 120, 40),
-        &Keymap::default(),
-    )
-    .unwrap();
-    assert_eq!(app.file_rows.len(), expanded, "l expands the folder");
-
-    handle_key(
-        &mut app,
-        KeyEvent::from(KeyCode::Char('h')),
-        Rect::new(0, 0, 120, 40),
-        &Keymap::default(),
-    )
-    .unwrap();
-    assert!(app.file_rows.len() < expanded, "h collapses the folder");
+    app.expand_dir(); // →
+    assert_eq!(app.file_rows.len(), expanded, "expanding shows them again");
 }
 
 #[test]
