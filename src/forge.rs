@@ -59,7 +59,7 @@ impl PrView {
     /// Both snapshot preservation and the empty-state renderer consume this projection so a
     /// newly added retryable failure cannot diverge between those surfaces. `refresh` is the
     /// active `refresh` binding's hint key, so the advertised retry key follows a rebind.
-    pub fn retry_remedy(&self, refresh: crate::keymap::Key) -> Option<String> {
+    pub fn retry_remedy(&self, refresh: &str) -> Option<String> {
         match self {
             Self::NoCli(forge) => Some(format!(
                 "{} CLI not found. Install `{}`, then press {refresh}.",

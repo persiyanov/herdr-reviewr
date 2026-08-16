@@ -8,6 +8,8 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::keymap::KeyCode;
+
 /// Resolved runtime configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -470,7 +472,7 @@ fn parse_key(text: &str) -> Option<crate::keymap::Key> {
             if !ch.is_whitespace()
                 && unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) > 0 =>
         {
-            Some(crate::keymap::Key { ctrl, alt, ch })
+            Some(crate::keymap::Key { ctrl, alt, code: KeyCode::Char(ch) })
         }
         _ => None,
     }
@@ -601,7 +603,7 @@ pub fn print_plugin_config() -> Result<(), PluginConfigError> {
 #[cfg(test)]
 mod tests {
     use super::{Config, NavigatorPosition, PluginConfig, ToggleDirection, TogglePlacement};
-    use crate::model::Scope;
+    use crate::{keymap::KeyCode, model::Scope};
     use std::time::Duration;
 
     fn parse(args: &[&str]) -> Config {
@@ -848,7 +850,7 @@ mod tests {
         std::fs::write(&path, "[keybindings]\nfind = [\"alt+x\"]\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(
-            config.keymap().action_for(Key { ctrl: false, alt: true, ch: 'x' }),
+            config.keymap().action_for(Key { ctrl: false, alt: true, code: KeyCode::Char('x') }),
             Some(Action::Find)
         );
         assert_eq!(config.keymap().action_for(Key::ctrl('f')), None);

@@ -1964,7 +1964,8 @@ impl App {
     /// note, so a failed poll never blanks a populated tab; the cursor clamps to the new rows.
     pub fn apply_pr(&mut self, view: forge::PrView) {
         self.pr_refreshing = false;
-        let retry = view.retry_remedy(self.keymap().hint(crate::keymap::Action::Refresh));
+        let refresh = self.keymap().hint(crate::keymap::Action::Refresh).ui_str();
+        let retry = view.retry_remedy(&refresh);
         let has_snapshot =
             matches!(self.pr, forge::PrView::Pr(_) | forge::PrView::NoPr | forge::PrView::Detached);
         if has_snapshot && let Some(message) = retry {
@@ -2440,8 +2441,8 @@ impl App {
         true
     }
 
-    /// Whether the cursor is on a directory row in the focused file list — the rows `←`/`→`
-    /// collapse and expand (elsewhere those keys scroll the diff).
+    /// Whether the cursor is on a directory row in the focused file list — the rows `h`/`l` and
+    /// `←`/`→` collapse and expand (elsewhere the arrows scroll the diff).
     pub fn on_folder(&self) -> bool {
         self.focus == Focus::Files
             && self.file_rows.get(self.file_cursor).is_some_and(|r| r.dir_path().is_some())

@@ -28,7 +28,7 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | `down` / `up`                                            | move the cursor in the focused pane         | `j` / `k` / `↓` / `↑`                       | click a row                   |
 | `next-hunk` / `prev-hunk`                                | jump to the next / previous hunk            | `]` / `[`                                   | —                             |
 | `next-file` / `prev-file`                                | jump to the next / previous file            | `f` / `F`                                   | —                             |
-| —                                                        | collapse / expand a directory               | `←` / `→`                                   | click the directory row       |
+| —                                                        | collapse / expand a directory               | `h` / `l` / `←` / `→`                       | click the directory row       |
 | —                                                        | switch focus between list and diff          | `tab`                                       | click a pane                  |
 | —                                                        | move a page                                 | `PageUp` / `PageDown` / `ctrl+u` / `ctrl+d` | —                             |
 | —                                                        | scroll the viewport, selection put          | —                                           | wheel over the pane           |
@@ -84,6 +84,10 @@ Writing a comment: select a range or land on a line, press `c`, type into the in
 - A crossing arms only when a file to cross to exists. At the changeset's ends nothing is offered and nothing moves.
 - A file with no changed rows is crossed over, notice diffs (`binary`, `too_large`) included.
 - The steps are inert in `All files` and in the markdown preview, which paint no changed rows.
+
+`h`/`l` collapse and expand the directory under the cursor in the file navigator. They mirror
+`←`/`→`; `l` replaces `comments` while the cursor is on a directory, and opens the comments list
+elsewhere.
 
 `next-file` / `prev-file` skip a file per press, from either pane, and never arm:
 

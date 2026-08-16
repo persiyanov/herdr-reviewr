@@ -587,9 +587,9 @@ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) ->
 fn tab_labels(keymap: &Keymap) -> [(Tab, String); 3] {
     use crate::keymap::Action as K;
     [
-        (Tab::Changes, format!("{} Changes", keymap.hint(K::TabChanges))),
-        (Tab::AllFiles, format!("{} Files", keymap.hint(K::TabAllFiles))),
-        (Tab::Pr, format!("{} PR", keymap.hint(K::TabPr))),
+        (Tab::Changes, format!("{} Changes", keymap.hint(K::TabChanges).ui_str())),
+        (Tab::AllFiles, format!("{} Files", keymap.hint(K::TabAllFiles).ui_str())),
+        (Tab::Pr, format!("{} PR", keymap.hint(K::TabPr).ui_str())),
     ]
 }
 const HEADER_LEAD: &str = " ";
@@ -1653,7 +1653,7 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
     use crate::keymap::Action as K;
     use FooterAction as A;
     // A rebindable action's hint is its first bound key (`specs/input.md`).
-    let hint = |action: K| app.keymap().hint(action).to_string();
+    let hint = |action: K| app.keymap().hint(action).ui_str();
     let (k, l): (String, &str) = match action {
         A::Comment => (hint(K::Comment), "comment"),
         A::Select => (hint(K::Select), "select"),
@@ -1671,8 +1671,8 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::MoveHunk => (format!("{} {}", hint(K::NextHunk), hint(K::PrevHunk)), "hunk"),
         A::MoveFile => (format!("{} {}", hint(K::NextFile), hint(K::PrevFile)), "file"),
         A::MovePage => ("PageUp PageDown".into(), ""),
-        A::ExpandDir => ("→".into(), "expand"),
-        A::CollapseDir => ("←".into(), "collapse"),
+        A::ExpandDir => (hint(K::Expand), "expand"),
+        A::CollapseDir => (hint(K::Collapse), "collapse"),
         A::TogglePane => {
             return ("tab".into(), if app.focus == Focus::Files { "diff" } else { "files" }.into());
         }
@@ -3421,7 +3421,7 @@ fn pr_empty_msg(
     forge: crate::git::Forge,
     refresh: crate::keymap::Key,
 ) -> String {
-    if let Some(message) = view.retry_remedy(refresh) {
+    if let Some(message) = view.retry_remedy(&refresh.ui_str()) {
         return message;
     }
     let noun = forge.noun();

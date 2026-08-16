@@ -12,7 +12,7 @@ use herdr_reviewr::app::{App, Band, Focus, FooterAction, Mode};
 use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::export::ExportTarget;
 use herdr_reviewr::herdr::{AgentChoice, AgentSample};
-use herdr_reviewr::keymap::{Action, Key, Keymap};
+use herdr_reviewr::keymap::{Action, Key, KeyCode as BindingKeyCode, Keymap};
 use herdr_reviewr::model::{Scope, Side};
 use herdr_reviewr::turn::Status;
 use herdr_reviewr::{handle_key, handle_mouse};
@@ -1376,8 +1376,23 @@ fn arrows_collapse_and_expand_a_folder() {
     assert!(app.file_rows.len() < expanded, "collapsing hides the children");
     assert!(app.on_folder(), "the cursor stays on the folder row");
 
-    app.expand_dir(); // →
-    assert_eq!(app.file_rows.len(), expanded, "expanding shows them again");
+    handle_key(
+        &mut app,
+        KeyEvent::from(KeyCode::Char('l')),
+        Rect::new(0, 0, 120, 40),
+        &Keymap::default(),
+    )
+    .unwrap();
+    assert_eq!(app.file_rows.len(), expanded, "l expands the folder");
+
+    handle_key(
+        &mut app,
+        KeyEvent::from(KeyCode::Char('h')),
+        Rect::new(0, 0, 120, 40),
+        &Keymap::default(),
+    )
+    .unwrap();
+    assert!(app.file_rows.len() < expanded, "h collapses the folder");
 }
 
 #[test]
@@ -3586,8 +3601,11 @@ fn a_poll_keeping_the_open_file_leaves_find_open_and_re_derives() {
 fn find_opens_on_a_rebound_alt_chord_through_the_dispatcher() {
     let r = find_repo();
     let mut app = app_on(&r);
-    let keymap =
-        Keymap::resolve(&[(Action::Find, vec![Key { ctrl: false, alt: true, ch: 'x' }])]).unwrap();
+    let keymap = Keymap::resolve(&[(
+        Action::Find,
+        vec![Key { ctrl: false, alt: true, code: BindingKeyCode::Char('x') }],
+    )])
+    .unwrap();
     app.focus = Focus::Diff;
     let area = Rect::new(0, 0, 120, 40);
 

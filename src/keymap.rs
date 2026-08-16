@@ -7,6 +7,8 @@ use std::sync::LazyLock;
 /// One rebindable action from the keymap table in `specs/input.md`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
+    Expand,
+    Collapse,
     Down,
     Up,
     NextHunk,
@@ -43,6 +45,33 @@ pub enum Action {
     Quit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyCode {
+    Char(char),
+    Left,
+    Right,
+}
+
+impl KeyCode {
+    pub fn ui_str(self) -> String {
+        match self {
+            Self::Char(ch) => ch.to_string(),
+            Self::Left => "←".to_string(),
+            Self::Right => "→".to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for KeyCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KeyCode::Char(ch) => write!(f, "{ch}"),
+            KeyCode::Left => write!(f, "left"),
+            KeyCode::Right => write!(f, "right"),
+        }
+    }
+}
+
 /// One bound key: a base character, alone or under a `ctrl`/`alt` modifier. A modifier-less
 /// `Key` is the bare character the keymap answered before chords existed
 /// (`specs/config.md`).
@@ -50,28 +79,46 @@ pub enum Action {
 pub struct Key {
     pub ctrl: bool,
     pub alt: bool,
-    pub ch: char,
+    pub code: KeyCode,
 }
 
 impl Key {
     /// A bare character, no modifier.
     pub const fn plain(ch: char) -> Self {
-        Self { ctrl: false, alt: false, ch }
+        Self { ctrl: false, alt: false, code: KeyCode::Char(ch) }
+    }
+
+    pub const fn right() -> Self {
+        Self { ctrl: false, alt: false, code: KeyCode::Right }
+    }
+
+    pub const fn left() -> Self {
+        Self { ctrl: false, alt: false, code: KeyCode::Left }
     }
 
     /// A `ctrl+<ch>` chord.
     pub const fn ctrl(ch: char) -> Self {
-        Self { ctrl: true, alt: false, ch }
+        Self { ctrl: true, alt: false, code: KeyCode::Char(ch) }
     }
 
-    /// The spelling `[keybindings]` and `--resolve-plugin-config` round-trip, also shown as the
-    /// hint: `ctrl+f`, `alt+x`, or the bare character. Spelled out, never a glyph, so the same
-    /// text names a key in the config and on screen (specs/input.md, specs/config.md).
+    /// The spelling `[keybindings]` and `--resolve-plugin-config` round-trip: `ctrl+f`,
+    /// `alt+x`, or the bare character (specs/input.md, specs/config.md).
     pub fn config_str(self) -> String {
         match (self.ctrl, self.alt) {
-            (true, _) => format!("ctrl+{}", self.ch),
-            (false, true) => format!("alt+{}", self.ch),
-            (false, false) => self.ch.to_string(),
+            (true, _) => format!("ctrl+{}", self.code),
+            (false, true) => format!("alt+{}", self.code),
+            (false, false) => self.code.to_string(),
+        }
+    }
+
+    /// The key spelling used in the UI. Arrow keys use glyphs while configurable names remain
+    /// spelled out by [`Self::config_str`].
+    pub fn ui_str(self) -> String {
+        let code = self.code.ui_str();
+        match (self.ctrl, self.alt) {
+            (true, _) => format!("ctrl+{code}"),
+            (false, true) => format!("alt+{code}"),
+            (false, false) => code,
         }
     }
 }
@@ -85,7 +132,9 @@ impl std::fmt::Display for Key {
 
 /// Every action with its config name and default keys — the single source the default keymap,
 /// the name lookup, and the config error message are built from.
-const ACTIONS: [(Action, &str, &[Key]); 34] = [
+const ACTIONS: [(Action, &str, &[Key]); 36] = [
+    (Action::Expand, "expand", &[Key::right()]),
+    (Action::Collapse, "collapse", &[Key::left()]),
     (Action::Down, "down", &[Key::plain('j')]),
     (Action::Up, "up", &[Key::plain('k')]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -240,7 +289,7 @@ impl Keymap {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Key, Keymap};
+    use super::{Action, Key, KeyCode, Keymap};
 
     #[test]
     fn defaults_bind_every_action_and_hint_is_first_key() {
@@ -286,10 +335,15 @@ mod tests {
     #[test]
     fn find_rebinds_to_another_chord_or_a_bare_key() {
         // To another chord.
-        let keymap =
-            Keymap::resolve(&[(Action::Find, vec![Key { ctrl: false, alt: true, ch: 'x' }])])
-                .unwrap();
-        assert_eq!(keymap.action_for(Key { ctrl: false, alt: true, ch: 'x' }), Some(Action::Find));
+        let keymap = Keymap::resolve(&[(
+            Action::Find,
+            vec![Key { ctrl: false, alt: true, code: KeyCode::Char('x') }],
+        )])
+        .unwrap();
+        assert_eq!(
+            keymap.action_for(Key { ctrl: false, alt: true, code: KeyCode::Char('x') }),
+            Some(Action::Find)
+        );
         assert_eq!(keymap.action_for(Key::ctrl('f')), None, "the default chord is freed");
 
         // And to a bare key, demoting the chord action to a plain character.

@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Configurable directory navigation.** The `expand` and `collapse` keys can now be rebound in `[keybindings]`; they default to `→` and `←`.
+
 ## [0.31.0] — 2026-08-15
 
 ### Added

@@ -1460,7 +1460,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
     // the page keys, `←`/`→`) stay hardcoded per context below (`specs/input.md`).
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let action = match key.code {
-        Char(c) => keymap.action_for(crate::keymap::Key { ctrl, alt, ch: c }),
+        Char(c) => {
+            keymap.action_for(crate::keymap::Key { ctrl, alt, code: keymap::KeyCode::Char(c) })
+        }
         Down => Some(K::Down),
         Up => Some(K::Up),
         _ => None,
@@ -1579,6 +1581,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::TabChanges => app.set_tab(crate::app::Tab::Changes)?,
             K::TabAllFiles => app.set_tab(crate::app::Tab::AllFiles)?,
             K::TabPr => app.set_tab(crate::app::Tab::Pr)?,
+            K::Expand if app.on_folder() => app.expand_dir(),
+            K::Expand if app.on_fold() => {
+                let heights = ui::diff_row_heights(app, area);
+                app.expand_fold(&heights, ui::diff_viewport_height(area, app));
+            }
+            K::Expand => {}
+            K::Collapse if app.on_folder() => app.collapse_dir(),
+            K::Collapse => {}
             K::Down => app.move_cursor(1)?,
             K::Up => app.move_cursor(-1)?,
             K::NextHunk => app.next_hunk(),
@@ -1625,15 +1635,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
         Char('d') if ctrl => app.move_cursor(HALF_PAGE)?,
         PageDown => app.move_cursor(PAGE)?,
         PageUp => app.move_cursor(-PAGE)?,
-        // `←`/`→` expand/collapse the collapsible under the cursor — a directory in the file
-        // list, a fold in the diff (expand-only); otherwise they scroll the diff sideways
-        // (`scroll_h` is a no-op while wrapping, so it only acts when h-scroll is meaningful).
-        Right if app.on_folder() => app.expand_dir(),
-        Left if app.on_folder() => app.collapse_dir(),
-        Right if app.on_fold() => {
-            let heights = ui::diff_row_heights(app, area);
-            app.expand_fold(&heights, ui::diff_viewport_height(area, app));
-        }
         Right => app.scroll_h(8),
         Left => app.scroll_h(-8),
         // `esc` peels one layer: a live selection, then an armed crossing, then the footer
