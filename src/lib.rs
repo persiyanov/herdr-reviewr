@@ -1463,6 +1463,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
         Char(c) => {
             keymap.action_for(crate::keymap::Key { ctrl, alt, code: keymap::KeyCode::Char(c) })
         }
+        Right => keymap.action_for(crate::keymap::Key { ctrl, alt, code: keymap::KeyCode::Right }),
+        Left => keymap.action_for(crate::keymap::Key { ctrl, alt, code: keymap::KeyCode::Left }),
         Down => Some(K::Down),
         Up => Some(K::Up),
         _ => None,

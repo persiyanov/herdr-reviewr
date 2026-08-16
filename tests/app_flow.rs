@@ -1364,20 +1364,25 @@ fn arrows_collapse_and_expand_a_folder() {
     r.commit_all("init");
     r.write("src/a.rs", "x2\n");
     r.write("src/b.rs", "y2\n");
+    let config_dir = tempfile::tempdir().unwrap();
+    let config = herdr_reviewr::config::plugin_config_in(config_dir.path()).unwrap();
     let mut app = app_on(&r);
+    app.set_plugin_config(config);
     app.focus = Focus::Files;
 
     let dir_row = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
     app.file_cursor = dir_row;
     assert!(app.on_folder(), "the cursor is on the folder");
     let expanded = app.file_rows.len();
+    let area = Rect::new(0, 0, 120, 40);
+    let keymap = app.keymap().clone();
 
-    app.collapse_dir(); // ←
-    assert!(app.file_rows.len() < expanded, "collapsing hides the children");
+    handle_key(&mut app, KeyEvent::from(KeyCode::Left), area, &keymap).unwrap();
+    assert!(app.file_rows.len() < expanded, "left collapses the folder");
     assert!(app.on_folder(), "the cursor stays on the folder row");
 
-    app.expand_dir(); // →
-    assert_eq!(app.file_rows.len(), expanded, "expanding shows them again");
+    handle_key(&mut app, KeyEvent::from(KeyCode::Right), area, &keymap).unwrap();
+    assert_eq!(app.file_rows.len(), expanded, "right expands the folder");
 }
 
 #[test]
