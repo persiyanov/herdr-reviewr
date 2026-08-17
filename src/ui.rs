@@ -587,9 +587,9 @@ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) ->
 fn tab_labels(keymap: &Keymap) -> [(Tab, String); 3] {
     use crate::keymap::Action as K;
     [
-        (Tab::Changes, format!("{} Changes", keymap.hint(K::TabChanges).ui_str())),
-        (Tab::AllFiles, format!("{} Files", keymap.hint(K::TabAllFiles).ui_str())),
-        (Tab::Pr, format!("{} PR", keymap.hint(K::TabPr).ui_str())),
+        (Tab::Changes, format!("{} Changes", keymap.hint(K::TabChanges).label())),
+        (Tab::AllFiles, format!("{} Files", keymap.hint(K::TabAllFiles).label())),
+        (Tab::Pr, format!("{} PR", keymap.hint(K::TabPr).label())),
     ]
 }
 const HEADER_LEAD: &str = " ";
@@ -1091,6 +1091,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let gutter_w = gutter_for(&app.diff);
+    let expand_hint = app.keymap().hint(crate::keymap::Action::Expand).label();
     let layout = RowLayout {
         gutter_w,
         width,
@@ -1102,6 +1103,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
             .find
             .as_ref()
             .map(|f| (f.query.as_str(), crate::app::find_case_sensitive(&f.query))),
+        expand_hint: &expand_hint,
     };
     let commented = app.commented_lines();
     let cards = app.comment_cards();
@@ -1226,6 +1228,8 @@ struct RowLayout<'a> {
     /// The in-file find query and its smart-case flag while the band is open, so every visible
     /// row lights its matches (specs/find-in-file.md).
     find: Option<(&'a str, bool)>,
+    /// The `expand` hint the cursor's fold row advertises, following a rebind (`specs/input.md`).
+    expand_hint: &'a str,
 }
 
 /// A row's per-row highlight state.
@@ -1241,11 +1245,11 @@ struct RowState {
 /// into `code_width`-wide rows; a continuation row carries a blank gutter so numbers
 /// stay aligned. With wrap off, the line is one row scrolled by `h_scroll`.
 fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'static>> {
-    let RowLayout { gutter_w, width, h_scroll, wrap, focused, pal, find } = layout;
+    let RowLayout { gutter_w, width, h_scroll, wrap, focused, pal, find, expand_hint } = layout;
     let RowState { commented, cursor, selected } = state;
     if let Row::Fold { .. } = row {
         let label = if cursor {
-            format!("  ⋯  {} unmodified lines — → expand", row.hidden())
+            format!("  ⋯  {} unmodified lines — {expand_hint} expand", row.hidden())
         } else {
             format!("  ⋯  {} unmodified lines", row.hidden())
         };
@@ -1653,7 +1657,7 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
     use crate::keymap::Action as K;
     use FooterAction as A;
     // A rebindable action's hint is its first bound key (`specs/input.md`).
-    let hint = |action: K| app.keymap().hint(action).ui_str();
+    let hint = |action: K| app.keymap().hint(action).label();
     let (k, l): (String, &str) = match action {
         A::Comment => (hint(K::Comment), "comment"),
         A::Select => (hint(K::Select), "select"),
@@ -1661,16 +1665,16 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::EditComment => (hint(K::Edit), "edit"),
         A::DeleteComment => (hint(K::Delete), "delete"),
         A::JumpComment => (format!("{}/{}", hint(K::NextComment), hint(K::PrevComment)), "jump"),
-        A::ExpandFold => ("→".into(), "expand fold"),
+        A::ExpandFold => (hint(K::Expand), "expand fold"),
         // The armed crossing is keyed to the hunk step that armed it, so a rebound `next-hunk`
         // is the key the hint shows.
         A::CrossFile { forward: true } => (hint(K::NextHunk), "next file"),
         A::CrossFile { forward: false } => (hint(K::PrevHunk), "prev file"),
-        // The `move` band's pairs render as their two keys; `MovePage`'s are the fixed page keys.
+        // The `move` band's pairs render as their two keys.
         A::MoveLine => (format!("{} {}", hint(K::Down), hint(K::Up)), ""),
         A::MoveHunk => (format!("{} {}", hint(K::NextHunk), hint(K::PrevHunk)), "hunk"),
         A::MoveFile => (format!("{} {}", hint(K::NextFile), hint(K::PrevFile)), "file"),
-        A::MovePage => ("PageUp PageDown".into(), ""),
+        A::MovePage => (format!("{} {}", hint(K::PageUp), hint(K::PageDown)), ""),
         A::ExpandDir => (hint(K::Expand), "expand"),
         A::CollapseDir => (hint(K::Collapse), "collapse"),
         A::TogglePane => {
@@ -3287,6 +3291,8 @@ fn push_finding_quote(
             focused: false,
             pal: p,
             find: None,
+            // Snippet rows never carry the cursor, so no fold ever shows the hint here.
+            expand_hint: "",
         };
         for row in &rows {
             let state = RowState {
@@ -3421,7 +3427,7 @@ fn pr_empty_msg(
     forge: crate::git::Forge,
     refresh: crate::keymap::Key,
 ) -> String {
-    if let Some(message) = view.retry_remedy(&refresh.ui_str()) {
+    if let Some(message) = view.retry_remedy(refresh) {
         return message;
     }
     let noun = forge.noun();

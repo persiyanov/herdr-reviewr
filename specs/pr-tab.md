@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-17
-Last edited: 2026-08-15
+Last edited: 2026-08-17
 ---
 
 # PR tab
@@ -111,7 +111,7 @@ This table shows how each snippet line shows:
 - The `j` key, the `k` key, or a click selects a description or a comment. The navigator shows the selected row. You cannot select a check.
 - The wheel on the navigator scrolls the navigator view. The selection does not change.
 - The wheel on the read pane scrolls the read pane.
-- The `PageUp` key and the `PageDown` key scroll the pane that has focus.
+- The `page-up` and `page-down` bindings scroll the pane that has focus (`input.md`).
 - Each pane stops when the last line is at the bottom edge.
 - The `o` key or the chip opens the PR in the browser.
 - If a body is higher than the read pane, a scrollbar shows on the right border of the pane. If the body fits, there is no scrollbar.

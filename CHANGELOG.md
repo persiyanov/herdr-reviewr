@@ -6,8 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Every key rebindable.** The arrows and page keys are now ordinary defaults of six new
+  actions in `[keybindings]`: `expand`, `collapse`, `page-up`, `page-down`, `half-up`, and
+  `half-down`. Named keys spell as `left`, `right`, `up`, `down`, `pageup`, and `pagedown`
+  in the config, so a vim-style `expand = ["l"]` with `collapse = ["h"]` works. Only `tab`,
+  `esc`, and `enter` stay fixed. Thanks to @dferland1 for driving this in #68.
+
 ### Changed
-- **Configurable directory navigation.** The `expand` and `collapse` keys can now be rebound in `[keybindings]`; they default to `→` and `←`.
+- **A rebind now replaces the arrow defaults too.** A config that already rebinds `down` or
+  `up` frees the `↓`/`↑` arrows on upgrade. Add `"down"` / `"up"` to those key lists to keep
+  them.
+- **A held modifier makes an arrow or page key its own key.** `ctrl+↓` no longer acts as
+  plain `↓`. Bind `ctrl+down` (or any `ctrl+`/`alt+` named key) explicitly to use it.
 
 ## [0.31.0] — 2026-08-15
 

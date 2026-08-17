@@ -8,8 +8,6 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::keymap::KeyCode;
-
 /// Resolved runtime configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -454,11 +452,12 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
     Ok(config)
 }
 
-/// One `[keybindings]` key string → a [`Key`](crate::keymap::Key): a bare character, or a
-/// character behind a `ctrl+`/`alt+` prefix (`specs/config.md`). The character is
+/// One `[keybindings]` key string → a [`Key`](crate::keymap::Key): a bare character or a
+/// named key, alone or behind a `ctrl+`/`alt+` prefix (`specs/config.md`). The character is
 /// one visible cell — a positive display width also rejects the zero-width class `is_control`
 /// misses (format chars, combining marks).
 fn parse_key(text: &str) -> Option<crate::keymap::Key> {
+    use crate::keymap::KeyCode;
     let (ctrl, alt, rest) = if let Some(rest) = text.strip_prefix("ctrl+") {
         (true, false, rest)
     } else if let Some(rest) = text.strip_prefix("alt+") {
@@ -466,6 +465,9 @@ fn parse_key(text: &str) -> Option<crate::keymap::Key> {
     } else {
         (false, false, text)
     };
+    if let Some(code) = KeyCode::by_name(rest) {
+        return Some(crate::keymap::Key { ctrl, alt, code });
+    }
     let mut it = rest.chars();
     match (it.next(), it.next()) {
         (Some(ch), None)
@@ -491,6 +493,11 @@ fn parse_keybindings(
     };
     let mut overrides = Vec::with_capacity(entries.len());
     let mut names_by_action = Vec::with_capacity(entries.len());
+    // Loop-invariant, and this parse runs per frame (`CFG-*` snapshots): build it once.
+    let expected = format!(
+        "a non-empty array of keys, each a character or a named key ({}), alone or behind ctrl+/alt+",
+        crate::keymap::KeyCode::names().collect::<Vec<_>>().join(", ")
+    );
     for (name, keys) in entries {
         let Some(action) = Action::by_config_name(name) else {
             return Err(unknown_key_error(
@@ -511,7 +518,7 @@ fn parse_keybindings(
         }
         names_by_action.push((action, name.as_str()));
         let entry_key = format!("keybindings.{name}");
-        let expected = "a non-empty array of keys, each a character or a ctrl+/alt+ chord";
+        let expected = expected.as_str();
         let Some(values) = keys.as_array() else {
             return Err(value_error(path, &entry_key, expected));
         };
@@ -603,7 +610,8 @@ pub fn print_plugin_config() -> Result<(), PluginConfigError> {
 #[cfg(test)]
 mod tests {
     use super::{Config, NavigatorPosition, PluginConfig, ToggleDirection, TogglePlacement};
-    use crate::{keymap::KeyCode, model::Scope};
+    use crate::keymap::KeyCode;
+    use crate::model::Scope;
     use std::time::Duration;
 
     fn parse(args: &[&str]) -> Config {
@@ -861,6 +869,49 @@ mod tests {
         std::fs::write(&path, "[keybindings]\nfind = [\"ctrl+\"]\n").unwrap();
         let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
         assert!(error.contains("`keybindings.find`") && error.contains("expected"), "{error}");
+    }
+
+    #[test]
+    fn named_keys_bind_spell_by_name_and_round_trip() {
+        use crate::keymap::{Action, Key};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        std::fs::write(&path, "[keybindings]\ncollapse = [\"h\", \"left\"]\n").unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.keymap().action_for(Key::plain('h')), Some(Action::Collapse));
+        assert_eq!(config.keymap().action_for(Key::named(KeyCode::Left)), Some(Action::Collapse));
+        let json = config.to_json();
+        assert_eq!(json["keybindings"]["collapse"], serde_json::json!(["h", "left"]));
+        assert_eq!(json["keybindings"]["expand"], serde_json::json!(["right"]));
+        assert_eq!(json["keybindings"]["down"], serde_json::json!(["j", "down"]));
+        assert_eq!(json["keybindings"]["half-up"], serde_json::json!(["ctrl+u"]));
+
+        // The resolved output re-parses: every emitted spelling is valid config grammar.
+        let resolved = json["keybindings"].as_object().unwrap().clone();
+        let toml: String = std::iter::once("[keybindings]\n".to_string())
+            .chain(resolved.iter().map(|(action, keys)| format!("{action} = {keys}\n")))
+            .collect();
+        std::fs::write(&path, toml).unwrap();
+        let reparsed = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(reparsed.to_json()["keybindings"], json["keybindings"]);
+
+        // The display spelling of a named key is not the config spelling.
+        std::fs::write(&path, "[keybindings]\npage-up = [\"PageUp\"]\n").unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("`keybindings.page-up`") && error.contains("pageup"), "{error}");
+    }
+
+    #[test]
+    fn a_rebind_colliding_with_a_default_names_both_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[keybindings]\nexpand = [\"l\"]\n")
+            .unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("`expand`") && error.contains("`comments`") && error.contains('l'),
+            "{error}"
+        );
     }
 
     #[test]

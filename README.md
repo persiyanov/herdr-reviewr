@@ -113,7 +113,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | `PageUp` `PageDown` | Move a page |
 | `Ctrl+U` `Ctrl+D` | Move a half-page |
 | `Tab` | Switch focus |
-| `→` `←` | Expand / collapse directories, or scroll sideways |
+| `→` `←` | Expand / collapse, or scroll sideways |
 | `/` | Search files and code |
 | `Ctrl+F` | Find in file |
 | `w` | Toggle line wrap |
@@ -133,7 +133,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | `c` | Comment on line or selection |
 | `e` `d` | Edit / delete comment |
 | `n` `N` | Jump to next / previous comment |
-| `L` | List all comments |
+| `l` | List all comments |
 | `s` | Send comments to agent |
 | `y` | Copy comments to clipboard |
 | `esc` | Clear selection |

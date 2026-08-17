@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-10
-Last edited: 2026-08-08
+Last edited: 2026-08-17
 ---
 
 # Configuration
@@ -24,9 +24,10 @@ gitlab_host = "git.corp.example"
 azure_devops_host = "tfs.corp.example"
 
 [keybindings]
-comment = ["c", "ㅊ"]
-select  = ["v", "ㅍ"]
-find    = ["ctrl+f"]
+comment  = ["c", "ㅊ"]
+select   = ["v", "ㅍ"]
+find     = ["ctrl+f"]
+collapse = ["h", "left"]
 ```
 
 | key                  | value                                                                              |
@@ -42,7 +43,7 @@ find    = ["ctrl+f"]
 | `azure_devops_host`  | bare hostname other than `dev.azure.com`                                           |
 | `keybindings`        | table of actions from the keymap in `input.md`, each a non-empty array of keys     |
 
-`--resolve-plugin-config` prints the validated config as JSON, every key included, the keymap resolved.
+`--resolve-plugin-config` prints the validated config as JSON, every key included, the keymap resolved. A resolved key spells as the config grammar spells it, a named key by its name.
 
 The invariants:
 
@@ -93,9 +94,9 @@ A hostname is recognized by at most one forge. A host key naming another host ke
 
 ## Keybindings
 
-`[keybindings]` rebinds the action shortcuts: the resolved keymap is the default keymap with each bound action's keys replaced by its binding. A key is one printable, non-whitespace codepoint, alone or with a `ctrl+`/`alt+` prefix. A chord-only action, like `find`, rebinds like any other (`input.md`).
+`[keybindings]` rebinds the action shortcuts: the resolved keymap is the default keymap with each bound action's keys replaced by its binding. A key is one printable, non-whitespace codepoint or a named key: `left`, `right`, `up`, `down`, `pageup`, or `pagedown`. Either form stands alone or takes a `ctrl+`/`alt+` prefix. A chord-only action, like `find`, rebinds like any other (`input.md`).
 
-A binding never displaces a fixed key (`input.md`). An unknown action name is an unknown key. A malformed key and a duplicate key are invalid values (→ CFG-WHOLE-FILE). A key appears at most once across the resolved keymap. A default added by an upgrade may collide with an existing custom binding, and the collision is invalid, the error naming both actions and the shared character.
+A binding never displaces a fixed key (`input.md`). An unknown action name is an unknown key. A malformed key and a duplicate key are invalid values (→ CFG-WHOLE-FILE). A key appears at most once across the resolved keymap, and a collision error names both actions and the shared key. A default added by an upgrade may collide with an existing custom binding the same way.
 
 `list-wider` and `list-narrower` are accepted aliases for `navigator-grow` and `navigator-shrink`. A config naming an action and its alias is invalid as a duplicate action. Resolved output uses the canonical names.
 

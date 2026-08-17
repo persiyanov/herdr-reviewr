@@ -7,14 +7,18 @@ use std::sync::LazyLock;
 /// One rebindable action from the keymap table in `specs/input.md`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
-    Expand,
-    Collapse,
     Down,
     Up,
     NextHunk,
     PrevHunk,
     NextFile,
     PrevFile,
+    Collapse,
+    Expand,
+    PageUp,
+    PageDown,
+    HalfUp,
+    HalfDown,
     ScopeUncommitted,
     ScopeBranch,
     ScopeLastTurn,
@@ -45,34 +49,65 @@ pub enum Action {
     Quit,
 }
 
+/// A key's base: a printable character, or one of the named keys from the `[keybindings]`
+/// grammar (`specs/config.md` Keybindings).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyCode {
     Char(char),
     Left,
     Right,
+    Up,
+    Down,
+    PageUp,
+    PageDown,
 }
 
 impl KeyCode {
-    pub fn ui_str(self) -> String {
+    /// Every named key, the one list `by_name` and `names` derive from. The spellings live in
+    /// the exhaustive `name`/`label` matches, so a new variant cannot compile unspelled.
+    const NAMED: [KeyCode; 6] =
+        [Self::Left, Self::Right, Self::Up, Self::Down, Self::PageUp, Self::PageDown];
+
+    /// The config spelling: the bare character, or the named key's lowercase name
+    /// (`specs/config.md` Keybindings).
+    fn name(self) -> String {
         match self {
             Self::Char(ch) => ch.to_string(),
-            Self::Left => "←".to_string(),
-            Self::Right => "→".to_string(),
+            Self::Left => "left".into(),
+            Self::Right => "right".into(),
+            Self::Up => "up".into(),
+            Self::Down => "down".into(),
+            Self::PageUp => "pageup".into(),
+            Self::PageDown => "pagedown".into(),
         }
     }
-}
 
-impl std::fmt::Display for KeyCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    /// The screen label a hint paints: the character, or the named key's glyph
+    /// (`specs/input.md`).
+    fn label(self) -> String {
         match self {
-            KeyCode::Char(ch) => write!(f, "{ch}"),
-            KeyCode::Left => write!(f, "left"),
-            KeyCode::Right => write!(f, "right"),
+            Self::Char(ch) => ch.to_string(),
+            Self::Left => "←".into(),
+            Self::Right => "→".into(),
+            Self::Up => "↑".into(),
+            Self::Down => "↓".into(),
+            Self::PageUp => "PageUp".into(),
+            Self::PageDown => "PageDown".into(),
         }
+    }
+
+    /// The named key called `name` in `[keybindings]`, if any. Exact lowercase names only.
+    pub fn by_name(name: &str) -> Option<Self> {
+        Self::NAMED.into_iter().find(|code| code.name() == name)
+    }
+
+    /// Every named key's config name, for the keybindings value-error message.
+    pub fn names() -> impl Iterator<Item = String> {
+        Self::NAMED.into_iter().map(Self::name)
     }
 }
 
-/// One bound key: a base character, alone or under a `ctrl`/`alt` modifier. A modifier-less
+/// One bound key: a base [`KeyCode`], alone or under a `ctrl`/`alt` modifier. A modifier-less
 /// `Key` is the bare character the keymap answered before chords existed
 /// (`specs/config.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,59 +123,54 @@ impl Key {
         Self { ctrl: false, alt: false, code: KeyCode::Char(ch) }
     }
 
-    pub const fn right() -> Self {
-        Self { ctrl: false, alt: false, code: KeyCode::Right }
-    }
-
-    pub const fn left() -> Self {
-        Self { ctrl: false, alt: false, code: KeyCode::Left }
-    }
-
     /// A `ctrl+<ch>` chord.
     pub const fn ctrl(ch: char) -> Self {
         Self { ctrl: true, alt: false, code: KeyCode::Char(ch) }
     }
 
+    /// A bare named key, no modifier.
+    pub const fn named(code: KeyCode) -> Self {
+        Self { ctrl: false, alt: false, code }
+    }
+
+    /// The `ctrl+`/`alt+` prefixing both spellings share.
+    fn prefixed(self, base: String) -> String {
+        match (self.ctrl, self.alt) {
+            (true, _) => format!("ctrl+{base}"),
+            (false, true) => format!("alt+{base}"),
+            (false, false) => base,
+        }
+    }
+
     /// The spelling `[keybindings]` and `--resolve-plugin-config` round-trip: `ctrl+f`,
-    /// `alt+x`, or the bare character (specs/input.md, specs/config.md).
+    /// `alt+x`, the bare character, or a named key's lowercase name (`specs/config.md`).
+    /// There is deliberately no `Display` impl: a call site must pick this or [`Self::label`].
     pub fn config_str(self) -> String {
-        match (self.ctrl, self.alt) {
-            (true, _) => format!("ctrl+{}", self.code),
-            (false, true) => format!("alt+{}", self.code),
-            (false, false) => self.code.to_string(),
-        }
+        self.prefixed(self.code.name())
     }
 
-    /// The key spelling used in the UI. Arrow keys use glyphs while configurable names remain
-    /// spelled out by [`Self::config_str`].
-    pub fn ui_str(self) -> String {
-        let code = self.code.ui_str();
-        match (self.ctrl, self.alt) {
-            (true, _) => format!("ctrl+{code}"),
-            (false, true) => format!("alt+{code}"),
-            (false, false) => code,
-        }
-    }
-}
-
-impl std::fmt::Display for Key {
-    /// The footer and header hint, spelled out like the config (`ctrl+f`), one home in `config_str`.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.config_str())
+    /// The hint the footer and header paint: the config spelling, except a named key shows
+    /// its screen label — `→`, `PageUp` (`specs/input.md`).
+    pub fn label(self) -> String {
+        self.prefixed(self.code.label())
     }
 }
 
 /// Every action with its config name and default keys — the single source the default keymap,
 /// the name lookup, and the config error message are built from.
-const ACTIONS: [(Action, &str, &[Key]); 36] = [
-    (Action::Expand, "expand", &[Key::right()]),
-    (Action::Collapse, "collapse", &[Key::left()]),
-    (Action::Down, "down", &[Key::plain('j')]),
-    (Action::Up, "up", &[Key::plain('k')]),
+const ACTIONS: [(Action, &str, &[Key]); 40] = [
+    (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
+    (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
     (Action::PrevHunk, "prev-hunk", &[Key::plain('[')]),
     (Action::NextFile, "next-file", &[Key::plain('f')]),
     (Action::PrevFile, "prev-file", &[Key::plain('F')]),
+    (Action::Collapse, "collapse", &[Key::named(KeyCode::Left)]),
+    (Action::Expand, "expand", &[Key::named(KeyCode::Right)]),
+    (Action::PageUp, "page-up", &[Key::named(KeyCode::PageUp)]),
+    (Action::PageDown, "page-down", &[Key::named(KeyCode::PageDown)]),
+    (Action::HalfUp, "half-up", &[Key::ctrl('u')]),
+    (Action::HalfDown, "half-down", &[Key::ctrl('d')]),
     (Action::ScopeUncommitted, "scope-uncommitted", &[Key::plain('u')]),
     (Action::ScopeBranch, "scope-branch", &[Key::plain('b')]),
     (Action::ScopeLastTurn, "scope-last-turn", &[Key::plain('t')]),
@@ -303,6 +333,31 @@ mod tests {
         assert_eq!(keymap.action_for(Key::plain('?')), Some(Action::Keys));
         assert_eq!(keymap.hint(Action::Send), Key::plain('s'));
         assert_eq!(keymap.hint(Action::TabPr), Key::plain('3'));
+        assert_eq!(keymap.action_for(Key::named(KeyCode::Right)), Some(Action::Expand));
+        assert_eq!(keymap.action_for(Key::named(KeyCode::Left)), Some(Action::Collapse));
+        assert_eq!(keymap.action_for(Key::named(KeyCode::Down)), Some(Action::Down));
+        assert_eq!(keymap.action_for(Key::named(KeyCode::Up)), Some(Action::Up));
+        assert_eq!(keymap.action_for(Key::named(KeyCode::PageUp)), Some(Action::PageUp));
+        assert_eq!(keymap.action_for(Key::named(KeyCode::PageDown)), Some(Action::PageDown));
+        assert_eq!(keymap.action_for(Key::ctrl('u')), Some(Action::HalfUp));
+        assert_eq!(keymap.action_for(Key::ctrl('d')), Some(Action::HalfDown));
+        // The hint stays the first bound key: `j` for `down`, the named key for `expand`.
+        assert_eq!(keymap.hint(Action::Down), Key::plain('j'));
+        assert_eq!(keymap.hint(Action::Expand), Key::named(KeyCode::Right));
+    }
+
+    #[test]
+    fn a_named_key_spells_its_name_in_config_and_its_label_on_screen() {
+        let keymap = Keymap::default();
+        assert_eq!(keymap.hint(Action::Expand).config_str(), "right");
+        assert_eq!(keymap.hint(Action::Expand).label(), "→");
+        assert_eq!(keymap.hint(Action::Collapse).label(), "←");
+        assert_eq!(keymap.hint(Action::PageUp).config_str(), "pageup");
+        assert_eq!(keymap.hint(Action::PageUp).label(), "PageUp");
+        assert_eq!(keymap.hint(Action::PageDown).label(), "PageDown");
+        assert_eq!(Key { ctrl: true, alt: false, code: KeyCode::Right }.config_str(), "ctrl+right");
+        // A character key labels as itself, chords included.
+        assert_eq!(Key::ctrl('u').label(), "ctrl+u");
         assert_eq!(Action::by_config_name("list-wider"), Some(Action::NavigatorGrow));
         assert_eq!(Action::by_config_name("list-narrower"), Some(Action::NavigatorShrink));
     }
@@ -314,7 +369,6 @@ mod tests {
         // The bare `f` is `next-file`, unshadowed by the chord.
         assert_eq!(keymap.action_for(Key::plain('f')), Some(Action::NextFile));
         assert_eq!(keymap.hint(Action::Find), Key::ctrl('f'));
-        assert_eq!(keymap.hint(Action::Find).to_string(), "ctrl+f");
         assert_eq!(keymap.hint(Action::Find).config_str(), "ctrl+f");
     }
 
@@ -335,15 +389,9 @@ mod tests {
     #[test]
     fn find_rebinds_to_another_chord_or_a_bare_key() {
         // To another chord.
-        let keymap = Keymap::resolve(&[(
-            Action::Find,
-            vec![Key { ctrl: false, alt: true, code: KeyCode::Char('x') }],
-        )])
-        .unwrap();
-        assert_eq!(
-            keymap.action_for(Key { ctrl: false, alt: true, code: KeyCode::Char('x') }),
-            Some(Action::Find)
-        );
+        let alt_x = Key { ctrl: false, alt: true, code: KeyCode::Char('x') };
+        let keymap = Keymap::resolve(&[(Action::Find, vec![alt_x])]).unwrap();
+        assert_eq!(keymap.action_for(alt_x), Some(Action::Find));
         assert_eq!(keymap.action_for(Key::ctrl('f')), None, "the default chord is freed");
 
         // And to a bare key, demoting the chord action to a plain character.

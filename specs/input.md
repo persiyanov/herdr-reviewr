@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-17
-Last edited: 2026-08-13
+Last edited: 2026-08-17
 ---
 
 # Input
@@ -15,12 +15,13 @@ Every action has a key. The mouse-relevant ones also work by click or drag.
 The keymap is rebindable per action through `[keybindings]` in the plugin config (`config.md`):
 
 - The `action` column names the action for `[keybindings]`.
-- The keys shown are defaults: a bare character, or a `ctrl+`/`alt+` chord (`config.md`).
-- The arrows, `tab`, `esc`, `enter`, and the page keys are structural. They are fixed and never rebind.
+- The keys shown are defaults: a bare character, a named key, or a `ctrl+`/`alt+` chord (`config.md`).
+- `tab`, `esc`, and `enter` are structural. They are fixed and never rebind.
 - A key hint in the header or the footer shows its action's first bound key.
+- A named key spells as its name in the config and paints as its screen label: `←`, `→`, `↑`, `↓`, `PageUp`, `PageDown`.
 - The comments list acts through the same bindings and closes on `esc` and the `comments` binding.
 - The agent picker acts through the `down` / `up` bindings and closes on `esc`.
-- The base picker filters through a text field with the comment editor's controls, moves through the arrows, and closes on `esc`.
+- The base picker filters through a text field with the comment editor's controls, moves through the arrows, and closes on `esc`. Its keys are fixed like every text field's, whatever `down` / `up` are bound to.
 - Prose and mockups elsewhere show the default keys.
 
 | action                                                   | does                                        | keys                                        | mouse                         |
@@ -28,15 +29,14 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | `down` / `up`                                            | move the cursor in the focused pane         | `j` / `k` / `↓` / `↑`                       | click a row                   |
 | `next-hunk` / `prev-hunk`                                | jump to the next / previous hunk            | `]` / `[`                                   | —                             |
 | `next-file` / `prev-file`                                | jump to the next / previous file            | `f` / `F`                                   | —                             |
-| `collapse` / `expand`                                    | collapse / expand a directory               | `←` / `→`                       | click the directory row       |
+| `collapse` / `expand`                                    | collapse / expand, else scroll sideways     | `←` / `→`                                   | click the directory or `⋯` row |
 | —                                                        | switch focus between list and diff          | `tab`                                       | click a pane                  |
-| —                                                        | move a page                                 | `PageUp` / `PageDown` / `ctrl+u` / `ctrl+d` | —                             |
+| `page-up` / `page-down`                                  | move a page                                 | `PageUp` / `PageDown`                       | —                             |
+| `half-up` / `half-down`                                  | move a half page                            | `ctrl+u` / `ctrl+d`                         | —                             |
 | —                                                        | scroll the viewport, selection put          | —                                           | wheel over the pane           |
-| —                                                        | scroll the diff horizontally (wrap off)     | `←` / `→`                                   | —                             |
 | `scope-uncommitted` / `scope-branch` / `scope-last-turn` | switch scope                                | `u` / `b` / `t`                             | click the scope chip to cycle |
 | `base-pick`                                              | open the base picker                        | `B`                                         | click the base name           |
 | `tab-changes` / `tab-all-files` / `tab-pr`               | switch tab                                  | `1` / `2` / `3`                             | click a tab name              |
-| —                                                        | expand the fold under the cursor            | `→`                                         | click the `⋯` row             |
 | —                                                        | open a link in rendered markdown            | —                                           | click the link                |
 | `wrap`                                                   | toggle line wrap                            | `w`                                         | —                             |
 | `preview`                                                | toggle the markdown preview                 | `m`                                         | —                             |
@@ -85,10 +85,6 @@ Writing a comment: select a range or land on a line, press `c`, type into the in
 - A file with no changed rows is crossed over, notice diffs (`binary`, `too_large`) included.
 - The steps are inert in `All files` and in the markdown preview, which paint no changed rows.
 
-`h`/`l` collapse and expand the directory under the cursor in the file navigator. They mirror
-`←`/`→`; `l` replaces `comments` while the cursor is on a directory, and opens the comments list
-elsewhere.
-
 `next-file` / `prev-file` skip a file per press, from either pane, and never arm:
 
 - In the diff, each press opens the next or previous file, cursor on its first row. Focus stays on the diff.
@@ -102,6 +98,14 @@ The steps and the skips share the rest:
 - With no target in the pressed direction, a press does nothing.
 - Both are inert while a line selection is live and while the comments list, the agent picker, or the base picker is open.
 - The `PR` tab has neither.
+
+### Expand and collapse
+
+`expand` and `collapse` act on the collapsible under the cursor, and scroll the diff sideways from anywhere else. A rebind moves the whole bundle.
+
+- On a directory row in the focused file list, `expand` shows its children and `collapse` hides them.
+- On a fold in the diff, `expand` opens it. An open fold never closes again, so `collapse` scrolls there.
+- Elsewhere, `expand` scrolls the diff right and `collapse` scrolls it left. The scroll is inert while wrap is on.
 
 ### Footer
 
@@ -232,7 +236,7 @@ A plain-text field that edits at the caret, not only at the end. The search inpu
 
 ### Agent picker
 
-`Send` opens the picker (`herdr-host.md`). Every key below acts, and every other key is inert.
+`Send` opens the picker (`herdr-host.md`). Every key below acts, and every other key is inert. The movement row shows the `down` / `up` defaults and follows a rebind. The digits, `enter`, and `esc` are literal.
 
 | key                     | does                                        |
 | ----------------------- | ------------------------------------------- |
@@ -278,9 +282,9 @@ The filter is a text field with the comment editor's controls, above. `↑` and 
 ## Non-goals
 
 - No text selection, cut/copy, undo/redo, markdown rendering, or click-to-place-caret in the comment editor.
-- No named-key or multi-key sequence bindings. A binding is one key, alone or with a `ctrl+`/`alt+` prefix.
+- No multi-key sequence bindings. A binding is one key, alone or with a `ctrl+`/`alt+` prefix.
 - No `down` / `up` crossing at a file's edges. The line cursor clamps there.
-- The `?` expansion omits the navigator-resize keys and the horizontal-diff-scroll keys. Resizing is a divider drag first, and horizontal scroll is one of the `←` / `→` keys' several meanings.
+- The `?` expansion omits the navigator-resize keys, the half-page keys, and the `expand` / `collapse` keys. Resizing is a divider drag first, and the fold and scroll meanings are contextual row-1 actions.
 
 ## Related specs
 

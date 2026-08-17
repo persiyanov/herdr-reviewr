@@ -12,7 +12,7 @@ use herdr_reviewr::app::{App, Band, Focus, FooterAction, Mode};
 use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::export::ExportTarget;
 use herdr_reviewr::herdr::{AgentChoice, AgentSample};
-use herdr_reviewr::keymap::{Action, Key, KeyCode as BindingKeyCode, Keymap};
+use herdr_reviewr::keymap::{Action, Key, KeyCode as BindingCode, Keymap};
 use herdr_reviewr::model::{Scope, Side};
 use herdr_reviewr::turn::Status;
 use herdr_reviewr::{handle_key, handle_mouse};
@@ -200,12 +200,7 @@ fn a_boundary_move_reveals_the_cursor_after_wheeling() {
 
 #[test]
 fn toggling_a_directory_requests_a_reveal() {
-    let r = Repo::init();
-    r.write("src/a.rs", "x\n");
-    r.write("src/b.rs", "y\n");
-    r.commit_all("init");
-    r.write("src/a.rs", "x2\n");
-    r.write("src/b.rs", "y2\n");
+    let r = folder_repo();
     let mut app = app_on(&r);
     app.focus = Focus::Files;
     let dir = app.file_rows.iter().position(|row| row.dir_path() == Some("src")).unwrap();
@@ -1356,33 +1351,110 @@ fn the_cursor_stays_on_a_folder_across_a_poll_and_toggle() {
     assert_eq!(app.diff_path, open, "the open diff is still unchanged");
 }
 
-#[test]
-fn arrows_collapse_and_expand_a_folder() {
+/// A repo with a `src/` directory of two edited files, cursor parked on the directory row.
+fn folder_repo() -> Repo {
     let r = Repo::init();
     r.write("src/a.rs", "x\n");
     r.write("src/b.rs", "y\n");
     r.commit_all("init");
     r.write("src/a.rs", "x2\n");
     r.write("src/b.rs", "y2\n");
-    let config_dir = tempfile::tempdir().unwrap();
-    let config = herdr_reviewr::config::plugin_config_in(config_dir.path()).unwrap();
+    r
+}
+
+#[test]
+fn default_arrows_fold_a_folder_and_scroll_the_diff_elsewhere() {
+    let r = folder_repo();
     let mut app = app_on(&r);
-    app.set_plugin_config(config);
+    let keymap = Keymap::default();
     app.focus = Focus::Files;
 
     let dir_row = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
     app.file_cursor = dir_row;
     assert!(app.on_folder(), "the cursor is on the folder");
     let expanded = app.file_rows.len();
-    let area = Rect::new(0, 0, 120, 40);
-    let keymap = app.keymap().clone();
 
-    handle_key(&mut app, KeyEvent::from(KeyCode::Left), area, &keymap).unwrap();
-    assert!(app.file_rows.len() < expanded, "left collapses the folder");
+    press(&mut app, &keymap, KeyCode::Left);
+    assert!(app.file_rows.len() < expanded, "`←` collapses the folder");
     assert!(app.on_folder(), "the cursor stays on the folder row");
 
-    handle_key(&mut app, KeyEvent::from(KeyCode::Right), area, &keymap).unwrap();
-    assert_eq!(app.file_rows.len(), expanded, "right expands the folder");
+    press(&mut app, &keymap, KeyCode::Right);
+    assert_eq!(app.file_rows.len(), expanded, "`→` expands it again");
+
+    // Off the collapsible, the same keys scroll the open diff sideways (wrap off).
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path().is_none()).unwrap();
+    app.wrap = false;
+    assert!(!app.on_folder());
+    press(&mut app, &keymap, KeyCode::Right);
+    assert_eq!(app.h_scroll, 8, "`→` scrolls the diff right");
+    press(&mut app, &keymap, KeyCode::Left);
+    assert_eq!(app.h_scroll, 0, "`←` scrolls it back");
+}
+
+#[test]
+fn expand_rebinds_to_a_character_and_the_freed_arrow_goes_dead() {
+    let r = folder_repo();
+    let mut app = app_on(&r);
+    // The vim shape: `l`/`h` fold, `comments` moves off `l` to make room.
+    let keymap = Keymap::resolve(&[
+        (Action::Expand, vec![Key::plain('l')]),
+        (Action::Collapse, vec![Key::plain('h')]),
+        (Action::Comments, vec![Key::plain('L')]),
+    ])
+    .unwrap();
+    app.focus = Focus::Files;
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
+    let expanded = app.file_rows.len();
+
+    press(&mut app, &keymap, KeyCode::Char('h'));
+    assert!(app.file_rows.len() < expanded, "the bound `h` collapses the folder");
+    press(&mut app, &keymap, KeyCode::Char('l'));
+    assert_eq!(app.file_rows.len(), expanded, "the bound `l` expands it");
+
+    // The named-key defaults were replaced, so the arrows answer nothing anywhere.
+    press(&mut app, &keymap, KeyCode::Left);
+    assert_eq!(app.file_rows.len(), expanded, "the freed `←` no longer folds");
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path().is_none()).unwrap();
+    press(&mut app, &keymap, KeyCode::Right);
+    assert_eq!(app.h_scroll, 0, "the freed `→` no longer scrolls");
+}
+
+#[test]
+fn page_down_rebinds_and_half_page_defaults_hold() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.diff_cursor = 0;
+
+    let keymap = Keymap::default();
+    press(&mut app, &keymap, KeyCode::PageDown);
+    let paged = app.diff_cursor;
+    assert!(paged > 0, "`PageDown` moves the cursor by default");
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        Rect::new(0, 0, 120, 40),
+        &keymap,
+    )
+    .unwrap();
+    assert!(app.diff_cursor < paged, "`ctrl+u` half-pages back up");
+
+    let keymap = Keymap::resolve(&[(
+        Action::PageDown,
+        vec![Key { ctrl: true, alt: false, code: BindingCode::Char('n') }],
+    )])
+    .unwrap();
+    app.diff_cursor = 0;
+    press(&mut app, &keymap, KeyCode::PageDown);
+    assert_eq!(app.diff_cursor, 0, "the freed `PageDown` answers nothing");
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+        Rect::new(0, 0, 120, 40),
+        &keymap,
+    )
+    .unwrap();
+    assert!(app.diff_cursor > 0, "the rebound chord pages down");
 }
 
 #[test]
@@ -3316,7 +3388,7 @@ fn rebound_keys_dispatch_and_replaced_defaults_go_inert() {
 }
 
 #[test]
-fn fixed_keys_survive_rebinding() {
+fn rebinding_down_frees_the_arrow_and_tab_stays_fixed() {
     let r = edited_repo();
     let mut app = app_on(&r);
     let keymap = Keymap::resolve(&[
@@ -3327,11 +3399,15 @@ fn fixed_keys_survive_rebinding() {
     app.focus = Focus::Diff;
     app.diff_cursor = 0;
 
+    // The arrows are the `down`/`up` defaults, replaced like any other key (`specs/input.md`).
     press(&mut app, &keymap, KeyCode::Down);
-    assert!(app.diff_cursor > 0, "the down arrow still moves the cursor");
+    assert_eq!(app.diff_cursor, 0, "the freed down arrow answers nothing");
+
+    press(&mut app, &keymap, KeyCode::Char('x'));
+    assert!(app.diff_cursor > 0, "the bound key moves the cursor");
 
     press(&mut app, &keymap, KeyCode::Tab);
-    assert_eq!(app.focus, Focus::Files, "tab still switches focus");
+    assert_eq!(app.focus, Focus::Files, "tab is structural and never rebinds");
 }
 
 // ---- in-file find (specs/find-in-file.md) -----------------------------------------------
@@ -3593,7 +3669,7 @@ fn find_opens_on_a_rebound_alt_chord_through_the_dispatcher() {
     let mut app = app_on(&r);
     let keymap = Keymap::resolve(&[(
         Action::Find,
-        vec![Key { ctrl: false, alt: true, code: BindingKeyCode::Char('x') }],
+        vec![Key { ctrl: false, alt: true, code: BindingCode::Char('x') }],
     )])
     .unwrap();
     app.focus = Focus::Diff;
@@ -5002,6 +5078,20 @@ fn the_picker_moves_by_key_and_a_digit_past_the_last_row_is_inert() {
     // A mistyped digit must not arm a neighbour the reviewer would then send to.
     handle_key(&mut app, KeyEvent::from(KeyCode::Char('7')), area, &keymap).unwrap();
     assert_eq!(app.picker_cursor, 2, "a row past the end is inert, not clamped");
+}
+
+#[test]
+fn the_picker_follows_a_down_rebind_like_the_main_view() {
+    let r = edited_repo();
+    let mut app = app_with_picker(&r);
+    let keymap = Keymap::resolve(&[(Action::Down, vec![Key::plain('x')])]).unwrap();
+    let area = Rect::new(0, 0, 80, 24);
+    assert_eq!(app.picker_cursor, 0);
+
+    handle_key(&mut app, KeyEvent::from(KeyCode::Char('x')), area, &keymap).unwrap();
+    assert_eq!(app.picker_cursor, 1, "the rebound key moves the highlight");
+    handle_key(&mut app, KeyEvent::from(KeyCode::Down), area, &keymap).unwrap();
+    assert_eq!(app.picker_cursor, 1, "the freed arrow no longer moves it");
 }
 
 #[test]

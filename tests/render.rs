@@ -255,7 +255,7 @@ fn caret_vertical_moves_between_wrapped_rows() {
 }
 
 #[test]
-fn the_fold_hint_names_the_arrow_key() {
+fn the_fold_hint_names_the_expand_binding() {
     use std::fmt::Write as _;
     let r = Repo::init();
     let mut body = String::new();
@@ -272,6 +272,15 @@ fn the_fold_hint_names_the_arrow_key() {
     let out = render(&app);
     assert!(out.contains("→ expand"), "the fold hint names the `→` key");
     assert!(!out.contains("⏎ expand"), "no stale enter hint remains");
+
+    // A rebound `expand` renames the fold row's inline label and the footer hint alike
+    // (`specs/input.md`: a hint shows the action's first bound key).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "[keybindings]\nexpand = [\"x\"]\n").unwrap();
+    app.set_plugin_config(herdr_reviewr::config::plugin_config_in(dir.path()).unwrap());
+    let out = render(&app);
+    assert!(out.contains("x expand"), "the rebound key names the hint:\n{out}");
+    assert!(!out.contains("→ expand"), "the freed arrow leaves the hint");
 }
 
 fn edited_app() -> App {
