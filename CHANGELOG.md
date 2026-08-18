@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **The PR tab finds brew-installed forge CLIs.** herdr launches plugin panes with a minimal
+  `PATH`, so a `gh` in `/opt/homebrew/bin` never resolved and the PR tab read "GitHub CLI not
+  found. Install `gh`". Every open now forwards the action script's prepended `PATH` to the
+  pane — the same list it already relies on for `jq`/`git`.
+
 ## [0.32.0] — 2026-08-17
 
 ### Added

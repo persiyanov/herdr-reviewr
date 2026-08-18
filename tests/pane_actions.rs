@@ -540,6 +540,18 @@ fn the_flag_dispatch_matches_the_actions_anywhere_in_argv() {
 }
 
 #[test]
+fn open_forwards_the_prepended_path_so_the_pane_resolves_the_forge_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let (herdr, log) = fake_herdr(dir.path());
+
+    let output = run_open(dir.path(), &herdr);
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let calls = fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("--env PATH="), "{calls}");
+}
+
+#[test]
 fn valid_non_default_placement_and_direction_reach_herdr_arguments() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");

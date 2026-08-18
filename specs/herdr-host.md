@@ -78,6 +78,11 @@ A `split` or `zoomed` open attaches to the focused pane, or to the workspace's f
 
 A `tab` open names the fresh tab `reviewr`, using the `tab_id` the pane-open result reports. herdr otherwise labels a new tab with a bare number. The rename is cosmetic. When it fails, or an older herdr omits `tab_id`, the open still succeeds and the tab keeps its numeric label.
 
+Every open forwards this script's prepended `PATH` to the pane (`--env PATH`). herdr launches
+plugin panes with a minimal `PATH` (docs/herdr-api-notes.md), and the pane's PR tab executes
+the forge CLI — `gh`/`glab`/`az` — from `PATH`; without the forwarding, a brew-installed CLI
+renders as "GitHub CLI not found".
+
 **HH-EVENT-BESIDE-LAYOUT: a layout plugin handles the same event**
 
 1. The user sets `auto_open = false`. A layout plugin also handles `worktree.created`.
