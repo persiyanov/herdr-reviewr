@@ -380,7 +380,7 @@ fn run_cli(cmd: &mut Command, cancelled: &AtomicBool) -> Result<String, CliError
 
 /// Run explicitly targeted `gh` arguments in `repo` and return stdout or a classified failure.
 fn gh(repo: &Path, host: &str, args: &[&str], cancelled: &AtomicBool) -> Result<String, GhError> {
-    let mut cmd = Command::new("gh");
+    let mut cmd = crate::proc::command("gh");
     cmd.current_dir(repo).args(args);
     run_provider(
         &mut cmd,

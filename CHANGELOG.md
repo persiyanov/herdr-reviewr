@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.32.1] — 2026-08-18
+
+### Fixed
+- **Brew-installed host tools resolve from any launch.** herdr starts plugin panes with a
+  PATH that omits Homebrew, so the PR tab reported `gh` as missing. Reviewr now looks up
+  and spawns host tools against the usual bin dirs plus the inherited PATH, so
+  `gh`/`glab`/`az` resolve however the pane was opened.
+
 ## [0.32.0] — 2026-08-17
 
 ### Added

@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-08-13
+Last edited: 2026-08-18
 ---
 
 # herdr host
@@ -21,6 +21,8 @@ The binary paints its empty frame before the first git scan, so the pane never s
 | `HH-PLACEMENT-CONFIGURED` | Every action or event open uses the placement named by `toggle_placement`. |
 | `HH-TURN-PER-WORKTREE`    | A turn belongs to the worktree, never to one agent.                        |
 | `HH-LAUNCHER-BLIND`       | A reviewr pane behaves the same however it was created.                    |
+
+The reviewr process can resolve host tools in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, and `/bin` however it was launched.
 
 ## Pane identity
 

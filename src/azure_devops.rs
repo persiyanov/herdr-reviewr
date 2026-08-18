@@ -7,7 +7,6 @@
 //! writes to Azure DevOps.
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
 use serde_json::Value;
@@ -92,7 +91,7 @@ fn az_json(
     args: &[&str],
     cancelled: &AtomicBool,
 ) -> Result<Value, AzError> {
-    let mut cmd = Command::new("az");
+    let mut cmd = crate::proc::command("az");
     cmd.current_dir(repo).args(args).args(["--organization", org_url, "--output", "json"]);
     let stdout = crate::forge::run_provider(
         &mut cmd,

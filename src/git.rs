@@ -5,7 +5,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -13,7 +12,7 @@ use crate::model::{ChangeKind, ChangedFile, Scope};
 
 /// Run `git -C <repo> <args>` and return stdout. Errors on non-zero exit.
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
+    let out = crate::proc::command("git")
         .arg("-C")
         .arg(repo)
         .args(["-c", "core.quotepath=false"])
@@ -28,7 +27,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
 
 /// Like [`git`], but returns stdout even on non-zero exit (e.g. `diff --no-index`).
 fn git_lenient(repo: &Path, args: &[&str]) -> String {
-    Command::new("git")
+    crate::proc::command("git")
         .arg("-C")
         .arg(repo)
         .args(["-c", "core.quotepath=false"])
@@ -41,7 +40,7 @@ fn git_lenient(repo: &Path, args: &[&str]) -> String {
 /// Run `git -C <repo> <args>` and return its trimmed stdout, or `None` if the command fails to
 /// spawn, exits non-zero, or prints nothing. The one-line query workhorse for `rev-parse`/`merge-base`.
 fn git_line(repo: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(repo).args(args).output().ok()?;
+    let out = crate::proc::command("git").arg("-C").arg(repo).args(args).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -51,7 +50,12 @@ fn git_line(repo: &Path, args: &[&str]) -> Option<String> {
 
 /// Whether `git -C <repo> <args>` spawns and exits zero. The predicate workhorse for existence checks.
 fn git_ok(repo: &Path, args: &[&str]) -> bool {
-    Command::new("git").arg("-C").arg(repo).args(args).output().is_ok_and(|o| o.status.success())
+    crate::proc::command("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Whether `path` is inside a git work tree.
@@ -81,7 +85,12 @@ pub enum Worktree {
 
 /// Resolve `path` to its worktree, distinguishing the two ways resolution yields no root.
 pub fn worktree_of(path: &Path) -> Worktree {
-    match Command::new("git").arg("-C").arg(path).args(["rev-parse", "--show-toplevel"]).output() {
+    match crate::proc::command("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+    {
         Err(_) => Worktree::Unknown,
         Ok(out) if !out.status.success() => Worktree::Outside,
         Ok(out) => match String::from_utf8_lossy(&out.stdout).trim() {
@@ -430,7 +439,7 @@ pub struct GitFail(pub String);
 /// Spawn one PR-fetch git read. `LC_ALL=C` pins Git's messages to English — remote discovery
 /// classifies a missing remote by stderr text, which Git otherwise localizes.
 fn run_git(repo: &Path, args: &[&str]) -> Result<std::process::Output, GitFail> {
-    Command::new("git")
+    crate::proc::command("git")
         .arg("-C")
         .arg(repo)
         .env("LC_ALL", "C")
@@ -950,7 +959,7 @@ pub fn clear_base_pick(repo: &Path) -> Result<(), GitFail> {
 fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail> {
     use std::io::Write;
     use std::process::Stdio;
-    let mut child = Command::new("git")
+    let mut child = crate::proc::command("git")
         .arg("-C")
         .arg(repo)
         .env("LC_ALL", "C")
@@ -1032,7 +1041,7 @@ impl Drop for TempIndex<'_> {
 /// Like [`git`], but runs against a throwaway index via `GIT_INDEX_FILE` so the snapshot
 /// never disturbs the repo's real index.
 fn git_with_index(repo: &Path, index: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
+    let out = crate::proc::command("git")
         .arg("-C")
         .arg(repo)
         .args(["-c", "core.quotepath=false"])

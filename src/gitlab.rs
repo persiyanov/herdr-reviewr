@@ -6,7 +6,6 @@
 //! same normalized [`PrSnapshot`] the GitHub provider does. It never writes to GitLab.
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
 use serde_json::Value;
@@ -89,7 +88,7 @@ fn glab_raw(
     endpoint: &str,
     cancelled: &AtomicBool,
 ) -> Result<String, GlabError> {
-    let mut cmd = Command::new("glab");
+    let mut cmd = crate::proc::command("glab");
     cmd.current_dir(repo).args(glab_args(host, endpoint));
     crate::forge::run_provider(
         &mut cmd,

@@ -5,7 +5,7 @@
 //! a comment only after `export` returns `Ok`.
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 
@@ -83,7 +83,7 @@ impl ExportTarget for Clipboard {
             "no clipboard tool found (install wl-clipboard, xclip, or xsel) — \
              use Send instead",
         )?;
-        let mut child = Command::new(cmd)
+        let mut child = crate::proc::command(cmd)
             .args(args)
             .stdin(Stdio::piped())
             .spawn()

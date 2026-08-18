@@ -10,7 +10,6 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -84,7 +83,7 @@ fn herdr_bin() -> String {
 /// own or drops it. So the whole of it — the argv, which carries a review's text in `pane
 /// send-text`, and herdr's JSON error envelope — goes to the log and only there.
 fn herdr(args: &[&str]) -> Result<String> {
-    let out = match Command::new(herdr_bin()).args(args).output() {
+    let out = match crate::proc::command(herdr_bin()).args(args).output() {
         Ok(out) => out,
         Err(e) => {
             logln!("herdr {args:?} could not run: {e}");
