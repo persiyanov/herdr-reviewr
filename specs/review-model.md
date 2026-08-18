@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-08-08
+Last edited: 2026-08-18
 ---
 
 # Review model
@@ -93,10 +93,21 @@ A row in the `Changes` list carries:
 | `kind`          | `added`, `modified`, `deleted`, `renamed`, or `untracked` |
 | `additions`     | lines added in the scope, all lines for an untracked file |
 | `deletions`     | lines removed in the scope                                |
+| `binary`        | git gives no text diff for this change                    |
 
 ### Diff
 
 The selected file's structured diff, built from its old and new content (`diff-view.md`). Comment anchors and snippets come from it. An untracked file diffs against empty old content. A binary file lists, and its pane reads `binary — no line comments`.
+
+#### The binary decision
+
+Git decides which changes have no text diff. reviewr obeys that decision. It does not make its own decision from the content.
+
+- The changeset reports the decision in `binary`. A tracked change is `binary` when git gives no line counts for it.
+- Git gives no line counts for binary content, for a path where `.gitattributes` unsets the `diff` attribute (`-diff`, or the `binary` macro), and for a diff driver that git will not use for text.
+- A `binary` change goes directly to the notice. reviewr does not read the old content or the new content of that file.
+- An untracked file never gets a git diff, so no line counts speak for it. reviewr asks git for its `diff` attribute directly, for all untracked paths of the scope together. The file is `binary` when that attribute is unset, or when the content has a NUL byte. The same bytes get the same result whether or not git tracks the file.
+- The decision applies to the diff only. `All files` shows the content of the same file (`diff-view.md`).
 
 ### File content
 

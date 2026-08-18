@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-24
-Last edited: 2026-08-15
+Last edited: 2026-08-18
 ---
 
 # Diff view
@@ -61,6 +61,7 @@ You can select content rows for comments in the file tabs. You cannot select a `
 ### The model
 
 - Old content comes from `git show`. New content comes from the worktree. In the `branch` scope, new content comes from `git show`. An `untracked` file has empty old content. A `deleted` file has empty new content.
+- A change that git reports as `binary` goes to the notice before this read. The viewer reads no content for it. `review-model.md` owns that decision, which obeys `.gitattributes`.
 - Changes go into hunks. The context margin is 3 unchanged lines.
 - The full file has highlight. Each hunk does not have its own highlight. A string or a comment that spans many lines has the correct color inside a hunk.
 - The language comes from the path. A path that is not known shows as plain.
@@ -153,7 +154,7 @@ Return to source is different per view.
 The viewer only reads. The viewer is computed again on each refresh. The viewer degrades. The viewer does not block.
 
 - A file over the size budget shows `too_large`. The viewer does not hang.
-- A binary file shows `binary — no line comments`.
+- A binary file shows `binary — no line comments`. A file that `.gitattributes` makes not diffable shows the same notice, because git gives no text diff for it (`review-model.md`).
 - If highlight fails, the viewer uses plain spans. The diff still shows.
 - A diff that is empty on both sides shows its header and a notice of one line. The pane is not empty. A rename only, or a mode-only change, shows that content. The content is closed to a fold.
 - A refresh computes the model again. Saved comments do not change. A comment that is in progress does not change.

@@ -2993,6 +2993,48 @@ fn a_file_view_comment_exports_as_path_line_with_a_context_snippet() {
 }
 
 #[test]
+fn a_diff_unset_file_reads_as_the_binary_notice_not_a_text_diff() {
+    // `.gitattributes` `-diff` on a text file: git refuses to text-diff it, and the pane
+    // takes that verdict instead of re-deciding from content (`specs/review-model.md`).
+    use herdr_reviewr::diff::{FileState, View};
+    let r = Repo::init();
+    r.write(".gitattributes", "flake.lock -diff\n");
+    r.write("flake.lock", "one\ntwo\n");
+    r.commit_all("init");
+    r.write("flake.lock", "one\nTWO\n");
+
+    let mut app = app_on(&r);
+    let row = file_row_of(&app, "flake.lock").expect("flake.lock listed");
+    app.select_file(row).unwrap();
+
+    assert_eq!(app.diff.state, FileState::Binary);
+    assert_eq!(app.diff.view, View::Diff);
+    assert!(app.diff.rows.is_empty(), "a notice has no rows to comment on");
+    assert!(app.visible.is_empty());
+}
+
+#[test]
+fn a_diff_unset_file_in_all_files_still_reads_its_content() {
+    // The attribute governs diffing, not reading. `All files` shows the file itself, so a
+    // `-diff` text file stays readable there (`specs/diff-view.md` File view).
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::diff::{FileState, View};
+    let r = Repo::init();
+    r.write(".gitattributes", "flake.lock -diff\n");
+    r.write("flake.lock", "one\ntwo\n");
+    r.commit_all("init");
+
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    let row = file_row_of(&app, "flake.lock").expect("flake.lock listed");
+    app.select_file(row).unwrap();
+
+    assert_eq!(app.diff.state, FileState::Normal);
+    assert_eq!(app.diff.view, View::File);
+    assert!(app.diff.rows.iter().any(|row| row.text().contains("two")));
+}
+
+#[test]
 fn an_oversize_file_in_all_files_degrades_to_a_notice() {
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::diff::{FileState, View};

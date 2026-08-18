@@ -73,6 +73,10 @@ pub struct ChangedFile {
     /// The old path of a renamed file; `None` for every other kind. Its old content lives
     /// at this path, so a rename diffs real content instead of reading as all-insertion.
     pub previous_path: Option<String>,
+    /// Git's own no-text-diff verdict for this change: binary content, or a path whose
+    /// `diff` attribute `.gitattributes` unsets. The pane reads it as the `binary` notice
+    /// without reading either side (`specs/review-model.md`).
+    pub binary: bool,
 }
 
 /// Which side of the diff a comment's lines live on.

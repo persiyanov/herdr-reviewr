@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`.gitattributes` is respected in the diff.** A file marked `-diff` or `binary` there — a
+  lockfile, a generated bundle, a snapshot fixture — used to open as a full text diff even
+  though git itself refuses to diff it. It now reads `binary — no line comments`, the same as
+  any other binary, and reviewr no longer reads either side of it. This holds for a file the
+  agent has only just written, before it is tracked. `All files` still shows the file's
+  content, since the attribute governs diffing, not reading.
+
 ## [0.32.0] — 2026-08-17
 
 ### Added

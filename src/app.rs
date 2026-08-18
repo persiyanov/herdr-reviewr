@@ -1155,8 +1155,18 @@ impl App {
             self.preview_max_scroll.set(usize::MAX);
         }
         self.diff_path = Some(path.clone());
-        let (old, new) = self.content_sides(&path, previous_path.as_deref());
-        self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
+        // Git already reported no text diff for this change — binary content, or a path whose
+        // `diff` attribute `.gitattributes` unsets. Take that verdict rather than re-deciding
+        // from content, which would paint a `-diff` lockfile as a full text diff, and skip
+        // both blob reads while we are at it (specs/review-model.md).
+        let new = if self.changed.get(&path).is_some_and(|a| a.binary) {
+            self.diff = FileDiff::binary_notice(path, previous_path);
+            String::new()
+        } else {
+            let (old, new) = self.content_sides(&path, previous_path.as_deref());
+            self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
+            new
+        };
         // Hold the new side as the preview's render input, the same current content the File
         // view previews. A non-markdown file, a notice, or a deleted file (empty new side)
         // holds nothing, so its toggle stays inert (specs/diff-view.md).

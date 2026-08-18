@@ -947,6 +947,11 @@ pub fn clear_base_pick(repo: &Path) -> Result<(), GitFail> {
 }
 
 /// Run git with `input` piped to stdin, any non-zero exit a failure.
+///
+/// The write runs on its own thread. An input large enough to fill the stdin pipe — the
+/// untracked path set of [`diff_unset`] — would otherwise block here before anything read
+/// stdout, while git blocks writing the stdout it cannot flush: a deadlock with no timeout
+/// to break it, on the thread that draws the frame.
 fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail> {
     use std::io::Write;
     use std::process::Stdio;
@@ -960,13 +965,13 @@ fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail>
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| GitFail(format!("git {args:?}: {e}")))?;
-    child
-        .stdin
-        .take()
-        .expect("stdin piped")
-        .write_all(input.as_bytes())
-        .map_err(|e| GitFail(format!("git {args:?}: {e}")))?;
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    let owned = input.to_string();
+    // A git that answers and exits before reading it all closes the pipe. That is its answer,
+    // not a failure of ours, so the write's result is dropped and the exit status decides.
+    let writer = std::thread::spawn(move || drop(stdin.write_all(owned.as_bytes())));
     let out = child.wait_with_output().map_err(|e| GitFail(format!("git {args:?}: {e}")))?;
+    let _ = writer.join();
     if !out.status.success() {
         return Err(GitFail(format!(
             "git {args:?}: {}",
@@ -1230,8 +1235,18 @@ fn assemble(
         if !seen.insert(path.clone()) {
             continue;
         }
-        let (additions, deletions) = counts.get(&path).copied().unwrap_or((0, 0));
-        files.push(ChangedFile { path, kind, additions, deletions, previous_path });
+        // A path missing from the numstat has no counts to contradict, so it reads as an
+        // ordinary empty change rather than as git's no-text-diff verdict.
+        let verdict = counts.get(&path).copied().unwrap_or(Some((0, 0)));
+        let (additions, deletions) = verdict.unwrap_or((0, 0));
+        files.push(ChangedFile {
+            path,
+            kind,
+            additions,
+            deletions,
+            previous_path,
+            binary: verdict.is_none(),
+        });
     }
 
     if include_untracked {
@@ -1240,18 +1255,24 @@ fn assemble(
         // `-z` keeps paths with spaces or special characters verbatim, and files inside a
         // brand-new directory list individually (.gitignore still applies).
         let others = git(repo, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-        for path in others.split('\0').filter(|s| !s.is_empty()) {
+        let new_paths: Vec<&str> =
+            others.split('\0').filter(|p| !p.is_empty() && !seen.contains(*p)).collect();
+        let undiffable = diff_unset(repo, &new_paths)?;
+        for path in new_paths {
             let path = path.to_string();
-            if seen.insert(path.clone()) {
-                let additions = untracked_additions(repo, &path);
-                files.push(ChangedFile {
-                    path,
-                    kind: ChangeKind::Untracked,
-                    additions,
-                    deletions: 0,
-                    previous_path: None,
-                });
+            if !seen.insert(path.clone()) {
+                continue;
             }
+            let additions = untracked_additions(repo, &path);
+            let binary = additions.is_none() || undiffable.contains(path.as_str());
+            files.push(ChangedFile {
+                path,
+                kind: ChangeKind::Untracked,
+                additions: additions.unwrap_or(0),
+                deletions: 0,
+                previous_path: None,
+                binary,
+            });
         }
     }
 
@@ -1259,49 +1280,101 @@ fn assemble(
     Ok(files)
 }
 
+/// Of `paths`, those whose `diff` attribute git reports as unset — `-diff`, or the `binary`
+/// macro that implies it (`specs/review-model.md`). Empty when `paths` is, so a repository
+/// with nothing untracked pays nothing.
+///
+/// One `check-attr` for the whole set, never one per path — the same rule
+/// [`untracked_additions`] follows, and for the same reason. Only untracked paths come here:
+/// a tracked path already carries git's verdict in its `--numstat` record, at no cost.
+///
+/// Under `-z` the answer is `PATH\0diff\0VALUE\0` per path, and the input must be
+/// NUL-terminated too — a newline-separated list makes git read the newline as part of the
+/// path and answer `unspecified` for every one of them.
+fn diff_unset(repo: &Path, paths: &[&str]) -> Result<HashSet<String>> {
+    if paths.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let mut input = String::new();
+    for path in paths {
+        input.push_str(path);
+        input.push('\0');
+    }
+    let out = git_stdin(repo, &["check-attr", "-z", "--stdin", "diff"], &input)
+        .map_err(|e| anyhow::anyhow!("{}", e.0))?;
+    let mut fields = out.split('\0');
+    let mut unset = HashSet::new();
+    while let (Some(path), Some(_attr), Some(value)) = (fields.next(), fields.next(), fields.next())
+    {
+        if value == "unset" {
+            unset.insert(path.to_string());
+        }
+    }
+    Ok(unset)
+}
+
 /// Addition count of an untracked file: its line count, which is what `git diff` against
-/// nothing reports (0 for empty or binary). Read locally rather than shelling
-/// `git diff --no-index` per file — with `--untracked-files=all` a large untracked tree
-/// would otherwise fork git once per file on every poll and freeze the UI.
-fn untracked_additions(repo: &Path, path: &str) -> u32 {
-    let Ok(bytes) = std::fs::read(repo.join(path)) else { return 0 };
-    if bytes.is_empty() || bytes.contains(&0) {
-        return 0; // empty, or binary (a NUL byte) — git reports no line additions
+/// nothing reports. `None` where git would report no countable diff — binary content —
+/// matching the `-`/`-` numstat record a tracked binary produces. Read locally rather than
+/// shelling `git diff --no-index` per file — with `--untracked-files=all` a large untracked
+/// tree would otherwise fork git once per file on every poll and freeze the UI.
+///
+/// This is the content half of the untracked verdict only. An untracked path never reaches a
+/// `git diff`, so no numstat speaks for it; [`diff_unset`] asks git for the attribute half
+/// (specs/review-model.md).
+fn untracked_additions(repo: &Path, path: &str) -> Option<u32> {
+    let Ok(bytes) = std::fs::read(repo.join(path)) else { return Some(0) };
+    if bytes.contains(&0) {
+        return None; // binary (a NUL byte) — git reports no line additions
+    }
+    if bytes.is_empty() {
+        return Some(0);
     }
     // Lines = newline count, plus one for a final line with no trailing newline. A plain
     // byte count is fine for one already-read file; no need for the bytecount crate.
     #[allow(clippy::naive_bytecount)]
     let newlines = bytes.iter().filter(|&&b| b == b'\n').count();
     let trailing = usize::from(bytes.last() != Some(&b'\n'));
-    (newlines + trailing) as u32
+    Some((newlines + trailing) as u32)
 }
 
 // --- pure parsers (unit-tested without a repo) ---------------------------------
 
-/// Map of new-path to `(additions, deletions)` from `git diff --numstat -z`.
+/// Map of new-path to its line counts from `git diff --numstat -z`, `None` where git
+/// reports no countable diff — the `-`/`-` record.
 ///
 /// Under `-z` a non-rename record is `ADDS\tDELS\tPATH\0`; a rename/copy record is
 /// `ADDS\tDELS\t\0OLD\0NEW\0` — the counts ride the front, then old and new arrive as
-/// their own NUL fields (no `=>` arrow, no brace factoring). Binary files emit `-`/`-`,
-/// which parse to 0. The counts key under the new path, matching `parse_name_status`.
-fn parse_numstat(out: &str) -> HashMap<String, (u32, u32)> {
+/// their own NUL fields (no `=>` arrow, no brace factoring). The counts key under the new
+/// path, matching `parse_name_status`.
+///
+/// `-`/`-` is git's own no-text-diff verdict, and it already accounts for `.gitattributes`:
+/// binary content, an unset `diff` attribute (`-diff`, or the `binary` macro), and a driver
+/// git will not text-diff all land there. Reading it as `0`/`0` — as this once did — loses
+/// that verdict and leaves a `-diff` file to be diffed as text anyway.
+fn parse_numstat(out: &str) -> HashMap<String, Option<(u32, u32)>> {
     let mut map = HashMap::new();
     let mut it = out.split('\0');
     while let Some(field) = it.next() {
         // `splitn(3)` keeps any tabs inside the path (verbatim under `-z`) intact.
         let mut parts = field.splitn(3, '\t');
-        let add = parts.next().unwrap_or("0").parse().unwrap_or(0);
-        let del = parts.next().unwrap_or("0").parse().unwrap_or(0);
+        let add = parts.next().unwrap_or("");
+        let del = parts.next().unwrap_or("");
+        // Either side reading `-` is the whole record's verdict; git never mixes them.
+        let counts = match (add.parse(), del.parse()) {
+            (Ok(a), Ok(d)) => Some((a, d)),
+            _ => None,
+        };
         match parts.next() {
             // Non-rename: the path rode this same field.
             Some(path) if !path.is_empty() => {
-                map.insert(path.to_string(), (add, del));
+                map.insert(path.to_string(), counts);
             }
             // Rename/copy: the next two fields are the old and new paths.
             Some(_) => {
                 let _old = it.next();
                 if let Some(new) = it.next().filter(|n| !n.is_empty()) {
-                    map.insert(new.to_string(), (add, del));
+                    map.insert(new.to_string(), counts);
                 }
             }
             // No tab fields — a trailing empty record after the final NUL.
@@ -1685,10 +1758,19 @@ mod tests {
     }
 
     #[test]
-    fn numstat_parses_counts_and_ignores_binary() {
+    fn numstat_parses_counts_and_keeps_the_no_text_diff_verdict() {
         let m = parse_numstat("18\t8\tsrc/a.rs\0-\t-\tassets/logo.png\0");
-        assert_eq!(m["src/a.rs"], (18, 8));
-        assert_eq!(m["assets/logo.png"], (0, 0));
+        assert_eq!(m["src/a.rs"], Some((18, 8)));
+        // `-`/`-` is git refusing to text-diff, not a change of zero lines. Collapsing the
+        // two is what left a `-diff` path (`.gitattributes`) diffed as text.
+        assert_eq!(m["assets/logo.png"], None);
+    }
+
+    #[test]
+    fn numstat_separates_the_no_text_diff_verdict_from_an_empty_change() {
+        let m = parse_numstat("0\t0\tsrc/touched.rs\0-\t-\tflake.lock\0");
+        assert_eq!(m["src/touched.rs"], Some((0, 0)));
+        assert_eq!(m["flake.lock"], None);
     }
 
     #[test]
@@ -1696,7 +1778,7 @@ mod tests {
         // Under `-z` a rename is `ADDS\tDELS\t\0OLD\0NEW`: old and new are their own fields,
         // no `=>` arrow or brace form. Counts must key under the new path.
         let m = parse_numstat("3\t1\t\0src/old.rs\0src/new.rs\0");
-        assert_eq!(m["src/new.rs"], (3, 1));
+        assert_eq!(m["src/new.rs"], Some((3, 1)));
         assert!(!m.contains_key("src/old.rs"));
     }
 
@@ -1704,7 +1786,7 @@ mod tests {
     fn numstat_dir_removing_rename_has_no_double_slash() {
         // Regression: the old brace parser produced `a//file.rs` here, so counts never matched.
         let m = parse_numstat("4\t2\t\0a/b/file.rs\0a/file.rs\0");
-        assert_eq!(m["a/file.rs"], (4, 2));
+        assert_eq!(m["a/file.rs"], Some((4, 2)));
         assert!(!m.contains_key("a//file.rs"));
     }
 
@@ -1713,9 +1795,9 @@ mod tests {
         // binary, plain, rename, in sequence — the rename lookahead must stay aligned.
         // `\x00` (= NUL) is used as the separator so the digits after it read clearly.
         let m = parse_numstat("-\t-\tlogo.png\x009\t1\tsrc/a.rs\x005\t4\t\x00o.rs\x00n.rs\x00");
-        assert_eq!(m["logo.png"], (0, 0));
-        assert_eq!(m["src/a.rs"], (9, 1));
-        assert_eq!(m["n.rs"], (5, 4));
+        assert_eq!(m["logo.png"], None);
+        assert_eq!(m["src/a.rs"], Some((9, 1)));
+        assert_eq!(m["n.rs"], Some((5, 4)));
     }
 
     #[test]

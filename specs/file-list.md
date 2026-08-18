@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-24
-Last edited: 2026-07-18
+Last edited: 2026-08-18
 ---
 
 # File list
@@ -77,7 +77,7 @@ The list is a flat sequence of visible rows over the tree.
 ### Presentation
 
 - A file row is `<marker> <name> <stats>`: the marker colored by kind, the basename bright, parent directories dimmed, stats right-aligned.
-- Stats read `+added −removed`: additions green, deletions red, a zero side dropped. A change with no countable lines (a binary file) shows no stats.
+- Stats read `+added −removed`: additions green, deletions red, a zero side dropped. A change with no countable lines shows no stats. Git gives no counts for a binary file, and none for a file that `.gitattributes` makes not diffable (`review-model.md`).
 - An ignored row dims whole, distinct from the marker colors. `All files` is the one place an ignored path is readable. An ignored file never carries a change marker, since every scope respects `.gitignore` (`review-model.md`).
 - A too-narrow path shortens with a middle ellipsis (`…/2026-06-23-changes/plan`), keeping the basename and stats visible.
 

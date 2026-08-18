@@ -33,6 +33,90 @@ fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
 }
 
 #[test]
+fn a_path_the_diff_attribute_unsets_carries_gits_no_text_diff_verdict() {
+    // `.gitattributes` `-diff` makes git refuse to text-diff a path even though its bytes
+    // are text. The changeset must carry that verdict, not re-decide from content
+    // (`specs/review-model.md`).
+    let r = Repo::init();
+    r.write(".gitattributes", "lock.txt -diff\n");
+    r.write("lock.txt", "one\ntwo\n");
+    r.write("plain.txt", "one\ntwo\n");
+    r.commit_all("init");
+
+    r.write("lock.txt", "one\nTWO\n");
+    r.write("plain.txt", "one\nTWO\n");
+
+    let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let files = by_path(&files);
+
+    assert!(files["lock.txt"].binary, "-diff is git's no-text-diff verdict");
+    assert_eq!((files["lock.txt"].additions, files["lock.txt"].deletions), (0, 0));
+    assert!(!files["plain.txt"].binary, "an ordinary text file still diffs");
+    assert_eq!((files["plain.txt"].additions, files["plain.txt"].deletions), (1, 1));
+}
+
+#[test]
+fn the_binary_macro_and_real_binary_content_both_carry_the_verdict() {
+    let r = Repo::init();
+    r.write(".gitattributes", "packed.dat binary\n");
+    r.write("packed.dat", "text bytes\n");
+    r.write("logo.png", "\u{0}\u{1}png\n");
+    r.write("empty.txt", "");
+    r.commit_all("init");
+
+    r.write("packed.dat", "other text\n");
+    r.write("logo.png", "\u{0}\u{2}png\n");
+    r.write("empty.txt", "\n"); // a real change of one countable line
+
+    let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let files = by_path(&files);
+
+    assert!(files["packed.dat"].binary, "the `binary` macro unsets `diff`");
+    assert!(files["logo.png"].binary, "NUL bytes are git's own verdict too");
+    assert!(!files["empty.txt"].binary, "a countable change is never the verdict");
+}
+
+#[test]
+fn an_untracked_file_the_diff_attribute_unsets_carries_the_verdict_too() {
+    // The common shape right after an agent scaffolds a project: the lockfile is written and
+    // marked `-diff`, but nothing is committed yet. Identical bytes must not be treated
+    // differently for being untracked (`specs/review-model.md`).
+    let r = Repo::init();
+    r.write("keep.rs", "fn a() {}\n");
+    r.commit_all("init");
+    r.write(".gitattributes", "flake.lock -diff\n");
+    r.write("flake.lock", "one\ntwo\n");
+    r.write("notes.txt", "one\ntwo\n");
+
+    let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let files = by_path(&files);
+
+    assert_eq!(files["flake.lock"].kind, ChangeKind::Untracked);
+    assert!(files["flake.lock"].binary, "-diff holds for an untracked path");
+    assert!(!files["notes.txt"].binary, "an ordinary untracked file still diffs");
+    assert_eq!(files["notes.txt"].additions, 2);
+}
+
+#[test]
+fn an_untracked_binary_file_carries_the_verdict_from_its_content() {
+    // No numstat speaks for an untracked path, so content answers the half `.gitattributes`
+    // does not (`specs/review-model.md`).
+    let r = Repo::init();
+    r.write("keep.rs", "fn a() {}\n");
+    r.commit_all("init");
+    r.write("blob.bin", "\u{0}\u{1}\u{2}");
+    r.write("notes.txt", "one\ntwo\n");
+
+    let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let files = by_path(&files);
+
+    assert!(files["blob.bin"].binary);
+    assert_eq!(files["blob.bin"].additions, 0);
+    assert!(!files["notes.txt"].binary);
+    assert_eq!(files["notes.txt"].additions, 2);
+}
+
+#[test]
 fn lists_every_change_kind_with_stats() {
     let r = Repo::init();
     r.write("keep.rs", "fn a() {}\n");
