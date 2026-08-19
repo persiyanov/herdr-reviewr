@@ -20,6 +20,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Band, Focus, FooterAction, Mode, Tab};
 use crate::config::NavigatorPosition;
+use crate::copy::{Pane as CopyPane, Selection as CopySelection};
 use crate::diff::{FileDiff, FileState, Row};
 use crate::file_list::{Annotation, RowKind};
 use crate::forge;
@@ -246,6 +247,46 @@ pub fn in_files_pane(area: Rect, app: &App, col: u16, row: u16) -> bool {
 #[must_use]
 pub fn in_diff_pane(area: Rect, app: &App, col: u16, row: u16) -> bool {
     contains(panes(area, app).diff, col, row)
+}
+
+/// The selectable content rectangle for an internal pane, excluding its border.
+#[must_use]
+pub fn copy_pane_rect(area: Rect, app: &App, pane: CopyPane) -> Rect {
+    let p = panes(area, app);
+    inner_rect(match pane {
+        CopyPane::Files => p.files,
+        CopyPane::Diff => p.diff,
+    })
+}
+
+/// Paint a character selection over the already-rendered frame.
+pub fn render_copy_selection(frame: &mut Frame, selection: Option<CopySelection>, bounds: Rect) {
+    let Some(selection) = selection else { return };
+    let style = Style::default().bg(Color::Rgb(90, 90, 120)).fg(Color::White);
+    let end_x = bounds.x.saturating_add(bounds.width.saturating_sub(1));
+    let end_y = bounds.y.saturating_add(bounds.height.saturating_sub(1));
+    let (start, end) =
+        if (selection.start.1, selection.start.0) <= (selection.end.1, selection.end.0) {
+            (selection.start, selection.end)
+        } else {
+            (selection.end, selection.start)
+        };
+    for y in start.1..=end.1.min(end_y) {
+        let (from, to) = if start.1 == end.1 {
+            (start.0, end.0)
+        } else if y == start.1 {
+            (start.0, end_x)
+        } else if y == end.1 {
+            (bounds.x, end.0)
+        } else {
+            (bounds.x, end_x)
+        };
+        for x in from.max(bounds.x)..=to.min(end_x) {
+            if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                cell.set_style(style);
+            }
+        }
+    }
 }
 
 /// The logical diff-row index a click at `(col, row)` lands on, or `None` if outside the
@@ -1691,6 +1732,7 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
             return ("tab".into(), if app.focus == Focus::Files { "diff" } else { "files" }.into());
         }
         A::Preview => (hint(K::Preview), if app.preview_active() { "source" } else { "preview" }),
+        A::CopyMode => (hint(K::CopyMode), "copy"),
         A::NavigatorPosition => (hint(K::NavigatorPosition), "position"),
         A::NavigatorHide => {
             (hint(K::NavigatorHide), if app.navigator_hidden_here() { "show" } else { "hide" })
@@ -1771,7 +1813,12 @@ fn band_styles(band: Band, p: &Palette) -> (Style, Style) {
 fn action_entry(app: &App, action: FooterAction, band: Band) -> Vec<Span<'static>> {
     let p = app.palette();
     let (key, label) = action_key_label(app, action);
-    let (key_style, label_style) = band_styles(band, p);
+    let (key_style, label_style) = if action == FooterAction::CopyMode && app.copy_mode {
+        let active = Style::default().fg(p.peach).add_modifier(Modifier::BOLD);
+        (active, active)
+    } else {
+        band_styles(band, p)
+    };
     let mut spans = vec![Span::styled(key, key_style)];
     if !label.is_empty() {
         spans.push(Span::styled(format!(" {label}"), label_style));

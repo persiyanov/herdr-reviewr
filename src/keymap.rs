@@ -28,6 +28,7 @@ pub enum Action {
     TabPr,
     Wrap,
     Preview,
+    CopyMode,
     NavigatorPosition,
     NavigatorHide,
     NavigatorGrow,
@@ -158,7 +159,7 @@ impl Key {
 
 /// Every action with its config name and default keys — the single source the default keymap,
 /// the name lookup, and the config error message are built from.
-const ACTIONS: [(Action, &str, &[Key]); 40] = [
+const ACTIONS: [(Action, &str, &[Key]); 41] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -180,6 +181,7 @@ const ACTIONS: [(Action, &str, &[Key]); 40] = [
     (Action::TabPr, "tab-pr", &[Key::plain('3')]),
     (Action::Wrap, "wrap", &[Key::plain('w')]),
     (Action::Preview, "preview", &[Key::plain('m')]),
+    (Action::CopyMode, "copy-mode", &[Key::plain('C')]),
     (Action::NavigatorPosition, "navigator-position", &[Key::plain('p')]),
     (Action::NavigatorHide, "navigator-hide", &[Key::plain('z')]),
     (Action::NavigatorGrow, "navigator-grow", &[Key::plain('<')]),
@@ -327,6 +329,7 @@ mod tests {
         assert_eq!(keymap.action_for(Key::plain('c')), Some(Action::Comment));
         assert_eq!(keymap.action_for(Key::plain('S')), Some(Action::Send));
         assert_eq!(keymap.action_for(Key::plain('m')), Some(Action::Preview));
+        assert_eq!(keymap.action_for(Key::plain('C')), Some(Action::CopyMode));
         assert_eq!(keymap.action_for(Key::plain('p')), Some(Action::NavigatorPosition));
         assert_eq!(keymap.action_for(Key::plain('z')), Some(Action::NavigatorHide));
         assert_eq!(keymap.action_for(Key::plain('x')), None);

@@ -12,6 +12,7 @@ pub mod app;
 pub mod azure_devops;
 pub mod browser;
 pub mod config;
+pub mod copy;
 pub mod diff;
 pub mod export;
 pub mod file_list;
@@ -74,9 +75,11 @@ pub fn run() -> Result<()> {
     let mut app = app_for(&cfg, &initial_config);
 
     let mut terminal = ratatui::init();
+    let mut mouse_capture = true;
+    set_mouse_capture(mouse_capture);
     // Bracketed paste so a multi-line paste arrives as one event, not raw keystrokes whose
     // embedded newlines would submit the comment early.
-    let _ = execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    let _ = execute!(io::stdout(), EnableBracketedPaste);
     // The kitty keyboard protocol reports modifiers on keys the legacy encoding drops — most
     // notably Ctrl/Alt+arrows — so word-jump by arrow works where the terminal supports it.
     let kbd = supports_keyboard_enhancement().unwrap_or(false);
@@ -93,7 +96,7 @@ pub fn run() -> Result<()> {
     // opens the pane with the reason in the status line, the same contract as a failed poll
     // refresh.
     if let Err(error) = terminal.draw(|f| ui::render(f, &app)) {
-        restore_terminal(kbd);
+        restore_terminal(kbd, mouse_capture);
         return Err(error.into());
     }
     // The cosmetic pane label, stamped after the first paint and cleared on a normal exit
@@ -121,7 +124,7 @@ pub fn run() -> Result<()> {
         initial_config = config::plugin_config(cfg.plugin_config_dir.as_deref());
         app = app_for(&cfg, &initial_config);
         if let Err(error) = terminal.draw(|f| ui::render(f, &app)) {
-            restore_terminal(kbd);
+            restore_terminal(kbd, mouse_capture);
             herdr::clear_pane_label();
             return Err(error.into());
         }
@@ -137,17 +140,28 @@ pub fn run() -> Result<()> {
         logln!("startup reload failed: {e:#}");
         app.status = format!("load failed: {e}");
     }
-    let result = event_loop(&mut terminal, &mut app, &cfg, kbd);
+    let result = event_loop(&mut terminal, &mut app, &cfg, kbd, &mut mouse_capture);
     herdr::clear_pane_label();
     result
 }
 
 /// Leave the alternate screen and release terminal input modes before any bounded worker drain.
-fn restore_terminal(kbd: bool) {
+fn set_mouse_capture(enabled: bool) {
+    let _ = if enabled {
+        execute!(io::stdout(), EnableMouseCapture)
+    } else {
+        execute!(io::stdout(), DisableMouseCapture)
+    };
+}
+
+fn restore_terminal(kbd: bool, mouse_capture: bool) {
     if kbd {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
-    let _ = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+    if mouse_capture {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+    }
+    let _ = execute!(io::stdout(), DisableBracketedPaste);
     ratatui::restore();
 }
 
@@ -680,6 +694,7 @@ fn event_loop(
     app: &mut App,
     cfg: &Config,
     kbd: bool,
+    mouse_capture: &mut bool,
 ) -> Result<()> {
     let poll = cfg.poll;
     let mut last_poll = Instant::now();
@@ -719,6 +734,7 @@ fn event_loop(
     // Fetch the PR snapshot as soon as the panel opens, not on first switching to the tab, so the
     // tab is already populated when the user gets there (specs/forge-host.md).
     app.pr_pending = None;
+    let mut copy_state = copy::State::default();
     let result: Result<()> = (|| {
         while !app.should_quit {
             if let Ok((epoch, target, mut recovered)) = recovery_rx.try_recv() {
@@ -824,7 +840,14 @@ fn event_loop(
             }
             app.bound_file_scroll(file_vp);
             let painted_frame = PaintedFrameSnapshot::capture(app);
-            terminal.draw(|f| ui::render(f, app))?;
+            terminal.draw(|f| {
+                ui::render(f, app);
+                let bounds = copy_state
+                    .selection
+                    .map(|selection| copy::visual_pane_rect(area, app, selection.pane))
+                    .unwrap_or_default();
+                ui::render_copy_selection(f, copy_state.selection, bounds);
+            })?;
 
             // A world completion reconciles into the view only while the view it described is
             // still current; the worker's baseline is authoritative either way (specs/tui.md).
@@ -1080,7 +1103,25 @@ fn event_loop(
                 }
                 match event {
                     Event::Key(k) if k.kind == KeyEventKind::Press => {
-                        if let Err(e) = handle_key(app, k, area, painted_frame.keymap()) {
+                        let action = match k.code {
+                            KeyCode::Char(c) => painted_frame.keymap().action_for(keymap::Key {
+                                ctrl: k.modifiers.contains(KeyModifiers::CONTROL),
+                                alt: k.modifiers.contains(KeyModifiers::ALT),
+                                code: keymap::KeyCode::Char(c),
+                            }),
+                            _ => None,
+                        };
+                        if app.mode == Mode::Normal && action == Some(keymap::Action::CopyMode) {
+                            app.copy_mode = !app.copy_mode;
+                            if !app.copy_mode {
+                                copy_state.clear();
+                            }
+                            app.status = if app.copy_mode {
+                                "copy mode on — drag inside a pane".into()
+                            } else {
+                                "copy mode off".into()
+                            };
+                        } else if let Err(e) = handle_key(app, k, area, painted_frame.keymap()) {
                             app.status = format!("error: {e}");
                         }
                         logln!(
@@ -1104,7 +1145,11 @@ fn event_loop(
                     Event::Mouse(m) => {
                         // Reuse this frame's `area` and `heights` (computed above for the scroll
                         // settle) so a drag-select doesn't re-measure the whole diff per motion.
-                        if let Err(e) = handle_mouse(app, m, area, &heights, painted_frame.keymap())
+                        let copy_handled =
+                            app.copy_mode && copy::mouse_event(app, area, m, &mut copy_state)?;
+                        if !copy_handled
+                            && let Err(e) =
+                                handle_mouse(app, m, area, &heights, painted_frame.keymap())
                         {
                             app.status = format!("error: {e}");
                         }
@@ -1168,7 +1213,7 @@ fn event_loop(
         }
         Ok(())
     })();
-    restore_terminal(kbd);
+    restore_terminal(kbd, *mouse_capture);
     drain_pr_shutdown(&mut pr, &probe_rx, &pr_rx);
     result
 }
@@ -1641,7 +1686,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::Find => app.open_find(),
             K::Keys => app.toggle_keys(),
             // `edit`/`delete` off the diff, and `open-pr` off the `PR` tab, are inert.
-            K::Edit | K::Delete | K::OpenPr => {}
+            K::Edit | K::Delete | K::OpenPr | K::CopyMode => {}
         }
         return Ok(());
     }

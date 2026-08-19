@@ -6,6 +6,7 @@ mod common;
 use common::{Repo, app_on, enter_tab};
 use herdr_reviewr::app::{App, BaseChoice, BasePicker, BaseProbe, Focus, Mode, Tab};
 use herdr_reviewr::config::NavigatorPosition;
+use herdr_reviewr::copy::Pane as CopyPane;
 use herdr_reviewr::herdr::AgentChoice;
 use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::model::Scope;
@@ -43,6 +44,48 @@ fn render_buffer(app: &App) -> Buffer {
 /// Render at a specific width (height fixed), for footer fit-to-width assertions.
 fn render_at(app: &App, width: u16) -> String {
     dump(&render_size(app, width, 12))
+}
+
+#[test]
+fn copy_area_uses_the_pr_read_pane_content_edge() {
+    let repo = Repo::init();
+    repo.write("base.txt", "base\n");
+    repo.commit_all("base");
+    repo.write("changed.rs", "let value = 1;\n");
+    let mut app = app_on(&repo);
+    enter_tab(&mut app, Tab::Pr);
+
+    let area = Rect::new(0, 0, 140, 40);
+    let body = ui::body_rect(area, &app);
+    let navigator_width = (u32::from(body.width) * u32::from(app.navigator_share()) / 100) as u16;
+    let read_width = body.width - navigator_width;
+    let expected = Rect::new(
+        body.x + 1,
+        body.y + 1,
+        read_width.saturating_sub(2),
+        body.height.saturating_sub(2),
+    );
+
+    assert_eq!(ui::copy_pane_rect(area, &app, CopyPane::Diff), expected);
+}
+
+#[test]
+fn code_copy_highlight_starts_after_the_visual_gutter() {
+    let repo = Repo::init();
+    repo.write("app/controllers/application_controller.rb", "some.model.method = x\n");
+    repo.commit_all("base");
+    repo.write("app/controllers/application_controller.rb", "some.model.method = y\n");
+    let app = app_on(&repo);
+    let area = Rect::new(0, 0, 140, 40);
+    let hit = ui::copy_pane_rect(area, &app, CopyPane::Diff);
+    let visual = herdr_reviewr::copy::visual_pane_rect(area, &app, CopyPane::Diff);
+
+    assert!(visual.x > hit.x, "the code gutter is not part of the copy highlight");
+    assert_eq!(
+        u32::from(visual.x - hit.x) + u32::from(visual.width),
+        u32::from(hit.width),
+        "the content width remains unchanged after moving past the gutter"
+    );
 }
 
 fn render_size(app: &App, width: u16, height: u16) -> Buffer {
@@ -759,6 +802,7 @@ fn the_expansion_aligns_row_one_into_the_labeled_grid() {
         do_line.contains("c comment") && do_line.trim_end().ends_with('?'),
         "row 1 is the `do` line with the primary and `?`:\n{do_line}"
     );
+    assert!(do_line.contains("C copy"), "the do band advertises copy mode:\n{do_line}");
     assert!(go_line.contains("scope"), "the go band lists the always-there keys:\n{go_line}");
     assert!(
         move_line.contains("hunk") && move_line.contains("file"),

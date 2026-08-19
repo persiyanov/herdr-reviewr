@@ -427,6 +427,8 @@ pub enum FooterAction {
     /// Toggle the markdown preview; the label names the destination view (`m preview`
     /// on source, `m source` in the preview).
     Preview,
+    /// Toggle reviewr's character-level copy mode (`C copy`).
+    CopyMode,
     NavigatorPosition,
     /// Hide the navigator or show it back; the label names the direction (`z hide` / `z show`).
     /// Visible, it waits in the `go` band; hidden, it joins row 1 (specs/input.md).
@@ -607,6 +609,8 @@ pub struct App {
     /// The comment editor's caret: a char index into `input` (`0..=chars().count()`).
     pub caret: usize,
     pub status: String,
+    /// Whether character-level pane-local copy mode owns mouse selection.
+    pub copy_mode: bool,
     /// Whether the footer's `?` shortcut list is expanded. Global place state, not tab-stashed: one
     /// toggle across every tab, moved only by `?` and `esc`, preserved through a poll and config
     /// recovery (`specs/input.md`, `overview.md` Continuity).
@@ -772,6 +776,7 @@ impl App {
             input: String::new(),
             caret: 0,
             status: String::new(),
+            copy_mode: false,
             keys_expanded: false,
             should_quit: false,
             pr: forge::PrView::Pending,
@@ -3544,6 +3549,7 @@ impl App {
             if self.pr_snapshot().is_some() {
                 out.push((A::OpenPr, Primary));
             }
+            out.push((A::CopyMode, Do));
             out.push((A::Search, Go));
             out.push((A::TogglePane, Go));
             out.push((A::NavigatorPosition, Go));
@@ -3644,6 +3650,7 @@ impl App {
             out.push((A::BasePick, Go));
         }
         out.push((A::Search, Go));
+        out.push((A::CopyMode, Do));
         // In-file find shows wherever the read pane has content to search (specs/find-in-file.md).
         if self.find_available() {
             out.push((A::Find, Go));

@@ -118,6 +118,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | `Ctrl+F` | Find in file |
 | `w` | Toggle line wrap |
 | `m` | Preview markdown file |
+| `C` | Toggle character-level copy mode |
 | `p` | Rotate navigator |
 | `z` | Hide / show navigator |
 | `<` `>` | Grow / shrink navigator |
@@ -158,8 +159,14 @@ jumps, and `Ctrl+W` / `Ctrl+U` / `Ctrl+K` deletes.
 | `o` | Open PR in browser |
 | `r` | Refresh |
 
-The mouse works too: click files and tabs, drag to select, scroll. A link in rendered markdown
-opens in your browser (`http`/`https` only), and an anchor link jumps to its heading.
+Press `C` to toggle character-level copy mode. Drag within the diff or files pane to select and
+copy individual characters; the selection cannot cross into the other internal pane.
+File rows copy their complete repository-relative paths, and double-click selects one token
+(including dotted code chains). Diff rows are copied from their source text, so elision, wrapping,
+and horizontal scrolling do not discard text; with wrapping off, reaching the right edge also
+completes an overflowing final row.
+A link in rendered markdown opens in your browser (`http`/`https` only), and an anchor link jumps
+to its heading.
 
 ## The three tabs
 

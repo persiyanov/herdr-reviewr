@@ -40,6 +40,7 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | —                                                        | open a link in rendered markdown            | —                                           | click the link                |
 | `wrap`                                                   | toggle line wrap                            | `w`                                         | —                             |
 | `preview`                                                | toggle the markdown preview                 | `m`                                         | —                             |
+| `copy-mode`                                              | toggle character-level pane copy            | `C`                                         | drag inside one pane          |
 | `navigator-position`                                     | move the navigator clockwise                | `p`                                         | —                             |
 | `navigator-hide`                                         | hide / show the navigator                   | `z`                                         | —                             |
 | `navigator-grow` / `navigator-shrink`                    | grow / shrink the navigator                 | `<` / `>`                                   | drag the divider              |
@@ -72,6 +73,21 @@ A divider drag belongs to the navigator position and split axis at mouse-down. A
 Writing a comment: select a range or land on a line, press `c`, type into the inline box, `enter` saves and `esc` cancels. A saved comment renders as a read-only card spliced under its line, titled with its location, so written feedback stays on screen. `e` reopens the card as an edit box in place, hiding the card while editing. `d` deletes it. A successful send names the agent it added the comments to. A successful copy reports that they were copied. The transient status shows on the footer, pluralizes `comment`, and fades without covering the primary action.
 
 ## Behavior
+
+### Character-level copy mode
+
+`C` toggles copy mode. A drag stays within the pane where it starts and copies on release.
+
+On the file tabs, copy mode resolves the selection against source rows rather than painted terminal
+cells. File rows copy complete, unelided repository-relative paths without indentation, markers,
+arrows, or stats. Double-clicking a visible token selects that token; dotted code chains are one
+token.
+
+Diff selections use source lines, so horizontal scrolling and wrapping do not discard text; tabs
+remain tabs. The line-number and change-bar gutter is visual chrome: it is not highlighted or
+copied. With wrapping off, reaching the right edge of an overflowing row extends the endpoint to
+the source row's end only when hidden source text remains. PR and markdown-preview panes retain
+their rendered-text fallback because their content is composed from a different source model.
 
 ### Changeset traversal
 

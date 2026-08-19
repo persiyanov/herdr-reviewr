@@ -14,6 +14,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ([#75](https://github.com/persiyanov/herdr-reviewr/issues/75)). Named spellings re-resolve
   like git, so a later commit still diffs one back; the header reads `vs HEAD~1 (a1b2c3d)`.
   Type a SHA to freeze that commit; the header shows the abbrev once.
+- **Pane-local character copy mode.** Press `C` to select and copy text within either the files
+  or diff pane without crossing the internal split; source rows stay complete through elision,
+  wrapping, and horizontal scroll, while visual gutters and file-list chrome are excluded. File
+  selections use repository-relative paths, and double-click selects a complete token, including
+  dotted code chains.
+  With wrapping off, dragging to the right edge completes an overflowing final diff row without
+  requiring the selection to enter the next row.
+  ([#62](https://github.com/persiyanov/herdr-reviewr/issues/62))
 
 ### Changed
 - A unique SHA prefix shorter than seven characters completes to the abbreviated object id.
