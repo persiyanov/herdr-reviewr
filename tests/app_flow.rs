@@ -10,6 +10,7 @@ use anyhow::{Result, bail};
 use common::{Repo, app_on, enter_tab, typed};
 use herdr_reviewr::app::{App, Band, Focus, FooterAction, Mode};
 use herdr_reviewr::config::NavigatorPosition;
+use herdr_reviewr::copy::Pane as CopyPane;
 use herdr_reviewr::export::ExportTarget;
 use herdr_reviewr::herdr::{AgentChoice, AgentSample};
 use herdr_reviewr::keymap::{Action, Key, KeyCode as BindingCode, Keymap};
@@ -172,6 +173,54 @@ fn the_wheel_scrolls_the_diff_without_moving_its_cursor() {
     assert_eq!(app.diff_cursor, 3, "the wheel leaves the comment cursor put");
     assert!(app.diff_scroll > 0, "the wheel moved the viewport");
     assert!(!app.reveal_diff, "the wheel does not request a reveal");
+}
+
+#[test]
+fn dragging_a_line_selection_at_the_diff_edge_scrolls_into_new_rows() {
+    let mut app = long_diff_app(40);
+    let area = Rect::new(0, 0, 120, 24);
+    let keymap = Keymap::default();
+    let heights = herdr_reviewr::ui::diff_row_heights(&app, area);
+    let bounds = herdr_reviewr::ui::copy_pane_rect(area, &app, CopyPane::Diff);
+    let column = bounds.x + bounds.width / 2;
+    let bottom = bounds.y + bounds.height.saturating_sub(1);
+    let event = |kind, row| MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE };
+
+    handle_mouse(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row: bounds.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        area,
+        &heights,
+        &keymap,
+    )
+    .unwrap();
+    handle_mouse(
+        &mut app,
+        event(MouseEventKind::Drag(MouseButton::Left), bottom),
+        area,
+        &heights,
+        &keymap,
+    )
+    .unwrap();
+
+    assert!(app.select_anchor.is_some(), "the drag keeps a logical selection anchor");
+    assert!(app.diff_scroll > 0, "dragging at the bottom edge scrolls the diff");
+    let first_cursor = app.diff_cursor;
+
+    handle_mouse(
+        &mut app,
+        event(MouseEventKind::Drag(MouseButton::Left), bottom + 1),
+        area,
+        &heights,
+        &keymap,
+    )
+    .unwrap();
+    assert!(app.diff_cursor >= first_cursor, "the selection continues into newly visible rows");
 }
 
 #[test]

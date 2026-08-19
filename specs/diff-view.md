@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-24
-Last edited: 2026-08-15
+Last edited: 2026-08-19
 ---
 
 # Diff view
@@ -139,6 +139,7 @@ Return to source is different per view.
 - A comment anchors as `review-model.md` defines. The comment has a `side`, a `start..end` range, and the verbatim snippet.
 - A selection runs on content rows. A fold is a hard limit. The selection cannot cross a fold.
 - A selection covers the same rows from either end. An extend up over the same rows and an extend down over the same rows anchor the same comment. The input box opens under the last line of the range in both cases (`tui.md`).
+- During a mouse drag, reaching the top or bottom edge of the diff scrolls the viewport and continues the selection into the newly visible rows. The logical anchor remains unchanged.
 - The export snippet is built again from the selected rows. Each line has a `+` prefix, a `−` prefix, or a space prefix. The marks are in the export. The marks are not on the screen.
 
 ### Config

@@ -34,6 +34,7 @@ pub struct State {
     pub selection: Option<Selection>,
     last_click: Option<Click>,
     source_override: Option<SourceSelection>,
+    source_anchor: Option<SourcePoint>,
 }
 
 impl State {
@@ -41,6 +42,7 @@ impl State {
         self.selection = None;
         self.last_click = None;
         self.source_override = None;
+        self.source_anchor = None;
     }
 }
 
@@ -69,6 +71,18 @@ struct Click {
 
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
 
+/// Return the direction in which an active drag should move the pane when the pointer reaches
+/// its edge. The caller applies the scroll and re-hits the pointer against the newly visible
+/// rows, so the selection remains logical rather than being tied to painted cells.
+pub(crate) fn edge_scroll_delta(area: Rect, app: &App, pane: Pane, row: u16) -> isize {
+    if !app.tab.is_file_tab() || (pane == Pane::Diff && app.preview_active()) {
+        return 0;
+    }
+    let bounds = ui::copy_pane_rect(area, app, pane);
+    let bottom = bounds.y.saturating_add(bounds.height.saturating_sub(1));
+    if row <= bounds.y { -1 } else { isize::from(row >= bottom) }
+}
+
 pub fn mouse_event(
     app: &mut App,
     area: Rect,
@@ -91,6 +105,7 @@ pub fn mouse_event(
                 });
                 state.last_click = Some(Click { pane, point, at: Instant::now() });
                 if double_click {
+                    state.source_anchor = None;
                     if let Some((selection, source)) = token_selection(app, area, pane, point) {
                         state.selection = Some(selection);
                         state.source_override = source;
@@ -101,16 +116,26 @@ pub fn mouse_event(
                 } else {
                     state.selection = Some(Selection { pane, start: point, end: point });
                     state.source_override = None;
+                    state.source_anchor = copy_source_point(area, app, pane, point.0, point.1);
                 }
             } else {
                 state.last_click = None;
+                state.source_anchor = None;
             }
             Ok(true)
         }
         MouseEventKind::Drag(MouseButton::Left) => {
             state.last_click = None;
             state.source_override = None;
+            let pane = state.selection.map(|selection| selection.pane);
+            let start_y = state.selection.map(|selection| selection.start.1);
+            let shifted_start = pane.zip(start_y).and_then(|(pane, start_y)| {
+                scroll_selection_anchor(app, area, pane, event.row, start_y)
+            });
             if let Some(current) = state.selection.as_mut() {
+                if let Some(start_y) = shifted_start {
+                    current.start.1 = start_y;
+                }
                 current.end = clamp_point(
                     ui::copy_pane_rect(area, app, current.pane),
                     event.column,
@@ -121,7 +146,8 @@ pub fn mouse_event(
         }
         MouseEventKind::Up(MouseButton::Left) => {
             if let Some(current) = state.selection {
-                let text = selection_text(app, area, current, state.source_override)?;
+                let text =
+                    selection_text(app, area, current, state.source_override, state.source_anchor)?;
                 if !text.is_empty() {
                     Clipboard.export(&text)?;
                     app.status = "copied".into();
@@ -131,6 +157,59 @@ pub fn mouse_event(
         }
         _ => Ok(false),
     }
+}
+
+fn scroll_selection_anchor(
+    app: &mut App,
+    area: Rect,
+    pane: Pane,
+    row: u16,
+    start_y: u16,
+) -> Option<u16> {
+    let delta = edge_scroll_delta(area, app, pane, row);
+    if delta == 0 {
+        return None;
+    }
+    let bounds = ui::copy_pane_rect(area, app, pane);
+    let old_scroll = match pane {
+        Pane::Files => app.file_scroll,
+        Pane::Diff => app.diff_scroll,
+    };
+    let heights = (pane == Pane::Diff).then(|| ui::diff_row_heights(app, area));
+    match pane {
+        Pane::Files => {
+            app.wheel_files(delta);
+            app.bound_file_scroll(bounds.height as usize);
+        }
+        Pane::Diff => {
+            app.wheel_diff(delta);
+            if let Some(heights) = heights.as_deref() {
+                app.bound_diff_scroll(heights, ui::diff_viewport_height(area, app));
+            }
+        }
+    }
+    let new_scroll = match pane {
+        Pane::Files => app.file_scroll,
+        Pane::Diff => app.diff_scroll,
+    };
+    if old_scroll == new_scroll {
+        return None;
+    }
+    let shift = if let Some(heights) = heights {
+        if new_scroll > old_scroll {
+            heights[old_scroll..new_scroll].iter().sum()
+        } else {
+            heights[new_scroll..old_scroll].iter().sum()
+        }
+    } else {
+        old_scroll.abs_diff(new_scroll)
+    } as u16;
+    let shifted = if new_scroll > old_scroll {
+        start_y.saturating_sub(shift)
+    } else {
+        start_y.saturating_add(shift)
+    };
+    Some(shifted.clamp(bounds.y, bounds.y.saturating_add(bounds.height.saturating_sub(1))))
 }
 
 /// The source hit rectangle remains the full pane. Only code-pane painting excludes its
@@ -171,12 +250,28 @@ fn selection_text(
     area: Rect,
     selection: Selection,
     source_override: Option<SourceSelection>,
+    source_anchor: Option<SourcePoint>,
 ) -> Result<String> {
     if let Some(source) = source_override
         && let Some(lines) = source_lines(app, selection.pane)
         && let Some(text) = stream_source(&lines, source.start, source.end)
     {
         return Ok(text);
+    }
+    if let Some(source_start) = source_anchor
+        && let Some(source_end) =
+            copy_source_point(area, app, selection.pane, selection.end.0, selection.end.1)
+    {
+        let source_end = if selection.pane == Pane::Diff {
+            extend_diff_end_if_overflowing(area, app, selection.end.0, selection.end.1, source_end)
+        } else {
+            source_end
+        };
+        if let Some(lines) = source_lines(app, selection.pane)
+            && let Some(text) = stream_source(&lines, source_start, source_end)
+        {
+            return Ok(text);
+        }
     }
     if let Some(text) = model_selection_text(app, area, selection) {
         return Ok(text);

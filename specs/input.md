@@ -86,8 +86,10 @@ token.
 Diff selections use source lines, so horizontal scrolling and wrapping do not discard text; tabs
 remain tabs. The line-number and change-bar gutter is visual chrome: it is not highlighted or
 copied. With wrapping off, reaching the right edge of an overflowing row extends the endpoint to
-the source row's end only when hidden source text remains. PR and markdown-preview panes retain
-their rendered-text fallback because their content is composed from a different source model.
+the source row's end only when hidden source text remains. Dragging to the top or bottom edge
+scrolls a file or diff pane while keeping the source anchor, so selection can continue into rows
+outside the initial viewport. PR and markdown-preview panes retain their rendered-text fallback
+because their content is composed from a different source model.
 
 ### Changeset traversal
 

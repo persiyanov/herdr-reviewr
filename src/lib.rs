@@ -1905,10 +1905,8 @@ pub fn handle_mouse(
         MouseEventKind::Drag(MouseButton::Left) => {
             if app.preview_active() {
                 // No drag-selection in the read-only preview.
-            } else if let Some(i) =
-                ui::hit_diff(area, app, m.column, m.row, heights, app.diff_scroll)
-            {
-                app.drag_select_to(i);
+            } else {
+                drag_select_with_edge_scroll(app, area, m, heights);
             }
         }
         // The wheel scrolls the viewport of whichever pane it is over — never the cursor, so
@@ -1925,6 +1923,37 @@ pub fn handle_mouse(
         _ => {}
     }
     Ok(())
+}
+
+/// Extend a line selection against logical diff rows. When the pointer reaches the pane edge,
+/// move the viewport first and hit-test again so a drag can continue into rows that were not in
+/// the original frame (`specs/diff-view.md` Comment anchoring).
+fn drag_select_with_edge_scroll(app: &mut App, area: Rect, m: MouseEvent, heights: &[usize]) {
+    let target = drag_hit_diff(area, app, m.column, m.row, heights);
+    if let Some(index) = target {
+        app.drag_select_to(index);
+    }
+
+    let delta = copy::edge_scroll_delta(area, app, copy::Pane::Diff, m.row);
+    if delta == 0 || (target.is_none() && app.select_anchor.is_none()) {
+        return;
+    }
+    app.wheel_diff(delta);
+    let viewport = ui::diff_viewport_height(area, app);
+    app.bound_diff_scroll(heights, viewport);
+    if let Some(index) = drag_hit_diff(area, app, m.column, m.row, heights) {
+        app.drag_select_to(index);
+    }
+}
+
+fn drag_hit_diff(area: Rect, app: &App, column: u16, row: u16, heights: &[usize]) -> Option<usize> {
+    let bounds = ui::copy_pane_rect(area, app, copy::Pane::Diff);
+    let right = bounds.x.saturating_add(bounds.width.saturating_sub(1));
+    if column < bounds.x || column > right {
+        return None;
+    }
+    let clamped_row = row.clamp(bounds.y, bounds.y.saturating_add(bounds.height.saturating_sub(1)));
+    ui::hit_diff(area, app, column, clamped_row, heights, app.diff_scroll)
 }
 
 #[cfg(test)]
