@@ -96,7 +96,7 @@ pub fn build_changed(input: &WorldInput) -> Result<(git::BaseStatus, Vec<Changed
             // nothing resolves is not a failure: it returns the legible no-base state.
             let resolution = git::resolve_base(&input.repo, input.base.as_deref())
                 .map_err(|e| anyhow::anyhow!("{}", e.0))?;
-            let base_oid = resolution.status.winner.as_ref().map(|w| w.oid.clone());
+            let base_oid = resolution.status.winner.as_ref().map(|w| w.oid().to_string());
             let changed = git::changed_files(&input.repo, input.scope, base_oid.as_deref())?;
             Ok((resolution.status, changed))
         }

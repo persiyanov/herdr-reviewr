@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-17
-Last edited: 2026-08-17
+Last edited: 2026-08-19
 ---
 
 # Input
@@ -221,7 +221,7 @@ A plain-text field that edits at the caret, not only at the end. The search inpu
 | `Enter` / `Esc`                                 | save / cancel, cancel discards the draft         |
 
 - A paste arrives whole via bracketed paste. A multi-line paste keeps its newlines. `\r\n` and `\r` normalize to `\n`.
-- A paste outside the comment editor and the search input is ignored. It never starts or mutates a comment.
+- A paste outside the comment editor, the search input, the find input, and the base picker's filter is ignored. It never starts or mutates a comment.
 - Movement, insertion, and deletion are character-wise. Multi-byte and wide characters count as whole characters.
 - The terminal cursor follows every field's caret in display cells, anchoring an IME candidate
   window after wide characters.
@@ -255,27 +255,34 @@ Only the unmodified `enter` sends. `Alt+Enter` and `Shift+Enter` insert a newlin
 
 ### Base picker
 
-`base-pick` opens the picker over the body, like the comments list (`tui.md`). It works on the file tabs while the `branch` scope is active and no `--base` flag was passed. Elsewhere it is inert and stays out of the footer. While the comment editor is open, the base-name click is inert like the key.
+`base-pick` opens the picker over the body, like the comments list (`tui.md`). It works on the file tabs while the `branch` scope is active and no `--base` flag was passed. Elsewhere it is inert and stays out of the footer. While the comment editor is open, the base-name click is inert like the key. The picker still lists branches. It also opens when that list is empty, so a revision can be typed.
 
 The list holds one row per branch name, remote-tracking and local names merged. The checked-out branch is not listed, unless it is the default branch, whose row must stay reachable to clear a pick. Rows sort by most recent commit. Two rows outrank that order:
 
 - The open PR's target sorts first, starred (`forge-host.md`).
-- The default branch sorts next, marked `default`. Choosing it clears the pick (`review-model.md`).
+- The default branch sorts next, marked `default`. Choosing it clears the pick (`review-model.md`). Choosing a revision that resolves to the same commit does not.
 
-The highlight opens on the current base, else the first row. The highlight is place state (`overview.md`).
+When the current base is a spelling that is not a listed branch name, that spelling is a row. The highlight opens on it. Otherwise the highlight opens on the current base among the branch rows, else the first row. The highlight is place state (`overview.md`).
 
-| key                 | does                                            |
-| ------------------- | ----------------------------------------------- |
-| typed character     | narrow the list, matching anywhere in the name  |
-| `↓` / `↑`           | move the highlight                              |
-| `ctrl+n` / `ctrl+p` | move the highlight                              |
-| `enter`             | pick the highlighted branch                     |
-| `esc`               | cancel                                          |
+The query is checked as a commit only when the filter matches no row, and only after typing pauses. A unique abbreviated SHA, a tag, and `HEAD~1` all resolve. An ambiguous SHA prefix does not. A unique SHA prefix shorter than the abbreviated object id completes to that abbreviation — the row is `a1b2c3d`, not the typed prefix. A full object id, an already-abbreviated SHA, a tag, and `HEAD~1` keep the typed spelling. The highlight sits on that row. Choosing it stores that name (`review-model.md`).
 
-The filter is a text field with the comment editor's controls, above. `↑` and `↓` move the highlight, so the single-line filter keeps `←` and `→` for its caret. A pasted newline drops, so a branch name copied with its line ending filters as the bare name.
+A non-branch row is marked `(a1b2c3d)`. A SHA spelling paints as that abbreviated SHA and carries no marker. The marker is not a separate target. A click picks the spelling.
 
-- A click moves the highlight. A click on the highlighted row picks.
-- A filter matching no branch shows `no branches match`, and `enter` does nothing.
+| key                 | does                                                                 |
+| ------------------- | -------------------------------------------------------------------- |
+| typed character     | narrow the list, matching anywhere in the name                       |
+| `↓` / `↑`           | move the highlight                                                   |
+| `ctrl+n` / `ctrl+p` | move the highlight                                                   |
+| `enter`             | pick the highlighted row. With no row, check the query and pick it   |
+| `esc`               | cancel                                                               |
+
+The filter is a text field with the comment editor's controls, above. `↑` and `↓` move the highlight, so the single-line filter keeps `←` and `→` for its caret. A pasted newline drops, so a name copied with its line ending filters as the bare name.
+
+- A click moves the highlight. A click on the highlighted row picks. Every other gesture is inert, and none reaches the view behind.
+- An empty filter shows a dim `filter or type a revision` placeholder.
+- A filter matching no row shows `no branches match` once the query has been checked and is not a commit. Enter does nothing.
+- Enter with no highlighted row checks the query immediately. A resolving spelling is recorded. A miss stays on `no branches match`.
+- An empty query with no rows shows `type a revision`, and `enter` does nothing.
 - A pick applies immediately: the changeset rebuilds and the header renames (`review-model.md`).
 - A picker taller than the pane scrolls with the highlight.
 
@@ -285,6 +292,7 @@ The filter is a text field with the comment editor's controls, above. `↑` and 
 - No multi-key sequence bindings. A binding is one key, alone or with a `ctrl+`/`alt+` prefix.
 - No `down` / `up` crossing at a file's edges. The line cursor clamps there.
 - The `?` expansion omits the navigator-resize keys, the half-page keys, and the `expand` / `collapse` keys. Resizing is a divider drag first, and the fold and scroll meanings are contextual row-1 actions.
+- The base picker does not list tags, reflog entries, or recent commits. A revision that is not a branch is named by typing it.
 
 ## Related specs
 

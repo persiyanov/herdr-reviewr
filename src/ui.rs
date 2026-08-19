@@ -23,6 +23,7 @@ use crate::config::NavigatorPosition;
 use crate::diff::{FileDiff, FileState, Row};
 use crate::file_list::{Annotation, RowKind};
 use crate::forge;
+use crate::git;
 use crate::herdr::AgentChoice;
 use crate::keymap::Keymap;
 use crate::model::Comment;
@@ -634,11 +635,9 @@ fn scope_chip(app: &App) -> String {
     format!("[{}]", app.scope.label())
 }
 
-/// The `branch` scope's base label as `(lead, name, tail)`: `vs ` + the bare name however it
-/// resolved, or the empty-state `no base` in the name slot with no lead. The skipped-choice
-/// tail ` · <name> missing` follows either, so a dormant choice never reads as never-chosen
-/// (`specs/tui.md`). `None` off the `branch` scope.
-fn base_label(app: &App) -> Option<(String, String, String)> {
+/// The `branch` scope's base label as `(lead, shown, marker, tail)` (`specs/tui.md`).
+/// `shown` is the spelling or a SHA-once abbrev. `marker` is ` (sha)` for a named rev.
+fn base_label(app: &App) -> Option<(String, String, String, String)> {
     if app.scope != crate::model::Scope::Branch {
         return None;
     }
@@ -647,17 +646,23 @@ fn base_label(app: &App) -> Option<(String, String, String)> {
         None => String::new(),
     };
     Some(match &app.branch_base.winner {
-        Some(b) => ("vs ".to_string(), b.name.clone(), tail),
-        None => (String::new(), "no base".to_string(), tail),
+        Some(git::ResolvedBase::Branch { name, .. }) => {
+            ("vs ".to_string(), name.clone(), String::new(), tail)
+        }
+        Some(git::ResolvedBase::Rev { spelling, oid }) => {
+            let (shown, mark) = git::rev_paint(spelling, oid);
+            ("vs ".to_string(), shown, mark.map(|m| format!(" ({m})")).unwrap_or_default(), tail)
+        }
+        None => (String::new(), "no base".to_string(), String::new(), tail),
     })
 }
 
 /// The base label as painted: truncated with a trailing `…` to what the header can fit,
 /// the name first and the skipped tail only in what remains, so a long missing name can
 /// never evict the resolved base (`specs/tui.md`) — one source for the paint and the
-/// click hit-test.
+/// click hit-test. A `spelling (sha)` clips the spelling and keeps `(sha)` when it fits.
 fn base_parts(app: &App, keymap: &Keymap, width: u16) -> Option<(String, String, String)> {
-    let (lead, name, tail) = base_label(app)?;
+    let (lead, shown, marker, tail) = base_label(app)?;
     // Everything else on the line plus the base's own gap and the suffix's minimum gap.
     let fixed = header_prefix_len(&tab_spans(keymap))
         + scope_chip(app).len()
@@ -667,7 +672,12 @@ fn base_parts(app: &App, keymap: &Keymap, width: u16) -> Option<(String, String,
         + HEADER_LEAD.len()
         + 1;
     let budget = (width as usize).saturating_sub(fixed);
-    let name = truncate_width(&name, budget);
+    let marker_w = marker.width();
+    let name = if marker_w > 0 && budget > marker_w {
+        format!("{}{marker}", truncate_width(&shown, budget - marker_w))
+    } else {
+        truncate_width(&format!("{shown}{marker}"), budget)
+    };
     if name.is_empty() {
         // Not even one column for the name: the base leaves the header whole rather than
         // paint a nameless `vs` the click would still claim (`specs/tui.md`).
@@ -2224,32 +2234,51 @@ pub fn hit_picker_row(area: Rect, app: &App, col: u16, row: u16) -> Option<usize
 
 // --- Base picker (specs/input.md Base picker) ----------------------------------------------
 
-/// A row's dim trail: `default` on the default branch, whose pick clears the record
+/// A row's dim trail: `default` on the default branch, or `(sha)` on a named rev
 /// (`specs/input.md` Base picker).
-fn base_trail(row: &crate::app::BaseChoice) -> &'static str {
-    if row.is_default { "default" } else { "" }
+fn row_shown(row: &crate::app::BaseChoice) -> String {
+    match row {
+        crate::app::BaseChoice::Rev { name, oid } => git::rev_paint(name, oid).0,
+        crate::app::BaseChoice::Branch { name, .. } => name.clone(),
+    }
 }
 
-/// The names pad to the widest, so the dim `default` mark starts in one column.
-fn base_name_width(bp: &crate::app::BasePicker) -> usize {
-    bp.rows.iter().map(|r| r.name.width()).max().unwrap_or(0)
+fn base_trail(row: &crate::app::BaseChoice) -> String {
+    if row.is_default() {
+        return "default".into();
+    }
+    let crate::app::BaseChoice::Rev { name, oid } = row else {
+        return String::new();
+    };
+    match git::rev_paint(name, oid).1 {
+        Some(abbrev) => format!("({abbrev})"),
+        None => String::new(),
+    }
+}
+
+/// Content width of one base-picker row: star lead, painted name, and dim trail.
+fn base_row_width(row: &crate::app::BaseChoice) -> usize {
+    let trail = base_trail(row);
+    let trail_w = if trail.is_empty() { 0 } else { 2 + trail.width() };
+    3 + row_shown(row).width() + trail_w
 }
 
 /// Sized like the agent picker's box, plus the filter line above the rows. The box holds its
 /// full-list size while the filter narrows, so the frame never jumps under typing.
 fn base_picker_popup(area: Rect, app: &App) -> Rect {
     let Some(bp) = &app.base_picker else { return Rect::default() };
-    let name_width = base_name_width(bp);
-    // The star lead + the padded name + the dim trail.
-    let widest =
-        bp.rows.iter().map(|r| 3 + name_width + 2 + base_trail(r).width()).max().unwrap_or(0);
+    let hit = match &bp.probe {
+        crate::app::BaseProbe::Hit(c) => Some(c),
+        _ => None,
+    };
+    let widest = bp.rows.iter().chain(hit).map(base_row_width).max().unwrap_or(0);
     menu_popup(area, app, widest, BASE_PICKER_TITLE, bp.rows.len().max(1) + 3)
 }
 
 const BASE_PICKER_TITLE: &str = "Pick base branch";
 
 fn base_picker_scroll(bp: &crate::app::BasePicker, rows: usize) -> usize {
-    menu_scroll(bp.cursor, bp.filtered().len(), rows)
+    menu_scroll(bp.cursor, bp.visible().len(), rows)
 }
 
 fn render_base_picker(frame: &mut Frame, app: &App, area: Rect) {
@@ -2274,46 +2303,54 @@ fn render_base_picker(frame: &mut Frame, app: &App, area: Rect) {
     // One cell of right margin keeps the scrolled query off the popup's border.
     let avail = (inner.width as usize).saturating_sub(prefix.width() + 1);
     let (filter_spans, caret_cell_col) =
-        input_line(&bp.query, bp.caret, avail, "type to filter…", p);
+        input_line(&bp.query, bp.caret, avail, "filter or type a revision", p);
     let mut filter = Line::from(filter_spans);
     filter.spans.insert(0, Span::styled(prefix, text_style(p)));
     frame.render_widget(Paragraph::new(filter), Rect { height: 1, ..inner });
     anchor_input_cursor(frame, inner, prefix.width() + caret_cell_col, 0);
 
     let list_area = Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner };
-    let filtered = bp.filtered();
-    if filtered.is_empty() {
-        let none = Line::from(Span::styled(" no branches match", Style::default().fg(p.overlay0)));
+    let visible = bp.visible();
+    if visible.is_empty() {
+        let msg = if bp.query.is_empty() {
+            " type a revision"
+        } else if matches!(bp.probe, crate::app::BaseProbe::Miss) {
+            " no branches match"
+        } else {
+            return;
+        };
+        let none = Line::from(Span::styled(msg, Style::default().fg(p.overlay0)));
         frame.render_widget(Paragraph::new(none), list_area);
         return;
     }
-    let name_width = base_name_width(bp);
+    let width = list_area.width as usize;
     let first = base_picker_scroll(bp, list_area.height as usize);
-    let items: Vec<ListItem> = filtered
+    let items: Vec<ListItem> = visible
         .iter()
         .enumerate()
         .skip(first)
         .take(list_area.height as usize)
-        .map(|(vi, &ri)| {
-            let row = &bp.rows[ri];
+        .map(|(vi, row)| {
             // The star marks the open PR's target; the name is the only part at full
-            // brightness, like the agent picker's rows (`specs/input.md`).
-            let lead = if row.starred { " ★ " } else { "   " };
-            let pad = name_width.saturating_sub(row.name.width());
-            let spans = vec![
+            // brightness, like the agent picker's rows (`specs/input.md`). The dim
+            // trail right-aligns to the row so a probe and the full list put `(sha)`
+            // in the same place.
+            let lead = if row.starred() { " ★ " } else { "   " };
+            let label = row_shown(row);
+            let trail = base_trail(row);
+            let gap = if trail.is_empty() { 0 } else { 2 };
+            let pad = width.saturating_sub(lead.width() + label.width() + gap + trail.width());
+            let mut spans = vec![
                 Span::styled(lead.to_string(), Style::default().fg(p.yellow)),
-                Span::styled(row.name.clone(), text_style(p)),
-                Span::styled(
-                    format!("{}  {}", " ".repeat(pad), base_trail(row)),
-                    Style::default().fg(p.overlay0),
-                ),
+                Span::styled(label, text_style(p)),
             ];
-            selectable_row(
-                p,
-                spans,
-                list_area.width as usize,
-                (vi == bp.cursor).then_some(p.surface2),
-            )
+            if !trail.is_empty() {
+                spans.push(Span::styled(
+                    format!("{}{trail}", " ".repeat(pad + gap)),
+                    Style::default().fg(p.overlay0),
+                ));
+            }
+            selectable_row(p, spans, width, (vi == bp.cursor).then_some(p.surface2))
         })
         .collect();
     frame.render_widget(List::new(items), list_area);
@@ -2325,7 +2362,7 @@ pub fn hit_base_picker_row(area: Rect, app: &App, col: u16, row: u16) -> Option<
     let bp = app.base_picker.as_ref()?;
     let inner = picker_inner(base_picker_popup(area, app));
     let first = base_picker_scroll(bp, inner.height.saturating_sub(1) as usize);
-    menu_hit(inner, 1, first, bp.filtered().len(), col, row)
+    menu_hit(inner, 1, first, bp.visible().len(), col, row)
 }
 
 // --- Search screen (specs/search.md) -------------------------------------------------------

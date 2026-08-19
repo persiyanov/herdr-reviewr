@@ -7,10 +7,10 @@ use std::path::Path;
 
 use common::Repo;
 use herdr_reviewr::git::{
-    all_files, changed_against_tree, changed_files as changed_files_oid, clear_base_pick,
-    default_branch_name, file_content, list_branches, merge_base as merge_base_oid, read_base_pick,
-    read_baseline_ref, resolve_base, snapshot_worktree, worktree_key, write_base_pick,
-    write_baseline_ref,
+    ResolvedBase, abbreviate_oid, all_files, changed_against_tree,
+    changed_files as changed_files_oid, clear_base_pick, default_branch_name, file_content,
+    list_branches, merge_base as merge_base_oid, read_base_pick, read_baseline_ref, resolve_base,
+    resolve_commit, snapshot_worktree, worktree_key, write_base_pick, write_baseline_ref,
 };
 use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope};
 
@@ -24,12 +24,12 @@ fn changed_files(
     base: Option<&str>,
 ) -> anyhow::Result<Vec<ChangedFile>> {
     let winner = resolve_base(repo, base).map_err(|e| anyhow::anyhow!("{}", e.0))?.status.winner;
-    changed_files_oid(repo, scope, winner.as_ref().map(|w| w.oid.as_str()))
+    changed_files_oid(repo, scope, winner.as_ref().map(herdr_reviewr::git::ResolvedBase::oid))
 }
 
 fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
     let winner = resolve_base(repo, base).ok()?.status.winner?;
-    merge_base_oid(repo, &winner.oid)
+    merge_base_oid(repo, winner.oid())
 }
 
 #[test]
@@ -108,16 +108,16 @@ fn the_chain_is_flag_then_pick_then_default() {
 
     // Default branch alone: `origin/HEAD` names `main` (specs/review-model.md).
     let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
-    assert_eq!(winner.name, "main");
+    assert_eq!(winner.name(), "main");
 
     // A pick outranks the default.
     write_base_pick(r.path(), "picked-base").unwrap();
     let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
-    assert_eq!(winner.name, "picked-base");
+    assert_eq!(winner.name(), "picked-base");
 
     // The flag outranks the pick.
     let winner = resolve_base(r.path(), Some("flagged-base")).unwrap().status.winner.unwrap();
-    assert_eq!(winner.name, "flagged-base");
+    assert_eq!(winner.name(), "flagged-base");
 }
 
 #[test]
@@ -167,7 +167,15 @@ fn a_prefixed_flag_spelling_resolves_to_the_bare_name() {
     // `--base origin/main` resolves as a verbatim rev, but the header and the PR name
     // shield carry the bare spelling (specs/tui.md, specs/forge-host.md).
     let winner = resolve_base(r.path(), Some("origin/main")).unwrap().status.winner.unwrap();
-    assert_eq!(winner.name, "main");
+    assert_eq!(winner.name(), "main");
+
+    // A prefixed rev that is not a branch keeps the flag spelling, so `origin/HEAD` does
+    // not paint as live `HEAD`.
+    let winner = resolve_base(r.path(), Some("origin/HEAD")).unwrap().status.winner.unwrap();
+    assert_eq!(winner.name(), "origin/HEAD");
+
+    let status = resolve_base(r.path(), Some("origin/HEAD~99")).unwrap().status;
+    assert_eq!(status.skipped.as_deref(), Some("origin/HEAD~99"));
 
     // A prefixed spelling that resolves to nothing is skipped under the same bare name,
     // so the header reads `· gone missing`, never `· origin/gone missing`.
@@ -191,14 +199,14 @@ fn a_pick_git_could_never_have_written_is_no_pick() {
     r.write_raw_base_pick("dev\u{1b}]0;pwned\u{7}");
     assert_eq!(read_base_pick(r.path()).unwrap(), None);
 
-    // Nor a rev expression: `main~5` resolves to a commit no branch names, and the header
-    // would paint it as though a branch were chosen.
+    // A leftover expression in the blob is a spelling (`specs/review-model.md`). Too
+    // deep to resolve, it is skipped, not discarded.
     r.write_raw_base_pick("main~5");
-    assert_eq!(read_base_pick(r.path()).unwrap(), None);
+    assert_eq!(read_base_pick(r.path()).unwrap().as_deref(), Some("main~5"));
 
     let status = resolve_base(r.path(), None).unwrap().status;
-    assert_eq!(status.skipped, None, "a malformed pick is not a recorded choice either");
-    assert_eq!(status.winner.unwrap().name, "main");
+    assert_eq!(status.skipped.as_deref(), Some("main~5"));
+    assert_eq!(status.winner.unwrap().name(), "main");
 }
 
 #[test]
@@ -215,21 +223,21 @@ fn a_dormant_pick_is_skipped_and_reactivates() {
 
     // The pick wins while its branch resolves.
     let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
-    assert_eq!(winner.name, "dev");
+    assert_eq!(winner.name(), "dev");
 
     // The branch disappears: the pick is kept and skipped, the default wins, and the
     // header can say so (specs/review-model.md).
     r.git(&["branch", "-D", "dev"]);
     let status = resolve_base(r.path(), None).unwrap().status;
     let winner = status.winner.unwrap();
-    assert_eq!(winner.name, "main");
+    assert_eq!(winner.name(), "main");
     assert_eq!(status.skipped.as_deref(), Some("dev"));
     assert_eq!(read_base_pick(r.path()).unwrap().as_deref(), Some("dev"));
 
     // The branch returns: the pick reactivates without a new choice.
     r.git(&["branch", "dev", "main"]);
     let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
-    assert_eq!(winner.name, "dev");
+    assert_eq!(winner.name(), "dev");
 }
 
 #[test]
@@ -269,6 +277,153 @@ fn the_pick_persists_in_a_private_ref_and_clears() {
     let reviewr_refs: Vec<&str> = refs.lines().filter(|l| !l.starts_with("refs/heads/")).collect();
     assert_eq!(reviewr_refs, ["refs/reviewr/base-pick"]);
     assert_eq!(r.git(&["status", "--porcelain"]).trim(), "");
+}
+
+#[test]
+fn a_head_tilde_pick_re_resolves_after_a_commit() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("base.rs", "2\n");
+    r.commit_all("one");
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    write_base_pick(r.path(), "HEAD~1").unwrap();
+
+    let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
+    assert_eq!(winner.oid(), parent);
+    assert_eq!(winner.name(), "HEAD~1");
+    assert!(matches!(winner, ResolvedBase::Rev { .. }));
+    assert_eq!(read_base_pick(r.path()).unwrap().as_deref(), Some("HEAD~1"));
+
+    r.write("base.rs", "3\n");
+    r.commit_all("two");
+    let moved = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    assert_ne!(moved, parent);
+    let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
+    assert_eq!(winner.name(), "HEAD~1");
+    assert_eq!(winner.oid(), moved, "a later commit still diffs one back");
+    assert_eq!(merge_base(r.path(), None).as_deref(), Some(moved.as_str()));
+}
+
+#[test]
+fn a_sha_pick_stays_pinned() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("base.rs", "2\n");
+    r.commit_all("one");
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    write_base_pick(r.path(), &parent).unwrap();
+
+    let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
+    assert_eq!(winner.oid(), parent);
+    assert_eq!(winner.name(), parent);
+    assert!(matches!(winner, ResolvedBase::Rev { .. }));
+
+    r.write("base.rs", "3\n");
+    r.commit_all("two");
+    let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
+    assert_eq!(winner.oid(), parent, "a SHA spelling is a pin");
+    assert_eq!(merge_base(r.path(), None).as_deref(), Some(parent.as_str()));
+}
+
+#[test]
+fn a_tag_pick_re_resolves() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("base.rs", "2\n");
+    r.commit_all("one");
+    let first = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    r.git(&["tag", "qa-pin-base", &first]);
+    write_base_pick(r.path(), "qa-pin-base").unwrap();
+
+    let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
+    assert_eq!(winner.name(), "qa-pin-base");
+    assert_eq!(winner.oid(), first);
+    assert!(matches!(winner, ResolvedBase::Rev { .. }));
+
+    let tip = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+    r.git(&["tag", "-f", "qa-pin-base", &tip]);
+    let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
+    assert_eq!(winner.name(), "qa-pin-base");
+    assert_eq!(winner.oid(), tip, "moving the tag moves the base");
+}
+
+#[test]
+fn a_unique_short_sha_pick_keeps_that_spelling() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    let oid = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let short = abbreviate_oid(&oid);
+    write_base_pick(r.path(), &short).unwrap();
+    let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
+    assert_eq!(winner.name(), short);
+    assert_eq!(winner.oid(), oid);
+    assert!(matches!(winner, ResolvedBase::Rev { .. }));
+}
+
+#[test]
+fn a_unique_short_sha_resolves_and_a_too_deep_or_dashed_rev_does_not() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    let oid = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let short = abbreviate_oid(&oid);
+    assert_eq!(resolve_commit(r.path(), &short).unwrap().as_deref(), Some(oid.as_str()));
+    assert_eq!(resolve_commit(r.path(), "HEAD~1").unwrap(), None, "too deep is a miss");
+    assert_eq!(resolve_commit(r.path(), "-n").unwrap(), None, "a leading dash is not a rev");
+}
+
+#[test]
+fn a_tree_ish_does_not_resolve_as_a_commit() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    let tree = r.git(&["rev-parse", "HEAD^{tree}"]).trim().to_string();
+    assert_eq!(resolve_commit(r.path(), &tree).unwrap(), None);
+}
+
+#[test]
+fn a_flag_that_is_not_a_branch_keeps_its_spelling() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    r.write("base.rs", "1b\n");
+    r.commit_all("main-2");
+    r.set_origin_default("main", "HEAD");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("base.rs", "2\n");
+    r.commit_all("diverge");
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    let winner = resolve_base(r.path(), Some("HEAD~1")).unwrap().status.winner.unwrap();
+    assert_eq!(winner.oid(), parent);
+    assert_eq!(winner.name(), "HEAD~1");
+    assert!(matches!(winner, ResolvedBase::Rev { .. }));
+}
+
+#[test]
+fn a_missing_head_tilde_pick_is_skipped_and_reactivates() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    r.set_origin_default("main", "HEAD");
+    write_base_pick(r.path(), "HEAD~1").unwrap();
+
+    let status = resolve_base(r.path(), None).unwrap().status;
+    assert_eq!(status.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name), Some("main"));
+    assert_eq!(status.skipped.as_deref(), Some("HEAD~1"));
+
+    r.write("base.rs", "2\n");
+    r.commit_all("two");
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
+    assert_eq!(winner.name(), "HEAD~1");
+    assert_eq!(winner.oid(), parent);
 }
 
 #[test]

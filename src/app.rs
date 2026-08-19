@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -27,6 +28,9 @@ const DEFAULT_STACK_PCT: u16 = 25;
 const MIN_NAVIGATOR_PCT: u16 = 15;
 const MAX_SIDE_PCT: u16 = 60;
 const MAX_STACK_PCT: u16 = 50;
+/// Pause after the last filter edit before probing an empty list as a rev
+/// (`specs/input.md` Base picker).
+const BASE_PROBE_DELAY: Duration = Duration::from_millis(150);
 /// The search screen's results-pane share: half the body by default, dragged within
 /// wide bounds — the geometry's minimum pane sizes clamp the rest (specs/search.md).
 const DEFAULT_SEARCH_PCT: u16 = 50;
@@ -123,35 +127,81 @@ struct ArmedCross {
 /// at open; the filter and highlight are the reviewer's own place state.
 #[derive(Clone, Debug)]
 pub struct BasePicker {
-    /// Every pickable branch name: the open PR's target starred first, the default branch
-    /// next, the rest by commit recency, the checked-out branch excluded.
+    /// Pickable rows: branches (PR target starred first, default next, recency, checked-out
+    /// excluded) plus a current non-branch spelling so the highlight can open on it.
     pub rows: Vec<BaseChoice>,
-    /// The highlighted row, an index into the filtered view.
+    /// The highlighted row, an index into the visible view.
     pub cursor: usize,
     /// The typed filter, matching anywhere in the name.
     pub query: String,
     /// The caret in `query`, a char index — the filter edits with the comment editor's
     /// controls, like every other text field (`specs/input.md`).
     pub caret: usize,
+    /// Empty-list commit probe (`specs/input.md` Base picker).
+    pub probe: BaseProbe,
+}
+
+/// Empty-list commit probe while the base picker is open (`specs/input.md`).
+#[derive(Clone, Debug, Default)]
+pub enum BaseProbe {
+    #[default]
+    Idle,
+    Pending(Instant),
+    Hit(BaseChoice),
+    Miss,
 }
 
 /// One base picker row (`specs/input.md` Base picker).
 #[derive(Clone, Debug)]
-pub struct BaseChoice {
-    pub name: String,
-    /// The open PR's target, shown starred.
-    pub starred: bool,
-    /// The default branch, marked `default`. Choosing it clears the pick
-    /// (`specs/review-model.md`).
-    pub is_default: bool,
+pub enum BaseChoice {
+    Branch { name: String, starred: bool, is_default: bool },
+    Rev { name: String, oid: String },
+}
+
+impl BaseChoice {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Branch { name, .. } | Self::Rev { name, .. } => name,
+        }
+    }
+
+    #[must_use]
+    pub fn starred(&self) -> bool {
+        matches!(self, Self::Branch { starred: true, .. })
+    }
+
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Branch { is_default: true, .. })
+    }
+
+    #[must_use]
+    pub fn oid(&self) -> Option<&str> {
+        match self {
+            Self::Rev { oid, .. } => Some(oid),
+            Self::Branch { .. } => None,
+        }
+    }
 }
 
 impl BasePicker {
-    /// The filtered view: indices into `rows` whose name contains the query, matched
-    /// case-insensitively and anywhere in the name (`specs/input.md` Base picker).
+    /// Frozen rows whose name contains the query, matched case-insensitively and
+    /// anywhere in the name (`specs/input.md` Base picker).
     pub fn filtered(&self) -> Vec<usize> {
         let q = self.query.to_lowercase();
-        (0..self.rows.len()).filter(|&i| self.rows[i].name.to_lowercase().contains(&q)).collect()
+        (0..self.rows.len()).filter(|&i| self.rows[i].name().to_lowercase().contains(&q)).collect()
+    }
+
+    /// The on-screen rows: a live probe hit, else the frozen matches (`specs/input.md`).
+    pub fn visible(&self) -> Vec<&BaseChoice> {
+        let matched = self.filtered();
+        if let BaseProbe::Hit(probe) = &self.probe
+            && matched.is_empty()
+        {
+            return vec![probe];
+        }
+        matched.into_iter().map(|i| &self.rows[i]).collect()
     }
 }
 
@@ -1295,7 +1345,7 @@ impl App {
                     .branch_base
                     .winner
                     .as_ref()
-                    .and_then(|b| git::merge_base(&self.repo, &b.oid));
+                    .and_then(|b| git::merge_base(&self.repo, b.oid()));
                 let old =
                     mb.map(|m| git::file_content(&self.repo, &m, old_path)).unwrap_or_default();
                 (old, worktree_content(&self.repo, new_path))
@@ -2664,9 +2714,11 @@ impl App {
     /// (specs/search.md).
     fn edit_input(&mut self, f: impl FnOnce(&mut Vec<char>, &mut usize)) {
         let searching = self.mode == Mode::Search;
-        // The highlighted branch's own row, read before the filter narrows under it.
-        let highlighted =
-            self.base_picker.as_ref().and_then(|bp| bp.filtered().get(bp.cursor).copied());
+        // The highlighted row's name, read before the filter narrows under it.
+        let highlighted = self
+            .base_picker
+            .as_ref()
+            .and_then(|bp| bp.visible().get(bp.cursor).map(|c| c.name().to_string()));
         let Some((text, caret_ref)) = self.active_field() else { return };
         let mut v: Vec<char> = text.chars().collect();
         let mut caret = (*caret_ref).min(v.len());
@@ -2685,11 +2737,75 @@ impl App {
 
     /// Re-seat the base picker's highlight after a filter edit: it follows its own row into
     /// the narrowed view when the row survives, else rests on the first match
-    /// (`specs/overview.md` Continuity).
-    fn refilter_base_picker(&mut self, highlighted: Option<usize>) {
+    /// (`specs/overview.md` Continuity). An empty frozen list with a non-empty query
+    /// schedules a commit probe (`specs/input.md` Base picker).
+    fn refilter_base_picker(&mut self, highlighted: Option<String>) {
         let Some(bp) = self.base_picker.as_mut() else { return };
-        let filtered = bp.filtered();
-        bp.cursor = highlighted.and_then(|h| filtered.iter().position(|&i| i == h)).unwrap_or(0);
+        bp.probe = if bp.filtered().is_empty() && !bp.query.is_empty() {
+            BaseProbe::Pending(Instant::now() + BASE_PROBE_DELAY)
+        } else {
+            BaseProbe::Idle
+        };
+        let cursor = {
+            let vis = bp.visible();
+            highlighted.and_then(|h| vis.iter().position(|c| c.name() == h)).unwrap_or(0)
+        };
+        bp.cursor = cursor;
+    }
+
+    /// Remaining wait until the empty-list probe, if one is pending.
+    #[must_use]
+    pub fn base_probe_wait(&self) -> Option<Duration> {
+        match self.base_picker.as_ref()?.probe {
+            BaseProbe::Pending(at) => Some(at.saturating_duration_since(Instant::now())),
+            _ => None,
+        }
+    }
+
+    /// Run the empty-list commit probe if its pause has elapsed (`specs/input.md`).
+    pub fn tick_base_picker_probe(&mut self) {
+        let at = match self.base_picker.as_ref().map(|bp| &bp.probe) {
+            Some(BaseProbe::Pending(at)) => *at,
+            _ => return,
+        };
+        if Instant::now() < at {
+            return;
+        }
+        self.run_base_probe();
+    }
+
+    /// Check the query as a commit now. Tests call this instead of sleeping.
+    pub fn run_base_probe(&mut self) {
+        let Some(bp) = &self.base_picker else { return };
+        if bp.query.is_empty() || !bp.filtered().is_empty() {
+            if let Some(bp) = self.base_picker.as_mut() {
+                bp.probe = BaseProbe::Idle;
+            }
+            return;
+        }
+        let query = bp.query.clone();
+        let hit = git::resolve_spelling(&self.repo, &query).map(|resolved| {
+            resolved.map(|c| match c {
+                git::ResolvedBase::Branch { name, .. } => {
+                    BaseChoice::Branch { name, starred: false, is_default: false }
+                }
+                git::ResolvedBase::Rev { spelling, oid } => {
+                    BaseChoice::Rev { name: git::complete_sha_prefix(&spelling, &oid), oid }
+                }
+            })
+        });
+        let Some(bp) = self.base_picker.as_mut() else { return };
+        match hit {
+            Ok(Some(choice)) => {
+                bp.probe = BaseProbe::Hit(choice);
+                bp.cursor = 0;
+            }
+            Ok(None) => bp.probe = BaseProbe::Miss,
+            Err(e) => {
+                bp.probe = BaseProbe::Miss;
+                self.status = e.0;
+            }
+        }
     }
 
     /// Move the caret with a function of the current `Vec<char>` view; a no-op without an
@@ -3663,7 +3779,9 @@ impl App {
 
     /// Open the base picker: one row per branch name, the open PR's target starred first,
     /// the default branch next, the rest by commit recency (`specs/input.md` Base picker).
-    /// The highlight opens on the current base, else the first row.
+    /// A current non-branch pick is inserted as a row. The highlight opens on the current
+    /// base, else the first row. Still opens when that list is empty, so a revision can
+    /// be typed.
     pub fn open_base_picker(&mut self) {
         if !self.base_pick_available() || self.mode != Mode::Normal {
             return;
@@ -3676,29 +3794,34 @@ impl App {
                 return;
             }
         };
-        if names.is_empty() {
-            // Nothing to choose: refuse with the cause, like an empty send
-            // (`specs/input.md` Base picker).
-            self.status = "no branches to pick".to_string();
-            return;
-        }
         let target = self
             .pr_snapshot()
             .filter(|s| s.state == forge::PrState::Open)
             .map(|s| s.base_ref.clone());
         let mut rows: Vec<BaseChoice> = names
             .into_iter()
-            .map(|name| BaseChoice {
+            .map(|name| BaseChoice::Branch {
                 starred: target.as_deref() == Some(name.as_str()),
                 is_default: default.as_deref() == Some(name.as_str()),
                 name,
             })
             .collect();
         // A stable sort, so recency still orders the promoted pair and the rest alike.
-        rows.sort_by_key(|r| (!r.starred, !r.is_default));
-        let current = self.branch_base.winner.as_ref().map(|b| b.name.as_str());
-        let cursor = current.and_then(|c| rows.iter().position(|r| r.name == c)).unwrap_or(0);
-        self.base_picker = Some(BasePicker { rows, cursor, query: String::new(), caret: 0 });
+        rows.sort_by_key(|r| (!r.starred(), !r.is_default()));
+        if let Some(git::ResolvedBase::Rev { spelling, oid }) = &self.branch_base.winner
+            && !rows.iter().any(|r| r.name() == spelling)
+        {
+            rows.insert(0, BaseChoice::Rev { name: spelling.clone(), oid: oid.clone() });
+        }
+        let current = self.branch_base.winner.as_ref().map(git::ResolvedBase::name);
+        let cursor = current.and_then(|c| rows.iter().position(|r| r.name() == c)).unwrap_or(0);
+        self.base_picker = Some(BasePicker {
+            rows,
+            cursor,
+            query: String::new(),
+            caret: 0,
+            probe: BaseProbe::Idle,
+        });
         self.mode = Mode::BasePick;
     }
 
@@ -3709,38 +3832,47 @@ impl App {
         self.base_picker = None;
     }
 
-    /// Move the highlight through the filtered view (`specs/input.md`).
+    /// Move the highlight through the visible view (`specs/input.md`).
     pub fn base_picker_move(&mut self, delta: isize) {
         let Some(bp) = self.base_picker.as_mut() else { return };
-        let len = bp.filtered().len();
+        let len = bp.visible().len();
         if len > 0 {
             bp.cursor = step(bp.cursor.min(len - 1), delta, len);
         }
     }
 
-    /// Move the highlight to filtered `row`, for a click. A row past the end is inert
+    /// Move the highlight to visible `row`, for a click. A row past the end is inert
     /// (`specs/input.md`).
     pub fn base_picker_goto(&mut self, row: usize) {
         if let Some(bp) = self.base_picker.as_mut()
-            && row < bp.filtered().len()
+            && row < bp.visible().len()
         {
             bp.cursor = row;
         }
     }
 
-    /// Pick the highlighted branch: persist it as the repo pick — or clear the pick when
-    /// the highlight is the default branch — then rebuild the changeset against it, so the
-    /// list and the header rename together (`specs/input.md`, `specs/review-model.md`).
-    /// With no filter match there is no highlight, and `enter` does nothing.
+    /// Pick the highlighted row: persist its spelling — or clear the pick when the
+    /// highlight is the default branch — then rebuild the changeset against it
+    /// (`specs/input.md`, `specs/review-model.md`). With no visible row, Enter checks the
+    /// query immediately and records it if it resolves.
     pub fn base_picker_pick(&mut self) -> Result<()> {
         let Some(bp) = &self.base_picker else { return Ok(()) };
-        let Some(&row) = bp.filtered().get(bp.cursor) else { return Ok(()) };
-        let choice = bp.rows[row].clone();
+        if bp.visible().is_empty() {
+            if bp.query.is_empty() {
+                return Ok(());
+            }
+            self.run_base_probe();
+        }
+        let choice = {
+            let Some(bp) = &self.base_picker else { return Ok(()) };
+            bp.visible().get(bp.cursor).map(|c| (*c).clone())
+        };
+        let Some(choice) = choice else { return Ok(()) };
         self.close_base_picker();
-        let write = if choice.is_default {
+        let write = if choice.is_default() {
             git::clear_base_pick(&self.repo)
         } else {
-            git::write_base_pick(&self.repo, &choice.name)
+            git::write_base_pick(&self.repo, choice.name())
         };
         if let Err(e) = write {
             self.status = e.0;
@@ -4046,7 +4178,7 @@ mod tests {
         let mut old = App::blocked(PathBuf::from("."), Scope::Branch, None);
         old.mode = Mode::BasePick;
         old.base_picker = Some(super::BasePicker {
-            rows: vec![super::BaseChoice {
+            rows: vec![super::BaseChoice::Branch {
                 name: "dev".to_string(),
                 starred: false,
                 is_default: false,
@@ -4054,9 +4186,10 @@ mod tests {
             cursor: 0,
             query: "d".to_string(),
             caret: 1,
+            probe: super::BaseProbe::Idle,
         });
         old.branch_base = crate::git::BaseStatus {
-            winner: Some(crate::git::ResolvedBase {
+            winner: Some(crate::git::ResolvedBase::Branch {
                 name: "main".to_string(),
                 oid: "0".repeat(40),
             }),
@@ -4068,11 +4201,11 @@ mod tests {
         assert_eq!(recovered.mode, Mode::BasePick);
         let bp = recovered.base_picker.as_ref().expect("the picker state is carried");
         assert_eq!(bp.query, "d");
-        assert_eq!(bp.rows[0].name, "dev");
+        assert_eq!(bp.rows[0].name(), "dev");
         // The header's base rides with the carried frame — recovery never paints
         // `no base` beside a populated list (`specs/tui.md`).
         let base = recovered.branch_base.winner.as_ref().expect("the resolved base is carried");
-        assert_eq!(base.name, "main");
+        assert_eq!(base.name(), "main");
     }
 
     #[test]

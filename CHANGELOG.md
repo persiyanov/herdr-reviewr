@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.33.0] — 2026-08-19
+
+### Added
+- **Typed base revisions.** The pick-base menu (`B`) takes any git revision, not only named
+  branches: `HEAD~1`, a tag, a unique SHA prefix
+  ([#75](https://github.com/persiyanov/herdr-reviewr/issues/75)). Named spellings re-resolve
+  like git, so a later commit still diffs one back; the header reads `vs HEAD~1 (a1b2c3d)`.
+  Type a SHA to freeze that commit; the header shows the abbrev once.
+
+### Changed
+- A unique SHA prefix shorter than seven characters completes to the abbreviated object id.
+  A pasted 40-hex stays a pin.
+
 ## [0.32.1] — 2026-08-18
 
 ### Fixed

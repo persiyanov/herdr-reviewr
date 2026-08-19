@@ -532,12 +532,37 @@ pub fn pr_local(repo: &Path, base_flag: Option<&str>) -> Result<PrLocalState, Gi
     Ok(PrLocalState { head_oid, base_oid: bases.into_iter().next(), names, detached: false })
 }
 
-/// The winning base: the source's bare name and its pinned commit
+/// The winning base: a branch (origin then local) or any other spelling
 /// (`specs/review-model.md` Base branch).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResolvedBase {
-    pub name: String,
-    pub oid: String,
+pub enum ResolvedBase {
+    Branch { name: String, oid: String },
+    Rev { spelling: String, oid: String },
+}
+
+impl ResolvedBase {
+    fn branch(name: String, oid: String) -> Self {
+        Self::Branch { name, oid }
+    }
+
+    fn rev(spelling: String, oid: String) -> Self {
+        Self::Rev { spelling, oid }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Branch { name, .. } => name,
+            Self::Rev { spelling, .. } => spelling,
+        }
+    }
+
+    #[must_use]
+    pub fn oid(&self) -> &str {
+        match self {
+            Self::Branch { oid, .. } | Self::Rev { oid, .. } => oid,
+        }
+    }
 }
 
 /// The chain outcome the header paints: the winner and the first recorded choice the
@@ -558,27 +583,27 @@ pub struct BaseStatus {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BaseResolution {
     pub status: BaseStatus,
-    candidates: Vec<(String, String)>,
+    candidates: Vec<ResolvedBase>,
     recorded: Vec<String>,
 }
 
 impl BaseResolution {
     fn oids(&self) -> Vec<String> {
-        self.candidates.iter().map(|(_, oid)| oid.clone()).collect()
+        self.candidates.iter().map(|c| c.oid().to_string()).collect()
     }
 }
 
 /// Resolve the base chain: the `--base` flag, then the repo pick, then the branch
-/// `origin/HEAD` names (`specs/review-model.md` Base branch). A source that resolves to no
-/// ref is skipped, never an error; a skipped flag or pick that would have outranked the
-/// winner is recorded for the header (`specs/tui.md`).
+/// `origin/HEAD` names (`specs/review-model.md` Base branch). A source that does not
+/// resolve to a commit is skipped, never an error; a skipped flag or pick that would have
+/// outranked the winner is recorded for the header (`specs/tui.md`).
 pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResolution, GitFail> {
-    let mut candidates: Vec<(String, String)> = Vec::new();
+    let mut candidates: Vec<ResolvedBase> = Vec::new();
     let mut recorded: Vec<String> = Vec::new();
     let mut skipped: Option<String> = None;
-    let push = |name: String, oid: String, c: &mut Vec<(String, String)>| {
-        if !c.iter().any(|(_, o)| *o == oid) {
-            c.push((name, oid));
+    let push = |c: ResolvedBase, list: &mut Vec<ResolvedBase>| {
+        if !list.iter().any(|x| x.oid() == c.oid()) {
+            list.push(c);
         }
     };
     let record = |name: String, r: &mut Vec<String>| {
@@ -587,26 +612,20 @@ pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResoluti
         }
     };
     if let Some(flag) = base_flag.filter(|b| !b.is_empty()) {
-        // The flag is the power-user escape hatch: any rev works verbatim (a SHA, a tag,
-        // `upstream/main`), and a branch-name spelling falls back to prefix-stripped
-        // resolution. The header and the name shield use the bare spelling either way.
-        let entry = strip_base_prefix(flag);
-        record(entry.clone(), &mut recorded);
-        let probe = format!("{flag}^{{commit}}");
-        if let Some(oid) = git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])? {
-            push(entry, oid, &mut candidates);
-        } else {
-            match resolve_base_entry(repo, &entry)? {
-                Some(oid) => push(entry, oid, &mut candidates),
-                None => skipped = Some(entry),
-            }
+        let (hit, skip) = classify_flag(repo, flag)?;
+        if let Some(c) = hit {
+            record(c.name().to_string(), &mut recorded);
+            push(c, &mut candidates);
+        }
+        if let Some(s) = skip {
+            record(s.clone(), &mut recorded);
+            skipped = Some(s);
         }
     }
     if let Some(pick) = read_base_pick(repo)? {
         record(pick.clone(), &mut recorded);
-        match resolve_base_entry(repo, &pick)? {
-            Some(oid) => push(pick, oid, &mut candidates),
-            // Only a failure that outranks the eventual winner reads as skipped.
+        match resolve_spelling(repo, &pick)? {
+            Some(c) => push(c, &mut candidates),
             None if candidates.is_empty() => skipped = skipped.or(Some(pick)),
             None => {}
         }
@@ -614,11 +633,10 @@ pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResoluti
     if let Some(name) = default_branch_name(repo)? {
         record(name.clone(), &mut recorded);
         if let Some(oid) = resolve_base_entry(repo, &name)? {
-            push(name, oid, &mut candidates);
+            push(ResolvedBase::branch(name, oid), &mut candidates);
         }
     }
-    let winner =
-        candidates.first().map(|(name, oid)| ResolvedBase { name: name.clone(), oid: oid.clone() });
+    let winner = candidates.first().cloned();
     Ok(BaseResolution { status: BaseStatus { winner, skipped }, candidates, recorded })
 }
 
@@ -819,9 +837,98 @@ fn remote_identity(
     Err(GitFail(format!("git {args:?}: {}", stderr.trim())))
 }
 
-/// One base branch name pinned to an OID: `refs/remotes/origin/<name>`, then
-/// `refs/heads/<name>` (`specs/review-model.md` Base branch).
+/// Peel `rev` to a commit object id (`specs/review-model.md`). A leading `-` is not a
+/// rev. An ambiguous abbreviated SHA is a miss, not an error.
+pub fn resolve_commit(repo: &Path, rev: &str) -> Result<Option<String>, GitFail> {
+    if rev.is_empty() || rev.starts_with('-') {
+        return Ok(None);
+    }
+    let probe = format!("{rev}^{{commit}}");
+    git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])
+}
+
+/// The abbreviated object id the header and the picker paint (`specs/tui.md`).
+#[must_use]
+pub fn abbreviate_oid(oid: &str) -> String {
+    const N: usize = 7;
+    if oid.len() <= N { oid.to_string() } else { oid[..N].to_string() }
+}
+
+/// Whether `spelling` is a hex prefix of `oid` (`specs/tui.md`: paint once).
+#[must_use]
+pub fn spelling_is_sha_prefix(spelling: &str, oid: &str) -> bool {
+    let s = spelling.to_ascii_lowercase();
+    !s.is_empty()
+        && s.bytes().all(|b| b.is_ascii_hexdigit())
+        && oid.to_ascii_lowercase().starts_with(&s)
+}
+
+/// Shown name and optional abbreviated SHA for a non-branch spelling (`specs/tui.md`,
+/// `specs/input.md`). A SHA prefix paints once; anything else keeps the spelling and
+/// carries the mark.
+#[must_use]
+pub fn rev_paint(spelling: &str, oid: &str) -> (String, Option<String>) {
+    let abbrev = abbreviate_oid(oid);
+    if spelling_is_sha_prefix(spelling, oid) {
+        (abbrev, None)
+    } else {
+        (spelling.to_string(), Some(abbrev))
+    }
+}
+
+/// Complete a unique SHA prefix to the abbreviated object id. A spelling that is
+/// already that abbrev, or a longer hex prefix of the oid (a pasted 40-hex), is kept
+/// (`specs/input.md`).
+#[must_use]
+pub fn complete_sha_prefix(spelling: &str, oid: &str) -> String {
+    let abbrev = abbreviate_oid(oid);
+    if spelling_is_sha_prefix(spelling, oid) && spelling.len() < abbrev.len() {
+        abbrev
+    } else {
+        spelling.to_string()
+    }
+}
+
+/// A branch name the picker would list, not `HEAD` and not a rev-walk (`specs/review-model.md`).
+#[must_use]
+pub fn is_branch_label(value: &str) -> bool {
+    branch_name_shaped(value) && !value.eq_ignore_ascii_case("HEAD")
+}
+
+/// Origin then local, else a verbatim commit (`specs/review-model.md`).
+pub(crate) fn resolve_spelling(
+    repo: &Path,
+    spelling: &str,
+) -> Result<Option<ResolvedBase>, GitFail> {
+    if let Some(oid) = resolve_base_entry(repo, spelling)? {
+        return Ok(Some(ResolvedBase::branch(spelling.to_string(), oid)));
+    }
+    Ok(resolve_commit(repo, spelling)?.map(|oid| ResolvedBase::rev(spelling.to_string(), oid)))
+}
+
+/// `--base`: verbatim first, else prefix-stripped as a branch. A miss keeps the flag
+/// spelling unless the stripped form is a branch name (`specs/review-model.md`).
+fn classify_flag(
+    repo: &Path,
+    flag: &str,
+) -> Result<(Option<ResolvedBase>, Option<String>), GitFail> {
+    let entry = strip_base_prefix(flag);
+    let verbatim = resolve_commit(repo, flag)?;
+    let via_branch = resolve_base_entry(repo, &entry)?;
+    Ok(match (verbatim, via_branch) {
+        (Some(oid), None) => (Some(ResolvedBase::rev(flag.to_string(), oid)), None),
+        (Some(oid), Some(_)) | (None, Some(oid)) => (Some(ResolvedBase::branch(entry, oid)), None),
+        (None, None) => {
+            let skip = if is_branch_label(&entry) { entry } else { flag.to_string() };
+            (None, Some(skip))
+        }
+    })
+}
+
 fn resolve_base_entry(repo: &Path, name: &str) -> Result<Option<String>, GitFail> {
+    if !is_branch_label(name) {
+        return Ok(None);
+    }
     for prefix in ["refs/remotes/origin/", "refs/heads/"] {
         let probe = format!("{prefix}{name}^{{commit}}");
         if let Some(oid) = git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])? {
@@ -906,13 +1013,13 @@ pub fn file_content(repo: &Path, rev: &str, path: &str) -> String {
 
 // --- base pick (branch scope) --------------------------------------------------
 //
-// See `specs/review-model.md` Base branch. The pick is one branch name per repository:
-// a blob under one private ref, and refs are shared across a repository's worktrees, so
-// every pane reads the same pick.
+// See `specs/review-model.md` Base branch. The pick is one revision spelling per
+// repository: a blob under one private ref, and refs are shared across a repository's
+// worktrees, so every pane reads the same pick.
 
 const BASE_PICK_REF: &str = "refs/reviewr/base-pick";
 
-/// The recorded pick's branch name, or `None` when no pick is recorded. One git call, so a
+/// The recorded pick's spelling, or `None` when no pick is recorded. One git call, so a
 /// concurrent clear from another pane can never split the read the way an exists-then-read
 /// pair would; a failed read is no pick, matching the chain's skip-never-error contract
 /// (`specs/review-model.md`).
@@ -923,14 +1030,19 @@ pub fn read_base_pick(repo: &Path) -> Result<Option<String>, GitFail> {
     }
     let name = String::from_utf8_lossy(&out.stdout);
     let name = name.trim();
-    Ok(branch_name_shaped(name).then(|| name.to_string()))
+    Ok(pick_spelling_shaped(name).then(|| name.to_string()))
 }
 
-/// Whether a recorded pick is shaped like the branch name reviewr writes there. The ref is
-/// shared repository state any tool can write, and a pick that resolves to nothing still
-/// paints its name in the header, so a value git could never have produced is no pick at
-/// all — the chain's skip-never-error contract (`specs/review-model.md`), and the rule git
-/// itself applies to a refname.
+/// One printable line, not a git option (`specs/review-model.md`). `HEAD~1` and a tag are
+/// picks. Control bytes are not.
+fn pick_spelling_shaped(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && value.bytes().all(|byte| byte > b' ' && byte != 0x7f)
+}
+
+/// Shape of a branch name the origin-then-local walk will accept. `HEAD` and rev-walk
+/// spellings (`HEAD~1`) are not: git would parse them through `origin/HEAD`.
 fn branch_name_shaped(value: &str) -> bool {
     !value.is_empty()
         && !value.starts_with('-')

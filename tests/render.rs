@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Repo, app_on, enter_tab};
-use herdr_reviewr::app::{App, BaseChoice, BasePicker, Focus, Mode, Tab};
+use herdr_reviewr::app::{App, BaseChoice, BasePicker, BaseProbe, Focus, Mode, Tab};
 use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::herdr::AgentChoice;
 use herdr_reviewr::keymap::Keymap;
@@ -149,10 +149,15 @@ fn backspacing_a_wide_character_leaves_the_terminal_cursor_unpainted() {
 fn the_base_picker_anchors_the_terminal_cursor_at_its_caret() {
     let mut app = edited_app();
     app.base_picker = Some(BasePicker {
-        rows: vec![BaseChoice { name: "main".to_string(), starred: false, is_default: true }],
+        rows: vec![BaseChoice::Branch {
+            name: "main".to_string(),
+            starred: false,
+            is_default: true,
+        }],
         cursor: 0,
         query: String::new(),
         caret: 0,
+        probe: BaseProbe::Idle,
     });
     app.mode = Mode::BasePick;
     let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
@@ -3041,6 +3046,196 @@ fn the_branch_header_names_the_base_and_its_click_opens_the_picker() {
 }
 
 #[test]
+fn a_named_rev_paints_the_spelling_and_abbrev() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    herdr_reviewr::git::write_base_pick(r.path(), "HEAD~1").unwrap();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    let short = herdr_reviewr::git::abbreviate_oid(&parent);
+    assert!(
+        line0.contains(&format!("vs HEAD~1 ({short})")),
+        "a named rev paints the spelling and the abbreviated SHA: {line0}"
+    );
+}
+
+#[test]
+fn a_sha_pick_paints_once() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    herdr_reviewr::git::write_base_pick(r.path(), &parent).unwrap();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let short = herdr_reviewr::git::abbreviate_oid(&parent);
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    assert!(line0.contains(&format!("vs {short}")), "a SHA spelling paints once: {line0}");
+    assert!(
+        !line0.contains(&format!("vs {short} (")),
+        "a SHA spelling does not repeat as a marker: {line0}"
+    );
+
+    herdr_reviewr::git::write_base_pick(r.path(), &short).unwrap();
+    app.reload().unwrap();
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    assert!(
+        line0.contains(&format!("vs {short}")),
+        "an abbreviated SHA spelling paints once: {line0}"
+    );
+    assert!(
+        !line0.contains(&format!("vs {short} (")),
+        "an abbreviated SHA spelling does not repeat as a marker: {line0}"
+    );
+}
+
+#[test]
+fn a_flag_named_rev_paints_the_same_form() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    let mut app = App::new(r.path_buf(), Scope::Branch, Some("HEAD~1".to_string()));
+    app.reload().unwrap();
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    let short = herdr_reviewr::git::abbreviate_oid(&parent);
+    assert!(
+        line0.contains(&format!("vs HEAD~1 ({short})")),
+        "the --base flag uses the same paint: {line0}"
+    );
+}
+
+#[test]
+fn a_probe_row_is_the_typed_spelling() {
+    let (r, mut app) = based_app();
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    let short = herdr_reviewr::git::abbreviate_oid(&parent);
+    app.open_base_picker();
+    for ch in "HEAD~1".chars() {
+        app.input_push(ch);
+    }
+    app.run_base_probe();
+    let frame = render(&app);
+    assert!(frame.contains("HEAD~1"), "the probe row is the typed spelling:\n{frame}");
+    assert!(
+        frame.contains(&format!("({short})")),
+        "a named rev is marked with the abbreviated SHA:\n{frame}"
+    );
+}
+
+#[test]
+fn a_probe_row_right_aligns_the_sha_like_the_open_list() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    r.git(&["branch", "dev"]);
+    r.git(&["branch", &format!("release/{}", "x".repeat(40))]);
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    let short = herdr_reviewr::git::abbreviate_oid(&parent);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    for ch in "HEAD~1".chars() {
+        app.input_push(ch);
+    }
+    app.run_base_probe();
+    let marker = format!("({short})");
+    let picker_row = |frame: &str| {
+        frame
+            .lines()
+            .find(|l| l.contains(&marker) && !l.contains("vs "))
+            .expect("the picker row paints")
+            .to_string()
+    };
+    let probe = picker_row(&render(&app));
+    let probe_at = probe.find(&marker).unwrap();
+    app.base_picker_pick().unwrap();
+    app.open_base_picker();
+    let open = picker_row(&render(&app));
+    let open_at = open.find(&marker).unwrap();
+    assert_eq!(
+        probe_at, open_at,
+        "typing a rev puts `(sha)` in the same column as opening the list:\nopen: {open}\nprobe: {probe}"
+    );
+    let name_end = probe.find("HEAD~1").expect("the spelling paints") + "HEAD~1".len();
+    assert!(probe_at > name_end + 2, "the SHA is right-aligned, not glued to the name:\n{probe}");
+}
+
+#[test]
+fn a_short_sha_prefix_probe_completes_to_the_abbrev() {
+    let (r, mut app) = based_app();
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    let short = herdr_reviewr::git::abbreviate_oid(&parent);
+    let prefix = short[..4].to_string();
+    app.open_base_picker();
+    for ch in prefix.chars() {
+        app.input_push(ch);
+    }
+    app.run_base_probe();
+    let bp = app.base_picker.as_ref().unwrap();
+    assert_eq!(bp.visible()[0].name(), short, "the row is the abbreviated SHA, not the prefix");
+    let frame = render(&app);
+    assert!(
+        frame.lines().any(|l| l.contains(&short) && !l.contains(&format!("({short})"))),
+        "a unique prefix completes to the abbreviated SHA with no marker:\n{frame}"
+    );
+}
+
+#[test]
+fn a_seven_char_sha_probe_is_not_marked() {
+    let (r, mut app) = based_app();
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    let short = herdr_reviewr::git::abbreviate_oid(&parent);
+    app.open_base_picker();
+    for ch in short.chars() {
+        app.input_push(ch);
+    }
+    app.run_base_probe();
+    let frame = render(&app);
+    assert!(frame.contains(&short), "the probe row is the abbreviated SHA:\n{frame}");
+    assert!(
+        !frame.contains(&format!("({short})")),
+        "a spelling that already is that SHA carries no marker:\n{frame}"
+    );
+}
+
+#[test]
+fn a_skipped_named_rev_uses_the_stored_spelling() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    herdr_reviewr::git::write_base_pick(r.path(), "HEAD~1").unwrap();
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    assert!(
+        line0.contains("vs main · HEAD~1 missing"),
+        "a skipped non-branch spelling uses the stored spelling: {line0}"
+    );
+}
+
+#[test]
 fn a_skipped_pick_warns_beside_the_resolved_base() {
     let r = Repo::init();
     r.write("hello.rs", "alpha\n");
@@ -3082,6 +3277,28 @@ fn a_dormant_pick_shows_beside_the_empty_state() {
         line0.contains("no base · gone missing"),
         "a dormant choice never reads as never-chosen: {line0}"
     );
+}
+
+#[test]
+fn a_named_rev_clips_the_spelling_and_keeps_the_sha() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    let long = format!("release-{}", "x".repeat(80));
+    r.git(&["tag", &long, &parent]);
+    herdr_reviewr::git::write_base_pick(r.path(), &long).unwrap();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = dump(&render_size(&app, 80, 20)).lines().next().unwrap().to_string();
+    let short = herdr_reviewr::git::abbreviate_oid(&parent);
+    assert!(line0.contains(&format!("({short})")), "the SHA marker survives the clip: {line0}");
+    assert!(line0.contains('…'), "the spelling truncates: {line0}");
+    assert!(line0.contains("1 changed"), "the right-aligned stats survive: {line0}");
 }
 
 #[test]

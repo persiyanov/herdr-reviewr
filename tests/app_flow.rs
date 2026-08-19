@@ -5340,10 +5340,10 @@ fn the_base_picker_opens_only_on_the_branch_scope_without_a_flag() {
     app.open_base_picker();
     assert_eq!(app.mode, Mode::BasePick);
     let bp = app.base_picker.as_ref().expect("picker state");
-    let names: Vec<&str> = bp.rows.iter().map(|r| r.name.as_str()).collect();
+    let names: Vec<&str> = bp.rows.iter().map(herdr_reviewr::app::BaseChoice::name).collect();
     assert!(!names.contains(&"feature"), "the checked-out branch is not listed");
-    assert_eq!(bp.rows[0].name, "main", "the default branch sorts ahead of recency");
-    assert!(bp.rows[0].is_default);
+    assert_eq!(bp.rows[0].name(), "main", "the default branch sorts ahead of recency");
+    assert!(bp.rows[0].is_default());
     assert!(names.contains(&"dev"));
     assert_eq!(bp.cursor, 0, "the highlight opens on the current base");
     app.close_base_picker();
@@ -5362,7 +5362,10 @@ fn typing_filters_and_enter_picks_the_highlight() {
     let r = based_repo();
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
-    assert_eq!(app.branch_base.winner.as_ref().map(|b| b.name.as_str()), Some("main"));
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
+        Some("main")
+    );
     app.open_base_picker();
     app.input_push('d');
     app.input_push('e');
@@ -5370,7 +5373,10 @@ fn typing_filters_and_enter_picks_the_highlight() {
     assert_eq!(bp.filtered().len(), 1, "the filter matches anywhere in the name");
     app.base_picker_pick().unwrap();
     assert_eq!(app.mode, Mode::Normal, "a pick closes the picker");
-    assert_eq!(app.branch_base.winner.as_ref().map(|b| b.name.as_str()), Some("dev"));
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
+        Some("dev")
+    );
     let picked = r.git(&["show", "refs/reviewr/base-pick"]);
     assert_eq!(picked.trim(), "dev", "the pick persists in the private ref");
     assert!(
@@ -5400,13 +5406,19 @@ fn picking_the_default_clears_the_pick() {
     herdr_reviewr::git::write_base_pick(r.path(), "dev").unwrap();
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
-    assert_eq!(app.branch_base.winner.as_ref().map(|b| b.name.as_str()), Some("dev"));
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
+        Some("dev")
+    );
     app.open_base_picker();
     let bp = app.base_picker.as_ref().unwrap();
-    assert_eq!(bp.rows[bp.cursor].name, "dev", "the highlight opens on the current base");
+    assert_eq!(bp.rows[bp.cursor].name(), "dev", "the highlight opens on the current base");
     app.base_picker_goto(0);
     app.base_picker_pick().unwrap();
-    assert_eq!(app.branch_base.winner.as_ref().map(|b| b.name.as_str()), Some("main"));
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
+        Some("main")
+    );
     assert_eq!(
         herdr_reviewr::git::read_base_pick(r.path()).unwrap(),
         None,
@@ -5433,19 +5445,20 @@ fn a_filter_with_no_match_leaves_enter_inert_and_backspace_recovers() {
 }
 
 #[test]
-fn a_repo_with_no_pickable_branch_refuses_to_open_the_picker() {
+fn a_repo_with_no_pickable_branch_still_opens_the_picker() {
     let r = Repo::init();
     r.write("a.rs", "one\n");
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
 
-    // One branch, checked out, and no origin default: nothing to choose, so the picker
-    // refuses with the cause rather than opening empty (`specs/input.md` Base picker).
+    // One branch, checked out, and no origin default: the picker opens empty so a
+    // revision can still be typed (`specs/input.md` Base picker).
     app.open_base_picker();
-    assert_eq!(app.mode, Mode::Normal);
-    assert!(app.base_picker.is_none());
-    assert_eq!(app.status, "no branches to pick");
+    assert_eq!(app.mode, Mode::BasePick);
+    let bp = app.base_picker.as_ref().unwrap();
+    assert!(bp.rows.is_empty());
+    assert!(bp.visible().is_empty());
 }
 
 #[test]
@@ -5471,7 +5484,7 @@ fn the_filter_edits_with_the_comment_editors_controls() {
     app.input_push('e');
     let bp = app.base_picker.as_ref().unwrap();
     assert_eq!(bp.query, "dev");
-    assert_eq!(bp.rows[bp.filtered()[bp.cursor]].name, "dev", "the narrowed view still picks");
+    assert_eq!(bp.rows[bp.filtered()[bp.cursor]].name(), "dev", "the narrowed view still picks");
 
     // A branch name pasted with the trailing newline it was copied with still filters:
     // the single-line field takes a newline as a space (`specs/input.md`).
@@ -5480,7 +5493,7 @@ fn the_filter_edits_with_the_comment_editors_controls() {
     app.input_paste("dev\n");
     let bp = app.base_picker.as_ref().unwrap();
     assert_eq!(bp.query, "dev", "the trailing newline never lands in the query");
-    assert_eq!(bp.rows[bp.filtered()[bp.cursor]].name, "dev", "the pasted name filters");
+    assert_eq!(bp.rows[bp.filtered()[bp.cursor]].name(), "dev", "the pasted name filters");
 }
 
 #[test]
@@ -5491,11 +5504,11 @@ fn the_highlight_follows_its_row_through_a_narrowing_filter() {
     app.open_base_picker();
     app.base_picker_move(1); // main -> dev
     let bp = app.base_picker.as_ref().unwrap();
-    assert_eq!(bp.rows[bp.filtered()[bp.cursor]].name, "dev");
+    assert_eq!(bp.rows[bp.filtered()[bp.cursor]].name(), "dev");
     app.input_push('d');
     let bp = app.base_picker.as_ref().unwrap();
     assert_eq!(
-        bp.rows[bp.filtered()[bp.cursor]].name,
+        bp.rows[bp.filtered()[bp.cursor]].name(),
         "dev",
         "the highlight keeps its row when the row survives the filter"
     );
@@ -5535,4 +5548,174 @@ fn the_base_picker_owns_the_whole_footer_bar_and_survives_a_config_error() {
     app.set_config_error("theme = \"not-a-theme\"".to_string());
     assert_eq!(app.mode, Mode::BasePick);
     assert_eq!(app.base_picker.as_ref().unwrap().query, "d");
+}
+
+#[test]
+fn typing_head_tilde_stores_the_spelling() {
+    let r = based_repo();
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    for ch in "HEAD~1".chars() {
+        app.input_push(ch);
+    }
+    assert!(app.base_picker.as_ref().unwrap().visible().is_empty());
+    assert!(app.base_probe_wait().is_some(), "typing schedules the empty-list probe");
+    app.tick_base_picker_probe();
+    assert!(app.base_picker.as_ref().unwrap().visible().is_empty(), "the pause has not elapsed");
+    app.run_base_probe();
+    let bp = app.base_picker.as_ref().unwrap();
+    assert_eq!(bp.visible().len(), 1);
+    assert_eq!(bp.visible()[0].name(), "HEAD~1");
+    assert_eq!(bp.visible()[0].oid(), Some(parent.as_str()));
+    app.base_picker_pick().unwrap();
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::oid),
+        Some(parent.as_str())
+    );
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
+        Some("HEAD~1")
+    );
+    assert_eq!(herdr_reviewr::git::read_base_pick(r.path()).unwrap().as_deref(), Some("HEAD~1"));
+
+    r.write("a.rs", "three\n");
+    r.commit_all("later");
+    let moved = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    assert_ne!(moved, parent);
+    app.reload().unwrap();
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
+        Some("HEAD~1")
+    );
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::oid),
+        Some(moved.as_str()),
+        "a later commit still diffs one back"
+    );
+}
+
+#[test]
+fn enter_on_an_empty_list_probes_immediately() {
+    let r = based_repo();
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    for ch in "HEAD~1".chars() {
+        app.input_push(ch);
+    }
+    app.base_picker_pick().unwrap();
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::oid),
+        Some(parent.as_str())
+    );
+    assert_eq!(herdr_reviewr::git::read_base_pick(r.path()).unwrap().as_deref(), Some("HEAD~1"));
+}
+
+#[test]
+fn a_typed_sha_prefix_stores_the_abbreviated_sha() {
+    let r = based_repo();
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    let short = herdr_reviewr::git::abbreviate_oid(&parent);
+    let prefix = short[..4].to_string();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    for ch in prefix.chars() {
+        app.input_push(ch);
+    }
+    app.base_picker_pick().unwrap();
+    assert_eq!(
+        herdr_reviewr::git::read_base_pick(r.path()).unwrap().as_deref(),
+        Some(short.as_str())
+    );
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
+        Some(short.as_str())
+    );
+    app.open_base_picker();
+    let bp = app.base_picker.as_ref().unwrap();
+    assert_eq!(bp.visible()[bp.cursor].name(), short);
+}
+
+#[test]
+fn a_short_sha_with_a_newline_can_be_pasted_and_picked() {
+    let r = based_repo();
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    let short = herdr_reviewr::git::abbreviate_oid(&parent);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    app.input_paste(&format!("{short}\n"));
+    assert_eq!(app.base_picker.as_ref().unwrap().query, short);
+    app.base_picker_pick().unwrap();
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::oid),
+        Some(parent.as_str())
+    );
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
+        Some(short.as_str())
+    );
+    assert_eq!(
+        herdr_reviewr::git::read_base_pick(r.path()).unwrap().as_deref(),
+        Some(short.as_str())
+    );
+}
+
+#[test]
+fn a_current_named_rev_is_the_highlighted_row_on_reopen() {
+    let r = based_repo();
+    let parent = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    herdr_reviewr::git::write_base_pick(r.path(), "HEAD~1").unwrap();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    let bp = app.base_picker.as_ref().unwrap();
+    assert_eq!(bp.visible()[bp.cursor].name(), "HEAD~1");
+    assert_eq!(bp.visible()[bp.cursor].oid(), Some(parent.as_str()));
+}
+
+#[test]
+fn picking_the_default_tips_sha_does_not_clear_the_pick() {
+    let r = based_repo();
+    let main = r.git(&["rev-parse", "main"]).trim().to_string();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    app.input_paste(&main);
+    app.base_picker_pick().unwrap();
+    assert_eq!(
+        herdr_reviewr::git::read_base_pick(r.path()).unwrap().as_deref(),
+        Some(main.as_str())
+    );
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::oid),
+        Some(main.as_str())
+    );
+}
+
+#[test]
+fn checking_out_a_picked_branch_does_not_turn_it_into_a_pin() {
+    let r = based_repo();
+    herdr_reviewr::git::write_base_pick(r.path(), "dev").unwrap();
+    r.git(&["checkout", "-q", "dev"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
+        Some("dev")
+    );
+    app.open_base_picker();
+    let bp = app.base_picker.as_ref().unwrap();
+    assert!(
+        bp.rows.iter().all(|row| row.oid().is_none()),
+        "a live branch pick must not grow a SHA row"
+    );
+    assert!(bp.visible()[bp.cursor].oid().is_none(), "the highlight must not be a pin");
+    assert_eq!(herdr_reviewr::git::read_base_pick(r.path()).unwrap().as_deref(), Some("dev"));
 }

@@ -1064,6 +1064,11 @@ fn event_loop(
             if let Some(started) = pr.wait_started {
                 timeout = timeout.min(INDICATOR_DELAY.saturating_sub(started.elapsed()));
             }
+            if app.config_error().is_none()
+                && let Some(wait) = app.base_probe_wait()
+            {
+                timeout = timeout.min(wait);
+            }
             if event::poll(timeout)? {
                 if !painted_frame.still_current(app) {
                     continue;
@@ -1125,6 +1130,9 @@ fn event_loop(
                     }
                     _ => {}
                 }
+            }
+            if app.config_error().is_none() {
+                app.tick_base_picker_probe();
             }
             if app.should_quit {
                 break;

@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-08-08
+Last edited: 2026-08-19
 ---
 
 # Review model
@@ -39,24 +39,27 @@ A scope selects which changes `Changes` shows and which files `All files` annota
 
 ### Base branch
 
-The `branch` scope diffs against the merge-base of the base branch and `HEAD`. The base is always a recorded choice, never inferred. The first source that resolves wins:
+The `branch` scope diffs against the merge-base of the base and `HEAD`. The base is always a recorded choice, never inferred. The first source that resolves wins:
 
-| # | source              | base is                                            |
-| - | ------------------- | -------------------------------------------------- |
-| 1 | `--base <ref>` flag | any rev, resolved verbatim, else as a branch name  |
-| 2 | the repo pick       | the branch chosen in the base picker (`input.md`)  |
-| 3 | `origin/HEAD`       | the default branch it names, when present          |
+| # | source              | base is                                              |
+| - | ------------------- | ---------------------------------------------------- |
+| 1 | `--base <ref>` flag | any rev, resolved verbatim, else as a branch name    |
+| 2 | the repo pick       | the revision named in the base picker (`input.md`)   |
+| 3 | `origin/HEAD`       | the default branch it names, when present            |
 
-A branch name resolves through `refs/remotes/origin/<name>`, then `refs/heads/<name>`. A leading `refs/heads/`, `refs/remotes/origin/`, or `origin/` prefix on a `--base` name is stripped first. A source that resolves to no ref is skipped, never an error. When no source resolves, `branch` shows nothing and the footer offers the picker (`input.md`). The other scopes are unaffected.
+A branch name resolves through `refs/remotes/origin/<name>`, then `refs/heads/<name>`. A leading `refs/heads/`, `refs/remotes/origin/`, or `origin/` prefix on a `--base` branch name is stripped first. A `--base` rev that is not a branch keeps the flag spelling, so `origin/HEAD` does not paint as live `HEAD`. A source that does not resolve to a commit is skipped, never an error. A spelling that starts with `-` does not resolve. When no source resolves, `branch` shows nothing and the footer offers the picker (`input.md`). The other scopes are unaffected.
 
 The pick:
 
-- The pick is one branch name per repository, shared by its worktrees.
+- The pick is one revision spelling per repository, shared by its worktrees.
+- A recorded spelling is one printable line. A blob that is not that shape is no pick.
+- A pick that is a branch name resolves through origin then local. Any other pick, `HEAD` included, resolves verbatim to a commit, the same first arm as `--base`. Two worktrees that record `HEAD~1` each diff against one commit back from that worktree's `HEAD`.
+- A SHA spelling is a pin because it is the spelling. A unique SHA prefix shorter than the abbreviated object id is recorded as that abbreviation. A full object id is kept as typed. `HEAD~1` and a tag keep their names and re-resolve. Type `HEAD~1`, and a new commit still diffs one back. Type the hash to freeze that moment.
 - The pick persists in a private ref under `refs/reviewr/` and survives pane restarts (`overview.md`).
 - The pick applies only after its ref write lands.
 - The pick reaches every other pane of the repository at that pane's next refresh.
 - The pick clears when the chosen branch is the one `origin/HEAD` names.
-- The pick is kept and skipped while its branch does not resolve. It reactivates when the branch resolves again.
+- The pick is kept and skipped while its spelling does not resolve. It reactivates when the spelling resolves again.
 - The pick can only be replaced, never cleared, in a repository with no default branch.
 
 The header names the base while the `branch` scope is active (`tui.md`). A base change rebuilds the changeset on the next frame, never waiting for a poll.
@@ -160,6 +163,7 @@ How the agent pane is found and filled is in `herdr-host.md`.
 - No auto-submit of the agent prompt.
 - No inferred base branch. The reflog and the commit graph never choose a base.
 - No global base list. A base is chosen per repository, never once for every repository.
+- No conversion of a named revision to a SHA at pick time. A SHA is a pin because that is what was named.
 
 ## Related specs
 

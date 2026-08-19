@@ -53,7 +53,8 @@ fn main() {
         "changed_files (branch, incl. resolve)",
         sample(5, || {
             let base = git::resolve_base(&repo, None).ok().and_then(|r| r.status.winner);
-            git::changed_files(&repo, Scope::Branch, base.map(|w| w.oid).as_deref()).unwrap();
+            git::changed_files(&repo, Scope::Branch, base.as_ref().map(git::ResolvedBase::oid))
+                .unwrap();
         }),
     );
     let all = git::all_files(&repo).unwrap();

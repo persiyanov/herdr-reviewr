@@ -270,8 +270,13 @@ When the trunk is something else, or you review a stacked branch, press `B` (or 
 base name) and pick the branch. The pick is stored in the repo, shared by every reviewr pane
 on it, and holds until you pick again. Choosing the default branch clears it.
 
-`--base <ref>` pins the base for the pane and takes any rev (a branch, a tag, a SHA). It
-wins over the pick and disables the picker.
+You can also type a revision the list does not contain. `HEAD~2` and a tag keep that
+spelling and re-resolve like git, so a later commit still diffs one back; the header shows
+`vs HEAD~2 (a1b2c3d)`. A unique SHA prefix completes to the abbreviated SHA. Type a SHA
+(or paste a full object id) to freeze that commit; the header shows `vs a1b2c3d`.
+
+`--base <ref>` sets the base for this pane and takes any rev (a branch, a tag, a SHA,
+`HEAD~1`). It wins over the pick and disables the picker.
 
 A picked branch that is gone (deleted after a stacked review, or a typo) is skipped, and the
 header says so: `vs main · dev missing`. When nothing resolves, the scope stays empty and the
