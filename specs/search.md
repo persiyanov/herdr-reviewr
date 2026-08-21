@@ -138,10 +138,13 @@ Printable keys edit the query. The rest:
 | `↓` / `↑`, `ctrl+n/p`   | move the pick                            | click a result, wheel   |
 | `PageUp` / `PageDown`   | scroll the preview                       | wheel over the preview  |
 | `enter`                 | open the pick                            | click the picked result |
+| `ctrl+e`                | edit the picked result's file in `$EDITOR` (`input.md` Edit file) | —      |
 | `esc`                   | close, place untouched                   | —                       |
 
 The footer shows these while the screen is open. With nothing to pick — warming, errored,
-or no matches — it shows the mode flip and `esc`.
+or no matches — it shows the mode flip and `esc`. The `ctrl+e` row shows only while
+something is pickable. The chord outranks the shared caret-to-end control on this screen
+alone; `End` still moves the caret.
 
 ## Opening a result
 

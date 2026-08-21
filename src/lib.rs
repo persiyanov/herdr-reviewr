@@ -49,7 +49,10 @@ use ratatui::crossterm::event::{
     MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::supports_keyboard_enhancement;
+use ratatui::crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
+};
 use ratatui::layout::Rect;
 
 use crate::app::{App, Focus, Mode};
@@ -150,6 +153,79 @@ fn restore_terminal(kbd: bool) {
     }
     let _ = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste);
     ratatui::restore();
+}
+
+/// Service one `edit-file` request (`specs/input.md`): suspend the TUI exactly as
+/// [`restore_terminal`] tears it down, run `$VISUAL`/`$EDITOR` on the file — `+LINE`
+/// first when a line is known, the vi-family convention vim, nvim, nano, hx, and
+/// kakoune share — then rebuild the terminal and repaint. The editor inherits the pane's
+/// environment; its PATH resolves through [`proc::command`], since a herdr pane may strip
+/// it. Afterward the file may have changed on disk, so a world refresh reconciles the
+/// diff in place (`overview.md` Continuity) and the status names what happened.
+fn run_editor(terminal: &mut DefaultTerminal, app: &mut App, kbd: bool) -> Result<()> {
+    use crate::app::EditorTarget;
+    let Some(EditorTarget { path, line }) = app.editor_request.take() else {
+        return Ok(());
+    };
+    // The whole value is the command: `$EDITOR="code -w"` runs `code` with `-w`. A bare
+    // name resolves on the host PATH; anything else must be runnable as spelled.
+    let Some(program) = std::env::var_os("VISUAL")
+        .or_else(|| std::env::var_os("EDITOR"))
+        .map(|value| value.to_string_lossy().into_owned())
+    else {
+        app.status = "set $EDITOR (or $VISUAL) to edit files".into();
+        return Ok(());
+    };
+    let mut words = program.split_whitespace();
+    let Some(bin) = words.next() else {
+        app.status = "set $EDITOR (or $VISUAL) to edit files".into();
+        return Ok(());
+    };
+    let mut cmd = proc::command(bin);
+    cmd.args(words);
+    if let Some(no) = line {
+        cmd.arg(format!("+{no}"));
+    }
+    cmd.arg(app.repo.join(&path));
+
+    // Suspend: leave the alternate screen and release every input mode, so the editor
+    // owns the terminal cleanly.
+    let _ = terminal.clear();
+    if kbd {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
+    let _ =
+        execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste);
+    let _ = disable_raw_mode();
+
+    let launched = cmd.status();
+
+    // Resume: rebuild the exact mode stack the loop expects, force a full repaint, and
+    // drop any keystrokes the editor's exit left unread.
+    let _ = enable_raw_mode();
+    if kbd {
+        let _ = execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
+    let _ = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste);
+    let _ = terminal.clear();
+    while event::poll(Duration::ZERO)? {
+        let _ = event::read();
+    }
+    terminal.draw(|f| ui::render(f, app))?;
+
+    match launched {
+        Ok(status) if status.success() => {
+            app.status = format!("edited {path}");
+            app.request_world_refresh(false, false);
+            app.refresh_commanded = true;
+        }
+        Ok(status) => app.status = format!("editor exited with {status}"),
+        Err(e) => app.status = format!("editor failed: {e}"),
+    }
+    Ok(())
 }
 
 /// The reviewed repository, resolved to its git top level. Every `App` goes through this,
@@ -1173,6 +1249,11 @@ fn event_loop(
             if app.config_error().is_none() {
                 app.tick_base_picker_probe();
             }
+            // An `edit-file` press left a target: suspend, run `$EDITOR`, resume, and
+            // repaint before the loop continues (`specs/input.md`).
+            if app.editor_request.is_some() {
+                run_editor(terminal, app, kbd)?;
+            }
             if app.should_quit {
                 break;
             }
@@ -1500,6 +1581,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
         match key.code {
             Esc => app.close_search(),
             Enter => app.search_open_pick()?,
+            // `edit-file` on the picked result. The chord is the only way in — every
+            // printable, `E` included, types into the query (`specs/search.md`) — so
+            // here it outranks the shared caret-to-end control, which `End` still does.
+            Char('e') if ctrl => app.request_edit_file(),
             Tab => app.search_flip(),
             PageDown => app.scroll_search_preview(PAGE),
             PageUp => app.scroll_search_preview(-PAGE),
@@ -1642,6 +1727,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
                 app.export(&Clipboard);
             }
             (Some(K::Edit), _) => app.start_edit(),
+            (Some(K::EditFile), _) => app.request_edit_file(),
             (Some(K::Delete), _) => app.delete_comment(),
             _ => {}
         }
@@ -1697,6 +1783,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             // off-screen cursor. (The comments-list overlay targets the highlighted row instead.)
             K::Edit if app.focus == Focus::Diff => app.start_edit(),
             K::Delete if app.focus == Focus::Diff => app.delete_comment(),
+            // `edit-file` follows the cursor wherever a file is named: the read pane's
+            // line, the navigator's selected file row (`specs/input.md`).
+            K::EditFile => app.request_edit_file(),
             K::Send => app.send_to_agent(),
             K::Copy => {
                 app.export(&Clipboard);

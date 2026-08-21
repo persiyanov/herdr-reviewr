@@ -48,6 +48,7 @@ The keymap is rebindable per action through `[keybindings]` in the plugin config
 | `comment`                                                | comment on the selection                    | `c`, type, `enter`                          | click or drag the gutter                       |
 | —                                                        | copy text (`text-selection.md`)             | —                                           | drag over text                                 |
 | `edit`                                                   | edit the comment under the cursor           | `e`                                         | —                                              |
+| `edit-file`                                              | open the file under the cursor in `$EDITOR` | `ctrl+e`                                    | —                                              |
 | `delete`                                                 | delete the comment under the cursor         | `d`                                         | —                                              |
 | `next-comment` / `prev-comment`                          | jump to next / previous comment             | `n` / `N`                                   | —                                              |
 | `comments`                                               | list and manage all comments                | `l`                                         | —                                              |
@@ -107,6 +108,37 @@ The steps and the skips share the rest:
 - On a directory row in the focused file list, `expand` shows its children and `collapse` hides them.
 - On a fold in the diff, `expand` opens it. An open fold never closes again, so `collapse` scrolls there.
 - Elsewhere, `expand` scrolls the diff right and `collapse` scrolls it left. The scroll is inert while wrap is on.
+
+### Edit file
+
+`edit-file` opens the file the cursor names in the user's editor, so a fix spotted mid-review
+is one keypress away. The target follows the press:
+
+- In the read pane — the `Changes` diff, an `All files` File view, or a markdown preview —
+  the open file at the line under the cursor. A deletion or fold row carries no new-file
+  number, so the nearest numbered row above it names the line.
+- On a file row in the navigator, that file, without a line. A directory row is inert.
+- In the comments list, the highlighted comment's file at its anchor start. An old-side
+  anchor numbers revision lines rather than worktree lines, so it opens without one.
+
+The comment editor, the find band, the agent picker, and the base picker are text fields and
+strictly modal: every printable is theirs, so `edit-file` never fires there. Its default is
+a chord — `ctrl+e` — so it also reaches the search screen, where every printable types into
+the query: there it opens the picked result's file straight from the screen, outranking the
+shared caret-to-end control on that screen alone (`search.md`); `End` still moves the caret.
+The `PR` tab has no files to name and stays inert.
+
+The pane suspends — alternate screen, raw mode, mouse capture, bracketed paste, and the
+keyboard protocol all release — so the editor owns the terminal cleanly, then rebuilds the
+same mode stack on return. The editor is `$VISUAL` or `$EDITOR`, run through the host PATH;
+its whole value is the command, so `code -w` works. When a line is known it passes as
+`+LINE` before the path, the convention vim, nvim, nano, hx, and kakoune share; editors
+without it open at their own position. With neither variable set, the press reports what to
+set instead of failing silently.
+
+A successful edit refreshes the changeset, so the diff reconciles to the edited file in place
+(`overview.md` Continuity) — reviewr itself still never writes (`overview.md`). The status
+names the edited file; a nonzero exit or a failed launch reports it instead.
 
 ### Footer
 

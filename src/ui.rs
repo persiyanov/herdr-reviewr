@@ -2426,6 +2426,7 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::Select => (hint(K::Select), "select"),
         A::ClearSelection => ("esc".into(), "clear"),
         A::EditComment => (hint(K::Edit), "edit"),
+        A::EditFile => (hint(K::EditFile), "edit file"),
         A::DeleteComment => (hint(K::Delete), "delete"),
         A::JumpComment => (format!("{}/{}", hint(K::NextComment), hint(K::PrevComment)), "jump"),
         A::ExpandFold => (hint(K::Expand), "expand fold"),

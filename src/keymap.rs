@@ -35,6 +35,7 @@ pub enum Action {
     Select,
     Comment,
     Edit,
+    EditFile,
     Delete,
     NextComment,
     PrevComment,
@@ -158,7 +159,7 @@ impl Key {
 
 /// Every action with its config name and default keys — the single source the default keymap,
 /// the name lookup, and the config error message are built from.
-const ACTIONS: [(Action, &str, &[Key]); 40] = [
+const ACTIONS: [(Action, &str, &[Key]); 41] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -187,6 +188,7 @@ const ACTIONS: [(Action, &str, &[Key]); 40] = [
     (Action::Select, "select", &[Key::plain('v')]),
     (Action::Comment, "comment", &[Key::plain('c')]),
     (Action::Edit, "edit", &[Key::plain('e')]),
+    (Action::EditFile, "edit-file", &[Key::ctrl('e')]),
     (Action::Delete, "delete", &[Key::plain('d')]),
     (Action::NextComment, "next-comment", &[Key::plain('n')]),
     (Action::PrevComment, "prev-comment", &[Key::plain('N')]),
@@ -325,6 +327,14 @@ mod tests {
     fn defaults_bind_every_action_and_hint_is_first_key() {
         let keymap = Keymap::default();
         assert_eq!(keymap.action_for(Key::plain('c')), Some(Action::Comment));
+        // `e` stays the comment editor; `ctrl+e` is the file editor — a chord, so it
+        // also reaches the search screen, where every printable types into the query
+        // (`specs/input.md`).
+        assert_eq!(keymap.action_for(Key::plain('e')), Some(Action::Edit));
+        assert_eq!(keymap.action_for(Key::plain('E')), None);
+        assert_eq!(keymap.action_for(Key::ctrl('e')), Some(Action::EditFile));
+        assert_eq!(keymap.hint(Action::EditFile), Key::ctrl('e'));
+        assert_eq!(keymap.hint(Action::EditFile).label(), "ctrl+e");
         assert_eq!(keymap.action_for(Key::plain('S')), Some(Action::Send));
         assert_eq!(keymap.action_for(Key::plain('m')), Some(Action::Preview));
         assert_eq!(keymap.action_for(Key::plain('p')), Some(Action::NavigatorPosition));

@@ -133,6 +133,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | `v` | Select lines |
 | `c` | Comment on line or selection |
 | `e` `d` | Edit / delete comment |
+| `Ctrl+E` | Open the file under the cursor in `$EDITOR` — works from the search screen on the picked result |
 | `n` `N` | Jump to next / previous comment |
 | `l` | List all comments |
 | `s` | Send comments to agent |

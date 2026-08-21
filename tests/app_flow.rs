@@ -1420,6 +1420,86 @@ fn expand_rebinds_to_a_character_and_the_freed_arrow_goes_dead() {
 }
 
 #[test]
+fn edit_file_requests_the_open_diff_line_and_stays_inert_where_nothing_is_editable() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.diff_cursor = 1; // a changed row of `a.rs`
+
+    let keymap = Keymap::default();
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+        Rect::new(0, 0, 120, 40),
+        &keymap,
+    )
+    .unwrap();
+    let target = app.editor_request.take().expect("ctrl+e names the open file");
+    assert_eq!(target.path, "a.rs", "the request carries the open file");
+    assert!(target.line.is_some(), "the cursor's new-file line rides along");
+
+    // The bare characters keep their own meanings: no file request from either.
+    press(&mut app, &keymap, KeyCode::Char('e'));
+    assert!(app.editor_request.is_none(), "`e` never requests a file");
+    assert_eq!(app.mode, Mode::Normal);
+    press(&mut app, &keymap, KeyCode::Char('E'));
+    assert!(app.editor_request.is_none(), "`E` is unbound");
+
+    // The read-only PR tab has no files to name.
+    enter_tab(&mut app, herdr_reviewr::app::Tab::Pr);
+    press(&mut app, &keymap, KeyCode::Char('E'));
+    assert!(app.editor_request.is_none(), "`E` is inert on the PR tab");
+}
+
+#[test]
+fn edit_file_opens_the_picked_result_from_the_search_screen_by_chord() {
+    use herdr_reviewr::app::{SearchMode, SearchOverlay, SearchPhase};
+    use herdr_reviewr::search::{CodeHit, SearchResults};
+
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    // A settled code search with one hit in a real file — the state `enter` would open.
+    app.search = Some(SearchOverlay {
+        query: "BETA".into(),
+        caret: 4,
+        search_mode: SearchMode::Code,
+        pick: 0,
+        scroll: std::cell::Cell::new(0),
+        results: SearchResults {
+            code: vec![CodeHit {
+                path: "a.rs".into(),
+                line: 2,
+                text: "BETA".into(),
+                spans: vec![(0, 4)],
+            }],
+            ..Default::default()
+        },
+        phase: SearchPhase::Ready,
+        preview: None,
+    });
+    app.mode = Mode::Search;
+
+    // The chord reaches `edit-file` where the bare `E` types into the query.
+    let keymap = Keymap::default();
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+        Rect::new(0, 0, 120, 40),
+        &keymap,
+    )
+    .unwrap();
+    let target = app.editor_request.take().expect("ctrl+e names the picked result");
+    assert_eq!(target.path, "a.rs");
+    assert_eq!(target.line, Some(2));
+    assert_eq!(app.mode, Mode::Search, "the screen stays until the editor returns");
+
+    // The bare character still types into the query, never the editor.
+    press(&mut app, &keymap, KeyCode::Char('E'));
+    assert!(app.editor_request.is_none(), "`E` is query text on the search screen");
+    assert_eq!(app.search.as_ref().unwrap().query, "BETAE");
+}
+
+#[test]
 fn page_down_rebinds_and_half_page_defaults_hold() {
     let r = edited_repo();
     let mut app = app_on(&r);
@@ -4676,6 +4756,7 @@ mod search_overlay {
                 flip,
                 FooterAction::PickResult,
                 FooterAction::OpenResult,
+                FooterAction::EditFile,
                 FooterAction::CloseSearch
             ]
         );
