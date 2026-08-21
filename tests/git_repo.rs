@@ -675,6 +675,24 @@ fn a_binary_change_lists_with_zero_stats() {
 }
 
 #[test]
+fn file_bytes_round_trips_png_without_utf8_lossy() {
+    use herdr_reviewr::git::file_bytes;
+    let r = Repo::init();
+    let png = {
+        use std::io::Cursor;
+        let img = image::RgbImage::from_pixel(2, 2, image::Rgb([1, 2, 3]));
+        let mut buf = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img).write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        buf.into_inner()
+    };
+    r.write_bytes("logo.png", &png);
+    r.commit_all("init");
+    let got = file_bytes(r.path(), "HEAD", "logo.png");
+    assert_eq!(got, png, "raw bytes must match the committed blob");
+    assert!(image::load_from_memory(&got).is_ok(), "bytes must still decode");
+}
+
+#[test]
 fn git_access_never_mutates_the_repo() {
     let r = Repo::init();
     r.write("a.rs", "x\n");

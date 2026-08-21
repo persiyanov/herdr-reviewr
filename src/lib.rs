@@ -23,6 +23,7 @@ pub mod highlight;
 pub mod keymap;
 #[macro_use]
 pub mod log;
+pub mod image_view;
 pub mod markdown;
 pub mod model;
 pub mod proc;
@@ -78,6 +79,12 @@ pub fn run() -> Result<()> {
     // Bracketed paste so a multi-line paste arrives as one event, not raw keystrokes whose
     // embedded newlines would submit the comment early.
     let _ = execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    // Halfblocks only: `Picker::from_query_stdio` on a silent PTY times out while leaving a
+    // stdin reader that steals the next keypress, so the event loop never sees it. The unicode
+    // fallback still paints the preview (`specs/diff-view.md` Image preview). Kitty/Sixel via
+    // a safe capability probe is a later change.
+    let image_picker = ratatui_image::picker::Picker::halfblocks();
+    app.set_image_picker(image_picker.clone());
     // The kitty keyboard protocol reports modifiers on keys the legacy encoding drops — most
     // notably Ctrl/Alt+arrows — so word-jump by arrow works where the terminal supports it.
     let kbd = supports_keyboard_enhancement().unwrap_or(false);
@@ -121,6 +128,7 @@ pub fn run() -> Result<()> {
         cfg.plugin_config_dir = Some(dir.into());
         initial_config = config::plugin_config(cfg.plugin_config_dir.as_deref());
         app = app_for(&cfg, &initial_config);
+        app.set_image_picker(image_picker.clone());
         if let Err(error) = terminal.draw(|f| ui::render(f, &app)) {
             restore_terminal(kbd);
             herdr::clear_pane_label();

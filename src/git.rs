@@ -25,15 +25,15 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Like [`git`], but returns stdout even on non-zero exit (e.g. `diff --no-index`).
-fn git_lenient(repo: &Path, args: &[&str]) -> String {
+/// Like [`git`], but returns stdout bytes even on non-zero exit (e.g. missing `rev:path`).
+fn git_lenient_bytes(repo: &Path, args: &[&str]) -> Vec<u8> {
     crate::proc::command("git")
         .arg("-C")
         .arg(repo)
         .args(["-c", "core.quotepath=false"])
         .args(args)
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .map(|o| o.stdout)
         .unwrap_or_default()
 }
 
@@ -1008,7 +1008,14 @@ pub fn merge_base(repo: &Path, base_oid: &str) -> Option<String> {
 /// The content of `path` at `rev` (`git show <rev>:<path>`). Empty when the path does
 /// not exist at that rev — an added file against its old side, say.
 pub fn file_content(repo: &Path, rev: &str, path: &str) -> String {
-    git_lenient(repo, &["show", &format!("{rev}:{path}")])
+    String::from_utf8_lossy(&file_bytes(repo, rev, path)).into_owned()
+}
+
+/// Raw bytes of `path` at `rev` (`git show <rev>:<path>`). Empty when the path does not
+/// exist at that rev. Used for image classification — never UTF-8 lossy
+/// (`specs/diff-view.md` Image preview).
+pub fn file_bytes(repo: &Path, rev: &str, path: &str) -> Vec<u8> {
+    git_lenient_bytes(repo, &["show", &format!("{rev}:{path}")])
 }
 
 // --- base pick (branch scope) --------------------------------------------------
