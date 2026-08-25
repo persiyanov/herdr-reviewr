@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-08-23
+Last edited: 2026-08-25
 ---
 
 # Review model
@@ -123,7 +123,7 @@ A row in the `Changes` list carries:
 
 ### Diff
 
-The selected file's structured diff, built from its old and new content (`diff-view.md`). Comment anchors and snippets come from it. An untracked file diffs against empty old content. A binary file lists, and its pane reads `binary — no line comments`.
+The selected file's structured diff, built from its old and new content (`diff-view.md`). Comment anchors and snippets come from it. An untracked file diffs against empty old content. A supported image lists and paints a visual preview in Changes (`diff-view.md`). Any other binary lists, and its pane reads `binary — no line comments`.
 
 ### File content
 

@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-24
-Last edited: 2026-08-23
+Last edited: 2026-08-25
 ---
 
 # Diff view
@@ -37,12 +37,12 @@ What the reviewer sees (unified view, a renamed TypeScript file):
 ### FileDiff
 
 | field           | type    | meaning                                                        |
-| --------------- | ------- | -------------------------------------------------------------- |
-| `path`          | string  | path relative to the repo, the new path for a rename           |
-| `previous_path` | string? | the old path when the file was renamed, absent in other cases  |
-| `state`         | enum    | `normal` shows rows, `binary` and `too_large` show a notice    |
-| `view`          | enum    | `diff` shows change rows and folds, `file` shows all `context` |
-| `rows`          | Row[]   | the show units and cursor units, in display order              |
+| --------------- | ------- | --------------------------------------------------------------------------------- |
+| `path`          | string  | path relative to the repo, the new path for a rename                              |
+| `previous_path` | string? | the old path when the file was renamed, absent in other cases                     |
+| `state`         | enum    | `normal` shows rows; `binary` and `too_large` show a notice; `image` a preview    |
+| `view`          | enum    | `diff` shows change rows and folds, `file` shows all `context`                    |
+| `rows`          | Row[]   | the show units and cursor units, in display order                                 |
 
 ### Row
 
@@ -81,6 +81,17 @@ You can select content rows for comments in the file tabs. You cannot select a `
 - The gutter shows the new-line number and a blank change bar.
 - Highlight, wrap, horizontal scroll, selection, and comments operate as they operate in Diff view.
 - A `binary` file or a `too_large` file goes to a notice. The File view notice is `file too large`. The Diff view notice is `file too large to diff`.
+
+### Image preview
+
+In the Changes Diff view, a file whose current or previous bytes decode as a supported image paints a visual preview instead of rows:
+
+- Classification reads raw bytes (never UTF-8 lossy). A successful image decode wins over the NUL binary rule. Other NUL-bearing files stay `binary`.
+- The pane fits the image into its inner area, keeps aspect ratio, and centers it. There is no image scroll and no line comments.
+- Selection, wrap, horizontal scroll, and the markdown preview toggle are inert.
+- A decode or protocol failure paints `could not display image`, never a blank pane and never a panic.
+- The pane always encodes through the unicode halfblocks fallback. A later change may probe Kitty or Sixel without stealing input on a silent terminal. Non-image binaries still paint `binary — no line comments`.
+- Side-by-side before/after for a modified image is out of scope here.
 
 ### Markdown preview
 
@@ -154,7 +165,8 @@ Return to source is different per view.
 The viewer only reads. The viewer is computed again on each refresh. The viewer degrades. The viewer does not block.
 
 - A file over the size budget shows `too_large`. The viewer does not hang.
-- A binary file shows `binary — no line comments`.
+- A binary file that is not a supported image shows `binary — no line comments`.
+- An image that fails to load or encode shows `could not display image`.
 - If highlight fails, the viewer uses plain spans. The diff still shows.
 - A diff that is empty on both sides shows its header and a notice of one line. The pane is not empty. A rename only, or a mode-only change, shows that content. The content is closed to a fold.
 - A refresh computes the model again. Saved comments do not change. A comment that is in progress does not change.
@@ -162,6 +174,7 @@ The viewer only reads. The viewer is computed again on each refresh. The viewer 
 ## Non-goals
 
 - There is no other diff layout. There is one unified column. A side-by-side split is on the roadmap.
+- There is no before/after image split. A later change may add it without reshaping the text diff model.
 - The viewer does not edit. The viewer does not stage. The viewer does not revert.
 - The viewer does not move comment line numbers again. `review-model.md` owns comment anchors, through the snippet.
 

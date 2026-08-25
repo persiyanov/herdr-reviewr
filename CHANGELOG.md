@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Image previews in Changes.** A supported image in the Diff view paints a visual preview
+  instead of the binary notice. Classification reads raw bytes (never UTF-8 lossy). Other
+  binaries, text diffs, and line comments keep their existing behavior. There is no
+  before/after split yet.
+
 ## [0.36.0] — 2026-08-23
 
 ### Added
