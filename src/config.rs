@@ -680,6 +680,14 @@ mod tests {
     }
 
     #[test]
+    fn terminal_theme_is_accepted_by_cli_and_config() {
+        assert_eq!(parse(&["--theme", "terminal"]).theme.as_deref(), Some("terminal"));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "theme = \"terminal\"\n").unwrap();
+        assert_eq!(super::plugin_config_in(dir.path()).unwrap().theme(), "terminal");
+    }
+
+    #[test]
     fn poll_has_a_floor() {
         assert_eq!(parse(&["--poll", "10"]).poll, Duration::from_millis(200));
         assert_eq!(parse(&["--poll", "garbage"]).poll, Duration::from_secs(2));
