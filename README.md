@@ -35,7 +35,7 @@ GitLab, or Azure DevOps and never posts.
 
 - **herdr ≥ 0.7.5** (the plugin system).
 - **git** on `PATH`.
-- A **truecolor** terminal with Unicode box-drawing.
+- A terminal with **Unicode box-drawing**. Fixed themes require **truecolor**; `terminal` uses ANSI colors.
 - **macOS or Linux.**
 - **`gh`** (GitHub), **`glab`** (GitLab), or **`az`** (Azure DevOps, with the `azure-devops` extension), authenticated. Only the **PR** tab needs one.
 
@@ -247,6 +247,7 @@ theme = "tokyo-night"
   `gruvbox`, `one-dark`, `solarized`, `monokai`, `tokyo-night`, `rose-pine`.
 - **Light:** `catppuccin-latte`, `gruvbox-light`, `one-light`, `solarized-light`,
   `github-light`, `tokyo-night-day`, `rose-pine-dawn`.
+- **Terminal-following:** `terminal`.
 
 Names match herdr's where both ship a palette.
 
@@ -413,10 +414,10 @@ workspace. Put `herdr-reviewr` itself in a layout pane, never the invoke.
 The known constraints:
 
 **Terminal & theme**
-- **Truecolor required** — colors are 24-bit RGB with no 256/8-color fallback. Basic terminals
-  render wrong colors.
-- **Theme must match the terminal** — the pane keeps the terminal's background, and there is no
-  auto light/dark detection yet. You match the theme by hand.
+- Fixed themes use 24-bit RGB. The `terminal` theme follows the terminal's default and named ANSI
+  colors, so it does not require truecolor.
+- Fixed themes must match the terminal's background. `terminal` follows external terminal palette
+  changes without an app query or restart.
 - **Add / remove are red / green** — no secondary cue for colorblind users yet.
 - **Box-drawing glyphs required**, but no Nerd Font.
 
@@ -480,8 +481,7 @@ herdr plugin link .
 
 Structured (JSON) export, a side-by-side split view, mark-file-reviewed,
 named-key notation for keybindings, OSC light/dark theme autodetect, more themes
-(`kanagawa`, `vesper`, `everforest`, `ayu`, a dark `github`), a `terminal`-following palette,
-and OSC 52 clipboard.
+(`kanagawa`, `vesper`, `everforest`, `ayu`, a dark `github`), and OSC 52 clipboard.
 
 ## Design
 
@@ -498,3 +498,4 @@ Bundled `.tmTheme` syntax files in `assets/`, each under its own license:
 - [Catppuccin Mocha](https://github.com/catppuccin/bat) — MIT.
 - [Tokyo Night](https://github.com/folke/tokyonight.nvim) (`tokyo-night`, `tokyo-night-day`) — Apache-2.0.
 - [Rosé Pine](https://github.com/rose-pine/tm-theme) (`rose-pine`, `rose-pine-dawn`) — MIT.
+- `terminal.tmTheme` — project-owned sentinel adapter, MIT.

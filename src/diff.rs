@@ -1,25 +1,23 @@
 //! The structured diff model: a file's changes as rows built from its old and new
 //! content, syntax-highlighted, ready to paint.
 //!
-//! This module is terminal-free — a `Span` carries an RGB
-//! color, and `src/ui.rs` maps it to a ratatui color.
+//! This module is terminal-free. A `Span` carries the palette-owned Ratatui color that
+//! the renderer will paint.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 
+use ratatui::style::Color;
 use similar::{ChangeTag, TextDiff};
 
 use crate::highlight::Highlighter;
-
-/// An 8-bit RGB color.
-pub type Rgb = (u8, u8, u8);
 
 /// A run of one line's text in a single color.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Span {
     pub text: String,
-    pub color: Rgb,
+    pub color: Color,
 }
 
 /// A rendered diff row. Content rows (`Context`/`Deletion`/`Insertion`) are selectable
