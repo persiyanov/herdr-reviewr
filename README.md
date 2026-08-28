@@ -484,7 +484,7 @@ and OSC 52 clipboard.
 
 ## Design
 
-The living design is in [`specs/`](specs/), one concept per doc, always current.
+Change specs live in [`docs/specs/`](docs/specs/), one folder per change.
 
 ## License
 

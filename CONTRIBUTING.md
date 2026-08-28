@@ -29,9 +29,9 @@ plugin and `just qa-restore` brings the release back. The details and the sharp 
 
 ## How this repo works
 
-**Specs are the contract.** Every behavior lives in a spec under `specs/` (`overview.md` is the
-map). A change to behavior lands in the spec and the code together, in the same PR. If you find
-the code and a spec disagreeing, that is a bug report worth filing on its own.
+**Specs are the contract.** New behavior is a change spec under
+`docs/specs/YYYY-MM-DD-<slug>/spec.md`, then a plan and tickets beside it. A behavior change
+lands in that spec and the code together, in the same PR.
 
 **The changelog is written as you go.** User-visible changes add a bullet under `## [Unreleased]`
 in `CHANGELOG.md`. That text becomes the release notes verbatim, so write it for the person
@@ -53,7 +53,7 @@ component calls.
 ## Pull requests
 
 - Keep one PR to one concern.
-- `just ci` green, spec updated with the behavior, changelog bullet added.
+- `just ci` green, change spec updated with the behavior, changelog bullet added.
 - Tests live beside the code (unit) and in `tests/` (integration, against real git repos).
   Test names read as sentences: `a_tab_switch_paints_the_stashed_frame_and_defers_its_reload`.
 

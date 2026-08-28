@@ -15,9 +15,9 @@ herdr-reviewr is a Rust TUI (ratatui) code-review pane: it runs in a [herdr](htt
 
 ## Spec-first
 
-`specs/` holds the contracts (`overview.md` is the map). Behavior changes land in the spec and the code together, and code comments cite the spec section they implement. Before changing user-visible behavior, read the governing spec file, and treat divergence between spec and code as a finding to raise, not silently fix.
+New behavior is designed with `/brainstorming` and sequenced with `/planning`. Each change lives in `docs/specs/YYYY-MM-DD-<slug>/` (`spec.md`, then `plan.md` and `tickets/`). Read that change's spec before touching user-visible behavior.
 
-Load-bearing invariants (specs/overview.md). Cite them by name, never by position in the table:
+Load-bearing invariants. Cite them by name:
 
 - **No writes**: reviewr never mutates the worktree, index, or branches. Its only git writes are private refs under `refs/reviewr/`: the turn baseline and the base pick.
 - **Comments survive**: comments are never lost to a refresh or the agent's edits, and leave only by explicit export. The comment store is in-memory **by design** — do not propose persisting it.
@@ -33,12 +33,12 @@ The runtime is a single-threaded frame loop (`event_loop` in `src/lib.rs`): draw
 - `src/diff.rs` — `FileDiff` build (syntect highlight both sides, similar-line pairing, word emphasis, folds) and `DiffCache`, keyed by path and gated by content hash. Cleared on scope switch and theme change.
 - `src/ui.rs` — all rendering. Row heights and wrapping recompute per frame across the visible diff, so render cost scales with open-file size.
 - `src/forge.rs` + the `PrRefresh`/`PrCoordinator` state machines in `lib.rs` — the PR snapshot. Fetches are tagged with the input (repository identity, pinned HEAD and base, the branch's forge names) that produced them, and a result paints only if a fresh probe proves the input still matches. This generation/input-tag pattern is the template for moving other derived state off-thread.
-- `src/gitlab.rs` / `src/azure_devops.rs` — the `glab` and `az` providers behind the forge boundary in `forge.rs`, each mapping its CLI's payloads onto the one `PrSnapshot` shape (specs/forge-providers.md).
+- `src/gitlab.rs` / `src/azure_devops.rs` — the `glab` and `az` providers behind the forge boundary in `forge.rs`, each mapping its CLI's payloads onto the one `PrSnapshot` shape.
 - `src/turn.rs` — the pure turn state machine: a resting→working edge starts a turn, and a pending candidate promotes to the `last-turn` baseline once the worktree diverges from it. The world worker's `TurnHost` drives it; `src/herdr.rs` holds the herdr CLI calls.
 - `src/model.rs` — `CommentStore` (in-memory), comment anchoring (`diff_anchored` distinguishes diff comments from All-files content comments — each renders only in its own view).
-- `src/editor.rs` — the editor command: a name-keyed dialect table (how each editor takes a line, and whether it draws in the pane), quote-aware splitting, and the `editor` key's `{file}`/`{line}` template. Pure argv resolution, spawning nowhere. `run_editor` in `lib.rs` owns the spawn, and hands the pane over for a terminal editor, blocking the frame loop for that editor's whole session (specs/input.md Edit).
+- `src/editor.rs` — the editor command: a name-keyed dialect table (how each editor takes a line, and whether it draws in the pane), quote-aware splitting, and the `editor` key's `{file}`/`{line}` template. Pure argv resolution, spawning nowhere. `run_editor` in `lib.rs` owns the spawn, and hands the pane over for a terminal editor, blocking the frame loop for that editor's whole session.
 - `src/export.rs` — comment export: format all, send via `herdr agent send` or clipboard, consume-on-success only.
-- `src/config.rs` — plugin config: the whole file validates before every frame/action (the `CFG-*` invariants in specs/config.md). An invalid config blocks all review work until recovery, which carries authored state.
+- `src/config.rs` — plugin config: the whole file validates before every frame/action. An invalid config blocks all review work until recovery, which carries authored state.
 - `herdr-plugin.toml` + `herdr/pane.sh` — plugin packaging: pane, toggle/open/close actions, worktree.created auto-open.
 
 ## QA install — putting a local build into the user's herdr panes

@@ -2,7 +2,7 @@
 
 The herdr surface herdr-reviewr depends on, confirmed live (last sweep 2026-07-31).
 herdr-reviewr ships as a herdr **plugin** (`../herdr-plugin.toml`), and the binary is a plain
-terminal program: any pane that runs it is a reviewr pane (`../specs/herdr-host.md`).
+terminal program: any pane that runs it is a reviewr pane.
 
 ## Plugin manifest (`herdr-plugin.toml`)
 
@@ -64,8 +64,7 @@ The direct-run mode rides on four calls plus the plain-pane env, all confirmed l
   nothing reads it back.
 - **`herdr plugin config-dir <plugin_id>`** prints the plugin's config directory
   (`~/.config/herdr/plugins/config/persiyanov.reviewr`). The binary falls back to it when
-  `HERDR_PLUGIN_CONFIG_DIR` is unset, so a hand-launched pane reads the same `config.toml`
-  (`../specs/config.md`).
+  `HERDR_PLUGIN_CONFIG_DIR` is unset, so a hand-launched pane reads the same `config.toml`.
 - **`herdr pane split [--pane <id>|--current] [--direction …] [--ratio …] [--cwd …] [--env K=V]
   [--focus|--no-focus]`, `pane run <id> <command>…`, `pane current`** exist for layout tooling.
   reviewr's own actions still open through `plugin pane open`; a layout plugin can use these
@@ -128,7 +127,7 @@ observed on 0.7.5 across 13 live agents, entries arrive grouped by workspace and
 workspace. No sample held two agents in one tab, so the order inside a tab is unverified.
 
 - Send candidates = every agent in the reviewr pane's `HERDR_WORKSPACE_ID`. One sends directly,
-  several open the picker (`../specs/herdr-host.md`). Turn tracking reads no pane topology at
+  several open the picker. Turn tracking reads no pane topology at
   all: it takes every agent's `cwd` and keeps those resolving to the reviewr pane's git top level.
 - `cwd` and `foreground_cwd` both carry the agent's working directory, and matched on every
   entry of a 10-agent sample. Each entry also carries `agent_session` (a stable UUID),
@@ -159,8 +158,7 @@ herdr agent focus    <agent_pane>                    # focus so the reviewer sub
 ```
 
 No part of this is fit for a 40-column status line, `message` included: it names a pane id the
-reviewer never saw. reviewr logs the whole payload and shows a sentence of its own
-(`../specs/herdr-host.md`).
+reviewer never saw. reviewr logs the whole payload and shows a sentence of its own.
 
 - `pane send-text` writes the literal bytes to the pane without Enter, unchanged since 0.7.0.
 - herdr 0.7.5 removed `agent send` (replaced by the logical-key `agent send-keys`). On 0.7.0 both
