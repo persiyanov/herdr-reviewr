@@ -267,8 +267,9 @@ The **branch** scope diffs against the merge-base with your repo's default branc
 `origin/HEAD` names. The header shows the resolved base, `vs main`.
 
 When the trunk is something else, or you review a stacked branch, press `B` (or click the
-base name) and pick the branch. The pick is stored in the repo, shared by every reviewr pane
-on it, and holds until you pick again. Choosing the default branch clears it.
+base name) and pick the branch. The pick is stored for this worktree and holds until you
+pick again. Other worktrees on the same clone keep their own pick. Choosing the default
+branch records that name.
 
 You can also type any revision, like `HEAD~2`, a tag, or a SHA prefix. The header shows what
 resolved: `vs HEAD~2 (a1b2c3d)`.

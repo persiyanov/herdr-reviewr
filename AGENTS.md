@@ -19,7 +19,7 @@ New behavior is designed with `/brainstorming` and sequenced with `/planning`. E
 
 Load-bearing invariants. Cite them by name:
 
-- **No writes**: reviewr never mutates the worktree, index, or branches. Its only git writes are private refs under `refs/reviewr/`: the turn baseline and the base pick.
+- **No writes**: reviewr never mutates the worktree, index, or branches. Its only git writes are private refs under `refs/worktree/reviewr/`: the turn baseline and the base pick.
 - **Comments survive**: comments are never lost to a refresh or the agent's edits, and leave only by explicit export. The comment store is in-memory **by design** — do not propose persisting it.
 - **Continuity**: place state (cursor, scroll, tab, scope, folds, selection, layout) moves only under the user's own input. World events (polls, refreshes, fetch results) may only *reconcile* it: match by identity first (path, comment author+anchor — never row index), fall back to the nearest surviving target, clamp last. Derived state on screen may be stale, never wrong: blank a view only when its identity changed, never because the same thing gained newer content.
 

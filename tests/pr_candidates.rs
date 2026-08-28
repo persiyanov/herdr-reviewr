@@ -466,12 +466,10 @@ fn fetch_input_changes_only_with_derived_query_state() {
     let head_changed = fetch_input(repo.path(), None, &defaults()).unwrap();
     assert_ne!(head_changed, names_changed);
 
-    // A base pick written by any pane changes the input; clearing it restores the default.
+    // A base pick on this worktree changes the input.
     herdr_reviewr::git::write_base_pick(repo.path(), "work").unwrap();
     let base_changed = fetch_input(repo.path(), None, &defaults()).unwrap();
     assert_ne!(base_changed, head_changed);
-    herdr_reviewr::git::clear_base_pick(repo.path()).unwrap();
-    assert_eq!(fetch_input(repo.path(), None, &defaults()).unwrap(), head_changed);
 }
 
 #[test]

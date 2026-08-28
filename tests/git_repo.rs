@@ -8,9 +8,9 @@ use std::path::Path;
 use common::Repo;
 use herdr_reviewr::git::{
     ResolvedBase, abbreviate_oid, all_files, changed_against_tree,
-    changed_files as changed_files_oid, clear_base_pick, default_branch_name, file_content,
-    list_branches, merge_base as merge_base_oid, read_base_pick, read_baseline_ref, resolve_base,
-    resolve_commit, snapshot_worktree, worktree_key, write_base_pick, write_baseline_ref,
+    changed_files as changed_files_oid, default_branch_name, file_content, list_branches,
+    merge_base as merge_base_oid, read_base_pick, read_baseline_ref, resolve_base, resolve_commit,
+    snapshot_worktree, write_base_pick, write_baseline_ref,
 };
 use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope};
 
@@ -254,28 +254,36 @@ fn a_dormant_pick_survives_even_when_nothing_resolves() {
     assert_eq!(status.skipped.as_deref(), Some("gone"));
 }
 
+fn ref_names(repo: &std::path::Path, prefix: &str) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", repo.to_str().unwrap(), "for-each-ref", "--format=%(refname)", prefix])
+        .output()
+        .expect("git");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).lines().map(str::to_string).collect()
+}
+
 #[test]
-fn the_pick_persists_in_a_private_ref_and_clears() {
+fn the_pick_persists_in_a_private_worktree_ref() {
     let r = Repo::init();
     r.write("base.rs", "1\n");
     r.commit_all("base");
 
-    // Absent until written; a write survives re-reading (a fresh pane would reread the
-    // same ref); a clear removes it (specs/review-model.md).
     assert_eq!(read_base_pick(r.path()).unwrap(), None);
     write_base_pick(r.path(), "dev").unwrap();
     assert_eq!(read_base_pick(r.path()).unwrap().as_deref(), Some("dev"));
     write_base_pick(r.path(), "release/1.0").unwrap();
     assert_eq!(read_base_pick(r.path()).unwrap().as_deref(), Some("release/1.0"));
-    clear_base_pick(r.path()).unwrap();
-    assert_eq!(read_base_pick(r.path()).unwrap(), None);
 
-    // The only ref the pick machinery touches lives under `refs/reviewr/` — the worktree,
-    // index, and branches stay untouched (specs/overview.md No writes).
+    let reviewr_before = ref_names(r.path(), "refs/reviewr");
     write_base_pick(r.path(), "dev").unwrap();
-    let refs = r.git(&["for-each-ref", "--format=%(refname)"]);
-    let reviewr_refs: Vec<&str> = refs.lines().filter(|l| !l.starts_with("refs/heads/")).collect();
-    assert_eq!(reviewr_refs, ["refs/reviewr/base-pick"]);
+    let tree = snapshot_worktree(r.path()).unwrap();
+    write_baseline_ref(r.path(), &tree).unwrap();
+    assert_eq!(
+        ref_names(r.path(), "refs/worktree/reviewr"),
+        ["refs/worktree/reviewr/base-pick", "refs/worktree/reviewr/turn-base"]
+    );
+    assert_eq!(ref_names(r.path(), "refs/reviewr"), reviewr_before);
     assert_eq!(r.git(&["status", "--porcelain"]).trim(), "");
 }
 
@@ -498,8 +506,7 @@ fn the_checked_out_default_branch_stays_listed() {
     r.commit_all("two");
     r.set_origin_default("main", "HEAD");
 
-    // Checked out on the default branch itself: its row stays, or a recorded pick could
-    // never be cleared from the picker (specs/input.md).
+    // Checked out on the default branch itself: its row stays so that name can still be picked.
     let names = list_branches(r.path(), default_branch_name(r.path()).unwrap().as_deref()).unwrap();
     assert_eq!(names, ["main", "dev"]);
 }
@@ -782,26 +789,81 @@ fn baseline_ref_round_trips_under_the_private_namespace() {
     let r = Repo::init();
     r.write("a.rs", "a\n");
     r.commit_all("init");
-    let key = worktree_key(r.path());
-    assert!(read_baseline_ref(r.path(), &key).is_none(), "no baseline initially");
+    assert!(read_baseline_ref(r.path()).is_none(), "no baseline initially");
 
     let tree = snapshot_worktree(r.path()).unwrap();
-    write_baseline_ref(r.path(), &key, &tree).unwrap();
-    assert_eq!(read_baseline_ref(r.path(), &key).as_deref(), Some(tree.as_str()));
+    write_baseline_ref(r.path(), &tree).unwrap();
+    assert_eq!(read_baseline_ref(r.path()).as_deref(), Some(tree.as_str()));
 
     assert!(!r.git(&["branch", "-a"]).contains("reviewr"), "the baseline is not a branch");
     assert!(
-        r.git(&["show-ref"]).contains("refs/reviewr/turn-base/"),
-        "the baseline lives under the private ref namespace"
+        r.git(&["show-ref"]).contains("refs/worktree/reviewr/turn-base"),
+        "the baseline lives under the private worktree namespace"
     );
 }
 
 #[test]
-fn worktree_key_is_stable_and_path_specific() {
-    let a = std::path::Path::new("/repo/one");
-    let b = std::path::Path::new("/repo/two");
-    assert_eq!(worktree_key(a), worktree_key(a), "deterministic for one path");
-    assert_ne!(worktree_key(a), worktree_key(b), "distinct per worktree path");
+fn a_pick_in_one_worktree_is_invisible_in_its_sibling() {
+    let r = Repo::init();
+    r.write("a.rs", "a\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    let linked = r.add_worktree("feature");
+
+    write_base_pick(r.path(), "main").unwrap();
+    assert_eq!(read_base_pick(r.path()).unwrap().as_deref(), Some("main"));
+    assert_eq!(read_base_pick(linked.path()).unwrap(), None, "main → linked");
+
+    write_base_pick(linked.path(), "main").unwrap();
+    assert_eq!(read_base_pick(linked.path()).unwrap().as_deref(), Some("main"));
+    assert_eq!(read_base_pick(r.path()).unwrap().as_deref(), Some("main"));
+
+    let other = r.add_worktree("other");
+    write_base_pick(linked.path(), "feature").unwrap();
+    assert_eq!(read_base_pick(other.path()).unwrap(), None, "linked → linked");
+    assert_eq!(read_base_pick(linked.path()).unwrap().as_deref(), Some("feature"));
+}
+
+#[test]
+fn a_turn_baseline_in_one_worktree_is_invisible_in_its_sibling() {
+    let r = Repo::init();
+    r.write("a.rs", "a\n");
+    r.commit_all("init");
+    let linked = r.add_worktree("feature");
+    let tree = snapshot_worktree(r.path()).unwrap();
+
+    write_baseline_ref(r.path(), &tree).unwrap();
+    assert_eq!(read_baseline_ref(r.path()).as_deref(), Some(tree.as_str()));
+    assert_eq!(read_baseline_ref(linked.path()), None, "main → linked");
+
+    write_baseline_ref(linked.path(), &tree).unwrap();
+    assert_eq!(read_baseline_ref(linked.path()).as_deref(), Some(tree.as_str()));
+    let other = r.add_worktree("other");
+    assert_eq!(read_baseline_ref(other.path()), None, "linked → linked");
+}
+
+#[test]
+fn a_planted_shared_pick_is_not_this_worktrees_pick() {
+    let r = Repo::init();
+    r.write("a.rs", "a\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    let linked = r.add_worktree("feature");
+    r.plant_legacy_base_pick("dev");
+
+    assert_eq!(read_base_pick(linked.path()).unwrap(), None);
+    let status = resolve_base(linked.path(), None).unwrap().status;
+    assert_eq!(status.winner.as_ref().map(ResolvedBase::name), Some("main"));
+}
+
+#[test]
+fn a_planted_hash_baseline_is_not_this_worktrees_last_turn() {
+    let r = Repo::init();
+    r.write("a.rs", "a\n");
+    r.commit_all("init");
+    let tree = snapshot_worktree(r.path()).unwrap();
+    r.plant_legacy_turn_base(&tree);
+    assert_eq!(read_baseline_ref(r.path()), None);
 }
 
 #[test]

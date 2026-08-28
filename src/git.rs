@@ -1,7 +1,7 @@
-//! Read-only git access: scopes, changed files, and diffs.
+//! Git access: scopes, changed files, and diffs.
 //!
-//! See `specs/review-model.md`. Every call here only reads — it never commits,
-//! stages, or mutates the worktree or refs.
+//! The only writes are private refs under `refs/worktree/reviewr/`. Nothing here
+//! commits, stages, or mutates the worktree, the index, or any branch.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -593,7 +593,7 @@ impl BaseResolution {
     }
 }
 
-/// Resolve the base chain: the `--base` flag, then the repo pick, then the branch
+/// Resolve the base chain: the `--base` flag, then this worktree's pick, then the branch
 /// `origin/HEAD` names (`specs/review-model.md` Base branch). A source that does not
 /// resolve to a commit is skipped, never an error; a skipped flag or pick that would have
 /// outranked the winner is recorded for the header (`specs/tui.md`).
@@ -650,7 +650,7 @@ pub fn default_branch_name(repo: &Path) -> Result<Option<String>, GitFail> {
     {
         // `fetch --prune` can delete the target and leave the symref dangling: a name
         // that resolves to nothing is no default, or the picker could never mark the
-        // clearing row and the name shield would carry a phantom (`specs/input.md`).
+        // default row and the name shield would carry a phantom.
         let probe = format!("refs/remotes/origin/{name}^{{commit}}");
         let resolves = git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])?;
         return Ok(resolves.map(|_| name));
@@ -676,9 +676,9 @@ pub(crate) fn strip_base_prefix(entry: &str) -> String {
 
 /// Every branch name for the base picker: `refs/heads` and `refs/remotes/origin` merged by
 /// bare name, newest commit first, `origin/HEAD` and the checked-out branch excluded —
-/// except the `default` branch, which stays listed so its row can clear a pick even while
-/// checked out (`specs/input.md` Base picker). The caller passes the default it already
-/// resolved, so one picker open runs the resolution once.
+/// except the `default` branch, which stays listed so it can be picked even while checked
+/// out. The caller passes the default it already resolved, so one picker open runs the
+/// resolution once.
 pub fn list_branches(repo: &Path, default: Option<&str>) -> Result<Vec<String>, GitFail> {
     let checked_out = git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])?
         .filter(|name| default != Some(name));
@@ -1013,16 +1013,16 @@ pub fn file_content(repo: &Path, rev: &str, path: &str) -> String {
 
 // --- base pick (branch scope) --------------------------------------------------
 //
-// See `specs/review-model.md` Base branch. The pick is one revision spelling per
-// repository: a blob under one private ref, and refs are shared across a repository's
-// worktrees, so every pane reads the same pick.
+// One revision spelling per worktree: a blob under `refs/worktree/reviewr/base-pick`.
+// Git isolates that namespace, so sibling worktrees do not share a pick.
 
-const BASE_PICK_REF: &str = "refs/reviewr/base-pick";
+const BASE_PICK_REF: &str = "refs/worktree/reviewr/base-pick";
+const TURN_BASE_REF: &str = "refs/worktree/reviewr/turn-base";
 
 /// The recorded pick's spelling, or `None` when no pick is recorded. One git call, so a
-/// concurrent clear from another pane can never split the read the way an exists-then-read
-/// pair would; a failed read is no pick, matching the chain's skip-never-error contract
-/// (`specs/review-model.md`).
+/// concurrent write from another pane of this worktree can never split the read the way
+/// an exists-then-read pair would; a failed read is no pick, matching the chain's
+/// skip-never-error contract.
 pub fn read_base_pick(repo: &Path) -> Result<Option<String>, GitFail> {
     let out = run_git(repo, &["cat-file", "blob", BASE_PICK_REF])?;
     if !out.status.success() {
@@ -1052,18 +1052,11 @@ fn branch_name_shaped(value: &str) -> bool {
         && value.bytes().all(|byte| byte > b' ' && byte != 0x7f)
 }
 
-/// Record `name` as the repository's pick. The ref write lands before the pick applies
-/// (`specs/review-model.md`), so a crash between the two loses nothing.
+/// Record `name` as this worktree's pick. The ref write lands before the pick applies,
+/// so a crash between the two loses nothing.
 pub fn write_base_pick(repo: &Path, name: &str) -> Result<(), GitFail> {
     let blob = git_stdin(repo, &["hash-object", "-w", "--stdin"], name)?;
     git_strict(repo, &["update-ref", BASE_PICK_REF, blob.trim()])?;
-    Ok(())
-}
-
-/// Drop the recorded pick — choosing the default branch clears it
-/// (`specs/review-model.md`).
-pub fn clear_base_pick(repo: &Path) -> Result<(), GitFail> {
-    git_strict(repo, &["update-ref", "-d", BASE_PICK_REF])?;
     Ok(())
 }
 
@@ -1099,10 +1092,9 @@ fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail>
 
 // --- turn baseline (last-turn scope) -------------------------------------------
 //
-// See `specs/herdr-host.md`. The snapshot is non-disruptive: it writes a tree object
-// from the worktree through a temporary index, never touching the real index, the
-// worktree, or any branch, and persists the baseline under a private `refs/reviewr/`
-// ref keyed by the worktree path.
+// The snapshot is non-disruptive: it writes a tree object from the worktree through
+// a temporary index, never touching the real index, the worktree, or any branch, and
+// persists the baseline at `refs/worktree/reviewr/turn-base`.
 
 /// A non-disruptive snapshot of the worktree as a tree object. Seeds a temporary index
 /// from the repo's real index so unchanged files keep their cached hash, then `add -A`
@@ -1167,33 +1159,15 @@ fn git_with_index(repo: &Path, index: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// A stable per-worktree key for the baseline ref, from the absolute top-level path, so
-/// sibling worktrees sharing one ref store do not collide. FNV-1a keeps it deterministic
-/// across rebuilds — a std `DefaultHasher` is seeded per process and is not.
-pub fn worktree_key(repo: &Path) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in repo.to_string_lossy().bytes() {
-        hash ^= u64::from(b);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{hash:016x}")
-}
-
-/// The private ref holding a worktree's turn baseline — outside `refs/heads`, so it
-/// never appears in a branch list.
-fn baseline_ref(key: &str) -> String {
-    format!("refs/reviewr/turn-base/{key}")
-}
-
 /// The persisted turn baseline tree for this worktree, if a baseline exists.
-pub fn read_baseline_ref(repo: &Path, key: &str) -> Option<String> {
-    git_line(repo, &["rev-parse", "--verify", "--quiet", &baseline_ref(key)])
+pub fn read_baseline_ref(repo: &Path) -> Option<String> {
+    git_line(repo, &["rev-parse", "--verify", "--quiet", TURN_BASE_REF])
 }
 
-/// Persist the turn baseline tree under the worktree's private ref. `update-ref` is
+/// Persist the turn baseline tree under this worktree's private ref. `update-ref` is
 /// atomic, so the baseline is never half-written.
-pub fn write_baseline_ref(repo: &Path, key: &str, sha: &str) -> Result<()> {
-    git(repo, &["update-ref", &baseline_ref(key), sha])?;
+pub fn write_baseline_ref(repo: &Path, sha: &str) -> Result<()> {
+    git(repo, &["update-ref", TURN_BASE_REF, sha])?;
     Ok(())
 }
 

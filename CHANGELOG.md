@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Base pick and last-turn are per worktree.** Stacked herdr panes on one clone no longer
+  share a base. Picking the default branch records that name instead of clearing.
+
 ## [0.36.0] — 2026-08-23
 
 ### Added

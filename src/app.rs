@@ -4543,10 +4543,9 @@ impl App {
         }
     }
 
-    /// Pick the highlighted row: persist its spelling — or clear the pick when the
-    /// highlight is the default branch — then rebuild the changeset against it
-    /// (`specs/input.md`, `specs/review-model.md`). With no visible row, Enter checks the
-    /// query immediately and records it if it resolves.
+    /// Pick the highlighted row: persist its spelling, then rebuild the changeset
+    /// against it. With no visible row, Enter checks the query immediately and
+    /// records it if it resolves.
     pub fn base_picker_pick(&mut self) -> Result<()> {
         let Some(bp) = &self.base_picker else { return Ok(()) };
         if bp.visible().is_empty() {
@@ -4561,11 +4560,7 @@ impl App {
         };
         let Some(choice) = choice else { return Ok(()) };
         self.close_base_picker();
-        let write = if choice.is_default() {
-            git::clear_base_pick(&self.repo)
-        } else {
-            git::write_base_pick(&self.repo, choice.name())
-        };
+        let write = git::write_base_pick(&self.repo, choice.name());
         if let Err(e) = write {
             self.status = e.0;
             return Ok(());

@@ -27,8 +27,7 @@ pub struct WorldInput {
     pub scope: Scope,
     /// The `--base` flag, resolved fresh per build. The pick is read from its ref at build
     /// time, so it is derived output, never input identity — a pick made in another pane
-    /// must land here as newer content, not be discarded as a mismatch
-    /// (specs/review-model.md).
+    /// of this worktree must land here as newer content, not be discarded as a mismatch.
     pub base: Option<String>,
     /// Bumped by this pane's own pick, so a build that read the previous pick fails the
     /// landing's input-equality gate instead of reverting the picked base. Another pane's
@@ -203,7 +202,7 @@ pub fn annotate(changed: &[ChangedFile]) -> HashMap<String, Annotation> {
 /// The persisted turn baseline for `repo`, if any — the one seeding rule, shared by the
 /// worker's tracker and the app's first-frame mirror (specs/herdr-host.md).
 pub fn seed_baseline(repo: &std::path::Path) -> Option<String> {
-    git::read_baseline_ref(repo, &git::worktree_key(repo))
+    git::read_baseline_ref(repo)
 }
 
 /// The `All files` entries: every worktree path (ignored dimmed), with the children of
@@ -235,12 +234,11 @@ pub(crate) fn all_files_entries(
 
 /// Turn tracking, owned by the worker: the sample, the snapshot capture, and the baseline
 /// promotion happen on one thread, so the snapshot always rides the sample that observed the
-/// edge (specs/herdr-host.md). The baseline ref stays reviewr's only git write.
+/// edge (specs/herdr-host.md). The baseline ref is this worktree's last-turn write.
 #[derive(Debug)]
 pub struct TurnHost {
     tracker: TurnTracker,
     repo: PathBuf,
-    turn_key: String,
     /// Each agent `cwd` resolved to whether it is a member of the reviewed worktree. Only a
     /// resolved git top level is recorded, since a worktree root does not move, so a member is
     /// placed once and never re-queried. A cwd git reports outside every worktree is not cached:
@@ -299,15 +297,12 @@ fn classify(
 
 impl TurnHost {
     /// Resume any persisted turn baseline for this worktree, so `last-turn` keeps its
-    /// anchor across a reviewr pane restart (specs/herdr-host.md).
+    /// anchor across a reviewr pane restart.
     /// `repo` must already be the git top level, as [`crate::world::seed_baseline`] and
-    /// membership both compare against it and `App` derives the same baseline-ref key from
-    /// its own copy — normalizing here instead would key the two apart. `run` resolves it
-    /// once for both (`src/lib.rs`).
+    /// membership both compare against it. `run` resolves it once for both (`src/lib.rs`).
     pub fn open(repo: PathBuf) -> Self {
         let tracker = TurnTracker::with_baseline(seed_baseline(&repo));
-        let turn_key = git::worktree_key(&repo);
-        Self { tracker, repo, turn_key, resolved: HashMap::new() }
+        Self { tracker, repo, resolved: HashMap::new() }
     }
 
     pub fn baseline(&self) -> Option<&str> {
@@ -391,7 +386,7 @@ impl TurnHost {
         match git::snapshot_worktree(&self.repo) {
             Ok(now) if now != candidate => {
                 self.tracker.promote();
-                if let Err(e) = git::write_baseline_ref(&self.repo, &self.turn_key, &candidate) {
+                if let Err(e) = git::write_baseline_ref(&self.repo, &candidate) {
                     logln!("turn baseline ref write failed: {e}");
                 }
             }

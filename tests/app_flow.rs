@@ -5632,7 +5632,7 @@ fn typing_filters_and_enter_picks_the_highlight() {
         app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
         Some("dev")
     );
-    let picked = r.git(&["show", "refs/reviewr/base-pick"]);
+    let picked = r.git(&["show", "refs/worktree/reviewr/base-pick"]);
     assert_eq!(picked.trim(), "dev", "the pick persists in the private ref");
     assert!(
         app.entries.iter().any(|e| e.path == "a.rs"),
@@ -5656,7 +5656,7 @@ fn a_pick_retags_the_world_input() {
 }
 
 #[test]
-fn picking_the_default_clears_the_pick() {
+fn picking_the_default_records_the_name() {
     let r = based_repo();
     herdr_reviewr::git::write_base_pick(r.path(), "dev").unwrap();
     let mut app = app_on(&r);
@@ -5675,9 +5675,9 @@ fn picking_the_default_clears_the_pick() {
         Some("main")
     );
     assert_eq!(
-        herdr_reviewr::git::read_base_pick(r.path()).unwrap(),
-        None,
-        "choosing the default clears the pick rather than recording it"
+        herdr_reviewr::git::read_base_pick(r.path()).unwrap().as_deref(),
+        Some("main"),
+        "choosing the default records that name"
     );
 }
 
