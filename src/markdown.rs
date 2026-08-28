@@ -1,6 +1,6 @@
 //! Markdown rendering: one renderer behind the PR tab's bodies and the File view's preview.
 //!
-//! See `specs/markdown.md`. Parses with `pulldown-cmark` and emits theme-styled,
+//! Parses with `pulldown-cmark` and emits theme-styled,
 //! pre-wrapped `ratatui` lines. Fenced code goes through the shared [`Highlighter`], so
 //! code in a comment matches the diff panes.
 
@@ -22,12 +22,12 @@ const MAX_NEST: usize = 8;
 const CODE_INDENT: &str = "  ";
 
 /// A shrunk table column never drops below this width (or its natural width, when
-/// smaller), so wrapped cells stay readable (`specs/markdown.md`).
+/// smaller), so wrapped cells stay readable.
 const COL_FLOOR: usize = 8;
 
 /// Rendered markdown: the styled lines, one metadata entry per line in lockstep, and
 /// the document's heading anchors — the position mapping and link hit-testing the
-/// surfaces consume (`specs/diff-view.md`, `specs/markdown.md`).
+/// surfaces consume.
 #[derive(Clone, Debug, Default)]
 pub struct Rendered {
     pub lines: Vec<Line<'static>>,
@@ -94,7 +94,7 @@ pub fn render(text: &str, width: usize, hl: &Highlighter, p: &Palette) -> Render
 
 /// A single-slot render memo: the last `(text, width)` and its lines. One input is on
 /// screen at a time per surface, so one slot absorbs the per-frame recompute
-/// (`specs/markdown.md`). Cleared on a theme switch, which changes every color.
+/// Cleared on a theme switch, which changes every color.
 #[derive(Debug, Default)]
 pub struct RenderCache {
     key: Option<(String, usize)>,
@@ -214,7 +214,7 @@ impl Renderer<'_> {
             }
             // Raw HTML shows as its dim source text: the parser's own classification
             // decides — an inline tag stays inline (`## <a name="x"></a>Title` is one
-            // heading), a block becomes its own dim lines (`specs/markdown.md`).
+            // heading), a block becomes its own dim lines.
             Event::InlineHtml(t) => {
                 let style = Style::default().fg(self.p.dim2);
                 let link = self.current_link();
@@ -247,7 +247,7 @@ impl Renderer<'_> {
 
     fn start(&mut self, tag: Tag<'_>, range: Range<usize>) {
         // A block-level tag stamps the source line every rendered line of the block maps
-        // back to (`specs/diff-view.md` position mapping).
+        // back to.
         if matches!(
             tag,
             Tag::Paragraph | Tag::Heading { .. } | Tag::Item | Tag::CodeBlock(_) | Tag::Table(_)
@@ -404,7 +404,7 @@ impl Renderer<'_> {
         self.styles.last().copied().unwrap_or_else(|| Style::default().fg(self.p.text))
     }
 
-    /// Heading style: bold in an accent, deeper levels dimmer (`specs/markdown.md`).
+    /// Heading style: bold in an accent, deeper levels dimmer.
     fn heading_style(&self, level: HeadingLevel) -> Style {
         let fg = match level {
             HeadingLevel::H1 | HeadingLevel::H2 => self.p.purple,
@@ -415,7 +415,7 @@ impl Renderer<'_> {
     }
 
     /// Close a link: when its visible text differs from the destination, append the
-    /// destination dim (`specs/markdown.md`).
+    /// destination dim.
     fn end_link(&mut self) {
         self.styles.pop();
         let Some((id, start)) = self.links.pop() else {
@@ -425,7 +425,7 @@ impl Renderer<'_> {
         let text: String = self.chunks_mut()[start..].iter().map(|c| c.text.as_str()).collect();
         if !dest.is_empty() && text != *dest {
             let style = Style::default().fg(self.p.dim2);
-            // The dim destination shares the click target with the text (`specs/markdown.md`).
+            // The dim destination shares the click target with the text.
             self.push_chunk(format!(" ({})", sanitize(&dest)), style, Some(id));
         }
     }
@@ -590,7 +590,7 @@ impl Renderer<'_> {
 
     /// Close a table: aligned columns with a bold header, an over-wide table shrinking
     /// its widest column and wrapping that column's cells, and dim source text only when
-    /// the column floors still overflow the pane (`specs/markdown.md`).
+    /// the column floors still overflow the pane.
     fn end_table(&mut self) {
         let Some(table) = self.table.take() else {
             return;
@@ -615,7 +615,7 @@ impl Renderer<'_> {
         // pass levels every widest column down toward the next-highest width or its
         // floor, whichever is larger, so cost is bounded by the column count, not by
         // how over-wide a cell's content is. Tied widest columns shrink together, as
-        // the reference renderers do (`specs/markdown.md`).
+        // the reference renderers do.
         let floors: Vec<usize> = widths.iter().map(|w| (*w).min(COL_FLOOR)).collect();
         let sep_total = 3 * cols.saturating_sub(1);
         let mut deficit = (widths.iter().sum::<usize>() + sep_total).saturating_sub(budget);
@@ -667,7 +667,7 @@ impl Renderer<'_> {
             let style_of =
                 |c: &Chunk| if head { c.style.add_modifier(Modifier::BOLD) } else { c.style };
             // A cell that fits its column emits verbatim, spaces and all; only a cell
-            // wider than its shrunk column wraps inside it (`specs/markdown.md`). The
+            // wider than its shrunk column wraps inside it. The
             // row is as tall as its tallest cell.
             let cells: Vec<Vec<WrappedLine>> = (0..cols)
                 .map(|i| {
@@ -752,7 +752,7 @@ impl Renderer<'_> {
 
 /// GitHub's slug normalization: lowercase, spaces to hyphens, everything but letters,
 /// digits, hyphens, and underscores dropped. The click side runs a fragment through the
-/// same transform, so `#Set-Up!` finds the `set-up` heading (`specs/markdown.md`).
+/// same transform, so `#Set-Up!` finds the `set-up` heading.
 pub(crate) fn slug_text(text: &str) -> String {
     let mut slug = String::new();
     for c in text.trim().to_lowercase().chars() {
@@ -768,14 +768,14 @@ pub(crate) fn slug_text(text: &str) -> String {
 /// A character the terminal must never receive raw: a control character or an explicit
 /// bidirectional override. One predicate serves the display ([`sanitize`]) and the link
 /// opener (`browser::openable_url`), so what the display would neutralize can never
-/// open as different bytes (`specs/markdown.md`).
+/// open as different bytes.
 pub(crate) fn hostile_char(c: char) -> bool {
     c.is_control()
         || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}')
 }
 
 /// Neutralize text the terminal must never interpret: hostile characters render as a
-/// visible placeholder; tabs widen to spaces (`specs/markdown.md`).
+/// visible placeholder; tabs widen to spaces.
 fn sanitize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -908,7 +908,7 @@ impl Wrapper {
             };
             // The link id follows its own rule: both sides in one link keep the gap
             // clickable — the plain-styled space between link text and its dim
-            // destination is still part of the click target (specs/markdown.md).
+            // destination is still part of the click target.
             let next_link = self.word[0].2;
             let prev_link = self
                 .line_links

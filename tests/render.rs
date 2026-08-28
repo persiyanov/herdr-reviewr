@@ -279,7 +279,7 @@ fn the_fold_hint_names_the_expand_binding() {
     assert!(!out.contains("⏎ expand"), "no stale enter hint remains");
 
     // A rebound `expand` renames the fold row's inline label and the footer hint alike
-    // (`specs/input.md`: a hint shows the action's first bound key).
+    // (a hint shows the action's first bound key).
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("config.toml"), "[keybindings]\nexpand = [\"x\"]\n").unwrap();
     app.set_plugin_config(herdr_reviewr::config::plugin_config_in(dir.path()).unwrap());
@@ -322,7 +322,7 @@ fn the_file_list_renders_as_a_directory_tree() {
 #[test]
 fn an_expanded_directory_nests_its_children() {
     // All files paints unchanged rows without a marker. Those two columns must still
-    // hold the chevron's width, or child names line up with the parent (file-list.md).
+    // hold the chevron's width, or child names line up with the parent.
     let r = Repo::init();
     r.write("src/app.rs", "x\n");
     r.write("src/ui.rs", "y\n");
@@ -721,7 +721,7 @@ fn a_status_too_long_to_paint_never_costs_the_row_the_actions_that_fit() {
     // A herdr failure is the longest line the status ever carries. Where the row has no room to
     // paint any of it, the status must cost nothing: the row falls back to exactly what it shows
     // with no status at all. Reserving room for a message that then drops would spend the width
-    // twice and paint neither (`specs/input.md`).
+    // twice and paint neither.
     for w in 14..=140u16 {
         app.status = "z".repeat(60);
         let with = footer_line(&render_at(&app, w));
@@ -743,7 +743,7 @@ fn the_footer_shows_the_sends_outcome_at_a_pane_width_by_yielding_the_cursor_act
 
     // The status is the only answer `s` gives, and a reviewr pane is around 40 columns wide, so
     // the cursor's actions yield to it: the `?` panel repeats every action and nothing repeats the
-    // status (`specs/input.md`).
+    // status.
     app.status = "no agent here — copy to the clipboard instead".to_string();
     let narrow = footer_line(&render_at(&app, 40));
     assert!(narrow.contains("no agent here"), "the refusal shows at 40 columns:\n{narrow}");
@@ -774,7 +774,7 @@ fn the_footer_shows_the_sends_outcome_at_a_pane_width_by_yielding_the_cursor_act
 
     // `s` is also the comments list's primary, so a refusal has to reach the reviewer there too.
     // The list has no `?`, so its trailing `…` is the only promise the trimmed actions exist, and
-    // the status leaves room for it (`specs/input.md`).
+    // the status leaves room for it.
     app.open_list();
     let listed = footer_line(&render_at(&app, 40));
     assert!(listed.contains("no agent here"), "the refusal shows in the list at 40:\n{listed}");
@@ -860,7 +860,7 @@ fn the_expansion_caps_so_the_body_keeps_its_rows() {
     on_changed_line(&mut app);
     app.toggle_keys();
     // On a short pane the wrapped bands would want more rows than fit, but the footer is capped so
-    // the body keeps its Min(3) (specs/tui.md).
+    // the body keeps its Min(3).
     let body = ui::body_rect(Rect::new(0, 0, 40, 6), &app);
     assert!(body.height >= 3, "the body keeps at least three rows: got {}", body.height);
 }
@@ -905,7 +905,7 @@ fn pr_header_names_the_resolved_branch_and_marks_a_fork() {
         }))
     };
     // The header shows the branch that resolved — it can differ from the local branch —
-    // and marks a fork head, so a same-named fork PR is visible (specs/forge-host.md).
+    // and marks a fork head, so a same-named fork PR is visible.
     app.pr = snap(false);
     let header = render(&app).lines().next().unwrap().to_string();
     assert!(header.contains("persiyanov/feature"), "resolved branch in the header:\n{header}");
@@ -1345,7 +1345,7 @@ fn open_list_renders_the_comments_overlay() {
 
 #[test]
 fn last_turn_without_an_agent_says_the_worktree_is_empty() {
-    // `specs/herdr-host.md` owns when membership counts as observed; `specs/tui.md` owns the
+    // owns when membership counts as observed; owns the
     // wording. Only a sample that found no member may say the worktree is empty.
     let r = Repo::init();
     r.write("a.rs", "a\n");
@@ -1373,7 +1373,7 @@ fn last_turn_with_an_agent_and_no_turn_yet_waits_for_the_first() {
 #[test]
 fn last_turn_before_the_first_sample_waits_rather_than_asserting_emptiness() {
     // The pre-poll frame has observed nothing, so it may wait but not claim the worktree
-    // is empty — stale is allowed, wrong is not (`specs/overview.md` Continuity).
+    // is empty — stale is allowed, wrong is not (Continuity).
     let r = Repo::init();
     r.write("a.rs", "a\n");
     r.commit_all("init");
@@ -1549,7 +1549,7 @@ fn a_deleted_markdown_file_offers_no_preview_in_the_footer() {
     app.focus = Focus::Diff;
 
     // The deletion rows are commentable, but a deleted file has no current content, so
-    // the footer never offers the inert preview toggle (specs/input.md).
+    // the footer never offers the inert preview toggle.
     let out = render(&app);
     let footer = out.lines().last().unwrap();
     assert!(footer.contains("c comment"), "a deletion row is commentable:\n{footer}");
@@ -1707,7 +1707,7 @@ fn pr_nav_clicks_map_the_description_and_comment_rows() {
     // Nav layout: description, blank, checks header, 1 check, blank, comments header,
     // then the comments. The nav inner starts one row under the tab bar's border. A click
     // resolves through the display-row map and the row's cursor, the same pair the release
-    // path uses (specs/text-selection.md).
+    // path uses.
     let area = Rect::new(0, 0, 140, 40);
     let x = 130; // inside the nav pane
     let hit = |app: &App, y: u16| {
@@ -1796,7 +1796,7 @@ fn pr_navigator_scroll_is_independent_and_preserved() {
     assert_eq!(app.pr_selected_comment().map(|c| c.author.clone()), selected);
 
     // Click a comment that is not already selected: the click acts at the release
-    // (specs/text-selection.md), so it takes a press and its same-row release.
+    // , so it takes a press and its same-row release.
     let current = app.pr_selected_comment().map(|c| c.author.clone());
     let (clicked_row, clicked_author) = scrolled
         .lines()
@@ -1868,7 +1868,7 @@ fn the_refresh_glyph_lives_in_the_tab_strip_not_the_content() {
     let before = row_of(&steady, "steady content");
     assert!(!steady.contains('⟳'), "the reserved cell is blank while idle");
 
-    // The reserved cell means the glyph's appearance shifts nothing (specs/tui.md).
+    // The reserved cell means the glyph's appearance shifts nothing.
     app.refresh_indicator = true;
     let refreshing = render(&app);
     let header = refreshing.lines().next().unwrap();
@@ -1922,7 +1922,7 @@ fn a_gitlab_repository_renders_merge_request_nouns_and_remedies() {
     app.set_tab(Tab::Pr).unwrap();
     app.pr_forge = Forge::GitLab;
 
-    // The empty state speaks the forge's noun (`specs/forge-providers.md`).
+    // The empty state speaks the forge's noun.
     app.apply_pr(PrView::NoPr);
     let out = render(&app);
     assert!(out.contains("No merge request yet"), "GitLab empty state:\n{out}");
@@ -1933,7 +1933,7 @@ fn a_gitlab_repository_renders_merge_request_nouns_and_remedies() {
     assert!(out.contains("!42"), "MR reference form:\n{out}");
     assert!(!out.contains("#42"), "no GitHub reference form on GitLab:\n{out}");
 
-    // Each failure names its own CLI and login command (`specs/forge-host.md`).
+    // Each failure names its own CLI and login command.
     app.apply_pr(PrView::NoCli(Forge::GitLab));
     let out = render(&app);
     assert!(out.contains("Install `glab`"), "glab install step:\n{out}");
@@ -1969,7 +1969,7 @@ fn an_azure_devops_repository_renders_pr_nouns_and_remedies() {
     app.set_tab(Tab::Pr).unwrap();
     app.pr_forge = Forge::AzureDevOps;
 
-    // The empty state speaks the forge's noun (`specs/forge-providers.md`).
+    // The empty state speaks the forge's noun.
     app.apply_pr(PrView::NoPr);
     let out = render(&app);
     assert!(out.contains("No pull request yet"), "Azure DevOps empty state:\n{out}");
@@ -1979,7 +1979,7 @@ fn an_azure_devops_repository_renders_pr_nouns_and_remedies() {
     let out = render(&app);
     assert!(out.contains("#12"), "PR reference form:\n{out}");
 
-    // Each failure names its own CLI, extension, and login command (`specs/forge-host.md`).
+    // Each failure names its own CLI, extension, and login command.
     app.apply_pr(PrView::NoCli(Forge::AzureDevOps));
     let out = render(&app);
     assert!(out.contains("Install `az`"), "az install step:\n{out}");
@@ -2226,7 +2226,7 @@ fn an_anchor_in_a_comment_body_jumps_past_the_snippet_offset() {
     assert!(!out.contains("jump go"), "the body's top scrolled away:\n{out}");
 }
 
-// In-file find rendering (specs/find-in-file.md).
+// In-file find rendering.
 #[test]
 fn the_find_band_and_match_highlight_paint() {
     let r = Repo::init();
@@ -2260,7 +2260,7 @@ fn the_find_band_and_match_highlight_paint() {
     assert!(highlighted, "a matched character reverses to the bright find highlight");
 }
 
-// Search screen rendering (specs/search.md).
+// Search screen rendering.
 mod search_screen_render {
     use super::{common, dump, render, render_size};
     use common::{Repo, app_on, enter_tab};
@@ -2391,7 +2391,7 @@ mod search_screen_render {
         let out = render(&app);
         assert!(out.contains("no matches"), "an empty warm Files result reads no matches");
 
-        // An empty query lists nothing in Code mode — no copy at all (specs/search.md).
+        // An empty query lists nothing in Code mode — no copy at all.
         key(&mut app, KeyCode::Tab);
         let out = render(&app);
         assert!(!out.contains("no matches"), "an empty query in Code mode lists nothing");
@@ -2441,7 +2441,7 @@ mod search_screen_render {
             .unwrap();
         };
 
-        // A click on an unpicked row picks it; a second click opens it (specs/search.md).
+        // A click on an unpicked row picks it; a second click opens it.
         let row = hit_row(&app, 1);
         click(&mut app, row);
         assert_eq!(app.mode, Mode::Search, "the first click only picks");
@@ -2532,7 +2532,7 @@ mod search_screen_render {
         // The worker trims each grep line's leading indentation and reports offsets into the
         // trimmed text; the preview keeps the true indentation, so the highlight must shift
         // over it and still cover the match, not slide left into the whitespace or the
-        // preceding tokens (specs/search.md).
+        // preceding tokens.
         let repo = Repo::init();
         let mut lines: Vec<String> = (1..=60).map(|i| format!("let x{i} = {i};")).collect();
         lines[29] = "    fn resolve() {}".to_string(); // line 30, four-space indented
@@ -2623,7 +2623,7 @@ mod search_screen_render {
     #[test]
     fn an_elided_file_result_still_highlights_the_visible_match() {
         // A head-elided path must still mark a match that survives in the shown tail — the
-        // highlight is unconditional, remapped across the elision, not dropped (specs/search.md).
+        // highlight is unconditional, remapped across the elision, not dropped.
         let repo = Repo::init();
         let path = "aaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbb/target_match.rs";
         repo.write(path, "x\n");
@@ -2676,7 +2676,7 @@ mod search_screen_render {
     #[test]
     fn a_changed_file_result_shows_its_marker_and_stats() {
         // A Files result on an uncommitted file wears the same change marker and stats as the
-        // file list, alongside the match highlight (specs/search.md).
+        // file list, alongside the match highlight.
         let repo = Repo::init();
         repo.write("a.rs", "one\n");
         repo.commit_all("c");
@@ -2708,8 +2708,7 @@ mod search_screen_render {
     #[test]
     fn a_poll_refreshes_the_open_preview_in_place() {
         // A landed poll rebuilds the previewed file's diff in place, so the preview follows
-        // the worktree while the held results stay as queried (specs/search.md, overview.md
-        // Continuity). Exercises the real reload → reconcile_world → refresh_search_preview
+        // the worktree while the held results stay as queried (Continuity). Exercises the real reload → reconcile_world → refresh_search_preview
         // wiring, not the method in isolation.
         let repo = Repo::init();
         repo.write("a.rs", "alpha\n");
@@ -2740,7 +2739,7 @@ mod search_screen_render {
     }
 }
 
-// Style-level emphasis coverage for the match rows (specs/search.md).
+// Style-level emphasis coverage for the match rows.
 mod search_row_emphasis {
     use super::{common, dump, render_size};
     use common::{Repo, app_on, enter_tab};
@@ -2761,7 +2760,7 @@ mod search_row_emphasis {
     }
 
     /// A code row too wide for the pane clips around its first matched span, keeping the
-    /// `line:` locator and marking the cut head with `…` (specs/search.md).
+    /// `line:` locator and marking the cut head with `…`.
     #[test]
     fn clipped_code_row_keeps_and_emphasizes_the_match() {
         let repo = Repo::init();
@@ -2810,7 +2809,6 @@ mod search_row_emphasis {
 
     /// A tab-indented code row expands its tabs to spaces, so the indentation shows and
     /// the emphasis lands on the matched word, not shifted by the collapsed tabs
-    /// (specs/search.md).
     #[test]
     fn tab_indented_code_row_expands_and_emphasizes() {
         let repo = Repo::init();
@@ -2888,7 +2886,7 @@ mod search_row_emphasis {
     }
 }
 
-// --- Agent picker (specs/herdr-host.md) ----------------------------------------------------
+// --- Agent picker ----------------------------------------------------
 
 fn agent_row(pane: &str, name: &str, state: &str, tab: &str) -> AgentChoice {
     AgentChoice { pane_id: pane.into(), name: name.into(), state: state.into(), tab: tab.into() }
@@ -2920,7 +2918,7 @@ fn the_last_sent_row_carries_its_tag_and_no_other_row_does() {
     let mut app = edited_app();
     write_comment(&mut app, "one");
     // A prior send to release-bot arms the highlight there and tags the row, so the
-    // remembered default reads before `enter` fires it (specs/herdr-host.md).
+    // remembered default reads before `enter` fires it.
     app.last_sent_pane = Some("w8:p2".to_string());
     app.open_picker(vec![
         agent_row("w8:p1", "claude", "idle", "1"),
@@ -2946,7 +2944,7 @@ fn an_open_picker_dims_the_view_behind_it_but_never_the_footer() {
     ]);
     let dimmed = render_buffer(&app);
 
-    // The tab bar recedes toward the theme base while the picker is up (specs/tui.md).
+    // The tab bar recedes toward the theme base while the picker is up.
     // Locate a lettered header cell rather than assuming a column, so a header layout
     // change cannot silently repoint the assertion.
     let x = (0..plain.area.width)
@@ -2980,7 +2978,6 @@ fn neither_popup_reaches_the_footer_that_advertises_its_keys() {
 
     // Both popups place through one rule, `body_popup`, so at every pane size the footer keeps
     // naming the keys the popup is listening for — it is the only surface that does
-    // (`specs/tui.md`).
     for h in 8..=30u16 {
         app.open_list();
         let listed = dump(&render_size(&app, 44, h));
@@ -3061,7 +3058,7 @@ fn a_picker_taller_than_the_pane_scrolls_to_keep_the_highlight_visible() {
     assert!(scrolled.contains("agent20"), "the view follows the highlight:\n{scrolled}");
 
     // The popup clamps to the body band, so even this over-tall picker never covers the
-    // footer — the one surface advertising its keys (specs/tui.md).
+    // footer — the one surface advertising its keys.
     let last_row = scrolled.lines().last().unwrap_or_default().to_string();
     assert!(last_row.contains("enter"), "the footer keeps the picker's keys: {last_row:?}");
 }
@@ -3081,7 +3078,7 @@ fn a_click_on_a_picker_row_moves_the_highlight_and_misses_stay_inert() {
     let col = line.find("codex").expect("a column inside the row") as u16;
 
     assert_eq!(ui::hit_picker_row(area, &app, col, row_y), Some(2));
-    // The title row and everything outside the popup are inert (specs/input.md).
+    // The title row and everything outside the popup are inert.
     assert_eq!(ui::hit_picker_row(area, &app, col, row_y - 3), None);
     assert_eq!(ui::hit_picker_row(area, &app, 0, 0), None);
 
@@ -3102,7 +3099,7 @@ fn a_click_on_a_picker_row_moves_the_highlight_and_misses_stay_inert() {
     assert_eq!(app.picker_cursor, 2, "a click moves the highlight to the clicked row");
 }
 
-// --- Header base label (specs/tui.md) ------------------------------------------------------
+// --- Header base label ------------------------------------------------------
 
 /// A repo on branch `feature` past `main`, with `origin/HEAD` naming `main` the default.
 /// The repo rides along: opening the picker shells out to git at click time.
@@ -3435,7 +3432,7 @@ fn a_narrow_header_never_maps_a_click_outside_the_painted_base() {
 
     // The base label truncates to its budget at a narrow width, and the hit test walks the
     // same arithmetic the paint does: every column it claims carries painted label, and the
-    // claim is one unbroken run (specs/tui.md).
+    // claim is one unbroken run.
     for width in [40u16, 56, 72] {
         let area = Rect { x: 0, y: 0, width, height: 12 };
         let line0 = dump(&render_size(&app, width, 12)).lines().next().unwrap().to_string();
@@ -3445,7 +3442,7 @@ fn a_narrow_header_never_maps_a_click_outside_the_painted_base() {
             .collect();
         let Some((&first, &last)) = hits.first().zip(hits.last()) else {
             // Too narrow for even one column of the name: the base left the header whole,
-            // so nothing paints a nameless `vs` and nothing claims it (specs/tui.md).
+            // so nothing paints a nameless `vs` and nothing claims it.
             assert!(!line0.contains("vs"), "width {width}: a nameless `vs` paints: {line0}");
             assert!(line0.contains("[branch]"), "width {width}: the scope survives: {line0}");
             continue;
@@ -3489,7 +3486,7 @@ fn an_overlong_skipped_tail_never_evicts_the_base_name() {
     assert!(line0.contains("1 changed"), "the right-aligned stats survive the long tail: {line0}");
 }
 
-// ---- mouse text selection (specs/text-selection.md, diff-view.md) ----
+// ---- mouse text selection ----
 
 /// A repo with one uncommitted three-line file, for selection geometry.
 fn selection_app() -> (Repo, App) {
@@ -3512,7 +3509,7 @@ fn the_hovered_row_shows_a_plus_in_its_change_bar_cell() {
     assert_eq!(buf.cell((inner.x, inner.y)).unwrap().symbol(), "▌");
 
     // Hovering anywhere on the row puts the `[+]` button over the number field; the
-    // change bar stays, so the diff signal never blinks (specs/diff-view.md).
+    // change bar stays, so the diff signal never blinks.
     app.hover = Some((inner.x + 8, inner.y));
     let buf = render_buffer(&app);
     assert_eq!(buf.cell((inner.x, inner.y)).unwrap().symbol(), "▌");
@@ -3527,7 +3524,7 @@ fn the_hovered_row_shows_a_plus_in_its_change_bar_cell() {
 fn the_plus_button_right_aligns_in_a_wide_number_field() {
     // A 1000-line file widens the number field past the 3-column minimum, so the
     // right-aligned `[+]` leaves blank padding on its left, like the numbers it
-    // replaces (specs/diff-view.md).
+    // replaces.
     let r = Repo::init();
     r.write("base.rs", "fn main() {}\n");
     r.commit_all("init");
@@ -3560,7 +3557,7 @@ fn the_text_selection_highlights_the_dragged_span() {
     let inner = ui::read_inner_rect(area, &app);
     let sel_bg = app.palette().sel_bg;
     // The selection fill is its own slot, distinct by hue from the cursor fills, so a
-    // selection reads inside a cursor row (specs/theme.md). Park the cursor on the fully
+    // selection reads inside a cursor row. Park the cursor on the fully
     // selected middle row so its cells still assert the selection fill won.
     app.diff_cursor = 1;
 
@@ -3576,7 +3573,7 @@ fn the_text_selection_highlights_the_dragged_span() {
     let buf = render_buffer(&app);
     let bg = |x: u16, y: u16| buf.cell((x, y)).unwrap().style().bg;
     // The `b` of beta is selected; the chars before the anchor are not — the first row runs
-    // from its start character, not whole (specs/text-selection.md).
+    // from its start character, not whole.
     assert_eq!(bg(inner.x + 5 + 6, inner.y), Some(sel_bg));
     assert_ne!(bg(inner.x + 5, inner.y), Some(sel_bg));
     assert_ne!(bg(inner.x + 5 + 5, inner.y), Some(sel_bg));
@@ -3591,7 +3588,7 @@ fn the_text_selection_highlights_the_dragged_span() {
     assert_ne!(bg(inner.x + 5 + 4, inner.y + 2), Some(sel_bg));
 }
 
-// --- Commit picker and the commits header (specs/input.md, specs/tui.md) --------------------
+// --- Commit picker and the commits header --------------------
 
 /// `main` with four commits, root first, plus an uncommitted edit. Returns the shas root
 /// first.

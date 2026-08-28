@@ -1,4 +1,4 @@
-//! Resolving the editor command for `edit` on a file (`specs/input.md` Edit).
+//! Resolving the editor command for `edit` on a file.
 //!
 //! Two sources, in order: the `editor` config key, whose value is a template the user owns
 //! outright, and `$VISUAL`/`$EDITOR`, whose binary name selects the argument dialect below.
@@ -25,7 +25,7 @@ enum LineArg {
 /// One editor family: the binary names that select it, how it takes a line, and where it draws.
 ///
 /// A window editor hands the file to an instance of its own and returns, so reviewr keeps the
-/// pane. A terminal editor draws in the pane and is given it (`specs/input.md` Edit).
+/// pane. A terminal editor draws in the pane and is given it.
 struct Dialect {
     names: &'static [&'static str],
     line: LineArg,
@@ -90,7 +90,7 @@ const DIALECTS: &[Dialect] = &[
 /// wants the terminal.
 ///
 /// A terminal editor paints in the pane and must be handed it outright. A window one draws in an
-/// instance of its own and never reads the terminal, so reviewr keeps it (`specs/input.md` Edit).
+/// instance of its own and never reads the terminal, so reviewr keeps it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EditorCommand {
     pub program: String,
@@ -98,7 +98,7 @@ pub struct EditorCommand {
     pub wants_terminal: bool,
 }
 
-/// Why no editor ran (`specs/config.md`).
+/// Why no editor ran.
 #[derive(Debug, PartialEq, Eq)]
 pub enum NoEditor {
     /// Neither the `editor` key nor `$VISUAL` nor `$EDITOR` is set.
@@ -174,7 +174,7 @@ pub fn resolve(
 /// ordinary short flags elsewhere (helix spells `--working-dir` as `-w`).
 ///
 /// Failing that, the binary's own name. Unknown means the pane, which is the outcome a terminal
-/// editor cannot survive being denied (`specs/input.md` Edit).
+/// editor cannot survive being denied.
 fn wants_terminal(program: &str, args: &[String]) -> bool {
     if args.iter().any(|a| a == "--wait" || a == "--block") {
         return false;

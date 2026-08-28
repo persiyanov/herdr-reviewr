@@ -1,6 +1,6 @@
 //! Command-line flags and the shared plugin configuration boundary.
 //!
-//! See `specs/tui.md` and `specs/herdr-host.md`. Flags override defaults; the positional
+//! Flags override defaults; the positional
 //! argument (if any) is the repo path, else the current directory.
 
 use std::fmt;
@@ -18,7 +18,7 @@ pub struct Config {
     /// `Some(false)` when `--wrap off` is passed; `None` keeps the default (wrap on).
     pub wrap: Option<bool>,
     /// The plugin config directory, resolved once at startup by [`resolve_config_dir`];
-    /// every later config read rereads only the file inside it (`specs/config.md`).
+    /// every later config read rereads only the file inside it.
     pub plugin_config_dir: Option<PathBuf>,
 }
 
@@ -194,7 +194,7 @@ impl PluginConfig {
     }
 
     /// The scope a fresh reviewr pane is built with — startup and config recovery. A reread never
-    /// switches a running pane's scope (specs/review-model.md).
+    /// switches a running pane's scope.
     pub fn default_scope(&self) -> crate::model::Scope {
         self.default_scope
     }
@@ -227,7 +227,7 @@ impl PluginConfig {
         self.azure_devops_host.as_deref()
     }
 
-    /// The forge host set one fetch resolves remotes against (`specs/forge-host.md`).
+    /// The forge host set one fetch resolves remotes against.
     pub fn forge_hosts(&self) -> crate::git::ForgeHosts<'_> {
         crate::git::ForgeHosts {
             github: self.github_host(),
@@ -236,7 +236,7 @@ impl PluginConfig {
         }
     }
 
-    /// The editor command template, `{file}` and `{line}` substituted (`specs/input.md` Edit).
+    /// The editor command template, `{file}` and `{line}` substituted.
     pub fn editor(&self) -> Option<&str> {
         self.editor.as_deref()
     }
@@ -295,7 +295,7 @@ impl fmt::Display for PluginConfigError {
 
 impl std::error::Error for PluginConfigError {}
 
-/// The config directory, resolved once at an entrypoint's startup (`specs/config.md`):
+/// The config directory, resolved once at an entrypoint's startup:
 /// `$HERDR_PLUGIN_CONFIG_DIR` when set, else the directory `cli` reports
 /// ([`crate::herdr::plugin_config_dir`]), else none — and none reads no config file.
 pub fn resolve_config_dir(cli: impl FnOnce() -> Option<String>) -> Option<PathBuf> {
@@ -315,7 +315,7 @@ fn config_dir_from(
 }
 
 /// Read one plugin config snapshot from the resolved config directory. No directory reads no
-/// config file, which is the missing-file outcome and uses every default (`specs/config.md`).
+/// config file, which is the missing-file outcome and uses every default.
 pub fn plugin_config(dir: Option<&Path>) -> Result<PluginConfig, PluginConfigError> {
     match dir {
         Some(dir) => plugin_config_in(dir),
@@ -365,7 +365,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             "branch" => crate::model::Scope::Branch,
             "last-turn" => crate::model::Scope::LastTurn,
             // `commits` needs a pick the pane does not yet hold, so it is not a start scope
-            // and falls to the error (specs/review-model.md Commit pick).
+            // and falls to the error.
             _ => {
                 return Err(value_error(
                     path,
@@ -443,7 +443,6 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             .ok_or_else(|| value_error(path, "editor", "a non-empty command"))?;
         // `{file}` and `{line}` are the whole grammar, so a typo for one of them would
         // otherwise reach the editor as a literal word and open a file named after the typo
-        // (`specs/config.md`).
         if let Some(unknown) = unknown_placeholder(command) {
             return Err(value_error(
                 path,
@@ -454,7 +453,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         config.editor = Some(command.to_owned());
     }
     // A hostname is recognized by at most one forge; a cross-key collision is an invalid
-    // value under CFG-WHOLE-FILE (`specs/config.md`). Scanned as a set so a new key joins by
+    // value under CFG-WHOLE-FILE. Scanned as a set so a new key joins by
     // being listed, in the parse order above: the later key's error names the earlier owner.
     let host_keys = [
         ("github_host", &config.github_host),
@@ -481,7 +480,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
 }
 
 /// One `[keybindings]` key string → a [`Key`](crate::keymap::Key): a bare character or a
-/// named key, alone or behind a `ctrl+`/`alt+` prefix (`specs/config.md`). The character is
+/// named key, alone or behind a `ctrl+`/`alt+` prefix. The character is
 /// one visible cell — a positive display width also rejects the zero-width class `is_control`
 /// misses (format chars, combining marks).
 fn parse_key(text: &str) -> Option<crate::keymap::Key> {
@@ -508,8 +507,8 @@ fn parse_key(text: &str) -> Option<crate::keymap::Key> {
     }
 }
 
-/// Parse and resolve the `[keybindings]` table (`specs/config.md`):
-/// action names from the keymap table in `specs/input.md`, each bound to a non-empty array of
+/// Parse and resolve the `[keybindings]` table:
+/// action names from the keymap table in, each bound to a non-empty array of
 /// keys, a bare character or a `ctrl+`/`alt+` chord.
 fn parse_keybindings(
     path: &Path,
@@ -592,7 +591,6 @@ fn unknown_key_error(path: &Path, key: &str, options: &str) -> PluginConfigError
 ///
 /// A brace that closes nothing opens nothing either: `code {fil` would otherwise reach the
 /// editor as the literal argument `{fil`, which is the typo this rule exists to catch
-/// (`specs/config.md`).
 fn unknown_placeholder(command: &str) -> Option<String> {
     let mut rest = command;
     while let Some(at) = rest.find('{') {
@@ -609,7 +607,7 @@ fn unknown_placeholder(command: &str) -> Option<String> {
 }
 
 /// Parse one self-hosted forge key: a bare hostname naming no built-in forge host — a
-/// hostname is recognized by at most one forge (`specs/config.md`). The built-in set has
+/// hostname is recognized by at most one forge. The built-in set has
 /// one authority, `git::forge_for_host`, asked here with no self-hosted keys.
 fn parse_forge_host(
     path: &Path,
@@ -769,7 +767,7 @@ mod tests {
         assert_eq!(config.to_json()["editor"], "code -g {file}:{line}");
 
         // A value naming no placeholder is valid: the path is appended to it
-        // (`specs/config.md`). A tightening that demanded `{file}` would block the whole file
+        // A tightening that demanded `{file}` would block the whole file
         // for anyone who spelled their editor the short way.
         for value in ["vim", "myed --at {line}"] {
             std::fs::write(&path, format!("editor = \"{value}\"\n")).unwrap();
@@ -778,7 +776,6 @@ mod tests {
         }
 
         // Unset, the key resolves to null and the environment supplies the editor instead
-        // (`specs/input.md` Edit).
         std::fs::write(&path, "theme = \"tokyo-night\"\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.editor(), None);
@@ -795,7 +792,7 @@ mod tests {
         assert!(error.contains("unknown key \"poll\""));
 
         // The retired `base_branches` key fails like any unknown key: the base is a picked,
-        // per-repo choice now, never configuration (`specs/config.md`, `specs/review-model.md`).
+        // per-repo choice now, never configuration.
         std::fs::write(&path, "base_branches = [\"dev\"]\n").unwrap();
         let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
         assert!(error.contains("unknown key \"base_branches\""));
@@ -833,7 +830,7 @@ mod tests {
             ("gitlab_host = \"github.com\"\n", "`gitlab_host`"),
             ("gitlab_host = \"https://git.corp.example\"\n", "`gitlab_host`"),
             ("azure_devops_host = \"dev.azure.com\"\n", "`azure_devops_host`"),
-            // Any organization label matches the built-in wildcard (`specs/config.md`).
+            // Any organization label matches the built-in wildcard.
             ("azure_devops_host = \"foo.visualstudio.com\"\n", "`azure_devops_host`"),
             ("github_host = \"bar.visualstudio.com\"\n", "`github_host`"),
         ];
@@ -856,7 +853,7 @@ mod tests {
         assert_eq!(config.gitlab_host(), Some("git.corp.example"));
 
         // The same hostname under two forge keys is an invalid file (CFG-WHOLE-FILE): a
-        // hostname is recognized by at most one forge (`specs/config.md`).
+        // hostname is recognized by at most one forge.
         std::fs::write(
             &path,
             "github_host = \"code.corp.example\"\ngitlab_host = \"code.corp.example\"\n",
@@ -879,7 +876,7 @@ mod tests {
         assert_eq!(config.forge_hosts().azure_devops, Some("tfs.corp.example"));
 
         // Each pair under one hostname is an invalid file (CFG-WHOLE-FILE): a hostname is
-        // recognized by at most one forge (`specs/config.md`).
+        // recognized by at most one forge.
         let pairs = [
             ("github_host", "azure_devops_host"),
             ("gitlab_host", "azure_devops_host"),

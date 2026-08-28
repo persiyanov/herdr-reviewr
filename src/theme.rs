@@ -1,6 +1,6 @@
 //! The color model: named palettes, derivation from anchors, and selection.
 //!
-//! See `specs/theme.md`. A theme is a few anchor colors plus a paired syntax theme;
+//! A theme is a few anchor colors plus a paired syntax theme;
 //! every other slot is derived from the anchors. One theme — `catppuccin` — instead
 //! pins its whole palette as a literal, to stay byte-identical to the pre-theming
 //! colors. One selection sets both the chrome `Palette` and the syntax theme, so they
@@ -68,7 +68,6 @@ pub struct Palette {
     pub match_hl: Color,
     /// The text-selection highlight, live and settled: a cool fill distinct by hue from the
     /// `surface1`/`surface2` row fills, so a selection reads inside a cursor row in any pane
-    /// (specs/theme.md, specs/text-selection.md).
     pub sel_bg: Color,
 }
 
@@ -82,7 +81,7 @@ impl Palette {
 
     /// Lift a painted color onto a selection fill. The dim role (`dim2`) sits one surface
     /// step above the fill and all but vanishes on it, so it rises to `dim0` and the
-    /// secondary parts of a selected row stay readable (`specs/theme.md`). Every other color
+    /// secondary parts of a selected row stay readable. Every other color
     /// already reads there and passes through. Each theme names both ends, so the mapping means
     /// the same thing in all of them.
     pub fn on_fill(&self, color: Color) -> Color {
@@ -90,7 +89,7 @@ impl Palette {
     }
 
     /// Recede a painted color behind an open modal: halfway to `base`, so the modal owns the
-    /// eye while the page behind stays recognizable (`specs/tui.md`). Non-RGB colors are the
+    /// eye while the page behind stays recognizable. Non-RGB colors are the
     /// terminal's own defaults, which have no known distance to `base`; they pass through.
     pub fn scrim(&self, color: Color) -> Color {
         match color {
@@ -113,7 +112,7 @@ pub fn resolve(name: Option<&str>) -> Theme {
 }
 
 /// Whether `name` selects a complete built-in theme. Plugin configuration validates against
-/// this same catalog before a snapshot is applied (`specs/config.md`).
+/// this same catalog before a snapshot is applied.
 pub fn is_known(name: &str) -> bool {
     build(name).is_some()
 }
@@ -374,7 +373,7 @@ fn readable_tint(
 /// the remainder rescaled to full range. A pastel anchor (Catppuccin's periwinkle `blue`)
 /// tints `base` into the same gray family as the surface fills; the saturated version tints
 /// it into an unmistakable hue instead, which is what lets the selection fill read inside a
-/// cursor row (specs/theme.md). A gray anchor has no hue to amplify and passes through.
+/// cursor row. A gray anchor has no hue to amplify and passes through.
 fn saturated(c: Color) -> Color {
     let (r, g, b) = channels(c);
     let lo = r.min(g).min(b);

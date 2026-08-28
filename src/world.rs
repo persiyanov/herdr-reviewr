@@ -2,8 +2,8 @@
 //!
 //! `build` reads nothing from `App`, so the same call runs synchronously (startup, scope
 //! switches, first visits) and behind the worker (polls, `r`, return visits)
-//! (specs/tui.md Refresh). Reconciling a snapshot into place state stays
-//! in `App::reconcile_world`, the one home for the Continuity rules (specs/overview.md).
+//! Reconciling a snapshot into place state stays
+//! in `App::reconcile_world`, the one home for the Continuity rules.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use crate::model::{ChangedFile, CommitPick, Scope};
 use crate::turn::{TurnTracker, WorktreeState};
 
 /// Everything the build reads. A landed snapshot reconciles only while the view still
-/// matches the input that produced it (specs/tui.md).
+/// matches the input that produced it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct WorldInput {
     pub repo: PathBuf,
@@ -36,7 +36,7 @@ pub struct WorldInput {
     /// The `last-turn` baseline tree the changed set diffs against; `None` before a turn.
     pub turn_baseline: Option<String>,
     /// The `commits` scope's pick. Part of the identity, so a build for a replaced pick
-    /// fails the landing gate instead of painting the old run (specs/review-model.md).
+    /// fails the landing gate instead of painting the old run.
     pub commit_pick: Option<CommitPick>,
     /// Expanded ignored directories whose children the `All files` tree loads.
     pub toggled_dirs: HashSet<String>,
@@ -44,21 +44,21 @@ pub struct WorldInput {
 
 /// The derived state one refresh produces: the scope changeset, the navigator entries, and
 /// the `branch` scope's resolved base. The base rides the snapshot so the header name and
-/// the changeset it heads land whole, from one build (specs/tui.md).
+/// the changeset it heads land whole, from one build.
 #[derive(Debug)]
 pub struct WorldSnapshot {
     pub changed: HashMap<String, Annotation>,
     pub entries: Vec<Entry>,
     pub branch_base: git::BaseStatus,
     /// The `commits` scope's pick verdict, from the same build as the changeset it heads
-    /// (specs/review-model.md Commit pick). `None` on every other scope.
+    /// `None` on every other scope.
     pub pick_status: Option<PickStatus>,
     /// The commit `HEAD` named when the build ran, the commit picker's universe key
-    /// (specs/input.md Commit picker). `None` in an unborn repository.
+    /// `None` in an unborn repository.
     pub head: Option<String>,
 }
 
-/// What one build found the commit pick to be (specs/review-model.md Commit pick).
+/// What one build found the commit pick to be.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum PickVerdict {
     /// Every commit reachable from `HEAD`.
@@ -69,7 +69,7 @@ pub enum PickVerdict {
     Gone(String),
 }
 
-/// The pick's verdict and the newest commit's subject, for the header (specs/tui.md).
+/// The pick's verdict and the newest commit's subject, for the header.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PickStatus {
     pub verdict: PickVerdict,
@@ -79,7 +79,7 @@ pub struct PickStatus {
 }
 
 /// The scope-dependent half of a build: the changeset and the base or pick it diffs against,
-/// landed together so the header and the list never disagree (specs/tui.md).
+/// landed together so the header and the list never disagree.
 #[derive(Debug)]
 pub struct ScopeBuild {
     pub branch_base: git::BaseStatus,
@@ -90,10 +90,10 @@ pub struct ScopeBuild {
 /// Build the snapshot for `input`. The changeset is computed regardless of tab so the
 /// header count and comment staleness stay correct while `All files` lists the whole
 /// worktree. In `last-turn` with no baseline yet, the changeset is empty until a turn
-/// start is observed (specs/review-model.md).
+/// start is observed.
 pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
     // Outside a git repo, an empty snapshot paints the quiet empty state rather than a
-    // failing status line every poll (specs/herdr-host.md).
+    // failing status line every poll.
     if !git::is_repo(&input.repo) {
         return Ok(WorldSnapshot {
             changed: HashMap::new(),
@@ -117,7 +117,7 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
 
 /// The active scope's changed files and, on the `branch` scope, the base they diff against —
 /// the piece a scope switch rebuilds before its frame, so the header count and list never
-/// wear another scope's label (specs/tui.md).
+/// wear another scope's label.
 pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
     let plain = |changed| ScopeBuild {
         branch_base: git::BaseStatus::default(),
@@ -136,7 +136,7 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
         Scope::Branch => {
             // A resolve failure fails the build whole, so the landing keeps the stale
             // frame and reports — degrading to an empty snapshot would blank a populated
-            // view over a transient error (specs/overview.md Continuity). A chain where
+            // view over a transient error (Continuity). A chain where
             // nothing resolves is not a failure: it returns the legible no-base state.
             let resolution = git::resolve_base(&input.repo, input.base.as_deref())
                 .map_err(|e| anyhow::anyhow!("{}", e.0))?;
@@ -145,7 +145,7 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
             Ok(ScopeBuild { branch_base: resolution.status, pick_status: None, changed })
         }
         Scope::Commits => {
-            // The scope is never entered without a pick (specs/input.md); a tag without one
+            // The scope is never entered without a pick; a tag without one
             // builds the empty changeset rather than failing the landing.
             let Some(pick) = &input.commit_pick else { return Ok(plain(Vec::new())) };
             let (status, changed) = build_pick(&input.repo, pick)?;
@@ -158,7 +158,7 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
     }
 }
 
-/// The pick's changeset and verdict in one pass (specs/review-model.md Commit pick): `gone`
+/// The pick's changeset and verdict in one pass: `gone`
 /// once any needed commit, `A^` included, is pruned, else `off branch` once any is
 /// unreachable from `HEAD`, else live. A `gone` pick has an empty changeset.
 fn build_pick(repo: &Path, pick: &CommitPick) -> Result<(PickStatus, Vec<ChangedFile>)> {
@@ -200,13 +200,13 @@ pub fn annotate(changed: &[ChangedFile]) -> HashMap<String, Annotation> {
 }
 
 /// The persisted turn baseline for `repo`, if any — the one seeding rule, shared by the
-/// worker's tracker and the app's first-frame mirror (specs/herdr-host.md).
+/// worker's tracker and the app's first-frame mirror.
 pub fn seed_baseline(repo: &std::path::Path) -> Option<String> {
     git::read_baseline_ref(repo)
 }
 
 /// The `All files` entries: every worktree path (ignored dimmed), with the children of
-/// expanded ignored directories loaded lazily (`specs/file-list.md`). Only directories the
+/// expanded ignored directories loaded lazily. Only directories the
 /// user has expanded are walked, so the cost tracks what is on screen, not the whole tree.
 pub(crate) fn all_files_entries(
     input: &WorldInput,
@@ -234,7 +234,7 @@ pub(crate) fn all_files_entries(
 
 /// Turn tracking, owned by the worker: the sample, the snapshot capture, and the baseline
 /// promotion happen on one thread, so the snapshot always rides the sample that observed the
-/// edge (specs/herdr-host.md). The baseline ref is this worktree's last-turn write.
+/// edge. The baseline ref is this worktree's last-turn write.
 #[derive(Debug)]
 pub struct TurnHost {
     tracker: TurnTracker,
@@ -244,7 +244,7 @@ pub struct TurnHost {
     /// placed once and never re-queried. A cwd git reports outside every worktree is not cached:
     /// re-checking it is cheap, and a directory can become a worktree later. A cwd git could not
     /// run for is not cached either, and holds the poll rather than counting the agent out, so a
-    /// transient failure never poisons a member for the session (specs/herdr-host.md).
+    /// transient failure never poisons a member for the session.
     resolved: HashMap<String, bool>,
 }
 
@@ -257,13 +257,12 @@ pub struct TurnReport {
     /// `None` when the sample could not observe the whole worktree, so the reader keeps whatever
     /// it already knew: either the enumeration failed, or a member's directory would not resolve
     /// this poll. Membership is held on the one consumer that paints it, never mirrored here
-    /// (specs/herdr-host.md).
     pub agents_present: Option<bool>,
 }
 
 /// An agent's relationship to the reviewed worktree, as [`TurnHost::membership`] resolves it.
 /// `Unknown` is not `NotMember`: it means git could not resolve the cwd this poll, so the fold
-/// holds on it rather than counting the agent out (specs/herdr-host.md).
+/// holds on it rather than counting the agent out.
 enum Membership {
     Member,
     NotMember,
@@ -272,7 +271,7 @@ enum Membership {
 
 /// The absolute cwd an agent names, or `None` for a blank or relative one. `git -C` resolves a
 /// relative directory against reviewr's own cwd, which is normally the reviewed worktree, so a
-/// relative cwd would be wrongly admitted as a member (specs/herdr-host.md).
+/// relative cwd would be wrongly admitted as a member.
 fn worktree_cwd(cwd: Option<&str>) -> Option<&str> {
     cwd.filter(|c| Path::new(c).is_absolute())
 }
@@ -317,14 +316,14 @@ impl TurnHost {
 
     /// Advance the baseline from one enumeration — the core [`Self::sample`] wraps, and the
     /// seam tests drive without herdr. `None` is a failed enumeration, which holds the
-    /// previous membership rather than reporting an empty worktree (specs/herdr-host.md).
+    /// previous membership rather than reporting an empty worktree.
     pub fn observe_agents(&mut self, samples: Option<&[AgentSample]>) -> TurnReport {
         let Some(samples) = samples else {
             return TurnReport { ended: false, agents_present: None };
         };
         // A member whose membership git could not determine leaves the sample incomplete, so
         // hold it exactly as a failed enumeration rather than reading an unresolved member as
-        // an empty worktree (specs/herdr-host.md).
+        // an empty worktree.
         let Some((present, state)) = classify(samples, |s| self.membership(s.cwd.as_deref()))
         else {
             return TurnReport { ended: false, agents_present: None };
@@ -335,7 +334,6 @@ impl TurnHost {
 
     /// An agent's relationship to the reviewed worktree. The git top level is authoritative, so
     /// a subdirectory is a member and a second worktree of the same repository is not
-    /// (specs/herdr-host.md).
     fn membership(&mut self, cwd: Option<&str>) -> Membership {
         let Some(cwd) = worktree_cwd(cwd) else {
             return Membership::NotMember;
@@ -355,7 +353,7 @@ impl TurnHost {
             // re-checked next poll rather than cached.
             git::Worktree::Outside => Membership::NotMember,
             // git could not run, so nothing is known this poll. Hold rather than count the agent
-            // out, exactly as a failed enumeration does (specs/herdr-host.md).
+            // out, exactly as a failed enumeration does.
             git::Worktree::Unknown => Membership::Unknown,
         }
     }
@@ -379,7 +377,7 @@ impl TurnHost {
             }
         }
         // Promote the pending candidate once the turn has changed a file. Compare full
-        // snapshots so a new untracked file counts as a change (specs/herdr-host.md).
+        // snapshots so a new untracked file counts as a change.
         let Some(candidate) = self.tracker.candidate().map(str::to_string) else {
             return transition.ended;
         };
@@ -400,7 +398,7 @@ impl TurnHost {
 /// One queued refresh's attributes, accumulated on `App` until the loop dispatches it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WorldRequest {
-    /// Sample the agents in the worktree — set by the poll alone (specs/tui.md).
+    /// Sample the agents in the worktree — set by the poll alone.
     pub sample_turn: bool,
     /// Re-reveal the cursor when the result lands — user-initiated switches only.
     pub reveal: bool,
@@ -413,10 +411,10 @@ pub struct WorldJob {
     pub generation: u64,
     pub input: WorldInput,
     /// Poll-driven requests sample the agents in the worktree; tab entry and `r` do not,
-    /// so the herdr CLI call count tracks the poll alone (specs/tui.md).
+    /// so the herdr CLI call count tracks the poll alone.
     pub sample_turn: bool,
     /// A user-initiated switch re-reveals the cursor when its result lands; a poll never
-    /// does (specs/tui.md).
+    /// does.
     pub reveal: bool,
 }
 
@@ -482,7 +480,7 @@ mod tests {
     #[test]
     fn only_an_absolute_cwd_can_name_a_worktree() {
         // A blank or relative cwd would resolve against reviewr's own cwd (the reviewed
-        // worktree), so membership must reject it before any git call (specs/herdr-host.md).
+        // worktree), so membership must reject it before any git call.
         assert_eq!(worktree_cwd(Some("/abs/path")), Some("/abs/path"));
         assert_eq!(worktree_cwd(Some("relative/path")), None);
         assert_eq!(worktree_cwd(Some("")), None);
@@ -493,7 +491,7 @@ mod tests {
     fn membership_decides_the_fold_and_undetermined_holds() {
         // One working agent, resolved three ways. `Unknown` holds the sample (the caller reads
         // this `None` exactly as a failed enumeration, never as an empty worktree); a determined
-        // verdict folds normally (specs/herdr-host.md).
+        // verdict folds normally.
         let samples = [working_at("/w")];
         assert_eq!(classify(&samples, |_| Membership::Unknown), None);
         assert_eq!(

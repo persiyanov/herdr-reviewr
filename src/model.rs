@@ -1,6 +1,6 @@
 //! In-memory review model: scopes, changed files, and comments.
 //!
-//! See `specs/review-model.md`. Comments live only for the session and are
+//! Comments live only for the session and are
 //! removed by export or delete — never by a refresh.
 
 /// Which set of changes the Changes view shows.
@@ -9,7 +9,7 @@ pub enum Scope {
     Uncommitted,
     Branch,
     LastTurn,
-    /// A picked run of commits, diffed `A^` against `B` (specs/review-model.md Commit pick).
+    /// A picked run of commits, diffed `A^` against `B`.
     Commits,
 }
 
@@ -35,7 +35,7 @@ impl Scope {
     }
 
     /// Cycle to the next scope, for the header chip click: uncommitted → branch → last turn →
-    /// commits (specs/input.md Commit picker).
+    /// commits.
     #[must_use]
     pub fn cycle(self) -> Self {
         match self {
@@ -48,7 +48,7 @@ impl Scope {
 }
 
 /// The `commits` scope's pick: a contiguous run from `oldest` to `newest`, both full commit
-/// ids, equal for a run of one (specs/review-model.md Commit pick).
+/// ids, equal for a run of one.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CommitPick {
     pub oldest: String,
@@ -67,8 +67,7 @@ impl CommitPick {
 
 /// Where a comment's diff was read: the worktree, or the picked run it came from. A diff
 /// comment renders only while the active scope reads the same diff, both sides: a run and
-/// its newest commit alone share a new side but not an old one (specs/review-model.md File
-/// content).
+/// its newest commit alone share a new side but not an old one.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Rev {
     Worktree,
@@ -127,9 +126,9 @@ pub struct Comment {
     pub lines: String,
     pub text: String,
     /// True when anchored to a diff (the `Changes` tab); false for a File-view content comment
-    /// (the `All files` tab). Selects how staleness is judged (specs/review-model.md).
+    /// (the `All files` tab). Selects how staleness is judged.
     pub diff_anchored: bool,
-    /// Where the new side was read (specs/review-model.md).
+    /// Where the new side was read.
     pub rev: Rev,
 }
 

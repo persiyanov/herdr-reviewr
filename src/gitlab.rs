@@ -1,7 +1,7 @@
 //! Read-only GitLab access: the merge request's identity, state, pipelines, and discussions.
 //!
-//! The GitLab provider behind `src/forge.rs` (`specs/forge-providers.md`). It follows the
-//! neutral resolution contract in `specs/forge-host.md` — the branch's forge names list
+//! The GitLab provider behind `src/forge.rs`. It follows the
+//! neutral resolution contract in — the branch's forge names list
 //! merge requests by `source_branch` — through `glab api` REST calls, and fills the
 //! same normalized [`PrSnapshot`] the GitHub provider does. It never writes to GitLab.
 
@@ -59,7 +59,7 @@ fn died(surface: &str) -> GlabError {
 }
 
 /// Fold an unreadable optional surface to an empty payload: the fetch stands on what it
-/// has instead of failing the whole view (`specs/forge-providers.md`).
+/// has instead of failing the whole view.
 fn optional_surface(result: Result<Value, GlabError>) -> Result<Value, GlabError> {
     match result {
         Err(GlabError::Unavailable(_)) => Ok(Value::Null),
@@ -69,7 +69,7 @@ fn optional_surface(result: Result<Value, GlabError>) -> Result<Value, GlabError
 
 /// The `glab` argument list for one explicitly hosted API read. `--hostname` pins the
 /// instance, so an inherited `GITLAB_HOST` override can never redirect the fetch
-/// (`specs/forge-host.md`). `--include` keeps the response headers, which carry the pagination
+/// `--include` keeps the response headers, which carry the pagination
 /// totals; a read that ignores them simply drops them.
 fn glab_args(host: &str, endpoint: &str) -> Vec<String> {
     vec![
@@ -189,7 +189,7 @@ fn fetch_inner(
 
     let head = input.local.head_oid.as_deref();
     // A fork clone: `origin` is the fork, the target is upstream. Both projects are
-    // asked, and upstream's pick outranks the fork's own (`specs/forge-host.md`).
+    // asked, and upstream's pick outranks the fork's own.
     let fork_path = crate::forge::fork_repository(input.origin_repository.as_ref(), target)
         .map(|origin| crate::forge::urlencode(&origin.full_path()));
     let Some((iid, project_path)) = associate_by_branch(
@@ -224,7 +224,7 @@ fn fetch_inner(
             scope.spawn(|| newest_discussions(repo, host, target_path, iid, cancelled));
         let approvals = scope.spawn(|| {
             // An unavailable approvals surface contributes no review rows instead of
-            // failing the whole view (`specs/forge-providers.md`).
+            // failing the whole view.
             optional_surface(glab_api(
                 repo,
                 host,
@@ -256,7 +256,7 @@ fn fetch_inner(
 /// The newest comment discussions. GitLab returns discussions oldest-first with no sort
 /// control, so the newest rows live on the last pages: read `x-total-pages`, then fetch the
 /// final two pages. Each page keeps only its comment discussions before the cap, so a stream
-/// of system events never spends the surface's 100 slots (`specs/forge-host.md`).
+/// of system events never spends the surface's 100 slots.
 fn newest_discussions(
     repo: &Path,
     host: &str,
@@ -275,8 +275,7 @@ fn newest_discussions(
     }
     let total = total_pages.unwrap_or(1).max(1);
     // The endpoint returns oldest-first with no sort control, so the newest rows live on the
-    // last pages. Read them concurrently (`specs/forge-host.md`: each surface reads its newest
-    // 100 rows).
+    // last pages. Read them concurrently (each surface reads its newest 100 rows).
     let endpoints: Vec<String> = discussion_tail_pages(total)
         .into_iter()
         .map(|page| format!("{base}&page={page}"))
@@ -324,7 +323,7 @@ fn assemble_discussions(page1: Vec<Value>, total: u64, later: Vec<Value>) -> (Ve
 /// Ask GitLab for the branch's merge requests: one `source_branch` listing per name
 /// against the target project — and the fork project on a fork clone — with the project
 /// lookups that prove each MR's source, all in one concurrent wave
-/// (`specs/forge-providers.md`). Returns the picked MR and the project path it lives in;
+/// Returns the picked MR and the project path it lives in;
 /// the target's pick outranks the fork's.
 fn associate_by_branch(
     repo: &Path,
@@ -345,7 +344,7 @@ fn associate_by_branch(
     }
     let mut responses = glab_api_fan_out(repo, host, &endpoints, cancelled).into_iter();
     // The target project's numeric id — the source filter every listed MR must match
-    // (`specs/forge-host.md`: a stranger's same-named fork branch never attaches).
+    // (a stranger's same-named fork branch never attaches).
     let project = responses.next().transpose()?.unwrap_or(Value::Null);
     let Some(target_id) = project["id"].as_u64() else {
         return Err(GlabError::Other("project lookup returned no id".to_string()));
@@ -362,7 +361,7 @@ fn associate_by_branch(
     };
     let target_rows: Vec<_> = responses.by_ref().take(2 * names.len()).collect();
     // On a fork clone the upstream lookup keeps only fork-sourced MRs — upstream's own
-    // same-named branch is a stranger's (`specs/forge-providers.md` GitLab).
+    // same-named branch is a stranger's.
     let assoc = collect_assoc(target_rows, |source| match fork_path {
         Some(_) => fork_id.is_some() && source == fork_id,
         None => source == Some(target_id),
@@ -387,7 +386,7 @@ fn associate_by_branch(
 /// The per-name merge-request listings against `project`: an opened page apart from the
 /// created-ordered all-state page, both newest-created-first and capped at 20. The opened
 /// page keeps the shared resolver's open-before-history precedence whole when a reused
-/// branch name's history runs past the cap (`specs/forge-providers.md` GitLab).
+/// branch name's history runs past the cap.
 fn branch_listings(project: &str, names: &[String]) -> Vec<String> {
     names
         .iter()
@@ -406,7 +405,6 @@ fn branch_listings(project: &str, names: &[String]) -> Vec<String> {
 
 /// Fold one project's listings into an association, keeping only MRs whose source project
 /// `allowed` admits. A 404 listing proves nothing and never fails the fetch
-/// (`specs/forge-providers.md`).
 fn collect_assoc(
     rows: Vec<Result<Value, GlabError>>,
     allowed: impl Fn(Option<u64>) -> bool,
@@ -447,7 +445,7 @@ fn assoc_mr(node: &Value) -> Option<AssocPr> {
 }
 
 /// The head pipeline's jobs as the checks list, one row per job — no pipeline is an empty
-/// list (`specs/forge-providers.md`). Returns the rows and whether the job page was capped.
+/// list. Returns the rows and whether the job page was capped.
 fn fetch_checks(
     repo: &Path,
     host: &str,
@@ -456,7 +454,7 @@ fn fetch_checks(
     cancelled: &AtomicBool,
 ) -> Result<(Vec<Check>, bool), GlabError> {
     // The MR detail names its own head pipeline, so the checks are the head's jobs rather than
-    // whichever pipeline ran last (`specs/forge-providers.md`). No head pipeline is no checks.
+    // whichever pipeline ran last. No head pipeline is no checks.
     let pipeline = &mr["head_pipeline"];
     let Some(pipeline_id) = pipeline["id"].as_u64() else {
         return Ok((Vec::new(), false));
@@ -468,7 +466,6 @@ fn fetch_checks(
     };
     // A fork MR's pipeline can be unreadable to the reviewer (private fork). An
     // unreadable pipeline project shows an empty checks list instead of failing the view
-    // (`specs/forge-providers.md`).
     let (job_pages, jobs) = match glab_api_paged(
         repo,
         host,
@@ -496,7 +493,7 @@ fn fetch_checks(
     if capped {
         // The rollup reads the rows it has, so a prefix of a large pipeline could report a pass
         // while an unread job failed. The pipeline states its own verdict, which stands in for
-        // the jobs left unread (`specs/forge-providers.md`).
+        // the jobs left unread.
         let status = pipeline_status(pipeline["status"].as_str().unwrap_or_default());
         upsert_latest(&mut checks, Check { name: "pipeline".to_string(), status });
     }
@@ -516,7 +513,7 @@ fn pipeline_status(status: &str) -> CheckStatus {
 
 /// Normalise one GitLab job status to a [`CheckStatus`]. An allowed-to-fail job leaves the
 /// pipeline green and the merge request mergeable, so its failure is a warning, never a
-/// failing check (`specs/forge-providers.md`).
+/// failing check.
 fn job_status(status: &str, allow_failure: bool) -> CheckStatus {
     match status {
         "success" => CheckStatus::Success,
@@ -547,7 +544,7 @@ fn build_snapshot(
         url: mr["web_url"].as_str().unwrap_or_default().to_string(),
         body: mr["description"].as_str().unwrap_or_default().to_string(),
         // A missing state must not read as reviewable: the empty string falls through
-        // `parse_state` to the closed arm — stale, never wrong (`specs/overview.md`).
+        // `parse_state` to the closed arm — stale, never wrong.
         state: parse_state(mr["state"].as_str().unwrap_or_default()),
         is_draft: mr["draft"].as_bool().unwrap_or(false),
         head_ref: mr["source_branch"].as_str().unwrap_or_default().to_string(),
@@ -562,7 +559,7 @@ fn build_snapshot(
     }
 }
 
-/// `opened` maps to `open`; a locked MR reads as closed (`specs/forge-providers.md`).
+/// `opened` maps to `open`; a locked MR reads as closed.
 fn parse_state(state: &str) -> PrState {
     match state {
         "opened" => PrState::Open,
@@ -571,7 +568,7 @@ fn parse_state(state: &str) -> PrState {
     }
 }
 
-/// A cross-project merge request sets the fork marker (`specs/forge-providers.md`).
+/// A cross-project merge request sets the fork marker.
 fn is_cross_project(mr: &Value) -> bool {
     match (mr["source_project_id"].as_u64(), mr["target_project_id"].as_u64()) {
         (Some(source), Some(target)) => source != target,
@@ -581,7 +578,7 @@ fn is_cross_project(mr: &Value) -> bool {
 
 /// Fold GitLab's merge state to the blockers worth surfacing: a conflict is `conflicting`,
 /// unresolved blocking discussions or missing required approvals are `blocked`, and
-/// everything else — including a still-checking status — is `clean` (`specs/forge-providers.md`).
+/// everything else — including a still-checking status — is `clean`.
 fn derive_merge(mr: &Value) -> Merge {
     if mr["has_conflicts"].as_bool().unwrap_or(false)
         || mr["detailed_merge_status"].as_str() == Some("conflict")
@@ -624,7 +621,7 @@ fn reply_count(discussion: &Value) -> u32 {
 
 /// Merge the discussion threads and approvals into one newest-first comment list:
 /// MR-level notes are `comment` rows, diff-position discussions are `finding` rows, and an
-/// approval is a `review` row (`specs/forge-providers.md`).
+/// approval is a `review` row.
 fn merge_comments(discussions: &[Value], approvals: &Value) -> Vec<Comment> {
     let mut out: Vec<Comment> = Vec::new();
     for discussion in discussions {

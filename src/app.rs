@@ -1,6 +1,6 @@
 //! Application state and transitions for the Changes review TUI.
 //!
-//! See `specs/tui.md` and `specs/review-model.md`. This module is terminal-free:
+//! This module is terminal-free:
 //! every method is a pure state transition or a read-only git/export call, so the
 //! whole interaction model is testable without a backend. `src/main.rs` owns the
 //! terminal and maps input events onto these methods.
@@ -30,10 +30,9 @@ const MIN_NAVIGATOR_PCT: u16 = 15;
 const MAX_SIDE_PCT: u16 = 60;
 const MAX_STACK_PCT: u16 = 50;
 /// Pause after the last filter edit before probing an empty list as a rev
-/// (`specs/input.md` Base picker).
 const BASE_PROBE_DELAY: Duration = Duration::from_millis(150);
 /// The search screen's results-pane share: half the body by default, dragged within
-/// wide bounds — the geometry's minimum pane sizes clamp the rest (specs/search.md).
+/// wide bounds — the geometry's minimum pane sizes clamp the rest.
 const DEFAULT_SEARCH_PCT: u16 = 50;
 const MIN_SEARCH_PCT: u16 = 10;
 const MAX_SEARCH_PCT: u16 = 90;
@@ -73,7 +72,7 @@ pub enum Tab {
 
 /// What a pending PR refresh may do to a fetch already in flight: an ambient trigger —
 /// tab entry, a turn end, the fallback timer — rides it, the user's `refresh` key
-/// supersedes it (specs/forge-host.md). `Ord` so merging pending requests keeps the
+/// supersedes it. `Ord` so merging pending requests keeps the
 /// stronger kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RefreshKind {
@@ -90,7 +89,7 @@ impl Tab {
 }
 
 /// The inactive tab's saved navigator and read-pane state, swapped in on a tab switch so
-/// each tab keeps its own selection and scroll (specs/tui.md).
+/// each tab keeps its own selection and scroll.
 #[derive(Debug, Default)]
 struct TabStash {
     entries: Vec<Entry>,
@@ -117,14 +116,14 @@ struct TabStash {
 
 /// A file crossing offered by the footer, waiting for the hunk step that armed it to repeat: the
 /// direction it crosses in, and the file it resolved to open. Holding the file spares the second
-/// press the walk the first one already paid for (specs/input.md).
+/// press the walk the first one already paid for.
 #[derive(Clone, Debug)]
 struct ArmedCross {
     forward: bool,
     path: String,
 }
 
-/// The base picker's state while it is open (`specs/input.md` Base picker). The rows freeze
+/// The base picker's state while it is open. The rows freeze
 /// at open; the filter and highlight are the reviewer's own place state.
 #[derive(Clone, Debug)]
 pub struct BasePicker {
@@ -136,13 +135,13 @@ pub struct BasePicker {
     /// The typed filter, matching anywhere in the name.
     pub query: String,
     /// The caret in `query`, a char index — the filter edits with the comment editor's
-    /// controls, like every other text field (`specs/input.md`).
+    /// controls, like every other text field.
     pub caret: usize,
-    /// Empty-list commit probe (`specs/input.md` Base picker).
+    /// Empty-list commit probe.
     pub probe: BaseProbe,
 }
 
-/// Empty-list commit probe while the base picker is open (`specs/input.md`).
+/// Empty-list commit probe while the base picker is open.
 #[derive(Clone, Debug, Default)]
 pub enum BaseProbe {
     #[default]
@@ -152,7 +151,7 @@ pub enum BaseProbe {
     Miss,
 }
 
-/// One base picker row (`specs/input.md` Base picker).
+/// One base picker row.
 #[derive(Clone, Debug)]
 pub enum BaseChoice {
     Branch { name: String, starred: bool, is_default: bool },
@@ -188,13 +187,13 @@ impl BaseChoice {
 
 impl BasePicker {
     /// Frozen rows whose name contains the query, matched case-insensitively and
-    /// anywhere in the name (`specs/input.md` Base picker).
+    /// anywhere in the name.
     pub fn filtered(&self) -> Vec<usize> {
         let q = self.query.to_lowercase();
         (0..self.rows.len()).filter(|&i| self.rows[i].name().to_lowercase().contains(&q)).collect()
     }
 
-    /// The on-screen rows: a live probe hit, else the frozen matches (`specs/input.md`).
+    /// The on-screen rows: a live probe hit, else the frozen matches.
     pub fn visible(&self) -> Vec<&BaseChoice> {
         let matched = self.filtered();
         if let BaseProbe::Hit(probe) = &self.probe
@@ -206,12 +205,12 @@ impl BasePicker {
     }
 }
 
-/// The commit picker's state while it is open (`specs/input.md` Commit picker). The rows
+/// The commit picker's state while it is open. The rows
 /// refresh under a poll and reconcile by sha; the highlight and the anchor are the reviewer's
 /// own place state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitPicker {
-    /// The universe, newest first (`specs/review-model.md` Commit pick).
+    /// The universe, newest first.
     pub rows: Vec<git::CommitRow>,
     /// The current pick when it is not wholly in `rows`: painted as one row above the list,
     /// outside every run. `None` when the pick is listed, or there is no pick.
@@ -220,9 +219,9 @@ pub struct CommitPicker {
     pub cursor: usize,
     /// The anchor row, an index into the visible view, never the pick row.
     pub anchor: Option<usize>,
-    /// The picker's title, naming the universe (`specs/input.md`).
+    /// The picker's title, naming the universe.
     pub title: String,
-    /// The empty-universe message (`specs/input.md`).
+    /// The empty-universe message.
     pub empty: String,
     /// The `HEAD` the rows were listed under: a poll re-lists only once it moves.
     pub head: Option<String>,
@@ -262,7 +261,7 @@ impl CommitPicker {
     }
 
     /// The inclusive visible range from the anchor to the highlight, or the highlight alone
-    /// (`specs/input.md`): `(top, bottom)` in visible indices. The pick row sits outside
+    /// : `(top, bottom)` in visible indices. The pick row sits outside
     /// every run, so the highlight on it is a run of itself whatever the anchor.
     pub fn run(&self) -> (usize, usize) {
         match self.anchor {
@@ -316,19 +315,19 @@ pub enum Mode {
     },
     /// Browsing the comments-list overlay.
     List,
-    /// Choosing which agent a `Send` goes to (`specs/herdr-host.md`). Its rows and highlight
+    /// Choosing which agent a `Send` goes to. Its rows and highlight
     /// live in [`App::picker_rows`] and [`App::picker_cursor`].
     Picker,
-    /// Choosing the `branch` scope's base (`specs/input.md` Base picker). Its state lives in
+    /// Choosing the `branch` scope's base. Its state lives in
     /// [`App::base_picker`].
     BasePick,
-    /// Choosing the `commits` scope's pick (`specs/input.md` Commit picker). Its state lives
+    /// Choosing the `commits` scope's pick. Its state lives
     /// in [`App::commit_picker`].
     CommitPick,
-    /// The search screen, replacing the body from any tab (specs/search.md). Its state
+    /// The search screen, replacing the body from any tab. Its state
     /// lives in [`App::search`].
     Search,
-    /// The in-file find band over the read pane (specs/find-in-file.md). Its state lives in
+    /// The in-file find band over the read pane. Its state lives in
     /// [`App::find`].
     Find,
 }
@@ -336,9 +335,7 @@ pub enum Mode {
 impl Mode {
     /// Whether this mode is a modal hold: the reviewer is mid-gesture over the body, with keys
     /// and a mouse of its own. A modal freezes the open diff, so the world can never move the
-    /// anchor, the scroll, or the selection out from under the gesture (`specs/overview.md`
-    /// Continuity), and it captures the mouse so no click reaches the view behind
-    /// (`specs/input.md`).
+    /// anchor, the scroll, or the selection out from under the gesture (Continuity), and it captures the mouse so no click reaches the view behind
     ///
     /// `Search` replaces the body rather than holding a place in it, and `Find` is a band the
     /// reviewer navigates the live diff with. Neither freezes anything, so neither is modal here.
@@ -350,7 +347,7 @@ impl Mode {
     }
 }
 
-/// The search screen's mode: which result set the list shows (specs/search.md).
+/// The search screen's mode: which result set the list shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SearchMode {
     /// The engine's path matches, one row per file.
@@ -359,7 +356,7 @@ pub enum SearchMode {
     Code,
 }
 
-/// Where the search overlay stands with the engine (specs/search.md).
+/// Where the search overlay stands with the engine.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SearchPhase {
     /// The engine's first scan is still running: the overlay shows `indexing…`.
@@ -371,7 +368,6 @@ pub enum SearchPhase {
 }
 
 /// The picked result's file rendered as the read pane's File view, hit-centered
-/// (specs/search.md Preview).
 #[derive(Debug)]
 pub struct SearchPreview {
     pub path: String,
@@ -392,7 +388,7 @@ pub struct SearchPreview {
 #[derive(Debug)]
 pub struct SearchOverlay {
     pub query: String,
-    /// The caret into `query`: a char index, edited by the shared caret ops (`input.md`).
+    /// The caret into `query`: a char index, edited by the shared caret ops.
     pub caret: usize,
     pub search_mode: SearchMode,
     /// The picked row, indexed into the active mode's result set.
@@ -403,7 +399,7 @@ pub struct SearchOverlay {
     pub phase: SearchPhase,
     /// The settled preview of the picked result. `None` until the first build, or while
     /// nothing is pickable. The event loop rebuilds it once input settles, whenever it no
-    /// longer matches the pick — a sweep never waits on a build (specs/search.md).
+    /// longer matches the pick — a sweep never waits on a build.
     pub preview: Option<SearchPreview>,
 }
 
@@ -445,17 +441,17 @@ pub enum PickedResult<'a> {
     Code(&'a crate::search::CodeHit),
 }
 
-/// The in-file find band's state while `mode == Mode::Find` (specs/find-in-file.md). The current
+/// The in-file find band's state while `mode == Mode::Find`. The current
 /// match is the read-pane cursor when its row matches, so only the query is stored — the matches,
 /// count, and highlight all derive from the query against the open file each frame.
 #[derive(Clone, Debug, Default)]
 pub struct Find {
     pub query: String,
-    /// The caret into `query`: a char index, edited by the shared caret ops (`input.md`).
+    /// The caret into `query`: a char index, edited by the shared caret ops.
     pub caret: usize,
 }
 
-/// A found match in file order: how the cursor moves onto it (specs/find-in-file.md).
+/// A found match in file order: how the cursor moves onto it.
 enum FindHit {
     /// A visible row, at this `visible` index.
     Visible(usize),
@@ -466,7 +462,7 @@ enum FindHit {
 
 /// The char-index ranges of every non-overlapping occurrence of `query` in `text`, honoring
 /// `case_sensitive` (pass [`find_case_sensitive`]'s result for smart-case). Char indices, so the
-/// diff renderer overlays the highlight the same way it does word emphasis (specs/find-in-file.md).
+/// diff renderer overlays the highlight the same way it does word emphasis.
 pub fn find_match_ranges(text: &str, query: &str, case_sensitive: bool) -> Vec<(u32, u32)> {
     if query.is_empty() {
         return Vec::new();
@@ -493,7 +489,7 @@ pub fn find_case_sensitive(query: &str) -> bool {
 }
 
 /// A footer action — what the bar offers for the current context. Semantic only: the renderer
-/// maps each to its key glyph and label and styles it by [`Band`] (`specs/input.md`).
+/// maps each to its key glyph and label and styles it by [`Band`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FooterAction {
     Comment,
@@ -509,25 +505,24 @@ pub enum FooterAction {
     CrossFile {
         forward: bool,
     },
-    /// The `move` band's cursor-movement pairs, each rendered as its two keys (`specs/input.md`).
+    /// The `move` band's cursor-movement pairs, each rendered as its two keys.
     MoveLine,
     MoveHunk,
     MoveFile,
     MovePage,
     ExpandDir,
     CollapseDir,
-    /// Open the search screen — offered in every context, on every tab (specs/search.md).
+    /// Open the search screen — offered in every context, on every tab.
     Search,
     /// Open the in-file find band — offered wherever the read pane has content
-    /// (specs/find-in-file.md).
     Find,
-    /// The search screen's own bar: flip, pick, open, close (specs/search.md). The flip
+    /// The search screen's own bar: flip, pick, open, close. The flip
     /// label names the destination mode, derived from the current mode at render time.
     FlipSearchMode,
     PickResult,
     OpenResult,
     CloseSearch,
-    /// The find band's own bar: step between matches, and close (specs/find-in-file.md).
+    /// The find band's own bar: step between matches, and close.
     FindStep,
     CloseFind,
     /// Switch focus between the file list and the diff; the label names the destination pane.
@@ -537,7 +532,7 @@ pub enum FooterAction {
     Preview,
     NavigatorPosition,
     /// Hide the navigator or show it back; the label names the direction (`z hide` / `z show`).
-    /// Visible, it waits in the `go` band; hidden, it joins row 1 (specs/input.md).
+    /// Visible, it waits in the `go` band; hidden, it joins row 1.
     NavigatorHide,
     Wrap,
     Scope,
@@ -549,26 +544,26 @@ pub enum FooterAction {
     Cancel,
     CloseList,
     /// The agent picker's own bar: send to the highlight, move it, and cancel
-    /// (`specs/input.md`). The digits are literal here, so the move hint names them.
+    /// The digits are literal here, so the move hint names them.
     PickAgent,
     MovePickerRow,
     ClosePicker,
-    /// Open the base picker (`specs/input.md` Base picker).
+    /// Open the base picker.
     BasePick,
     /// The base picker's own bar: pick the highlight and move it. Every printable is
     /// filter text there, so the move hint names the arrows alone.
     PickBaseRow,
     MoveBaseRow,
-    /// Open the commit picker (`specs/input.md` Commit picker).
+    /// Open the commit picker.
     CommitPick,
     /// The commit picker's own bar: pick the run, move the highlight, set the anchor, and
-    /// `esc` (`specs/input.md` Commit picker).
+    /// `esc`.
     PickCommitRun,
     MoveCommitRow,
     CommitAnchor,
     CloseCommitPicker,
     /// The scopes to switch away to, on every row 1 that leads with a scope switch: the
-    /// scope already showing would offer a no-op there (`specs/input.md`).
+    /// scope already showing would offer a no-op there.
     ScopeOther,
     OpenPr,
     Refresh,
@@ -578,7 +573,7 @@ pub enum FooterAction {
 
 /// Where a footer action sits: on row 1 (`Primary`, `Send`, or a `Do` cursor action), or in one of
 /// the `?`-expansion bands (`Do` overflow, `Go`, `Move`). Row 1 keeps the primary, `send`, and the
-/// `?`, trimming trailing `Do` actions to fit and spilling them into the `do` band (`specs/input.md`).
+/// `?`, trimming trailing `Do` actions to fit and spilling them into the `do` band.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Band {
     Primary,
@@ -589,7 +584,6 @@ pub enum Band {
 }
 
 /// The file `edit` opens: a repository-relative path and the 1-based line to open it at
-/// (`specs/input.md` Edit).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EditTarget {
     pub path: String,
@@ -606,16 +600,14 @@ pub struct App {
     pub base: Option<String>,
     /// The `branch` scope's base outcome, carried by the latest landed snapshot — the
     /// header names its winner (or the skip) and the diff builds against the winner's OID
-    /// (`specs/review-model.md`).
     pub branch_base: git::BaseStatus,
     /// The `commits` scope's pick: two commit ids, in memory, replaced and never cleared
-    /// (`specs/review-model.md` Commit pick). `None` until the first pick.
+    /// `None` until the first pick.
     pub commit_pick: Option<CommitPick>,
     /// The pick's verdict and subject from the latest landed `commits` build, so the header
-    /// marker and the changeset it heads land whole (`specs/tui.md`).
+    /// marker and the changeset it heads land whole.
     pub pick_status: Option<PickStatus>,
     /// The commit picker's rows, highlight, and anchor while `Mode::CommitPick` is open
-    /// (`specs/input.md` Commit picker).
     pub commit_picker: Option<CommitPicker>,
     /// Bumped by each pick made in this pane, so an in-flight build that read the old pick
     /// fails the landing's input match instead of reverting the pick (`crate::world::WorldInput`).
@@ -645,7 +637,7 @@ pub struct App {
     /// cursor into view. The wheel never sets it.
     pub reveal_diff: bool,
     /// The file crossing a hunk step armed when it found no further hunk in the open file. The
-    /// next step the same way takes it, and any other input drops it (specs/input.md).
+    /// next step the same way takes it, and any other input drops it.
     armed_cross: Option<ArmedCross>,
     /// Whether the current compose was opened from the comments-list overlay, so finishing it
     /// returns there rather than dropping to the diff.
@@ -679,7 +671,7 @@ pub struct App {
     /// Whether long diff lines wrap (default) or are scrolled horizontally.
     pub wrap: bool,
     /// Whether the markdown preview is open for the active file tab's file. Both file tabs
-    /// render it; the flag is per file tab and resets on a file change (specs/diff-view.md).
+    /// render it; the flag is per file tab and resets on a file change.
     /// Only the armed toggle — `preview_active()` is the honest on-screen predicate.
     preview: bool,
     /// Top visible rendered line of the markdown preview, clamped to the rendered length.
@@ -694,18 +686,17 @@ pub struct App {
     /// until the first paint.
     preview_max_scroll: std::cell::Cell<usize>,
     /// Whether a scroll input moved the preview since entry — the exact-restore
-    /// predicate; a refresh clamp never sets it (specs/diff-view.md).
+    /// predicate; a refresh clamp never sets it.
     preview_scrolled: bool,
     /// The diff pane's inner width, noted each paint, so the toggle's position mapping
     /// renders at the width the pane will paint with.
     pane_width: std::cell::Cell<usize>,
     /// The link regions painted this frame — a click resolves against the painted
-    /// frame (specs/markdown.md).
+    /// frame.
     painted_links: std::cell::RefCell<Vec<PaintedLink>>,
     /// The read pane's display-line layout as painted this frame (`ui::read_layout`) — the
     /// recording every read-pane hit test indexes, so no map can disagree with the screen.
     /// A mid-event scroll re-runs the walk (`ui::refresh_read_layout`)
-    /// (specs/text-selection.md).
     painted_slots: std::cell::RefCell<Vec<crate::ui::Slot>>,
     /// The painted markdown body's heading anchors as `(slug, content line index)`,
     /// covering the whole body — an anchor click can jump past the viewport.
@@ -718,43 +709,41 @@ pub struct App {
     pub navigator_side_pct: u16,
     pub navigator_stack_pct: u16,
     /// The presence toggle over the navigator, one state across all tabs, never a position
-    /// (specs/tui.md). A restart shows the navigator; recovery preserves this.
+    /// A restart shows the navigator; recovery preserves this.
     pub navigator_hidden: bool,
     /// The search screen's results-pane share — search's own session value, separate
-    /// from the review layout's shares (specs/search.md).
+    /// from the review layout's shares.
     pub search_pct: u16,
     divider_drag: DividerDrag,
     pub select_anchor: Option<usize>,
-    /// The one live mouse gesture — born at mouse-down, ended by the table in
-    /// specs/text-selection.md ("How a gesture ends").
+    /// The one live mouse gesture — born at mouse-down, ended on release or an interrupting event.
     pub gesture: crate::selection::Gesture,
     /// The settled selection: the last copy's span and its copied text, kept highlighted as
     /// feedback until the next mouse-down, a keypress, or a refresh that changes the text it
-    /// spans (specs/text-selection.md).
+    /// spans.
     settled_sel: Option<(crate::selection::TextDrag, String)>,
     /// The pointer's last reported cell, recomputed against each frame for the gutter hover
-    /// `+` (specs/diff-view.md).
+    /// `+`.
     pub hover: Option<(u16, u16)>,
     /// The multi-click chain: the last mouse-down's time, cell, mapped target row, and count
-    /// within the window (specs/text-selection.md).
+    /// within the window.
     last_click: Option<(std::time::Instant, u16, u16, usize, u8)>,
     /// Whether a view-anchored gesture held the open view's reload while snapshots landed
-    /// beneath it, so the gesture's end reloads it once (specs/text-selection.md).
+    /// beneath it, so the gesture's end reloads it once.
     view_reload_held: bool,
     pub store: CommentStore,
     pub list_cursor: usize,
     /// The picker's rows, frozen at the moment it opened. A refresh behind it adds, drops,
-    /// and reorders nothing (`specs/herdr-host.md`).
+    /// and reorders nothing.
     pub picker_rows: Vec<AgentChoice>,
     pub picker_cursor: usize,
     /// The mode the picker opened over — `Normal`, the comments list, or the find band —
-    /// so closing it restores the view the reviewer sent from (`specs/input.md`).
+    /// so closing it restores the view the reviewer sent from.
     pub picker_over: Mode,
     /// The agent this session last sent to, which arms the picker's highlight. Only a
-    /// successful send sets it (`specs/herdr-host.md`).
+    /// successful send sets it.
     pub last_sent_pane: Option<String>,
     /// The base picker's rows, filter, and highlight while `Mode::BasePick` is open
-    /// (`specs/input.md` Base picker).
     pub base_picker: Option<BasePicker>,
     pub mode: Mode,
     pub input: String,
@@ -763,13 +752,13 @@ pub struct App {
     pub status: String,
     /// Whether the footer's `?` shortcut list is expanded. Global place state, not tab-stashed: one
     /// toggle across every tab, moved only by `?` and `esc`, preserved through a poll and config
-    /// recovery (`specs/input.md`, `overview.md` Continuity).
+    /// recovery (Continuity).
     pub keys_expanded: bool,
     pub should_quit: bool,
-    /// The read-only `PR` tab's view of the pull request (`specs/forge-host.md`).
+    /// The read-only `PR` tab's view of the pull request.
     pub pr: forge::PrView,
     /// The resolved repository target's forge, from the latest input probe. Display strings
-    /// pick their noun and reference form from it (`specs/forge-providers.md`); a forge
+    /// pick their noun and reference form from it; a forge
     /// change always changes the target, which clears the PR before a mismatch could paint.
     pub pr_forge: crate::git::Forge,
     /// Persistent same-input fetch remedy shown without replacing the visible snapshot.
@@ -790,32 +779,31 @@ pub struct App {
     /// a `loading` frame shows before the blocking CLI calls run.
     pub pr_pending: Option<RefreshKind>,
     /// The world refresh request awaiting dispatch, if any; the event loop hands it to
-    /// the worker after the frame paints (specs/tui.md).
+    /// the worker after the frame paints.
     pub world_request: Option<crate::world::WorldRequest>,
     /// The search overlay's state while `mode == Mode::Search`, `None` otherwise.
     pub search: Option<SearchOverlay>,
     /// Set by every query edit (and the open); the event loop dispatches the query to the
-    /// search worker after the frame paints, tagged latest-wins (specs/search.md).
+    /// search worker after the frame paints, tagged latest-wins.
     pub search_dirty: bool,
     /// A picked path awaiting its frecency record; the event loop hands it to the worker.
     pub search_track: Option<String>,
     /// An `edit` press that named a file. The event loop runs the editor, suspending the pane
-    /// first only for one that draws there (`specs/input.md` Edit). `None` when idle.
+    /// first only for one that draws there. `None` when idle.
     pub editor_request: Option<EditTarget>,
     /// The in-file find band's state while `mode == Mode::Find`, `None` otherwise
-    /// (specs/find-in-file.md).
     pub find: Option<Find>,
     /// Whether the tab-strip glyph paints this frame — maintained by the event loop's
-    /// appear-delay and minimum-display clocks (specs/tui.md).
+    /// appear-delay and minimum-display clocks.
     pub refresh_indicator: bool,
     /// Set by `r`: the next refresh is commanded, so the glyph lights immediately
-    /// instead of waiting out the ambient appear delay (specs/tui.md).
+    /// instead of waiting out the ambient appear delay.
     pub refresh_commanded: bool,
     /// Whether the active file tab has ever completed a reload (stash counterpart:
     /// `TabStash::visited`). Gates the first-visit synchronous load in [`Self::set_tab`].
     tab_visited: bool,
     highlighter: Highlighter,
-    /// The active palette every renderer paints from (`specs/theme.md`).
+    /// The active palette every renderer paints from.
     palette: Palette,
     /// The active theme's name, so re-resolving to the same theme is a no-op.
     theme_name: &'static str,
@@ -827,7 +815,7 @@ pub struct App {
     requested_theme_name: Option<String>,
     cache: DiffCache,
     /// The one-slot markdown render memo behind the PR read pane and the file tabs'
-    /// preview (`specs/markdown.md`). Interior-mutable so the renderer can fill it from
+    /// preview. Interior-mutable so the renderer can fill it from
     /// `&App`; cleared with the diff cache on a theme switch.
     markdown_cache: std::cell::RefCell<crate::markdown::RenderCache>,
     snippet_cache: std::cell::RefCell<crate::snippet::SnippetRowCache>,
@@ -837,7 +825,7 @@ pub struct App {
     /// Whether any agent is in this worktree — the one home for the answer, held here
     /// because this is what paints it. `None` until a sample observes it, so a frame that
     /// has seen nothing waits instead of asserting an emptiness nobody looked for: stale is
-    /// allowed, wrong is not (`specs/overview.md` Continuity). Only a sample that observed the
+    /// allowed, wrong is not (Continuity). Only a sample that observed the
     /// whole worktree moves it — herdr answered and git resolved every member's directory — so
     /// `Some(false)` always means someone looked and found no member.
     agents_present: Option<bool>,
@@ -871,7 +859,7 @@ impl App {
     fn build(repo: PathBuf, scope: Scope, base: Option<String>, load_turn: bool) -> Self {
         // Mirror any persisted turn baseline for this worktree, so `last-turn` keeps its
         // anchor across a reviewr pane restart. The worker's `TurnHost` owns the tracker; this
-        // mirror follows its completions (specs/herdr-host.md).
+        // mirror follows its completions.
         let turn_baseline = if load_turn { crate::world::seed_baseline(&repo) } else { None };
         let theme = theme::resolve(None);
         Self {
@@ -975,7 +963,7 @@ impl App {
 
     /// Resolve `name` (a CLI or config value; `None` = default) and apply it when it changes:
     /// rebuild the highlighter and drop cached diffs so they re-render. Unknown or
-    /// not-yet-supported names fall back to the default (`specs/theme.md`).
+    /// not-yet-supported names fall back to the default.
     fn set_theme(&mut self, name: Option<&str>) {
         // Re-resolving the same name every poll would redo derivation and re-log an unknown
         // name, so skip when the request is unchanged.
@@ -1012,7 +1000,7 @@ impl App {
         }
         // A config layout or theme change also completes a live gesture's copy — that runs at
         // the observation boundary, where the painted frame is still in reach
-        // (`lib.rs::reconcile_plugin_config`, specs/text-selection.md).
+        // (`lib.rs::reconcile_plugin_config`).
         self.refresh_theme();
     }
 
@@ -1034,8 +1022,7 @@ impl App {
         self.cancel_gesture();
         // The search overlay, the find band, and the agent picker close when the config view
         // takes over; recovery restores the tab beneath them. The query is not restored, and
-        // neither are the picker's frozen rows, which would be stale by then (specs/search.md,
-        // specs/find-in-file.md, specs/herdr-host.md).
+        // neither are the picker's frozen rows, which would be stale by then.
         // The picker closes first, onto the mode it opened over, so the two closers below then
         // tear down that mode's own state instead of leaving it restored but emptied.
         self.close_picker();
@@ -1070,18 +1057,16 @@ impl App {
         self.store = std::mem::take(&mut old.store);
         self.list_cursor = old.list_cursor;
         // The footer expansion is one global toggle, carried regardless of the recovered mode
-        // (`specs/input.md`).
         self.keys_expanded = old.keys_expanded;
         // The `last used` arming is session memory, like the comments themselves — a config
-        // error must not forget which agent the session sent to (`specs/herdr-host.md`).
+        // error must not forget which agent the session sent to.
         self.last_sent_pane = old.last_sent_pane.take();
         // The commit pick is session memory like the comments: replaced, never cleared
-        // (`specs/review-model.md` Commit pick).
         self.commit_pick = old.commit_pick.take();
         self.navigator_side_pct = old.navigator_side_pct;
         self.navigator_stack_pct = old.navigator_stack_pct;
         self.navigator_hidden = old.navigator_hidden;
-        // A hidden navigator keeps focus on the read pane (specs/tui.md); the fresh app
+        // A hidden navigator keeps focus on the read pane; the fresh app
         // starts on the file list. The `List`/`Composing` arm re-carries the exact focus.
         if self.navigator_hidden {
             self.focus = Focus::Diff;
@@ -1095,8 +1080,7 @@ impl App {
         match old_mode {
             // `set_config_error` closes the search overlay, the find band, and the agent picker
             // before the mode is stored, so none reaches recovery; the search query is not
-            // restored and the picker's frozen rows are not either (specs/search.md,
-            // specs/find-in-file.md, specs/herdr-host.md).
+            // restored and the picker's frozen rows are not either.
             Mode::Normal | Mode::Search | Mode::Find | Mode::Picker => {}
             Mode::List | Mode::Composing { .. } | Mode::BasePick | Mode::CommitPick => {
                 self.scope = old.scope;
@@ -1112,7 +1096,6 @@ impl App {
                 self.changed = std::mem::take(&mut old.changed);
                 // The header's base label describes the carried list, so it carries too —
                 // a fresh app would paint `no base` beside a populated frame
-                // (`specs/tui.md`).
                 self.branch_base = std::mem::take(&mut old.branch_base);
                 self.pick_status = old.pick_status.take();
                 self.diff = std::mem::take(&mut old.diff);
@@ -1135,9 +1118,8 @@ impl App {
                 self.input = std::mem::take(&mut old.input);
                 self.caret = old.caret;
                 // The base picker survives recovery whole — rows, filter, and highlight
-                // (`specs/tui.md`).
                 self.base_picker = old.base_picker.take();
-                // So does the commit picker, with its highlight and anchor (`specs/tui.md`).
+                // So does the commit picker, with its highlight and anchor.
                 self.commit_picker = old.commit_picker.take();
             }
         }
@@ -1170,7 +1152,7 @@ impl App {
         self.set_theme(Some(&name));
     }
 
-    /// The active palette every renderer paints from (`specs/theme.md`).
+    /// The active palette every renderer paints from.
     pub fn palette(&self) -> &Palette {
         &self.palette
     }
@@ -1186,7 +1168,7 @@ impl App {
     }
 
     /// A directory's resting state in the active tab: `Changes` opens expanded, `All files`
-    /// collapsed (specs/file-list.md).
+    /// collapsed.
     fn default_expanded(&self) -> bool {
         self.tab == Tab::Changes
     }
@@ -1245,15 +1227,15 @@ impl App {
     }
 
     /// Never touches the comment store or the in-progress input — that is the
-    /// "a comment is never lost to a refresh" invariant (`specs/overview.md`).
+    /// "a comment is never lost to a refresh" invariant.
     pub fn reload(&mut self) -> Result<()> {
         self.ensure_config_ready()?;
         // The PR tab holds its own state and renders nothing from the file tree, so a poll on
-        // it skips the rebuild; switching back to a file tab reloads it then (specs/tui.md).
+        // it skips the rebuild; switching back to a file tab reloads it then.
         if !self.tab.is_file_tab() {
             return Ok(());
         }
-        // Outside a git repo, show an empty state rather than failing (herdr-host.md).
+        // Outside a git repo, show an empty state rather than failing.
         if !git::is_repo(&self.repo) {
             self.entries.clear();
             self.changed.clear();
@@ -1274,7 +1256,7 @@ impl App {
     }
 
     /// The input the next world build reads — the tag a landed snapshot is checked against
-    /// before it may reconcile (specs/tui.md).
+    /// before it may reconcile.
     pub fn world_input(&self) -> crate::world::WorldInput {
         crate::world::WorldInput {
             repo: self.repo.clone(),
@@ -1297,7 +1279,7 @@ impl App {
     /// Adopt a build's base outcome — the one rule for both writers (the landed snapshot
     /// and the scope switch's synchronous rebuild): only the `branch` scope owns a base,
     /// and the base and the changeset it produced land together, so the header name and
-    /// the list it heads never disagree (specs/tui.md).
+    /// the list it heads never disagree.
     fn adopt_branch_base(&mut self, base: git::BaseStatus) {
         if self.scope == Scope::Branch {
             self.branch_base = base;
@@ -1305,7 +1287,7 @@ impl App {
     }
 
     /// Adopt a build's pick verdict, the same way: only the `commits` scope owns one, and it
-    /// lands with the changeset it heads (`specs/review-model.md` Commit pick).
+    /// lands with the changeset it heads.
     fn adopt_pick_status(&mut self, status: Option<PickStatus>) {
         if self.scope == Scope::Commits {
             self.pick_status = status;
@@ -1313,18 +1295,17 @@ impl App {
     }
 
     /// Reconcile a built snapshot into the view — the one place a world result touches place
-    /// state, by identity first, then fallback, then clamp (`specs/overview.md` Continuity).
+    /// state, by identity first, then fallback, then clamp (Continuity).
     /// A navigator drag never reaches here: it gates the world drain itself, so the snapshot
-    /// waits in the completion channel (`lib.rs`, specs/text-selection.md).
+    /// waits in the completion channel (`lib.rs`).
     pub fn reconcile_world(&mut self, snapshot: crate::world::WorldSnapshot) {
         // A content change under the pointer resets the multi-click chain — the clicked
         // row's own text counts, so a same-length edit under the pointer breaks it too — while
         // a snapshot that changed nothing on screen leaves a double-click in flight alone
-        // (specs/text-selection.md).
         let view_before = (self.diff_path.clone(), self.visible.len(), self.clicked_target_text());
         // The preview's paint is a pure render of `preview_text`, so that string is the
         // settled highlight's staleness identity there; snapshot it only when a settled
-        // `Painted` span exists to compare for (specs/text-selection.md).
+        // `Painted` span exists to compare for.
         let preview_before = self
             .settled_sel
             .as_ref()
@@ -1349,19 +1330,19 @@ impl App {
         // Explicit actions (navigation, a scope switch) request their own reveal.
         // While a modal is open the diff below it is frozen, so a poll can't shift the anchor
         // beneath the writer, reset the scroll and selection under the overlay, or move the
-        // reviewer's place while they choose an agent (`Mode::is_modal`, overview.md Continuity).
+        // reviewer's place while they choose an agent (`Mode::is_modal`, Continuity).
         // A view-anchored drag holds it the same way, catching up when the gesture ends.
-        // The file list still updates above (specs/tui.md, specs/text-selection.md).
+        // The file list still updates above.
         if self.view_anchored_gesture() {
             self.view_reload_held = true;
         } else if !self.mode.is_modal() {
             self.reload_open_view();
         }
         // A landed poll repaints the search preview in place — never the results, which
-        // describe the worktree when their query ran (specs/search.md).
+        // describe the worktree when their query ran.
         self.refresh_search_preview();
         // The find band closes if its file lost its searchable rows or changed identity under the
-        // poll — a forced return, like the markdown preview (specs/find-in-file.md). The current
+        // poll — a forced return, like the markdown preview. The current
         // match otherwise follows the reconciled cursor, so nothing else to do.
         if self.mode == Mode::Find && (open != self.diff_path || !self.find_available()) {
             self.close_find();
@@ -1374,7 +1355,7 @@ impl App {
         }
         // The settled highlight follows Continuity: it survives a land that left its text
         // alone and blanks when the text under it changed — stale never wrong
-        // (specs/text-selection.md). The `PR` surfaces land through the PR paint, and a
+        // The `PR` surfaces land through the PR paint, and a
         // card's text is the in-memory comment's, which no poll moves.
         if let Some((d, text)) = &self.settled_sel {
             use crate::selection::Surface;
@@ -1397,7 +1378,7 @@ impl App {
             }
         }
         // The open commit picker reads the same world: its list refreshes under the poll and
-        // reconciles by sha (`specs/input.md` Commit picker).
+        // reconciles by sha.
         self.refresh_commit_picker(snapshot.head.as_deref());
         self.tab_visited = true;
     }
@@ -1412,7 +1393,7 @@ impl App {
 
     /// Reload the open view against the reconciled list: only a different shown file resets
     /// the diff view to the top, and it drops an armed crossing, which was armed at the edge
-    /// of a file that is no longer the one on screen (specs/input.md).
+    /// of a file that is no longer the one on screen.
     fn reload_open_view(&mut self) {
         if self.shown_entry().map(|e| e.path) != self.diff_path {
             self.reset_diff_view();
@@ -1451,7 +1432,7 @@ impl App {
         // A different file opens with all folds collapsed and in source. `expanded_folds` is
         // keyed by line number, so without the clear a fold in the new file whose first hidden
         // line matches an expanded one in the old file would render pre-expanded. A same-file
-        // poll or scope switch keeps both the folds and the preview choice (specs/diff-view.md).
+        // poll or scope switch keeps both the folds and the preview choice.
         if self.diff_path.as_deref() != Some(path.as_str()) {
             self.expanded_folds.clear();
             self.preview = false;
@@ -1463,7 +1444,7 @@ impl App {
         self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
         // Hold the new side as the preview's render input, the same current content the File
         // view previews. A non-markdown file, a notice, or a deleted file (empty new side)
-        // holds nothing, so its toggle stays inert (specs/diff-view.md).
+        // holds nothing, so its toggle stays inert.
         if self.markdown_file() && self.diff.state == crate::diff::FileState::Normal {
             self.preview_text = new;
         } else {
@@ -1474,10 +1455,10 @@ impl App {
     }
 
     /// Build the File view for `path`: its current worktree content as `Context` rows, no
-    /// folds. The `All files` read pane (specs/diff-view.md). Content is scope-independent.
+    /// folds. The `All files` read pane. Content is scope-independent.
     fn set_file_view(&mut self, path: &str) {
         // Opening a different file starts in source; a same-file refresh keeps the
-        // preview choice and its scroll (specs/diff-view.md).
+        // preview choice and its scroll.
         if self.diff_path.as_deref() != Some(path) {
             self.preview = false;
             self.preview_scroll = 0;
@@ -1487,7 +1468,7 @@ impl App {
         self.expanded_folds.clear(); // the File view has no folds
         let (diff, content) = self.file_view(path);
         // Keep the preview's render input current without a per-frame rebuild. A file the
-        // source view degrades to a notice never previews (specs/diff-view.md), so its
+        // source view degrades to a notice never previews, so its
         // content is not held either.
         if self.markdown_file() && diff.state == crate::diff::FileState::Normal {
             self.preview_text = content;
@@ -1504,7 +1485,7 @@ impl App {
     /// would spike the UI thread before `build_file`'s budget could discard it — else the
     /// worktree content is highlighted through the shared content-hash cache. Returns the
     /// diff and the content read (empty for the notice), for a caller that also keeps the
-    /// raw content (specs/diff-view.md). The one build the source view and the search
+    /// raw content. The one build the source view and the search
     /// preview share.
     fn file_view(&mut self, path: &str) -> (FileDiff, String) {
         let oversize = std::fs::metadata(self.repo.join(path))
@@ -1612,7 +1593,7 @@ impl App {
                     .unwrap_or_default();
                 (old, worktree_content(&self.repo, new_path))
             }
-            // Both sides from the commits: `A^` and `B` (specs/diff-view.md).
+            // Both sides from the commits: `A^` and `B`.
             Scope::Commits => {
                 let Some(pick) = &self.commit_pick else { return (String::new(), String::new()) };
                 let old = git::parent_or_empty(&self.repo, &pick.oldest)
@@ -1624,20 +1605,20 @@ impl App {
     }
 
     /// Whether the `commits` scope is active over a pruned pick: the empty state both panes
-    /// paint as [`Self::commits_gone_message`] (`specs/tui.md`).
+    /// paint as [`Self::commits_gone_message`].
     pub fn commits_gone(&self) -> bool {
         self.scope == Scope::Commits && self.pick_gone()
     }
 
     /// Whether the last build found the pick pruned, whatever scope is showing now: the
     /// verdict is adopted only in `commits` and kept across a switch away, so `g` from
-    /// another scope knows the pick has nothing to show (`specs/input.md`).
+    /// another scope knows the pick has nothing to show.
     pub(crate) fn pick_gone(&self) -> bool {
         matches!(self.pick_status, Some(PickStatus { verdict: PickVerdict::Gone(_), .. }))
     }
 
     /// The one message both panes paint for a [`Self::commits_gone`] frame, naming the first
-    /// missing commit (`specs/tui.md`).
+    /// missing commit.
     pub fn commits_gone_message(&self) -> String {
         match &self.pick_status {
             Some(PickStatus { verdict: PickVerdict::Gone(sha), .. }) => {
@@ -1647,7 +1628,7 @@ impl App {
         }
     }
 
-    /// Where the open diff's new side was read (`specs/review-model.md`): the picked run's
+    /// Where the open diff's new side was read: the picked run's
     /// newest commit in `commits`, the worktree everywhere else.
     fn current_rev(&self) -> Rev {
         match (self.scope, &self.commit_pick) {
@@ -1657,16 +1638,16 @@ impl App {
     }
 
     /// Whether the `last-turn` scope is active but no baseline has been captured yet — the
-    /// cold-start state the UI paints as [`Self::turn_wait_message`] (`specs/tui.md`).
+    /// cold-start state the UI paints as [`Self::turn_wait_message`].
     pub fn awaiting_turn(&self) -> bool {
         self.scope == Scope::LastTurn && self.turn_baseline.is_none()
     }
 
     /// The one message both panes paint for an [`Self::awaiting_turn`] frame, chosen here
-    /// so the file list and the diff view cannot disagree (`specs/tui.md`). An empty
+    /// so the file list and the diff view cannot disagree. An empty
     /// worktree will never produce a turn, so saying so beats waiting — but only a sample
     /// that found no member says it, since the pre-poll frame may only wait: stale is
-    /// allowed, wrong is not (`specs/overview.md` Continuity).
+    /// allowed, wrong is not (Continuity).
     pub fn turn_wait_message(&self) -> &'static str {
         match self.agents_present {
             Some(false) => "no agent works here",
@@ -1698,7 +1679,7 @@ impl App {
 
     /// Queue a world refresh for the event loop to dispatch after the frame paints.
     /// `sample` rides the poll's status sample along; `reveal` re-reveals the cursor when
-    /// the result lands, for user-initiated switches only (specs/tui.md).
+    /// the result lands, for user-initiated switches only.
     pub fn request_world_refresh(&mut self, sample_turn: bool, reveal: bool) {
         let request = self.world_request.get_or_insert(crate::world::WorldRequest::default());
         request.sample_turn |= sample_turn;
@@ -1730,14 +1711,14 @@ impl App {
     /// Toggle line wrap; reset the horizontal scroll, which only applies with wrap off.
     pub fn toggle_wrap(&mut self) {
         if self.preview_active() {
-            return; // the wrap toggle is inert in the preview (specs/diff-view.md)
+            return; // the wrap toggle is inert in the preview
         }
         self.wrap = !self.wrap;
         self.h_scroll = 0;
     }
 
     /// Whether the open file qualifies for the markdown preview: a `.md`/`.markdown`
-    /// extension, case-insensitive (specs/diff-view.md).
+    /// extension, case-insensitive.
     #[must_use]
     fn markdown_file(&self) -> bool {
         self.diff_path.as_deref().is_some_and(is_markdown_path)
@@ -1765,11 +1746,11 @@ impl App {
 
     /// Toggle source ↔ preview on a markdown file in a file tab; inert anywhere else.
     /// Entering clears a live selection and opens at the cursor's block; returning in the
-    /// File view maps the top visible block back to a source cursor (specs/diff-view.md).
+    /// File view maps the top visible block back to a source cursor.
     pub fn toggle_preview(&mut self) {
         // A file whose source view shows a notice, or a deleted file with no current
         // content, is not previewable, so the title can never claim a preview over a
-        // notice (specs/diff-view.md).
+        // notice.
         if !self.previewable() {
             return;
         }
@@ -1793,7 +1774,7 @@ impl App {
         }
         // The preview renders the current content, so a row's new-side line is its render
         // source line. A row without one — a deletion, a fold — aligns by the nearest row
-        // above with one; none above leaves the preview at its top (specs/diff-view.md). A
+        // above with one; none above leaves the preview at its top. A
         // File-view row is a context row numbered by its position, so this reduces to it.
         let Some(target) = self.visible[..=self.diff_cursor]
             .iter()
@@ -1815,7 +1796,6 @@ impl App {
     /// Leave the preview. In the Diff view the cursor, scroll, and folds stay exactly as
     /// they were left. In the File view a scrolled preview maps its top visible block back
     /// to a source cursor; an unscrolled one leaves the source position exactly as it was
-    /// (specs/diff-view.md).
     fn return_from_preview(&mut self) {
         let scrolled = self.preview_scrolled;
         self.preview = false;
@@ -1901,7 +1881,7 @@ impl App {
 
     /// Record the read pane's painted display-line layout — the walk the paint performed
     /// (`ui::read_layout`), which the selection, gutter, and hover hit tests resolve
-    /// against (specs/text-selection.md).
+    /// against.
     pub(crate) fn note_painted_slots(&self, slots: Vec<crate::ui::Slot>) {
         *self.painted_slots.borrow_mut() = slots;
     }
@@ -1939,13 +1919,13 @@ impl App {
             .map(|l| l.url.clone())
     }
 
-    /// Act on a clicked link destination (`specs/markdown.md`): a `#anchor` scrolls its
+    /// Act on a clicked link destination: a `#anchor` scrolls its
     /// own surface to the matching heading, an `http(s)` destination opens in the
     /// browser, and anything else is inert.
     pub fn open_link(&mut self, url: &str) {
         if let Some(fragment) = url.strip_prefix('#') {
             // The fragment runs through the same normalization that made the slugs, so
-            // `#Set-Up!` and `#İstanbul` find their headings (`specs/markdown.md`).
+            // `#Set-Up!` and `#İstanbul` find their headings.
             self.jump_to_anchor(&crate::markdown::slug_text(fragment));
             return;
         }
@@ -1972,7 +1952,6 @@ impl App {
     }
 
     /// Render `text` as markdown wrapped to `width`, through the one-slot memo
-    /// (`specs/markdown.md`).
     #[must_use]
     pub(crate) fn markdown_render(&self, text: &str, width: usize) -> crate::markdown::Rendered {
         self.markdown_cache.borrow_mut().get(text, width, &self.highlighter, &self.palette)
@@ -2002,7 +1981,7 @@ impl App {
     }
 
     /// Move clockwise and cancel any drag captured under the previous geometry. Inert while
-    /// the navigator is hidden (specs/input.md).
+    /// the navigator is hidden.
     pub fn cycle_navigator_position(&mut self) {
         if self.navigator_hidden_here() {
             return;
@@ -2011,7 +1990,7 @@ impl App {
         self.navigator_position = self.navigator_position.clockwise();
     }
 
-    /// Whether the active tab can hide its navigator — `PR` never does (specs/tui.md).
+    /// Whether the active tab can hide its navigator — `PR` never does.
     fn navigator_can_hide(&self) -> bool {
         self.tab != Tab::Pr
     }
@@ -2023,7 +2002,7 @@ impl App {
     }
 
     /// Hide the navigator, or show it back in its kept position and share. Hiding moves focus
-    /// to the read pane; showing leaves it there. Inert on `PR` (specs/tui.md).
+    /// to the read pane; showing leaves it there. Inert on `PR`.
     pub fn toggle_navigator_hidden(&mut self) {
         if !self.navigator_can_hide() {
             return;
@@ -2040,7 +2019,7 @@ impl App {
     }
 
     /// Grow or shrink the navigator by `delta` percentage points on the active split axis.
-    /// Inert while the navigator is hidden (specs/input.md).
+    /// Inert while the navigator is hidden.
     pub fn resize_navigator(&mut self, delta: i16) {
         if self.navigator_hidden_here() {
             return;
@@ -2112,7 +2091,7 @@ impl App {
     }
 
     /// Set the search screen's results share from a captured drag on its divider. The
-    /// review layout's shares are untouched (specs/search.md).
+    /// review layout's shares are untouched.
     pub fn drag_search_divider(&mut self, axis_len: u16, offset: u16) {
         if !self.divider_drag_active() || axis_len == 0 {
             return;
@@ -2164,9 +2143,9 @@ impl App {
     /// per frame when a navigation requested a reveal, not on a wheel scroll.
     ///
     /// The target is the cursor, except while composing: the box opens under the selection's
-    /// last line (`specs/tui.md`), so that line is what has to stay in view. A selection built
+    /// last line, so that line is what has to stay in view. A selection built
     /// upward has its cursor at the top, and following the cursor there would leave the box
-    /// off the bottom — the selection covers the same rows either way (`specs/diff-view.md`).
+    /// off the bottom — the selection covers the same rows either way.
     pub fn reveal_diff_cursor(&mut self, heights: &[usize], viewport: usize) {
         if self.visible.is_empty() {
             self.diff_scroll = 0;
@@ -2192,7 +2171,7 @@ impl App {
 
     /// The scope the header chip's click moves to: the next in the cycle, skipping `commits`
     /// while no pick exists or it is `gone`, so a mouse is never parked on a picker it keeps
-    /// reopening (`specs/input.md` Commit picker).
+    /// reopening.
     pub fn next_chip_scope(&self) -> Scope {
         let next = self.scope.cycle();
         if next == Scope::Commits && (self.commit_pick.is_none() || self.pick_gone()) {
@@ -2206,7 +2185,7 @@ impl App {
     pub fn set_scope(&mut self, scope: Scope) -> Result<()> {
         self.ensure_config_ready()?;
         // `commits` with no pick, or a `gone` one, has nothing to show: the picker opens
-        // instead, without switching, so `esc` leaves this scope active (`specs/input.md`).
+        // instead, without switching, so `esc` leaves this scope active.
         if scope == Scope::Commits
             && (self.commit_pick.is_none() || self.pick_gone())
             && !self.composing()
@@ -2237,7 +2216,7 @@ impl App {
             self.expanded_folds.clear();
             self.reset_diff_view();
             // The changed set rebuilds before the frame, so the list never shows another
-            // base's files under the new base's label (specs/tui.md). In `Changes` the
+            // base's files under the new base's label. In `Changes` the
             // changeset is the whole snapshot, so this is the full (cheap) reload.
             self.reload()?;
         } else {
@@ -2248,7 +2227,7 @@ impl App {
             self.stash.h_scroll = 0;
             self.stash.select_anchor = None;
             // `All files` keeps its tree; only the changed set rebuilds before the frame.
-            // The tree's annotations refresh behind it via the worker (specs/tui.md).
+            // The tree's annotations refresh behind it via the worker.
             let build = crate::world::build_changed(&self.world_input())?;
             self.adopt_branch_base(build.branch_base);
             self.adopt_pick_status(build.pick_status);
@@ -2274,9 +2253,9 @@ impl App {
 
     /// Switch to `tab`, saving the active tab's navigator and read-pane state and restoring the
     /// target's. Each tab keeps its own opened file and scroll, so returning to a tab lands
-    /// exactly where you left it (specs/tui.md). The switch frame paints the restored state as
+    /// exactly where you left it. The switch frame paints the restored state as
     /// it was; a world refresh lands behind it — stale until it lands, never wrong
-    /// (specs/overview.md Continuity). A no-op on the active tab or while composing; focus
+    /// (Continuity). A no-op on the active tab or while composing; focus
     /// stays on the same side.
     pub fn set_tab(&mut self, tab: Tab) -> Result<()> {
         self.ensure_config_ready()?;
@@ -2314,7 +2293,7 @@ impl App {
 
     /// An empty read pane — a first visit landing on a collapsed tree, or an open file gone
     /// empty — focuses the tree, so the cursor keys aren't trapped on a pane with nothing to
-    /// move (specs/tui.md). Runs on the switch frame and again when its world refresh lands.
+    /// move. Runs on the switch frame and again when its world refresh lands.
     pub(crate) fn settle_tab_entry(&mut self) {
         if self.navigator_hidden_here() {
             // A `PR` visit may have focused its always-shown navigator; entry restores
@@ -2327,11 +2306,10 @@ impl App {
         }
     }
 
-    // ---- PR tab (specs/forge-host.md, specs/pr-tab.md) -------------------------------------
+    // ---- PR tab -------------------------------------
 
     /// Blank a settled highlight anchored to a `PR` surface: the tab's paint is being
     /// replaced or emptied, so the span's text is leaving the screen
-    /// (specs/text-selection.md).
     fn blank_pr_settled(&mut self) {
         if let Some((d, _)) = &self.settled_sel {
             use crate::selection::Surface;
@@ -2345,7 +2323,7 @@ impl App {
 
     /// Clear a snapshot whose complete fetch input no longer matches the worktree. A gesture
     /// over the `PR` tab gates the drains this runs from, so it never fires under a live drag
-    /// (`lib.rs`, specs/text-selection.md).
+    /// (`lib.rs`).
     pub fn clear_pr(&mut self) {
         self.blank_pr_settled();
         self.pr = forge::PrView::Pending;
@@ -2370,7 +2348,7 @@ impl App {
             return;
         }
         // A held resolution keeps the painted story, and so does a transient detach
-        // while a snapshot is on screen (`specs/forge-host.md` Refresh).
+        // while a snapshot is on screen.
         if matches!(view, forge::PrView::Held)
             || (matches!(view, forge::PrView::Detached) && matches!(self.pr, forge::PrView::Pr(_)))
         {
@@ -2380,12 +2358,12 @@ impl App {
         self.pr_notice = None;
         // The snapshot replaces the painted `PR` surfaces, so a settled highlight on them
         // would point at replaced text — blank it. The early returns above keep the old
-        // paint, and keep the highlight with it (specs/text-selection.md).
+        // paint, and keep the highlight with it.
         self.blank_pr_settled();
         // Follow the selected row by identity, not index, so a refresh that inserts a newer
         // comment (the list is newest-first) keeps the cursor on the same one and leaves the read
         // scroll intact — only a vanished or absent selection resets it (mirrors the file tabs'
-        // poll-preservation, specs/pr-tab.md). The pinned description row's identity is itself:
+        // poll-preservation). The pinned description row's identity is itself:
         // it survives while the new snapshot still has a description, and an emptied one
         // vanishes like a deleted comment.
         let on_description = self.pr_on_description();
@@ -2409,7 +2387,7 @@ impl App {
         } else {
             // The selection vanished (or there was none): clamp the cursor into range,
             // and reset the read pane whenever a selected row disappeared — the pane now
-            // shows a different row (specs/pr-tab.md).
+            // shows a different row.
             let clamped = self.pr_row_count().saturating_sub(1);
             if self.pr_cursor > clamped || on_description || selected.is_some() {
                 self.pr_read_scroll = 0;
@@ -2446,7 +2424,7 @@ impl App {
     }
 
     /// Whether the snapshot carries a PR description — the pinned `description` row's
-    /// existence condition (specs/pr-tab.md).
+    /// existence condition.
     #[must_use]
     pub fn pr_has_description(&self) -> bool {
         self.pr_snapshot().is_some_and(|s| !s.body.trim().is_empty())
@@ -2518,7 +2496,7 @@ impl App {
             clamp_scroll(self.pr_read_scroll, delta, self.pr_read_max_scroll.get());
     }
 
-    /// Open the pull request in the browser (`specs/pr-tab.md`). A resolved PR always carries a
+    /// Open the pull request in the browser. A resolved PR always carries a
     /// `url`, so there is nothing to guard against.
     pub fn pr_open(&mut self) {
         let Some(url) = self.pr_snapshot().map(|s| s.url.clone()) else {
@@ -2555,7 +2533,7 @@ impl App {
     }
 
     /// While the navigator is hidden, `tab` shows it and focuses it instead of flipping
-    /// between panes (specs/input.md).
+    /// between panes.
     pub fn toggle_focus(&mut self) {
         if self.navigator_hidden_here() {
             self.navigator_hidden = false;
@@ -2587,7 +2565,7 @@ impl App {
             }
             Focus::Diff => {
                 // The preview has no cursor: vertical movement scrolls it, and the source
-                // view's cursor waits untouched for the toggle back (specs/diff-view.md).
+                // view's cursor waits untouched for the toggle back.
                 if self.preview_active() {
                     self.preview_scroll_by(delta);
                 } else if !self.visible.is_empty() {
@@ -2614,7 +2592,7 @@ impl App {
         }
     }
 
-    /// `next-file`: open the next file, from either pane (`specs/input.md`).
+    /// `next-file`: open the next file, from either pane.
     pub fn next_file(&mut self) {
         self.step_file(true);
     }
@@ -2641,7 +2619,7 @@ impl App {
         self.reveal_files = true;
     }
 
-    /// `next-hunk`: jump to the nearest hunk below the cursor (`specs/input.md`).
+    /// `next-hunk`: jump to the nearest hunk below the cursor.
     pub fn next_hunk(&mut self) {
         self.step_hunk(true);
     }
@@ -2654,7 +2632,7 @@ impl App {
     /// Move the diff cursor to the nearest hunk's first changed row past it. With no hunk left
     /// this way, the first press arms the crossing and the second one takes it, so a held key
     /// stops at each file. Only `Changes` paints change rows — `All files` is all context, and
-    /// the preview has no cursor — so a step anywhere else has no target (`specs/input.md`).
+    /// the preview has no cursor — so a step anywhere else has no target.
     fn step_hunk(&mut self, forward: bool) {
         // Any step drops the standing arm. A step the other way is not the repeat it waits for.
         let armed = self.armed_cross.take().filter(|a| a.forward == forward);
@@ -2740,22 +2718,20 @@ impl App {
     }
 
     /// Drop an armed crossing. Every input but a repeat of the step that armed it disarms
-    /// (`specs/input.md`).
     pub fn disarm_cross(&mut self) {
         self.armed_cross = None;
     }
 
     /// Toggle the footer's `?` shortcut list. Called only from `Normal` mode, so a modal's `?` stays
-    /// text or inert (`specs/input.md`).
+    /// text or inert.
     pub fn toggle_keys(&mut self) {
         self.keys_expanded = !self.keys_expanded;
     }
 
     /// The `esc` ladder in `Normal` mode: peel exactly one layer per press — a live selection, then
-    /// an armed crossing, then the footer expansion (`specs/input.md`). The selection and crossing
+    /// an armed crossing, then the footer expansion. The selection and crossing
     /// are file-tab place state, frozen in place while `PR` is active, so `esc` on `PR` closes only
-    /// the expansion and never disturbs the file tab the reviewer will return to (`overview.md`
-    /// Continuity).
+    /// the expansion and never disturbs the file tab the reviewer will return to (Continuity).
     pub fn escape(&mut self) {
         if self.tab != Tab::Pr {
             if self.select_anchor.is_some() {
@@ -2771,7 +2747,7 @@ impl App {
     }
 
     /// Whether the traversal keys act at all: a live selection holds the cursor still, since a
-    /// jump would silently drop the selection under it (`specs/input.md`).
+    /// jump would silently drop the selection under it.
     fn can_traverse(&self) -> bool {
         self.plugin_config().is_some() && self.select_anchor.is_none()
     }
@@ -2888,7 +2864,7 @@ impl App {
     /// Rebuild the tree after a directory's expansion changed, keeping the cursor in range.
     fn apply_dir_change(&mut self) {
         // In `All files`, expanding an ignored directory loads its children lazily, so the
-        // entry set is rebuilt before the rows (file-list.md). Other tabs just re-flatten.
+        // entry set is rebuilt before the rows. Other tabs just re-flatten.
         if self.tab == Tab::AllFiles
             && let Ok(entries) = crate::world::all_files_entries(&self.world_input(), &self.changed)
         {
@@ -2946,7 +2922,7 @@ impl App {
         }
     }
 
-    /// Whether a mouse text or gutter gesture is live (specs/text-selection.md).
+    /// Whether a mouse text or gutter gesture is live.
     #[must_use]
     pub fn gesture_active(&self) -> bool {
         !matches!(self.gesture, crate::selection::Gesture::None)
@@ -2961,31 +2937,31 @@ impl App {
         }
     }
 
-    /// Whether a gutter comment gesture is live (specs/input.md).
+    /// Whether a gutter comment gesture is live.
     #[must_use]
     pub fn gutter_drag(&self) -> bool {
         matches!(self.gesture, crate::selection::Gesture::Gutter)
     }
 
-    /// The settled selection's span, if one is painted (specs/text-selection.md).
+    /// The settled selection's span, if one is painted.
     #[must_use]
     pub fn settled_selection(&self) -> Option<crate::selection::TextDrag> {
         self.settled_sel.as_ref().map(|(d, _)| *d)
     }
 
     /// Settle a completed copy: the span stays highlighted as feedback, with its copied text
-    /// kept so a refresh can tell stale from wrong (specs/text-selection.md).
+    /// kept so a refresh can tell stale from wrong.
     pub(crate) fn settle_selection(&mut self, drag: crate::selection::TextDrag, text: String) {
         self.settled_sel = Some((drag, text));
     }
 
-    /// Clear the settled selection: the user did something else (specs/text-selection.md).
+    /// Clear the settled selection: the user did something else.
     pub(crate) fn clear_settled_selection(&mut self) {
         self.settled_sel = None;
     }
 
     /// Whether the live gesture anchors to the open view's rows: a landing snapshot holds
-    /// the view's reload while it lives, exactly as composing does (specs/text-selection.md).
+    /// the view's reload while it lives, exactly as composing does.
     fn view_anchored_gesture(&self) -> bool {
         use crate::selection::Surface;
         matches!(self.gesture, crate::selection::Gesture::Gutter)
@@ -3000,7 +2976,7 @@ impl App {
 
     /// Whether the live gesture anchors to the file navigator's rows, which a snapshot
     /// rebuilds — the event loop holds the world drain while it lives, so the completion
-    /// waits in its channel (specs/text-selection.md).
+    /// waits in its channel.
     #[must_use]
     pub fn gates_world_drain(&self) -> bool {
         use crate::selection::Surface;
@@ -3013,7 +2989,7 @@ impl App {
     }
 
     /// Whether the live gesture anchors to the `PR` tab's fetched result — the event loop
-    /// holds the PR drains the same way (specs/text-selection.md).
+    /// holds the PR drains the same way.
     #[must_use]
     pub fn gates_pr_drain(&self) -> bool {
         use crate::selection::Surface;
@@ -3028,7 +3004,6 @@ impl App {
     ///
     /// Mouse reporting stops while an external program owns the terminal, so no release and no
     /// motion will arrive to end a drag or move the hover off the cell it was painted on
-    /// (`specs/input.md` Edit).
     pub(crate) fn forget_pointer(&mut self) {
         self.cancel_gesture();
         self.finish_divider_drag();
@@ -3037,7 +3012,7 @@ impl App {
 
     /// End the live gesture without a copy: the reflow-input cancel, and the dissolve of a
     /// press that never moved or a lost gutter drag. The multi-click chain resets — only a
-    /// gesture's own release continues it — and the freeze lifts (specs/text-selection.md).
+    /// gesture's own release continues it — and the freeze lifts.
     pub(crate) fn cancel_gesture(&mut self) {
         if !self.gesture_active() {
             return; // nothing live: the multi-click chain survives unrelated input
@@ -3052,7 +3027,6 @@ impl App {
 
     /// Lift the ended gesture's freeze: the reload a view-anchored gesture held runs now;
     /// the gated completion channels drain on the event loop's next pass
-    /// (specs/text-selection.md).
     pub(crate) fn lift_gesture_freeze(&mut self) {
         // Skip (and drop the bit) when the gesture ended into the composer: the composing
         // freeze owns the view from here, and its own exit catches up.
@@ -3060,7 +3034,6 @@ impl App {
             self.reload_open_view();
             // The held reload rebuilds the text a just-settled span sits on, so the
             // highlight could paint over content that was never copied — blank it
-            // (specs/text-selection.md).
             self.settled_sel = None;
         }
     }
@@ -3069,7 +3042,7 @@ impl App {
     /// (1 = single, 2 = double, 3 = triple; further clicks within the window stay a triple).
     /// `target` is the row the cell maps to in its surface, so a scroll that slides new
     /// content under the pointer breaks the chain rather than double-clicking what the user
-    /// never aimed at (specs/text-selection.md).
+    /// never aimed at.
     pub fn note_click(&mut self, col: u16, row: u16, target: usize) -> u8 {
         const WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
         let now = std::time::Instant::now();
@@ -3086,10 +3059,10 @@ impl App {
     }
 
     /// Start a gutter comment gesture on `row`: line cursor there, selection cleared, the
-    /// range extended by drag and the composer opened on release (specs/input.md).
+    /// range extended by drag and the composer opened on release.
     pub fn start_gutter_drag(&mut self, row: usize) {
         if self.composing() || row >= self.visible.len() {
-            return; // the gutter is inert while the comment editor is open (specs/input.md)
+            return; // the gutter is inert while the comment editor is open
         }
         self.focus = Focus::Diff;
         self.diff_cursor = row;
@@ -3099,7 +3072,7 @@ impl App {
     }
 
     /// Finish a gutter gesture at its release: open the composer on the selected line or
-    /// range (specs/input.md).
+    /// range.
     pub fn finish_gutter_drag(&mut self) {
         if !matches!(self.gesture, crate::selection::Gesture::Gutter) {
             return;
@@ -3107,7 +3080,7 @@ impl App {
         self.gesture = crate::selection::Gesture::None;
         // The composer replaces the find band, so a gutter release while finding is a
         // forced return — without it the band's highlight would keep painting with no way
-        // left to close it (specs/find-in-file.md).
+        // left to close it.
         self.close_find();
         self.start_comment();
         self.lift_gesture_freeze();
@@ -3115,7 +3088,6 @@ impl App {
 
     /// Copy `text` to `target` (the clipboard at runtime, injected like [`Self::export`]):
     /// `copied N chars` on success, the loud failure status otherwise
-    /// (specs/text-selection.md Copy, herdr-host.md).
     pub fn copy_selection_text(&mut self, target: &dyn crate::export::ExportTarget, text: &str) {
         if text.is_empty() {
             return;
@@ -3132,7 +3104,7 @@ impl App {
     /// Toggle a range-selection anchor at the current diff line.
     pub fn toggle_select(&mut self) {
         if self.preview_active() {
-            return; // the preview is read-only (specs/diff-view.md)
+            return; // the preview is read-only
         }
         if self.focus == Focus::Diff && !self.visible.is_empty() {
             self.select_anchor = match self.select_anchor {
@@ -3161,7 +3133,7 @@ impl App {
 
     pub fn start_comment(&mut self) {
         if self.preview_active() {
-            return; // the preview is read-only (specs/diff-view.md)
+            return; // the preview is read-only
         }
         if self.focus == Focus::Diff && self.has_anchorable_selection() {
             self.reveal_diff = true; // scroll the anchored line into view before the box opens
@@ -3173,7 +3145,7 @@ impl App {
     }
 
     /// `edit`: the comment under the cursor, else the file the cursor names
-    /// (`specs/input.md` Edit). One key, resolved by what is actually there.
+    /// One key, resolved by what is actually there.
     pub fn start_edit(&mut self) {
         if self.comment_claims_edit() {
             self.edit_comment();
@@ -3188,7 +3160,6 @@ impl App {
     /// diff cursor is off screen, so the file row under the eye wins. A live line selection is
     /// a gesture in progress on the diff, so nothing on the diff claims the key and the range
     /// survives — the comments list, which owns the screen instead, still claims it
-    /// (`specs/input.md` Edit).
     fn comment_claims_edit(&self) -> bool {
         let on_the_diff = self.tab.is_file_tab()
             && self.focus == Focus::Diff
@@ -3201,14 +3172,14 @@ impl App {
 
     /// Whether the list's highlighted comment can be edited here: only while the active
     /// scope reads the diff it was made on, so the edit box opens over its card and never
-    /// over a same-numbered line of another revision (`specs/input.md` Edit).
+    /// over a same-numbered line of another revision.
     fn list_comment_editable(&self) -> bool {
         self.mode == Mode::List
             && self.store.get(self.list_cursor).is_some_and(|c| self.rev_is_current(c))
     }
 
     /// Whether `edit` opens a file here. The branch [`Self::start_edit`] takes, asked by the
-    /// footer, so the bar and the press cannot disagree (`specs/input.md` Edit).
+    /// footer, so the bar and the press cannot disagree.
     fn edit_opens_a_file(&self) -> bool {
         !self.comment_claims_edit() && self.edit_target().is_some()
     }
@@ -3217,7 +3188,7 @@ impl App {
     ///
     /// Pure and total. The press acts on it and the footer offers the key exactly when it is
     /// `Some`, so the two cannot disagree, and no surface can be reached without passing
-    /// through here (`specs/input.md` Edit). Whether the file is still on disk is the press's
+    /// through here. Whether the file is still on disk is the press's
     /// question, asked in `run_editor`: the footer asks this one twice a frame.
     fn edit_target(&self) -> Option<EditTarget> {
         // The `PR` tab names no file of its own, and the open diff behind it belongs to a
@@ -3235,14 +3206,13 @@ impl App {
         } else {
             // A live line selection is a gesture in progress on the diff, and a press must not
             // abandon the range. The navigator's own row is untouched by it
-            // (`specs/input.md` Edit).
             if self.select_anchor.is_some() {
                 return None;
             }
             // The open file, never the navigator's selection: the two diverge whenever a file
             // was opened by path rather than by row. A preview paints no numbered rows, and
             // in `commits` the numbers belong to the picked commit, not the worktree file
-            // the editor opens, so both open the file at its start (`specs/input.md` Edit).
+            // the editor opens, so both open the file at its start.
             let commit_diff = self.scope == Scope::Commits && self.diff.view == View::Diff;
             (self.diff_path.clone()?, !self.preview_active() && !commit_diff)
         };
@@ -3286,9 +3256,9 @@ impl App {
         // stale comment (file gone from the changeset) never jumps the cursor onto a
         // same-numbered line in a different file, and a comment from another view (a commit
         // comment under a worktree scope) never lands on the same-numbered worktree line
-        // (`specs/review-model.md`). Land on the range's LAST row — the row the card splices
+        // Land on the range's LAST row — the row the card splices
         // under (`card_rows`) — so the edit box opens in the card's place instead of jumping
-        // to the range's first line (specs/input.md).
+        // to the range's first line.
         if in_view
             && self.diff_path.as_deref() == Some(file.as_str())
             && let Some(idx) = self.visible.iter().rposition(|row| {
@@ -3311,8 +3281,7 @@ impl App {
     }
 
     // --- text editing: a character caret into the active field ----------------------------
-    // The comment editor and the search input share one control set (specs/input.md,
-    // specs/search.md). `caret` is a char index in `0..=text.chars().count()`. Edits
+    // The comment editor and the search input share one control set. `caret` is a char index in `0..=text.chars().count()`. Edits
     // round-trip through a `Vec<char>` (both fields are short), so every op is
     // character-wise and multi-byte safe.
 
@@ -3332,7 +3301,6 @@ impl App {
     /// the caret as an in-range index, hand both to `f`, then reassemble and re-clamp the
     /// caret. Every mutating `input_*` op routes through here, so the guard / collect /
     /// reassemble lives once instead of seven times. A changed search query re-queries
-    /// (specs/search.md).
     fn edit_input(&mut self, f: impl FnOnce(&mut Vec<char>, &mut usize)) {
         let searching = self.mode == Mode::Search;
         // The highlighted row's name, read before the filter narrows under it.
@@ -3358,8 +3326,8 @@ impl App {
 
     /// Re-seat the base picker's highlight after a filter edit: it follows its own row into
     /// the narrowed view when the row survives, else rests on the first match
-    /// (`specs/overview.md` Continuity). An empty frozen list with a non-empty query
-    /// schedules a commit probe (`specs/input.md` Base picker).
+    /// (Continuity). An empty frozen list with a non-empty query
+    /// schedules a commit probe.
     fn refilter_base_picker(&mut self, highlighted: Option<String>) {
         let Some(bp) = self.base_picker.as_mut() else { return };
         bp.probe = if bp.filtered().is_empty() && !bp.query.is_empty() {
@@ -3383,7 +3351,7 @@ impl App {
         }
     }
 
-    /// Run the empty-list commit probe if its pause has elapsed (`specs/input.md`).
+    /// Run the empty-list commit probe if its pause has elapsed.
     pub fn tick_base_picker_probe(&mut self) {
         let at = match self.base_picker.as_ref().map(|bp| &bp.probe) {
             Some(BaseProbe::Pending(at)) => *at,
@@ -3447,9 +3415,9 @@ impl App {
     }
 
     /// Insert pasted `text` at the caret as one unit, normalizing `\r\n`/`\r` to `\n`. The
-    /// single-line search and find queries take a newline as a space (specs/search.md); the
+    /// single-line search and find queries take a newline as a space; the
     /// base picker's filter drops it, so a branch name pasted with the newline it was copied
-    /// with still matches its branch (specs/input.md).
+    /// with still matches its branch.
     pub fn input_paste(&mut self, text: &str) {
         let mut norm = text.replace("\r\n", "\n").replace('\r', "\n");
         match self.mode {
@@ -3601,9 +3569,9 @@ impl App {
         let file = self.diff_path.clone()?;
         let (side, start, end, lines) = self.selection_anchor()?;
         // The File view marks every comment as content-anchored, so it ages by file existence,
-        // not changeset membership (specs/review-model.md).
+        // not changeset membership.
         let diff_anchored = self.diff.view == View::Diff;
-        // A content comment reads the worktree whatever the scope (specs/review-model.md).
+        // A content comment reads the worktree whatever the scope.
         let rev = if diff_anchored { self.current_rev() } else { Rev::Worktree };
         Some(Comment { file, side, start, end, lines, text, diff_anchored, rev })
     }
@@ -3642,7 +3610,7 @@ impl App {
     /// Whether comment `c` anchors to the pane's current view — a diff comment to the Diff view,
     /// a content comment to the File view. Stops a comment of one kind rendering on, or being
     /// acted on at, an unrelated line in the other tab's view of the same file (the diff's line
-    /// numbering and the File view's worktree line numbering differ; specs/review-model.md).
+    /// numbering and the File view's worktree line numbering differ).
     /// A diff comment also renders only while the scope reads its new side from the comment's
     /// `rev`, so a commit comment never lands on a worktree line.
     fn comment_in_view(&self, c: &Comment) -> bool {
@@ -3733,7 +3701,7 @@ impl App {
     /// Move the diff cursor to the next (`dir >= 0`) or previous commented line.
     pub fn jump_comment(&mut self, dir: isize) {
         if self.preview_active() {
-            return; // no cursor and no cards in the preview (specs/diff-view.md)
+            return; // no cursor and no cards in the preview
         }
         let mut idxs: Vec<usize> = self.commented_lines().into_iter().collect();
         if idxs.is_empty() {
@@ -3754,19 +3722,19 @@ impl App {
         }
     }
 
-    // --- Search overlay (specs/search.md) ------------------------------------------------
+    // --- Search overlay ------------------------------------------------
 
     /// The active scope's annotation for `path` — the search overlay's file rows wear the
-    /// same marker and stats as the file list (specs/search.md).
+    /// same marker and stats as the file list.
     pub(crate) fn changed_annotation(&self, path: &str) -> Option<&Annotation> {
         self.changed.get(path)
     }
 
-    /// `/`: open the search screen, from any tab, from either pane (specs/search.md).
+    /// `/`: open the search screen, from any tab, from either pane.
     pub fn open_search(&mut self) {
         // A navigator-divider drag held from the review view must not become a search-split
         // resize: cancel it so its remaining drag events are consumed, not acted on — the
-        // search divider only drags a gesture it started itself (specs/input.md).
+        // search divider only drags a gesture it started itself.
         self.cancel_divider_drag();
         self.search = Some(SearchOverlay::new());
         self.mode = Mode::Search;
@@ -3775,7 +3743,7 @@ impl App {
         self.search_dirty = true;
     }
 
-    /// `esc`: drop the screen whole, place untouched (specs/search.md).
+    /// `esc`: drop the screen whole, place untouched.
     pub fn close_search(&mut self) {
         if self.mode == Mode::Search {
             self.mode = Mode::Normal;
@@ -3786,14 +3754,14 @@ impl App {
 
     /// Whether the find band opens: the read pane shows searchable content rows — a file tab, not
     /// the markdown preview, at least one content row. A notice (binary, too large) and an empty
-    /// file carry no content rows, so `any(is_content)` excludes them (specs/find-in-file.md).
+    /// file carry no content rows, so `any(is_content)` excludes them.
     pub fn find_available(&self) -> bool {
         self.tab.is_file_tab() && !self.preview && self.visible.iter().any(Row::is_content)
     }
 
     /// `ctrl+f`: open the find band over the read pane, inert with nothing to search. Opening is a
     /// fresh gesture — it cancels a held drag, clears a live selection, and focuses the read pane
-    /// so the steps land there (specs/find-in-file.md, specs/diff-view.md).
+    /// so the steps land there.
     pub fn open_find(&mut self) {
         if !self.find_available() {
             return;
@@ -3804,12 +3772,11 @@ impl App {
         self.mode = Mode::Find;
         self.find = Some(Find::default());
         // The band steals the pane's bottom row, so pull the cursor above it — otherwise a cursor
-        // on the old last row hides behind the band until the first step (specs/find-in-file.md).
+        // on the old last row hides behind the band until the first step.
         self.reveal_diff = true;
     }
 
     /// `esc`: close the band, dropping the query. The cursor stays where the last step left it
-    /// (specs/find-in-file.md).
     pub fn close_find(&mut self) {
         if self.mode == Mode::Find {
             self.mode = Mode::Normal;
@@ -3820,7 +3787,7 @@ impl App {
     /// Every match of `query` over the open file in file order, the runs hidden inside folds
     /// included, with the cursor's rank among them (matches strictly before it) and whether the
     /// cursor's own row matches. The current match is the cursor's row when it matches, so both
-    /// the count and stepping derive from this walk (specs/find-in-file.md).
+    /// the count and stepping derive from this walk.
     fn find_hits(&self, query: &str) -> (Vec<FindHit>, usize, bool) {
         let cs = find_case_sensitive(query);
         let is_hit = |row: &Row| !find_match_ranges(&row.text(), query, cs).is_empty();
@@ -3879,7 +3846,7 @@ impl App {
 
     /// `enter`/`↓` (`delta > 0`) and `↑` (`delta < 0`): move the cursor to the nearest matching
     /// row below or above it, wrapping. A match in a collapsed fold expands it first, then the
-    /// cursor lands on the revealed row. Inert while nothing matches (specs/find-in-file.md).
+    /// cursor lands on the revealed row. Inert while nothing matches.
     pub fn find_step(&mut self, delta: i32) {
         let Some(query) = self.find.as_ref().map(|f| f.query.clone()) else { return };
         if query.is_empty() {
@@ -3915,7 +3882,6 @@ impl App {
 
     /// The find band's count: the current match's 1-based ordinal (`None` off a match) and the
     /// total. `None` while the query is empty — the band shows a blank count then
-    /// (specs/find-in-file.md).
     pub fn find_count(&self) -> Option<(Option<usize>, usize)> {
         let query = &self.find.as_ref()?.query;
         if query.is_empty() {
@@ -3926,7 +3892,7 @@ impl App {
     }
 
     /// `tab`: flip the mode, keeping the query. The held results paint at once and the
-    /// pick lands on the new mode's first result row (specs/search.md).
+    /// pick lands on the new mode's first result row.
     pub fn search_flip(&mut self) {
         if let Some(s) = self.search.as_mut() {
             s.search_mode = match s.search_mode {
@@ -3938,7 +3904,7 @@ impl App {
         }
     }
 
-    /// `↓`/`↑`, `ctrl+n`/`p`: move the pick by `delta`, only while `Ready` (specs/search.md).
+    /// `↓`/`↑`, `ctrl+n`/`p`: move the pick by `delta`, only while `Ready`.
     pub fn search_move(&mut self, delta: isize) {
         // Off `Ready` the screen paints a message, not rows, so there is nothing to
         // move onto — the same guard `search_open_pick` and `build_search_preview` uphold.
@@ -3951,7 +3917,7 @@ impl App {
 
     /// Land one completion. The dispatcher already dropped stale generations; while a
     /// query is in flight the previous results stay painted. A landed set resets the pick
-    /// to the first result row (specs/search.md).
+    /// to the first result row.
     pub fn apply_search_completion(&mut self, completion: crate::search::SearchCompletion) {
         use crate::search::SearchOutcome;
         let Some(s) = self.search.as_mut() else { return };
@@ -3966,7 +3932,7 @@ impl App {
             SearchOutcome::Failed(e) => {
                 s.phase = SearchPhase::Error(e);
                 // Drop the last preview so the pane falls back to its notice — a stale file
-                // under a red error reads as a result (specs/search.md).
+                // under a red error reads as a result.
                 s.preview = None;
             }
         }
@@ -3974,7 +3940,7 @@ impl App {
 
     /// Rebuild the picked result's preview when it no longer matches the pick — idempotent,
     /// so the event loop can call it every settled frame. It runs only with no input pending,
-    /// so a pick sweep never waits on it (specs/search.md Preview).
+    /// so a pick sweep never waits on it.
     pub fn build_search_preview(&mut self) {
         let Some(s) = self.search.as_ref() else { return };
         // The pick's target, or `None` when nothing is pickable (off `Ready`, or empty).
@@ -4005,7 +3971,7 @@ impl App {
             return;
         };
         // A deleted file reads empty and previews empty; an over-budget file previews as the
-        // File view's notice (specs/search.md).
+        // File view's notice.
         let diff = self.file_view(&path).0;
         if let Some(s) = self.search.as_mut() {
             s.preview = Some(SearchPreview {
@@ -4019,7 +3985,7 @@ impl App {
     }
 
     /// `PageUp`/`PageDown`: scroll the settled preview. The renderer clamps; the next
-    /// pick re-centers (specs/search.md).
+    /// pick re-centers.
     pub fn scroll_search_preview(&mut self, delta: isize) {
         if let Some(p) = self.search.as_ref().and_then(|s| s.preview.as_ref()) {
             p.center.set(false);
@@ -4029,7 +3995,7 @@ impl App {
 
     /// A landed poll's preview reconcile: rebuild the previewed file in place, keeping the
     /// scroll. The renderer clamps the scroll and bands the hit only while its line still
-    /// exists (specs/search.md, `overview.md` Continuity).
+    /// exists (Continuity).
     pub fn refresh_search_preview(&mut self) {
         let Some(path) =
             self.search.as_ref().and_then(|s| s.preview.as_ref()).map(|p| p.path.clone())
@@ -4045,11 +4011,11 @@ impl App {
     /// `enter`: open the picked result in `All files` whatever tab the search left — the
     /// file in the read pane, the navigator selection onto it, ancestors expanded; a code
     /// pick lands the cursor on its line, clamped into the file's current length. A
-    /// vanished path opens nothing and the screen stays (specs/search.md).
+    /// vanished path opens nothing and the screen stays.
     pub fn search_open_pick(&mut self) -> Result<()> {
         let Some(s) = self.search.as_ref() else { return Ok(()) };
         // Off `Ready`, the painted screen shows no rows — held results are stale and
-        // invisible, so nothing opens (specs/search.md).
+        // invisible, so nothing opens.
         if s.phase != SearchPhase::Ready {
             return Ok(());
         }
@@ -4063,7 +4029,7 @@ impl App {
         }
         self.close_search();
         // Opening is a deliberate leave: the origin tab stashes its place on the switch,
-        // kept for `1`/`2`/`3` (specs/search.md).
+        // kept for `1`/`2`/`3`.
         if self.tab != Tab::AllFiles {
             self.set_tab(Tab::AllFiles)?;
         }
@@ -4116,7 +4082,7 @@ impl App {
     /// The footer's actions for the current context, tagged with their [`Band`] — row 1 (primary,
     /// send, the cursor's `Do` actions) and the `?`-expansion bands (`Go`, `Move`). Pure: a context
     /// → action mapping, unit-tested without a terminal. The renderer packs row 1, spills trimmed
-    /// `Do` actions into the `do` band, and wraps the bands below (`specs/input.md`).
+    /// `Do` actions into the `do` band, and wraps the bands below.
     #[must_use]
     pub fn footer_bands(&self) -> Vec<(FooterAction, Band)> {
         use Band::{Do, Go, Move, Primary, Send};
@@ -4131,7 +4097,7 @@ impl App {
             }
             Mode::List => {
                 let mut out = vec![(A::Send, Primary), (A::CloseList, Do), (A::Copy, Do)];
-                // A comment from another diff cannot be edited here (`specs/input.md` Edit).
+                // A comment from another diff cannot be edited here.
                 if self.list_comment_editable() {
                     out.push((A::EditComment, Do));
                 }
@@ -4146,7 +4112,7 @@ impl App {
             }
             Mode::CommitPick => {
                 // An empty universe has nothing to open or move to, so only the exit is
-                // offered (`specs/input.md` Commit picker).
+                // offered.
                 if self.commit_picker.as_ref().is_none_or(CommitPicker::is_empty) {
                     return vec![(A::CloseCommitPicker, Primary)];
                 }
@@ -4164,7 +4130,7 @@ impl App {
             Mode::Search => {
                 // With nothing pickable — warming, errored, or no matches — only the
                 // mode flip and the exit are offered, so the bar never lists a key that
-                // would not work (specs/search.md).
+                // would not work.
                 let pickable = self
                     .search
                     .as_ref()
@@ -4182,7 +4148,7 @@ impl App {
             }
             Mode::Find => {
                 // The steps show only with a match to step to, so the bar never lists a key that
-                // would not work (specs/find-in-file.md).
+                // would not work.
                 let has_match = self.find_count().is_some_and(|(_, total)| total > 0);
                 return if has_match {
                     vec![(A::FindStep, Primary), (A::CloseFind, Do)]
@@ -4196,7 +4162,7 @@ impl App {
         // The read-only PR tab: the state summary leads row 1 (rendered separately); `o open` is the
         // act — available for any resolved PR, not only while a comment is selected, since `o`
         // opens the PR URL itself (`pr_open`). The `go` band carries the always-there keys; `move`
-        // carries only the steps the tab has — the PR has no hunk or file steps (`specs/pr-tab.md`).
+        // carries only the steps the tab has — the PR has no hunk or file steps.
         if self.tab == Tab::Pr {
             let mut out = Vec::new();
             if self.pr_snapshot().is_some() {
@@ -4219,7 +4185,7 @@ impl App {
 
         if self.preview_active() && self.focus == Focus::Diff {
             // The read-only preview: the way back to the commentable source leads, and
-            // no comment key is offered (specs/input.md); the shared tail below adds the
+            // no comment key is offered; the shared tail below adds the
             // scope, send, and band actions. With the file list focused, the tree's own
             // actions apply instead.
             out.push((A::Preview, Primary));
@@ -4230,20 +4196,19 @@ impl App {
         {
             // The `branch` scope with no base: the picker is the way forward, and `b` would
             // re-select the scope already showing, so only the other two offer
-            // (`specs/input.md`, `specs/review-model.md`).
             out.push((A::BasePick, Primary));
             out.push((A::ScopeOther, Do));
             out.push((A::Refresh, Do));
         } else if self.commits_gone() && self.tab == Tab::Changes {
             // A gone pick: the picker is the way forward, and `g` would reopen it too, so
-            // only the other three scopes offer (`specs/input.md`). `All files` keeps its
-            // content and its own actions (`specs/tui.md`).
+            // only the other three scopes offer. `All files` keeps its
+            // content and its own actions.
             out.push((A::CommitPick, Primary));
             out.push((A::ScopeOther, Do));
             out.push((A::Refresh, Do));
         } else if self.file_rows.is_empty() {
             // Nothing in scope to review: only switching scope or refreshing is useful, and
-            // the scope already showing is never offered on row 1 (`specs/input.md`).
+            // the scope already showing is never offered on row 1.
             out.push((A::ScopeOther, Primary));
             out.push((A::Refresh, Do));
         } else if self.focus == Focus::Files {
@@ -4255,11 +4220,11 @@ impl App {
                     pane_is_primary = true;
                 }
             }
-            // The files pane's calm row 1 has the room for the hide key (specs/input.md).
+            // The files pane's calm row 1 has the room for the hide key.
             out.push((A::NavigatorHide, Do));
         } else if self.visible.is_empty() {
             if self.navigator_hidden_here() {
-                // The hidden empty read pane: the way back leads row 1 (specs/input.md).
+                // The hidden empty read pane: the way back leads row 1.
                 out.push((A::NavigatorHide, Primary));
                 out.push((A::TogglePane, Do));
             } else {
@@ -4279,7 +4244,7 @@ impl App {
             out.push((A::Comment, Primary));
             out.push((A::Select, Do));
             // On a markdown file's source line that previews, surface the way in —
-            // otherwise the rendered view is undiscoverable (specs/input.md). A deleted
+            // otherwise the rendered view is undiscoverable. A deleted
             // file, holding no current content, offers nothing.
             if self.previewable() {
                 out.push((A::Preview, Do));
@@ -4287,7 +4252,7 @@ impl App {
         }
 
         // `edit` offers the file wherever the press would open one, asked once for every
-        // surface so the bar can neither miss a row nor name one twice (`specs/input.md` Edit).
+        // surface so the bar can neither miss a row nor name one twice.
         // It sits ahead of the navigator's own keys: a narrow row trims trailing actions
         // first, and the file is worth more there than the hide key.
         if self.edit_opens_a_file() {
@@ -4300,7 +4265,6 @@ impl App {
 
         // An armed crossing leads row 1: nothing else on screen says the next press leaves the
         // file. The cursor's own action stays, demoted — commenting still works here
-        // (specs/input.md).
         if let Some(forward) = self.armed_cross() {
             out[0].1 = Do;
             out.insert(0, (A::CrossFile { forward }, Primary));
@@ -4318,16 +4282,16 @@ impl App {
         if !out.iter().any(|&(a, _)| a == A::Scope || a == A::ScopeOther) {
             out.push((A::Scope, Go));
         }
-        // The base picker's key shows only where it works (`specs/input.md`).
+        // The base picker's key shows only where it works.
         if self.base_pick_available() && !out.iter().any(|&(a, _)| a == A::BasePick) {
             out.push((A::BasePick, Go));
         }
-        // The commit picker's key works on every file tab (`specs/input.md` Commit picker).
+        // The commit picker's key works on every file tab.
         if !out.iter().any(|&(a, _)| a == A::CommitPick) {
             out.push((A::CommitPick, Go));
         }
         out.push((A::Search, Go));
-        // In-file find shows wherever the read pane has content to search (specs/find-in-file.md).
+        // In-file find shows wherever the read pane has content to search.
         if self.find_available() {
             out.push((A::Find, Go));
         }
@@ -4341,7 +4305,6 @@ impl App {
         }
         out.push((A::Tabs, Go));
         // `tab` un-hides while hidden, so it stays offered even with an empty changeset
-        // (specs/input.md).
         if !out.iter().any(|&(a, _)| a == A::TogglePane)
             && !pane_is_primary
             && (!self.file_rows.is_empty() || self.navigator_hidden_here())
@@ -4359,7 +4322,7 @@ impl App {
         // The `move` band: the cursor-movement pairs, shown only when there is a changeset to
         // traverse. The hunk step follows `step_hunk`'s own reach — the `Changes` diff only, never a
         // preview — and drops while a crossing is armed, since the armed primary already owns that
-        // key (`specs/input.md`).
+        // key.
         if !self.file_rows.is_empty() {
             out.push((A::MoveLine, Move));
             if self.tab == Tab::Changes && !self.preview_active() && self.armed_cross().is_none() {
@@ -4380,14 +4343,14 @@ impl App {
 
 /// The row the picker's highlight opens on: the agent this session sent to last, else the
 /// first row. The last-sent agent counts only while it is still a candidate, so a closed
-/// pane falls through (`specs/herdr-host.md`).
+/// pane falls through.
 fn armed_row(rows: &[AgentChoice], last_sent: Option<&str>) -> usize {
     last_sent.and_then(|pane| rows.iter().position(|row| row.pane_id == pane)).unwrap_or(0)
 }
 
 impl App {
     /// `Send`: one agent goes straight out, several open the picker, none refuses and names
-    /// the clipboard (`specs/herdr-host.md`). The empty-store refusal is repeated here, ahead
+    /// the clipboard. The empty-store refusal is repeated here, ahead
     /// of [`Self::export`]'s own, so `Send` with nothing written shells out to no herdr call
     /// and opens no picker.
     pub fn send_to_agent(&mut self) {
@@ -4405,12 +4368,12 @@ impl App {
     }
 
     /// Open the picker over `rows`, arming the highlight on the agent this session sent to
-    /// last when it is still a candidate, else the first row (`specs/herdr-host.md`).
+    /// last when it is still a candidate, else the first row.
     pub fn open_picker(&mut self, rows: Vec<AgentChoice>) {
         // A picker with no rows has nothing to choose and no `enter` that acts, and a second open
         // over a live one would capture `Picker` as the mode to restore — either way a modal that
         // swallows every key and that one `esc` cannot leave. The frozen row set also outranks a
-        // later one: it is what the reviewer is reading (`specs/herdr-host.md`).
+        // later one: it is what the reviewer is reading.
         if rows.is_empty() || self.mode == Mode::Picker {
             return;
         }
@@ -4421,7 +4384,7 @@ impl App {
     }
 
     /// Close the picker back onto the view it opened over, so a reviewer who sent from the
-    /// comments list or with the find band open is not dropped into `Normal` (`specs/input.md`).
+    /// comments list or with the find band open is not dropped into `Normal`.
     pub fn close_picker(&mut self) {
         if self.mode == Mode::Picker {
             self.mode = std::mem::replace(&mut self.picker_over, Mode::Normal);
@@ -4437,7 +4400,7 @@ impl App {
     }
 
     /// Move the highlight to `row`, for a digit key or a click. A row past the end is inert
-    /// rather than clamped, so a mistyped digit never arms a neighbour (`specs/input.md`).
+    /// rather than clamped, so a mistyped digit never arms a neighbour.
     pub fn picker_goto(&mut self, row: usize) {
         if self.mode == Mode::Picker && row < self.picker_rows.len() {
             self.picker_cursor = row;
@@ -4446,7 +4409,7 @@ impl App {
 
     /// Send every comment to the highlighted agent, then close whatever the outcome. A
     /// failure reports and keeps the comments, so the reviewer can reopen a fresh picker
-    /// rather than retry against a frozen row (`specs/herdr-host.md`).
+    /// rather than retry against a frozen row.
     pub fn picker_pick(&mut self) {
         let Some(agent) = self.picker_rows.get(self.picker_cursor).cloned() else { return };
         self.close_picker();
@@ -4454,14 +4417,14 @@ impl App {
     }
 
     /// Whether the base picker can open here: a file tab and no `--base` flag, whatever the
-    /// scope, like the commit picker (`specs/input.md` Base picker).
+    /// scope, like the commit picker.
     #[must_use]
     pub fn base_pick_available(&self) -> bool {
         self.tab.is_file_tab() && self.base.is_none()
     }
 
     /// Open the base picker: one row per branch name, the open PR's target starred first,
-    /// the default branch next, the rest by commit recency (`specs/input.md` Base picker).
+    /// the default branch next, the rest by commit recency.
     /// A current non-branch pick is inserted as a row. The highlight opens on the current
     /// base, else the first row. Still opens when that list is empty, so a revision can
     /// be typed.
@@ -4492,7 +4455,7 @@ impl App {
         // A stable sort, so recency still orders the promoted pair and the rest alike.
         rows.sort_by_key(|r| (!r.starred(), !r.is_default()));
         // The base is re-resolved here, not read from `branch_base`: that lands only while
-        // `branch` is showing, and the picker opens from every scope (`specs/input.md`).
+        // `branch` is showing, and the picker opens from every scope.
         let winner = match git::resolve_base(&self.repo, self.base.as_deref()) {
             Ok(r) => r.status.winner,
             Err(e) => {
@@ -4524,7 +4487,7 @@ impl App {
         self.base_picker = None;
     }
 
-    /// Move the highlight through the visible view (`specs/input.md`).
+    /// Move the highlight through the visible view.
     pub fn base_picker_move(&mut self, delta: isize) {
         let Some(bp) = self.base_picker.as_mut() else { return };
         let len = bp.visible().len();
@@ -4534,7 +4497,6 @@ impl App {
     }
 
     /// Move the highlight to visible `row`, for a click. A row past the end is inert
-    /// (`specs/input.md`).
     pub fn base_picker_goto(&mut self, row: usize) {
         if let Some(bp) = self.base_picker.as_mut()
             && row < bp.visible().len()
@@ -4570,14 +4532,13 @@ impl App {
         // (`crate::world::WorldInput`).
         self.base_epoch = self.base_epoch.wrapping_add(1);
         // A pick takes the reviewer to the scope it configures, like the commit picker
-        // (`specs/input.md` Base picker).
         self.scope = Scope::Branch;
         self.rebase_changes()?;
         self.reveal_files = true;
         Ok(())
     }
 
-    /// Open the commit picker over the body (`specs/input.md` Commit picker): the universe
+    /// Open the commit picker over the body: the universe
     /// newest first, the pick as a row above the list when it is not wholly listed, the
     /// highlight on the pick's newest commit else the first row, and the anchor on the
     /// oldest for a run of two or more. Inert off the file tabs and under any other overlay.
@@ -4610,7 +4571,7 @@ impl App {
     }
 
     /// The picker's rows, title, and empty message for the current universe
-    /// (`specs/review-model.md` Commit pick). The title follows the range actually listed:
+    /// The title follows the range actually listed:
     /// a base with no merge-base (unrelated histories, a shallow cut) lists the last 50.
     fn list_commit_rows(&self) -> Result<CommitPicker, String> {
         let head = git::head_oid(&self.repo);
@@ -4634,7 +4595,7 @@ impl App {
     }
 
     /// Close the picker back to `Normal`. The scope stays where it is: a pick moved it, and a
-    /// cancel leaves the scope the picker opened over (`specs/input.md`).
+    /// cancel leaves the scope the picker opened over.
     pub fn close_commit_picker(&mut self) {
         if self.mode == Mode::CommitPick {
             self.mode = Mode::Normal;
@@ -4642,7 +4603,7 @@ impl App {
         self.commit_picker = None;
     }
 
-    /// `esc` in the picker: clear the anchor, else close (`specs/input.md` Commit picker).
+    /// `esc` in the picker: clear the anchor, else close.
     pub fn commit_picker_escape(&mut self) {
         match self.commit_picker.as_mut() {
             Some(cp) if cp.anchor.is_some() => cp.anchor = None,
@@ -4650,7 +4611,7 @@ impl App {
         }
     }
 
-    /// Move the highlight, clamped at the ends (`specs/input.md` Commit picker).
+    /// Move the highlight, clamped at the ends.
     pub fn commit_picker_move(&mut self, delta: isize) {
         let Some(cp) = self.commit_picker.as_mut() else { return };
         cp.cursor = step(cp.cursor, delta, cp.len());
@@ -4666,7 +4627,7 @@ impl App {
     }
 
     /// `v`: set the anchor on the highlight, or clear it when it sits there. The pick row
-    /// takes no anchor (`specs/input.md` Commit picker).
+    /// takes no anchor.
     pub fn commit_picker_anchor(&mut self) {
         let Some(cp) = self.commit_picker.as_mut() else { return };
         if cp.is_empty() || cp.is_pick_row(cp.cursor) {
@@ -4676,7 +4637,7 @@ impl App {
     }
 
     /// `enter`: pick the run, switch to `commits`, and rebuild before the frame
-    /// (`specs/input.md` Commit picker). An empty universe does nothing.
+    /// An empty universe does nothing.
     pub fn commit_picker_pick(&mut self) -> Result<()> {
         let Some(pick) = self.commit_picker.as_ref().and_then(CommitPicker::picked) else {
             return Ok(());
@@ -4695,8 +4656,7 @@ impl App {
     }
 
     /// A poll under the open picker: once `HEAD` moved, re-list the universe and reconcile
-    /// the highlight and the anchor by sha (`specs/input.md` Commit picker,
-    /// `specs/overview.md` Continuity). The same `HEAD` keeps the rows as they are, so a
+    /// the highlight and the anchor by sha (Continuity). The same `HEAD` keeps the rows as they are, so a
     /// quiet poll spawns nothing on the frame thread, and a failed re-list keeps them too,
     /// without touching the status line.
     pub fn refresh_commit_picker(&mut self, head: Option<&str>) {
@@ -4727,7 +4687,7 @@ impl App {
         };
         let last = fresh.len().saturating_sub(1);
         // Identity first, then the nearest surviving neighbour (the one above wins a tie),
-        // then clamp (`specs/overview.md`).
+        // then clamp.
         let place = |i: usize| -> usize {
             if let Some(at) = relocate(i) {
                 return at;
@@ -4748,7 +4708,7 @@ impl App {
     }
 
     /// Export to one decided pane. Nothing re-resolves it, so a pane that closed while the
-    /// picker was open fails here and keeps every comment (`specs/herdr-host.md`). Only a
+    /// picker was open fails here and keeps every comment. Only a
     /// delivery arms the next picker's highlight, and the pane comes from the row this send
     /// addressed, so `last used` can never name a pane the export did not reach.
     fn export_to_agent(&mut self, agent: &AgentChoice) {
@@ -4759,7 +4719,7 @@ impl App {
     }
 
     /// Send/copy every written comment to `target`; consume the whole set only on
-    /// success. A failed export leaves all comments in place (`specs/review-model.md`).
+    /// success. A failed export leaves all comments in place.
     /// Reports whether the comments were delivered.
     pub fn export(&mut self, target: &dyn ExportTarget) -> bool {
         if self.store.is_empty() {
@@ -4791,12 +4751,12 @@ impl App {
     }
 
     /// The number of files changed in the active scope — the header count, the same on both
-    /// tabs (specs/tui.md), since `All files` lists the worktree but counts the changeset.
+    /// tabs, since `All files` lists the worktree but counts the changeset.
     pub fn changed_count(&self) -> usize {
         self.changed.len()
     }
 
-    /// The scope's aggregate line stats, shown beside the header count (specs/tui.md).
+    /// The scope's aggregate line stats, shown beside the header count.
     /// Saturating, so a pathological changeset pins at the cap instead of wrapping.
     pub fn changed_totals(&self) -> (u32, u32) {
         self.changed.values().fold((0, 0), |(added, removed), a| {
@@ -4806,7 +4766,7 @@ impl App {
 
     /// Whether a comment's anchor may have moved. A diff comment is stale once its file leaves
     /// the changeset; a File-view (content) comment only once its file is gone from the
-    /// worktree, since it was never tied to the changeset (specs/review-model.md).
+    /// worktree, since it was never tied to the changeset.
     pub fn is_stale(&self, c: &Comment) -> bool {
         if c.diff_anchored {
             !self.changed.contains_key(&c.file)
@@ -4920,7 +4880,7 @@ fn is_change(row: &Row) -> bool {
 /// The nearest hunk's first changed row in `forward`'s direction: strictly past `from` inside
 /// the open file, or from the far end (`None`) in a file being crossed into. A hunk starts at a
 /// change row whose predecessor is not one, since context lines or a fold always separate two
-/// hunks (specs/diff-view.md).
+/// hunks.
 fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
     let starts_hunk = |&i: &usize| is_change(&rows[i]) && (i == 0 || !is_change(&rows[i - 1]));
     if forward {
@@ -4931,7 +4891,7 @@ fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
 }
 
 /// Whether `path` names a markdown file: a `.md`/`.markdown` extension,
-/// case-insensitive (specs/diff-view.md).
+/// case-insensitive.
 fn is_markdown_path(path: &str) -> bool {
     std::path::Path::new(path)
         .extension()
@@ -5002,7 +4962,6 @@ mod tests {
 
         // A transient fetch error keeps the painted snapshot, and the highlight with it;
         // a landed snapshot replaces the paint and blanks it; an emptied tab blanks it
-        // (specs/text-selection.md).
         app.apply_pr(crate::forge::PrView::Error(crate::git::Forge::GitHub, "offline".into()));
         assert!(app.settled_selection().is_some(), "a kept paint keeps the highlight");
         app.apply_pr(crate::forge::PrView::NoPr);
@@ -5044,7 +5003,7 @@ mod tests {
     #[test]
     fn config_recovery_carries_the_last_sent_agent() {
         // The `last used` arming is session memory: a config error between two sends must
-        // not move the next picker's default (`specs/herdr-host.md`).
+        // not move the next picker's default.
         let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
         old.last_sent_pane = Some("w8:p2".to_string());
         old.mode = Mode::Picker;
@@ -5059,7 +5018,6 @@ mod tests {
     #[test]
     fn config_recovery_carries_the_base_picker_whole() {
         // The base picker survives recovery with its rows, filter, and highlight
-        // (`specs/tui.md`).
         let mut old = App::blocked(PathBuf::from("."), Scope::Branch, None);
         old.mode = Mode::BasePick;
         old.base_picker = Some(super::BasePicker {
@@ -5088,7 +5046,7 @@ mod tests {
         assert_eq!(bp.query, "d");
         assert_eq!(bp.rows[0].name(), "dev");
         // The header's base rides with the carried frame — recovery never paints
-        // `no base` beside a populated list (`specs/tui.md`).
+        // `no base` beside a populated list.
         let base = recovered.branch_base.winner.as_ref().expect("the resolved base is carried");
         assert_eq!(base.name(), "main");
     }
@@ -5096,7 +5054,7 @@ mod tests {
     #[test]
     fn config_recovery_carries_the_commit_picker_with_its_highlight_and_anchor() {
         // The commit picker survives recovery with its rows, highlight, and anchor, and the
-        // pick with its verdict rides the carried frame (`specs/tui.md`).
+        // pick with its verdict rides the carried frame.
         let row = |sha: &str| crate::git::CommitRow {
             sha: sha.repeat(40),
             subject: format!("commit {sha}"),
@@ -5137,7 +5095,7 @@ mod tests {
         assert_eq!(recovered.pick_status.as_ref().map(|s| s.count), Some(3));
 
         // In `Normal` the pick still carries: it is session memory, replaced and never
-        // cleared (`specs/review-model.md` Commit pick).
+        // cleared.
         let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
         old.commit_pick = Some(CommitPick::single("d"));
         let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
@@ -5314,7 +5272,7 @@ mod tests {
     /// Every state `edit` can be pressed in, and what it names there.
     ///
     /// The table is the enumeration: `edit_target` is one total function of the cursor, so a
-    /// state that is not a row here is a state nobody decided (`specs/input.md` Edit).
+    /// state that is not a row here is a state nobody decided.
     #[test]
     fn edit_names_a_file_in_exactly_these_states() {
         use super::{EditTarget, FooterAction, Tab};
@@ -5418,7 +5376,7 @@ mod tests {
             let expected_offers = usize::from(expected.is_some() && !app.comment_claims_edit());
             assert_eq!(offered, expected_offers, "the footer disagrees with the press: {name}");
             // Ahead of the navigator's own keys, since a narrow row trims from the end and the
-            // file is worth more there than the hide key (`specs/input.md`).
+            // file is worth more there than the hide key.
             let at = |want| bands.iter().position(|&(a, _)| a == want);
             if let (Some(edit), Some(hide)) =
                 (at(FooterAction::EditFile), at(FooterAction::NavigatorHide))
@@ -5463,7 +5421,7 @@ mod tests {
     fn a_preview_over_a_commented_line_opens_the_file() {
         // Cards are not painted in a preview, so nothing on screen claims the key and the
         // previewed file wins it, even with the source cursor on a comment
-        // (`specs/input.md` Edit). The table above cannot assert this: its footer expectation
+        // The table above cannot assert this: its footer expectation
         // is derived from `comment_claims_edit`, so only an outcome catches a wrong predicate.
         use super::EditTarget;
         let mut app = edit_app();
@@ -5522,7 +5480,7 @@ mod tests {
     #[test]
     fn the_pr_tab_leaves_the_key_alone_entirely() {
         // The diff is not on screen there, so neither branch has a target: the file branch has
-        // no file tab, and the comment behind the tab has no card (`specs/input.md` Edit).
+        // no file tab, and the comment behind the tab has no card.
         let mut app = edit_app();
         app.store.add(crate::model::Comment {
             file: "src/lib.rs".into(),

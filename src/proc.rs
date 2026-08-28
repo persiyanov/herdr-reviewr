@@ -5,7 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Usual host bin dirs a stripped pane PATH may omit (`specs/herdr-host.md` HH-LAUNCHER-BLIND).
+/// Usual host bin dirs a stripped pane PATH may omit.
 const COMMON_BINS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
 fn host_path() -> OsString {
@@ -45,7 +45,7 @@ fn resolve_on(path: &OsStr, name: &OsStr) -> Option<PathBuf> {
 }
 
 /// Resolve `program` on the host PATH — the common host bins first, the inherited PATH after —
-/// and give the child that same PATH (`specs/herdr-host.md` HH-LAUNCHER-BLIND).
+/// and give the child that same PATH.
 ///
 /// For the tools reviewr runs for itself. [`user_command`] is the other way round, for the
 /// reviewer's own.
@@ -65,7 +65,7 @@ pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
 /// host's tools, so a stripped pane PATH must not hide them. The editor is the reviewer's own,
 /// so a version-managed shim on their `PATH` has to win over a stale copy in a common bin, and
 /// so must every tool the editor goes on to launch — its language servers, its formatters, its
-/// runtime (`specs/input.md` Edit).
+/// runtime.
 pub(crate) fn user_command(program: impl AsRef<OsStr>) -> Option<Command> {
     let program = program.as_ref();
     let path = appended_path(env::var_os("PATH").as_deref());

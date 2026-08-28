@@ -1,6 +1,6 @@
 //! Formatting comments and exporting them to the agent or clipboard.
 //!
-//! See `specs/review-model.md`. A comment becomes a block of `location`, the
+//! A comment becomes a block of `location`, the
 //! diff snippet, then the text. Export is consume-on-success: the caller removes
 //! a comment only after `export` returns `Ok`.
 
@@ -113,7 +113,7 @@ fn select_tool(
 ///
 /// The pane is decided before the export runs, by the sole-agent path or by the picker, and
 /// nothing re-resolves it here. A pane that closed in between fails the send and keeps every
-/// comment (`specs/herdr-host.md`).
+/// comment.
 #[derive(Clone, Debug)]
 pub struct Agent {
     pub pane: String,
@@ -126,7 +126,7 @@ impl ExportTarget for Agent {
     }
 
     /// Names the agent it addressed. The send is irreversible and consumes the whole set, so
-    /// this line is the reviewer's only record of where the review went (`specs/input.md`).
+    /// this line is the reviewer's only record of where the review went.
     fn success_message(&self, count: usize) -> String {
         format!("added {} to {}", counted_comments(count), self.name)
     }
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn export_confirmations_name_the_actual_result_and_pluralize_comments() {
         // The agent line names the pane it addressed, so a mis-send is visible the moment it
-        // lands (`specs/input.md`).
+        // lands.
         let agent = Agent { pane: "w8:p1".into(), name: "release-bot".into() };
         assert_eq!(agent.success_message(1), "added 1 comment to release-bot");
         assert_eq!(agent.success_message(2), "added 2 comments to release-bot");

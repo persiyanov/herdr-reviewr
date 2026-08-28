@@ -1,6 +1,6 @@
 //! Syntax highlighting via `syntect`, themed by the active theme's paired syntax theme.
 //!
-//! See `specs/diff-view.md` and `specs/theme.md`. The highlighter is rebuilt when the theme
+//! The highlighter is rebuilt when the theme
 //! changes and produces per-line foreground spans; the pane keeps the terminal's own
 //! background, so only token colors come from the theme.
 
@@ -51,7 +51,7 @@ impl Highlighter {
     /// Build from a theme's paired syntax source: a bundled `.tmTheme` (parsed from vendored
     /// bytes), or a theme from the `two-face` embedded set. A bundled theme that fails to
     /// parse leaves the highlighter theme-less, so highlighting degrades to plain spans
-    /// rather than crashing (`specs/theme.md`). Most files color out of the box via the
+    /// rather than crashing. Most files color out of the box via the
     /// broad two-face syntax set.
     pub fn new(syntax: SyntaxChoice) -> Self {
         let theme = match syntax {
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn bundled_syntax_themes_all_parse() {
         // Each bundled `.tmTheme` must load, or highlighting silently degrades to plain spans
-        // (specs/theme.md). A loaded theme tokenizes rust into more than one span; a failed
+        // A loaded theme tokenizes rust into more than one span; a failed
         // load would yield a single plain span — so this guards the parse path for every
         // bundled theme, the only `SyntaxChoice` that can fail.
         for name in ["catppuccin", "tokyo-night", "tokyo-night-day", "rose-pine", "rose-pine-dawn"]

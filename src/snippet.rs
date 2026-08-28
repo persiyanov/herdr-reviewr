@@ -1,4 +1,4 @@
-//! A stored PR finding hunk as Diff-view rows (`specs/pr-tab.md`).
+//! A stored PR finding hunk as Diff-view rows.
 //!
 //! This is a quotation, not a [`crate::diff::FileDiff`]. The live viewer owns folds,
 //! cursor, and comment targets. This module parses a unified-diff snippet, windows it

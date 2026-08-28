@@ -1,7 +1,7 @@
 //! Read-only Azure DevOps access: the pull request's identity, state, policies, and threads.
 //!
-//! The Azure DevOps provider behind `src/forge.rs` (`specs/forge-providers.md`). It follows
-//! the neutral resolution contract in `specs/forge-host.md` — the branch's forge names
+//! The Azure DevOps provider behind `src/forge.rs`. It follows
+//! the neutral resolution contract in — the branch's forge names
 //! filter an enumeration by `sourceRefName` — through the `az` CLI with the `azure-devops`
 //! extension, and fills the same normalized [`PrSnapshot`] the other providers do. It never
 //! writes to Azure DevOps.
@@ -62,7 +62,7 @@ fn died(surface: &str) -> AzError {
 }
 
 /// Fold an unreadable optional surface into an empty one: it contributes nothing to the
-/// snapshot, never fails the whole fetch (`specs/forge-providers.md`).
+/// snapshot, never fails the whole fetch.
 fn optional_surface(result: Result<Value, AzError>) -> Result<Value, AzError> {
     match result {
         Err(AzError::Unavailable(_)) => Ok(Value::Null),
@@ -71,7 +71,7 @@ fn optional_surface(result: Result<Value, AzError>) -> Result<Value, AzError> {
 }
 
 /// The organization URL every `az` call pins with `--organization`, so an inherited
-/// `AZURE_DEVOPS_*` default can never redirect the fetch (`specs/forge-host.md`). A legacy
+/// `AZURE_DEVOPS_*` default can never redirect the fetch. A legacy
 /// `{org}.visualstudio.com` host is its own organization URL; every other host scopes by the
 /// organization path segment.
 fn organization_url(target: &crate::git::RepoTarget) -> String {
@@ -127,7 +127,7 @@ fn classify_failure(stderr: &str) -> AzError {
         || crate::forge::reports_status(&s, 404)
         // TF401180: pull request not found. TF401019: repository not found. TF200016:
         // project not found. Unknown objects prove nothing; each call site decides whether
-        // its surface is optional (`specs/forge-providers.md` — Query).
+        // its surface is optional.
         || s.contains("tf401180")
         || s.contains("tf401019")
         || s.contains("tf200016")
@@ -194,7 +194,7 @@ fn fetch_inner(
             // Every association node that can yield a pick carries the project id, so a
             // pick without one is a malformed payload. A policy surface the reader cannot
             // address contributes no checks and no merge blocker instead of failing the
-            // view (`specs/forge-providers.md`).
+            // view.
             match &project_guid {
                 Some(guid) => fetch_evaluations(repo, &org_url, project, guid, id, cancelled),
                 None => Ok(Value::Null),
@@ -249,7 +249,7 @@ fn fetch_inner(
 
     let (rows, threads_capped) = newest_comment_threads(&threads);
     // A full checks page can hide older rows past it, exactly as a further thread page
-    // does; either caps the surface (`specs/forge-host.md`).
+    // does; either caps the surface.
     let checks_capped = one_page_capped(&evaluations) || one_page_capped(&statuses);
     let checks = build_checks(&evaluations, &statuses);
     Ok(PrView::Pr(Box::new(build_snapshot(
@@ -266,7 +266,6 @@ fn fetch_inner(
 
 /// One policy-evaluations read for a pull request, keyed by the project GUID inside the
 /// artifact id. An unreadable policy surface contributes no checks and no merge blocker
-/// (`specs/forge-providers.md`).
 fn fetch_evaluations(
     repo: &Path,
     org_url: &str,
@@ -288,8 +287,7 @@ fn fetch_evaluations(
             "evaluations",
             "--route-parameters",
             &format!("project={project}"),
-            // The surface's one page (`specs/forge-host.md`: each surface reads its
-            // newest 100 rows); `one_page_capped` reports the overflow.
+            // The surface's one page (each surface reads its newest 100 rows); `one_page_capped` reports the overflow.
             "--query-parameters",
             &artifact,
             "$top=100",
@@ -304,7 +302,7 @@ fn fetch_evaluations(
 
 /// Ask Azure DevOps for the branch's pull requests: the newest 100 active and newest 100
 /// completed enumerate in one concurrent wave, and a node joins when its source branch is
-/// one of the names (`specs/forge-providers.md`). A fork node has no provable source
+/// one of the names. A fork node has no provable source
 /// repository in the enumeration, so it joins only when the pinned `HEAD` contains its
 /// source tip. Also returns the target's project GUID as the enumeration nodes report it,
 /// so the policy read need not wait for anything else.
@@ -374,7 +372,7 @@ fn associate_by_branch(
 
 /// The enumeration node's pick fields when its source branch is one of the names. A fork
 /// node's source branch lives in an unnamed repository, so it is admitted only when the
-/// pinned `HEAD` contains its source tip (`specs/forge-providers.md`).
+/// pinned `HEAD` contains its source tip.
 fn branch_admitted(
     repo: &Path,
     node: &Value,
@@ -471,7 +469,7 @@ fn build_snapshot(
         ),
         body: pr["description"].as_str().unwrap_or_default().to_string(),
         // A missing status must not read as reviewable: the empty string falls through
-        // `parse_state` to the closed arm — stale, never wrong (`specs/overview.md`).
+        // `parse_state` to the closed arm — stale, never wrong.
         state: parse_state(pr["status"].as_str().unwrap_or_default()),
         is_draft: pr["isDraft"].as_bool().unwrap_or(false),
         head_ref: head_ref_of(pr),
@@ -487,7 +485,7 @@ fn build_snapshot(
 }
 
 /// Only `active` and `completed` are ever picked; every other status, a missing one
-/// included, is non-reviewable and reads as closed (`specs/forge-providers.md`).
+/// included, is non-reviewable and reads as closed.
 fn parse_state(status: &str) -> PrState {
     match status {
         "active" => PrState::Open,
@@ -498,7 +496,7 @@ fn parse_state(status: &str) -> PrState {
 
 /// Fold Azure DevOps' merge state to the blockers worth surfacing: a conflict is
 /// `conflicting`, a rejected required policy is `blocked`, and everything else — including a
-/// still-queued merge check — is `clean` (`specs/forge-providers.md`).
+/// still-queued merge check — is `clean`.
 fn derive_merge(pr: &Value, evaluations: &Value) -> Merge {
     if pr["mergeStatus"].as_str() == Some("conflicts") {
         return Merge::Conflicting;
@@ -516,7 +514,7 @@ fn derive_merge(pr: &Value, evaluations: &Value) -> Merge {
 }
 
 /// The checks list: policy evaluations and commit statuses normalized into one
-/// (`specs/forge-providers.md`). A policy allowed to fail — one that is not blocking —
+/// A policy allowed to fail — one that is not blocking —
 /// contributes a skipped check, never a failing one.
 fn build_checks(evaluations: &Value, statuses: &Value) -> Vec<Check> {
     let mut checks: Vec<Check> = Vec::new();
@@ -544,7 +542,6 @@ fn build_checks(evaluations: &Value, statuses: &Value) -> Vec<Check> {
 
 /// Normalise one policy evaluation status to a [`CheckStatus`]. A non-blocking policy's
 /// failure leaves the pull request completable, so it is a warning, never a failing check
-/// (`specs/forge-providers.md`).
 fn policy_status(status: &str, blocking: bool) -> CheckStatus {
     match status {
         "approved" => CheckStatus::Success,
@@ -582,7 +579,7 @@ fn one_page_capped(response: &Value) -> bool {
 
 /// The newest 100 comment threads from a threads response, oldest-first, and whether any were
 /// dropped. Azure DevOps returns every thread in one page, published order, so the cap is
-/// client-side (`specs/forge-host.md`: each surface reads its newest 100 rows). System-only
+/// client-side (each surface reads its newest 100 rows). System-only
 /// and empty threads drop first, so status churn never spends the surface's slots.
 fn newest_comment_threads(threads: &Value) -> (Vec<&Value>, bool) {
     let rows: Vec<&Value> = threads["value"]
@@ -631,7 +628,7 @@ fn thread_line_range(context: &Value) -> (Option<u64>, Option<u64>) {
 
 /// Merge the threads and reviewer votes into one newest-first comment list: PR-level threads
 /// are `comment` rows, file-position threads are `finding` rows with the thread's resolved
-/// status, and a reviewer vote is a `review` row (`specs/forge-providers.md`). A thread
+/// status, and a reviewer vote is a `review` row. A thread
 /// carries no code context, so a finding has no snippet.
 fn merge_comments(threads: &[&Value], pr: &Value) -> Vec<Comment> {
     let mut out: Vec<Comment> = Vec::new();
@@ -740,7 +737,7 @@ mod tests {
         assert_eq!(parse_state("active"), PrState::Open);
         assert_eq!(parse_state("completed"), PrState::Merged);
         // Only active and completed are ever picked, so a missing status is the one
-        // reachable fallback, and it must not read as reviewable (`specs/overview.md`).
+        // reachable fallback, and it must not read as reviewable.
         assert_eq!(parse_state(""), PrState::Closed);
     }
 
@@ -757,7 +754,7 @@ mod tests {
         let pr = json!({"mergeStatus": "succeeded"});
         assert_eq!(derive_merge(&pr, &rejected(true)), Merge::Blocked);
         assert_eq!(derive_merge(&pr, &rejected(false)), Merge::Clean);
-        // A still-queued merge check folds to clean (`specs/forge-providers.md`).
+        // A still-queued merge check folds to clean.
         assert_eq!(derive_merge(&json!({"mergeStatus": "queued"}), &none), Merge::Clean);
     }
 

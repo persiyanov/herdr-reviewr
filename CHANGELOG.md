@@ -510,7 +510,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   open --plugin persiyanov.reviewr` opens the sidebar and does nothing when one is already
   open. `close` removes it, including a sidebar herdr's plugin registry forgot after a restart.
   `toggle` keeps its key. `open` ignores `auto_open`, so a layout that opts out of auto-open
-  can still place reviewr deliberately. See `specs/herdr-host.md` and the README's layout
+  can still place reviewr deliberately. See the README's layout
   recipe. (#9)
 
 ### Changed
@@ -531,7 +531,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   derives every branch name the worktree's work could be published under — the recorded
   upstream, remote branches that carry the worktree's commits, and the local name — and asks
   GitHub about all of them in one call. GitHub decides which name holds the PR, so a stale
-  upstream or a checkpoint push can never hide it. See `specs/forge-host.md`. (#10)
+  upstream or a checkpoint push can never hide it. (#10)
 - **A git hiccup no longer reads as "no PR".** A failing git command during the fetch (a lock
   held by `git gc`, a ref pruned mid-read) now freezes the last good view with the retry marker
   instead of blanking the tab or showing a wrong empty state. Git errors are also read with a
@@ -553,7 +553,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   worktree's git dir, and every refresh after that failed with `refresh failed: git ["add", "-A"]
   failed: fatal: Unable to create … File exists` until the lock was deleted by hand. The snapshot
   now clears any leftover temp index and its lock — both private to reviewr — before running and
-  on every exit path. See `specs/herdr-host.md`.
+  on every exit path.
 - **`herdr plugin install` now delivers the current release again.** v0.8.1 shipped with
   `herdr-plugin.toml` still saying `0.8.0`, and `install.sh` reads the manifest to pick the
   download tag, so installs were silently getting the v0.8.0 binary — without the Send resolver
@@ -568,7 +568,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   plus any number of non-agent panes resolves cleanly. Turn tracking uses the same resolver, so
   `last-turn` no longer pauses in these layouts. A refused send now also says why — no agent
   here, or several — and points at `y` to copy to the clipboard instead. Thanks @worldnine for
-  the diagnosis and reproduction. See `specs/herdr-host.md`.
+  the diagnosis and reproduction.
 
 ## [0.8.0] — 2026-07-08
 
@@ -576,7 +576,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`auto_open` config key** — `auto_open = false` in reviewr's `config.toml` turns off the
   `worktree.created` auto-open, so a layout plugin like herdr-plus can furnish a fresh worktree
   undisturbed and reviewr opens only on the toggle key, in any placement. Defaults to `true`
-  (today's behavior); an unknown value falls back to the default. See `specs/herdr-host.md`. (#5)
+  (today's behavior); an unknown value falls back to the default. (#5)
 
 ### Changed
 - README now spells out where reviewr's config file lives on disk
@@ -590,7 +590,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (#4).** reviewr now initializes the terminal and paints before running any `git`, so a startup
   scan error shows `load failed: …` in the status line and a hung `git` shows a frozen-but-visible
   sidebar — never the blank pane herdr leaves for a process that blocks or exits before it renders.
-  See `specs/herdr-host.md`.
 
 ## [0.7.0] — 2026-07-08
 
@@ -599,7 +598,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   candidate list for the `branch` scope, re-read on refresh. reviewr uses the first entry that
   exists in the repo (default `origin/main` → `origin/master` → `main` → `master`), so one setting
   works across repos with different trunks and the base is reachable inside herdr, where no CLI
-  flag is. `--base` still overrides. See `specs/review-model.md`. (#3)
+  flag is. `--base` still overrides. (#3)
 
 ## [0.6.0] — 2026-07-02
 
@@ -608,7 +607,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   default `split`) and `toggle_direction` (`right` | `down`, split only, default `right`) in
   reviewr's `config.toml` set how the toggle opens the sidebar. The `worktree.created` auto-open
   stays a `split`/`tab` (the covering placements open only on a manual toggle). An unknown value
-  falls back to its default. See `specs/herdr-host.md`. (#2)
+  falls back to its default. (#2)
 
 ## [0.5.0] — 2026-06-29
 
@@ -618,7 +617,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Tokyo Night day/night, Rosé Pine / Dawn), set via `theme = "<name>"` in reviewr's
   `config.toml` (re-read on refresh) or `--theme` for a dev run; default `catppuccin`. One theme
   colors the whole UI — chrome and syntax together — replacing the hardcoded Catppuccin Mocha.
-  An unknown name falls back to the default. See `specs/theme.md`.
+  An unknown name falls back to the default.
 
 ### Changed
 - **`--theme` now selects the whole theme** (chrome + syntax), not just the syntect syntax theme.

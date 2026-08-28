@@ -1,6 +1,6 @@
 //! Open a URL in the user's browser — the `PR` tab's only outward action.
 //!
-//! See `specs/forge-host.md` (external links). Mirrors the clipboard-tool probe in
+//! Mirrors the clipboard-tool probe in
 //! `export.rs`: the first platform opener on `PATH` wins; none present errors clearly.
 
 use std::process::Stdio;
@@ -34,7 +34,7 @@ pub fn open(url: &str) -> Result<()> {
 }
 
 /// Gate a markdown link destination before it reaches the OS opener
-/// (`specs/markdown.md`): trimmed, case-insensitive `http://`/`https://` with something
+/// : trimmed, case-insensitive `http://`/`https://` with something
 /// after the scheme, and no control or bidirectional-override character anywhere — a
 /// destination the display would sanitize must never open as different bytes.
 pub fn openable_url(url: &str) -> Result<&str, &'static str> {

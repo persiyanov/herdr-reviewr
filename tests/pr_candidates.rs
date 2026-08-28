@@ -2,7 +2,6 @@
 //! `git::contains_commit`, `git::ahead_behind_oids`) against real temp repos.
 //! Remote-tracking branches are faked with `git update-ref
 //! refs/remotes/origin/<name> <sha>` — no network, no `gh`.
-//! See `specs/forge-host.md` "Resolution".
 
 mod common;
 
@@ -78,7 +77,6 @@ fn an_unusable_upstream_falls_back_to_origin() {
     assert_target(&selected().repository, "github.com", "acme", "widgets");
 
     // A GitLab upstream is a recognized forge repository, so it wins target selection
-    // (`specs/forge-host.md`).
     repo.git(&["remote", "set-url", "upstream", "https://gitlab.com/other/widgets.git"]);
     assert_target(&selected().repository, "gitlab.com", "other", "widgets");
 
@@ -201,7 +199,6 @@ fn every_resolved_base_source_excludes_names() {
 fn a_dormant_pick_still_shields_its_name() {
     // The picked `develop` was never created, so it resolves to nothing, but the record stands:
     // an upstream naming it is still tracking a base, not publishing to it
-    // (`specs/forge-host.md` Resolution — "resolved or recorded").
     let repo = worktree();
     herdr_reviewr::git::write_base_pick(repo.path(), "develop").unwrap();
     repo.git(&["config", "branch.work.remote", "origin"]);
@@ -217,7 +214,6 @@ fn an_upstream_on_a_base_resolved_without_its_name_is_excluded_by_tip() {
     // resolves only through `origin/HEAD`, so no configured entry carries its name.
     // The auto-written tracking record must still be recognized as a base, or the
     // base branch's own PR attaches to every branch cut from it
-    // (`specs/forge-host.md` Resolution — "unless that names a resolved base").
     let repo = Repo::init();
     repo.write("a.txt", "one\n");
     repo.commit_all("base");
@@ -248,8 +244,7 @@ fn an_upstream_on_a_base_resolved_without_its_name_is_excluded_by_tip() {
 fn a_merged_branch_keeps_its_local_name_and_its_recorded_upstream() {
     // The worktree's branch merged into main and the worktree stays parked at its tip:
     // the frontier ref is base history now, so recall rides on the local name and the
-    // recorded upstream (`specs/forge-host.md` Resolution — recall survives on the names
-    // local records still carry).
+    // recorded upstream (recall survives on the names local records still carry).
     let repo = worktree();
     repo.git(&["update-ref", "refs/remotes/origin/fix", "HEAD"]);
     repo.git(&["switch", "-q", "main"]);
@@ -269,7 +264,6 @@ fn a_merged_branch_keeps_its_local_name_and_its_recorded_upstream() {
 fn resolve_pick_drives_the_ancestry_guard_against_a_real_repo() {
     // The history pick wired end to end: a finished PR admits on the branch that holds
     // its head commit and never on a fresh branch reusing the name
-    // (`specs/forge-host.md` Resolution).
     let repo = worktree();
     let old_tip = head(&repo);
     repo.write("c.txt", "three\n");
@@ -302,7 +296,7 @@ fn resolve_pick_drives_the_ancestry_guard_against_a_real_repo() {
 #[test]
 fn the_reused_name_guard_admits_only_contained_history() {
     // The ancestry guard: a merged PR's head commit admits only when this branch holds
-    // it (`specs/forge-host.md` Resolution).
+    // it.
     let repo = worktree();
     let old_tip = head(&repo);
     // Continuing on the branch: the old tip stays in history.
@@ -321,7 +315,7 @@ fn the_reused_name_guard_admits_only_contained_history() {
 fn an_on_base_agent_carries_the_side_branch_name_until_the_pull() {
     // The on-main agent flow: commits on local main, pushed as `HEAD:side`, PR from
     // `side`. After the merged result is pulled, main carries no side name and is empty
-    // (`specs/forge-host.md` — a synced base branch is always empty).
+    // (a synced base branch is always empty).
     let repo = worktree();
     repo.git(&["switch", "-q", "main"]);
     repo.write("f.txt", "feature\n");
@@ -366,7 +360,7 @@ fn the_base_flag_resolves_verbatim_revs_before_canonical_entries() {
 #[test]
 fn without_a_resolvable_base_no_frontier_name_joins() {
     // A repo whose only branch is `trunk` and no origin/HEAD: no base resolves, so no
-    // frontier name can be proven beyond one (`specs/forge-host.md`).
+    // frontier name can be proven beyond one.
     let repo = Repo::init();
     repo.git(&["branch", "-qm", "trunk"]);
     repo.write("a.txt", "one\n");
@@ -377,7 +371,7 @@ fn without_a_resolvable_base_no_frontier_name_joins() {
     assert_eq!(local.base_oid, None);
     assert_eq!(local.names, ["trunk"]);
 
-    // origin/HEAD backstops the unresolvable list (`specs/review-model.md`).
+    // origin/HEAD backstops the unresolvable list.
     repo.git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]);
     repo.write("b.txt", "two\n");
     repo.commit_all("beyond trunk");
@@ -396,7 +390,7 @@ fn base_entries_canonicalize_and_resolve_origin_first() {
     assert_eq!(spelled.base_oid, bare.base_oid);
     assert!(spelled.base_oid.is_some());
 
-    // A stale local base loses to the origin tracking ref (`specs/config.md`).
+    // A stale local base loses to the origin tracking ref.
     repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
     let local = pr_local(repo.path(), None).expect("pr_local");
     assert_eq!(local.base_oid.as_deref(), Some(head(&repo).as_str()));

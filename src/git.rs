@@ -75,7 +75,7 @@ pub fn toplevel(path: &Path) -> Option<PathBuf> {
 /// A directory's git top level, keeping "git ran and it is outside any worktree" (`Outside`, a
 /// determination) apart from "git could not be run at all" (`Unknown`, the absence of one — a
 /// spawn error under load). A caller deciding membership must hold on `Unknown` rather than read
-/// it as `Outside` (`specs/herdr-host.md`).
+/// it as `Outside`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Worktree {
     Root(PathBuf),
@@ -101,7 +101,7 @@ pub fn worktree_of(path: &Path) -> Worktree {
 }
 
 /// The forge a repository target belongs to. Part of the target's identity: the same path on
-/// a different forge is a different target (`specs/forge-host.md`).
+/// a different forge is a different target.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Forge {
     /// The default carries the neutral `PR` vocabulary a forgeless state renders under.
@@ -112,7 +112,6 @@ pub enum Forge {
 }
 
 /// The per-forge display vocabulary — the CLI, noun, and reference table in
-/// `specs/forge-providers.md`.
 impl Forge {
     /// The forge's display name for link labels and failure wording.
     pub fn display_name(self) -> &'static str {
@@ -123,7 +122,7 @@ impl Forge {
         }
     }
 
-    /// The forge's full noun: the word its users say (`specs/forge-providers.md`).
+    /// The forge's full noun: the word its users say.
     pub fn noun(self) -> &'static str {
         match self {
             Self::GitHub | Self::AzureDevOps => "pull request",
@@ -158,7 +157,6 @@ impl Forge {
 }
 
 /// The self-hosted hostnames one validated config snapshot adds, one per forge
-/// (`specs/forge-host.md`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ForgeHosts<'a> {
     pub github: Option<&'a str>,
@@ -281,7 +279,7 @@ enum RemoteTransport {
 }
 
 /// Classify one repository URL against the built-in forge hosts and the configured
-/// self-hosted keys (`specs/forge-host.md`).
+/// self-hosted keys.
 fn classify_remote(url: &str, hosts: &ForgeHosts<'_>) -> RepositoryIdentity {
     let Some((transport, host, path, has_port)) = split_remote(url) else {
         return RepositoryIdentity::Hostless;
@@ -316,9 +314,9 @@ fn classify_remote(url: &str, hosts: &ForgeHosts<'_>) -> RepositoryIdentity {
 
 /// The forge that recognizes `host`, if any — the one authority for the built-in host set.
 /// Config validation asks it with default hosts, so the sets cannot drift. Config validation
-/// also keeps the host sets disjoint, so at most one forge matches (`specs/config.md`).
+/// also keeps the host sets disjoint, so at most one forge matches.
 /// `*.visualstudio.com` is the one built-in wildcard, matching every legacy Azure DevOps
-/// organization host by suffix (`specs/forge-host.md`).
+/// organization host by suffix.
 pub(crate) fn forge_for_host(host: &str, hosts: &ForgeHosts<'_>) -> Option<Forge> {
     if host == "github.com" || hosts.github == Some(host) {
         return Some(Forge::GitHub);
@@ -337,7 +335,7 @@ pub(crate) fn forge_for_host(host: &str, hosts: &ForgeHosts<'_>) -> Option<Forge
 }
 
 /// Canonicalize an Azure DevOps remote into its one target identity: the canonical host and
-/// the `[organization, project, repository]` path (`specs/forge-providers.md`). The ssh hosts
+/// the `[organization, project, repository]` path. The ssh hosts
 /// fold into their https equivalents, the `v3` and `_git` URL markers drop, a legacy
 /// `{org}.visualstudio.com` host contributes the organization segment, and each segment
 /// percent-decodes — a project named with a space travels as `%20` in the remote URL but is
@@ -426,13 +424,13 @@ fn split_remote(url: &str) -> Option<(RemoteTransport, &str, &str, bool)> {
 
 // --- PR-fetch local reads (branch names) ------------------------------------
 //
-// See `specs/forge-host.md` "Resolution". Repository selection and
+// Repository selection and
 // branch-state derivation both use the same failure contract: a git command that *fails* is a
 // transient [`GitFail`], never read as absence. The caller distinguishes a target read failure
 // from a later branch-state failure so only an unproven target replaces the visible snapshot.
 
 /// A git command that failed (spawn error or unexpected non-zero exit) during the PR
-/// fetch's local reads — a transient failure per `specs/forge-host.md`, never absence.
+/// fetch's local reads — a transient failure per, never absence.
 #[derive(Debug)]
 pub struct GitFail(pub String);
 
@@ -479,7 +477,7 @@ fn git_strict(repo: &Path, args: &[&str]) -> Result<String, GitFail> {
 pub struct PrFetchInput {
     pub repository: RepositoryIdentity,
     /// The `origin` repository, when it is a usable forge identity — on a fork clone it
-    /// is the fork, queried beside the target (`specs/forge-host.md`).
+    /// is the fork, queried beside the target.
     pub origin_repository: Option<RepoTarget>,
     /// The locally derived pins and branch names, read in the same pass.
     pub local: PrLocalState,
@@ -496,14 +494,13 @@ pub struct PrLocalState {
     pub base_oid: Option<String>,
     /// The branch's forge names: the checked-out branch's own name, its recorded upstream,
     /// and the `origin` branch names at the pushed frontier — the branch the work was
-    /// pushed to, whatever its local name (`specs/forge-host.md` Resolution).
+    /// pushed to, whatever its local name.
     pub names: Vec<String>,
     /// `HEAD` is detached — no branch, no PR story.
     pub detached: bool,
 }
 
 /// Derive the pinned `HEAD`, the pinned base, and the branch's forge names
-/// (`specs/forge-host.md` Resolution).
 pub fn pr_local(repo: &Path, base_flag: Option<&str>) -> Result<PrLocalState, GitFail> {
     let Some(branch) = git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])? else {
         return Ok(PrLocalState { detached: true, ..PrLocalState::default() });
@@ -533,7 +530,6 @@ pub fn pr_local(repo: &Path, base_flag: Option<&str>) -> Result<PrLocalState, Gi
 }
 
 /// The winning base: a branch (origin then local) or any other spelling
-/// (`specs/review-model.md` Base branch).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolvedBase {
     Branch { name: String, oid: String },
@@ -568,7 +564,7 @@ impl ResolvedBase {
 /// The chain outcome the header paints: the winner and the first recorded choice the
 /// chain skipped because it no longer resolves. The skip rides beside the winner, not
 /// inside it, so it survives a chain where nothing resolves at all — a dormant pick
-/// never reads as never-chosen (`specs/tui.md`).
+/// never reads as never-chosen.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BaseStatus {
     pub winner: Option<ResolvedBase>,
@@ -579,7 +575,7 @@ pub struct BaseStatus {
 /// precedence order and deduped by OID — the PR frontier walk needs all of them, not just
 /// the winner (`pr_local`). `recorded` keeps every source name the chain considered —
 /// every candidate's name and every dormant one's, since a pick that fails to resolve
-/// still shields its name from the PR name lookup (`specs/forge-host.md` Resolution).
+/// still shields its name from the PR name lookup.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BaseResolution {
     pub status: BaseStatus,
@@ -594,9 +590,9 @@ impl BaseResolution {
 }
 
 /// Resolve the base chain: the `--base` flag, then this worktree's pick, then the branch
-/// `origin/HEAD` names (`specs/review-model.md` Base branch). A source that does not
+/// `origin/HEAD` names. A source that does not
 /// resolve to a commit is skipped, never an error; a skipped flag or pick that would have
-/// outranked the winner is recorded for the header (`specs/tui.md`).
+/// outranked the winner is recorded for the header.
 pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResolution, GitFail> {
     let mut candidates: Vec<ResolvedBase> = Vec::new();
     let mut recorded: Vec<String> = Vec::new();
@@ -640,7 +636,7 @@ pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResoluti
     Ok(BaseResolution { status: BaseStatus { winner, skipped }, candidates, recorded })
 }
 
-/// The branch name `origin/HEAD` points at (`specs/review-model.md` Base branch). Some
+/// The branch name `origin/HEAD` points at. Some
 /// clones carry `origin/HEAD` as a plain ref instead of a symref — then the name is the
 /// origin tip whose commit matches it.
 pub fn default_branch_name(repo: &Path) -> Result<Option<String>, GitFail> {
@@ -665,7 +661,7 @@ pub fn default_branch_name(repo: &Path) -> Result<Option<String>, GitFail> {
     Ok(origin_tips(repo)?.into_iter().find_map(|(tip, name)| (tip == oid).then_some(name)))
 }
 
-/// Strip the ref prefixes a `--base` branch name may carry (`specs/review-model.md`).
+/// Strip the ref prefixes a `--base` branch name may carry.
 pub(crate) fn strip_base_prefix(entry: &str) -> String {
     ["refs/remotes/origin/", "refs/heads/", "origin/"]
         .iter()
@@ -775,7 +771,7 @@ fn is_ancestor(repo: &Path, commit: &str, of: &str) -> Result<bool, GitFail> {
 
 /// Whether the pinned `HEAD` contains `commit` — the merged/closed admission guard: a
 /// reused branch name never resurrects a PR whose commits this branch does not hold
-/// (`specs/forge-host.md` Resolution). A commit absent from the object database is not
+/// A commit absent from the object database is not
 /// contained; an unfetched head proves nothing.
 pub fn contains_commit(repo: &Path, head: &str, commit: &str) -> Result<bool, GitFail> {
     if git_tristate(repo, &["cat-file", "-e", commit])?.is_none() {
@@ -798,7 +794,7 @@ fn beyond_all_bases(repo: &Path, oid: &str, bases: &[String]) -> Result<bool, Gi
 /// The target and origin identities from one read of each remote. The target resolves from
 /// a readable supported `upstream`, falling back to `origin`; unusable identities fall
 /// back, read errors do not. The origin identity rides along for the fork lookup —
-/// on a fork clone the fork's own PRs live there (`specs/forge-host.md`). A usable `upstream`
+/// on a fork clone the fork's own PRs live there. A usable `upstream`
 /// already fixes the target, so an `origin` read that fails then costs only that fetch's
 /// association source, not the whole read.
 pub(crate) fn remote_identities(
@@ -837,7 +833,7 @@ fn remote_identity(
     Err(GitFail(format!("git {args:?}: {}", stderr.trim())))
 }
 
-/// Peel `rev` to a commit object id (`specs/review-model.md`). A leading `-` is not a
+/// Peel `rev` to a commit object id. A leading `-` is not a
 /// rev. An ambiguous abbreviated SHA is a miss, not an error.
 pub fn resolve_commit(repo: &Path, rev: &str) -> Result<Option<String>, GitFail> {
     if rev.is_empty() || rev.starts_with('-') {
@@ -847,14 +843,14 @@ pub fn resolve_commit(repo: &Path, rev: &str) -> Result<Option<String>, GitFail>
     git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])
 }
 
-/// The abbreviated object id the header and the picker paint (`specs/tui.md`).
+/// The abbreviated object id the header and the picker paint.
 #[must_use]
 pub fn abbreviate_oid(oid: &str) -> String {
     const N: usize = 7;
     if oid.len() <= N { oid.to_string() } else { oid[..N].to_string() }
 }
 
-/// Whether `spelling` is a hex prefix of `oid` (`specs/tui.md`: paint once).
+/// Whether `spelling` is a hex prefix of `oid`.
 #[must_use]
 pub fn spelling_is_sha_prefix(spelling: &str, oid: &str) -> bool {
     let s = spelling.to_ascii_lowercase();
@@ -863,8 +859,7 @@ pub fn spelling_is_sha_prefix(spelling: &str, oid: &str) -> bool {
         && oid.to_ascii_lowercase().starts_with(&s)
 }
 
-/// Shown name and optional abbreviated SHA for a non-branch spelling (`specs/tui.md`,
-/// `specs/input.md`). A SHA prefix paints once; anything else keeps the spelling and
+/// Shown name and optional abbreviated SHA for a non-branch spelling. A SHA prefix paints once; anything else keeps the spelling and
 /// carries the mark.
 #[must_use]
 pub fn rev_paint(spelling: &str, oid: &str) -> (String, Option<String>) {
@@ -878,7 +873,6 @@ pub fn rev_paint(spelling: &str, oid: &str) -> (String, Option<String>) {
 
 /// Complete a unique SHA prefix to the abbreviated object id. A spelling that is
 /// already that abbrev, or a longer hex prefix of the oid (a pasted 40-hex), is kept
-/// (`specs/input.md`).
 #[must_use]
 pub fn complete_sha_prefix(spelling: &str, oid: &str) -> String {
     let abbrev = abbreviate_oid(oid);
@@ -889,13 +883,13 @@ pub fn complete_sha_prefix(spelling: &str, oid: &str) -> String {
     }
 }
 
-/// A branch name the picker would list, not `HEAD` and not a rev-walk (`specs/review-model.md`).
+/// A branch name the picker would list, not `HEAD` and not a rev-walk.
 #[must_use]
 pub fn is_branch_label(value: &str) -> bool {
     branch_name_shaped(value) && !value.eq_ignore_ascii_case("HEAD")
 }
 
-/// Origin then local, else a verbatim commit (`specs/review-model.md`).
+/// Origin then local, else a verbatim commit.
 pub(crate) fn resolve_spelling(
     repo: &Path,
     spelling: &str,
@@ -907,7 +901,7 @@ pub(crate) fn resolve_spelling(
 }
 
 /// `--base`: verbatim first, else prefix-stripped as a branch. A miss keeps the flag
-/// spelling unless the stripped form is a branch name (`specs/review-model.md`).
+/// spelling unless the stripped form is a branch name.
 fn classify_flag(
     repo: &Path,
     flag: &str,
@@ -963,8 +957,7 @@ fn recorded_upstream(
         return Ok(None);
     }
     // A pruned upstream ref no longer resolves; the record still carries the name
-    // (`specs/forge-host.md` Resolution — a stale local record costs recall, never
-    // correctness).
+    // (a stale local record costs recall, never correctness).
     let probe = format!("{dest}^{{commit}}");
     if let Some(tip) = git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])?
         && base_oids.contains(&tip)
@@ -976,7 +969,7 @@ fn recorded_upstream(
 
 /// Commits `local` (the pinned `HEAD` OID) is ahead and behind `other` (the PR head OID).
 /// `Ok(None)` when `other` is not in the object database — the PR head was never fetched
-/// locally, a clean absence. Backs the PR `sync` indicator (`specs/forge-host.md`).
+/// locally, a clean absence. Backs the PR `sync` indicator.
 pub fn ahead_behind_oids(
     repo: &Path,
     local: &str,
@@ -1000,7 +993,6 @@ pub fn ahead_behind_oids(
 }
 
 /// The merge-base commit of the resolved base OID and `HEAD`
-/// (`specs/review-model.md` Base branch).
 pub fn merge_base(repo: &Path, base_oid: &str) -> Option<String> {
     git_line(repo, &["merge-base", base_oid, "HEAD"])
 }
@@ -1033,7 +1025,7 @@ pub fn read_base_pick(repo: &Path) -> Result<Option<String>, GitFail> {
     Ok(pick_spelling_shaped(name).then(|| name.to_string()))
 }
 
-/// One printable line, not a git option (`specs/review-model.md`). `HEAD~1` and a tag are
+/// One printable line, not a git option. `HEAD~1` and a tag are
 /// picks. Control bytes are not.
 fn pick_spelling_shaped(value: &str) -> bool {
     !value.is_empty()
@@ -1231,8 +1223,7 @@ pub fn changed_against_tree(repo: &Path, tree: &str) -> Result<Vec<ChangedFile>>
 }
 
 /// The changed files between two commits, `old` against `new`, for the `commits` scope:
-/// both sides are committed trees, so no untracked pass runs (specs/review-model.md
-/// Commit pick). `old` may be the empty tree for a root commit.
+/// both sides are committed trees, so no untracked pass runs. `old` may be the empty tree for a root commit.
 pub fn changed_between(repo: &Path, old: &str, new: &str) -> Result<Vec<ChangedFile>> {
     let numstat = git(repo, &["diff", old, new, "--numstat", "-z"])?;
     let name_status = git(repo, &["diff", old, new, "--name-status", "-z"])?;
@@ -1240,7 +1231,7 @@ pub fn changed_between(repo: &Path, old: &str, new: &str) -> Result<Vec<ChangedF
 }
 
 /// `sha`'s first parent, or the empty tree when `sha` is a root commit: the old side of a
-/// run whose oldest commit is `sha` (specs/review-model.md Commit pick). `None` when the
+/// run whose oldest commit is `sha`. `None` when the
 /// commit itself is missing. The parent is read from the raw commit object, so a parent the
 /// repository lacks (a shallow clone's cut) is named, not mistaken for a root: the caller's
 /// existence check then reports it `gone`.
@@ -1255,29 +1246,29 @@ pub fn parent_or_empty(repo: &Path, sha: &str) -> Option<String> {
 }
 
 /// The commit `HEAD` names, or `None` in an unborn repository. The commit picker's universe
-/// is keyed by it, so a poll re-lists only when it moved (specs/input.md Commit picker).
+/// is keyed by it, so a poll re-lists only when it moved.
 pub fn head_oid(repo: &Path) -> Option<String> {
     git_line(repo, &["rev-parse", "--verify", "-q", "HEAD"])
 }
 
-/// `sha`'s subject line, for the header paint (specs/tui.md).
+/// `sha`'s subject line, for the header paint.
 pub fn commit_subject(repo: &Path, sha: &str) -> Option<String> {
     git_line(repo, &["log", "-1", "--format=%s", sha])
 }
 
-/// Whether `sha` names a commit the repository still holds (specs/review-model.md `gone`).
+/// Whether `sha` names a commit the repository still holds (`gone`).
 pub fn commit_exists(repo: &Path, sha: &str) -> bool {
     git_ok(repo, &["cat-file", "-e", &format!("{sha}^{{commit}}")])
 }
 
-/// Whether `sha` is reachable from `HEAD` (specs/review-model.md `off branch`). A missing
+/// Whether `sha` is reachable from `HEAD` (`off branch`). A missing
 /// commit is unreachable.
 pub fn is_reachable(repo: &Path, sha: &str) -> bool {
     git_ok(repo, &["merge-base", "--is-ancestor", sha, "HEAD"])
 }
 
 /// How many commits `oldest..=newest` spans along the first-parent walk from `newest`
-/// (`specs/tui.md`). `None` when either end is missing, or `oldest` is not behind `newest`.
+/// `None` when either end is missing, or `oldest` is not behind `newest`.
 pub fn run_length(repo: &Path, oldest: &str, newest: &str) -> Option<usize> {
     let old = parent_or_empty(repo, oldest)?;
     run_length_from(repo, &old, oldest, newest)
@@ -1301,7 +1292,7 @@ pub fn run_length_from(repo: &Path, old: &str, oldest: &str, newest: &str) -> Op
     git_line(repo, &args)?.parse().ok()
 }
 
-/// One row of the commit picker (specs/input.md Commit picker): the full id, the subject,
+/// One row of the commit picker: the full id, the subject,
 /// the committer time as unix seconds, the author, the refs pointing at it, and whether it
 /// is a merge.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1316,7 +1307,7 @@ pub struct CommitRow {
 }
 
 /// A ref a picker row can show, by kind, so the row's one ref ranks by what it is rather
-/// than by how it is spelled (specs/input.md Commit picker).
+/// than by how it is spelled.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum CommitRef {
     /// A remote-tracking tip, shown as `origin/feature`.
@@ -1337,8 +1328,7 @@ impl CommitRef {
 }
 
 /// The picker's universe, newest first, along the first-parent walk from `HEAD`:
-/// `merge_base..HEAD` when the base has one, or the last 50 commits without (specs/review-
-/// model.md Commit pick). First-parent only, so any contiguous run of rows is one ancestor
+/// `merge_base..HEAD` when the base has one, or the last 50 commits without. First-parent only, so any contiguous run of rows is one ancestor
 /// chain and diffs as `A^..B`. An unborn repository lists nothing.
 pub fn list_commits(repo: &Path, merge_base: Option<&str>) -> Result<Vec<CommitRow>> {
     if head_oid(repo).is_none() {
@@ -1399,7 +1389,7 @@ fn parse_decorations(d: &str) -> Vec<CommitRef> {
 }
 
 /// One entry in the `All files` worktree listing: a path plus whether git ignores it and
-/// whether it is a (lazily-expanded) directory placeholder (specs/file-list.md).
+/// whether it is a (lazily-expanded) directory placeholder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeEntry {
     pub path: String,
@@ -1407,7 +1397,7 @@ pub struct WorktreeEntry {
     pub is_dir: bool,
 }
 
-/// Every entry in the worktree for the `All files` tab (specs/file-list.md): tracked and
+/// Every entry in the worktree for the `All files` tab: tracked and
 /// untracked-not-ignored files from one `ls-files --cached --others` pass, and the ignored
 /// entries from [`ignored_entries`] — a wholly-ignored directory collapsed to one `is_dir`
 /// placeholder, an individually-ignored file as itself. `.git` is never reported. Deduped and
@@ -1463,7 +1453,7 @@ fn ignored_entries(repo: &Path) -> Result<Vec<(String, bool)>> {
 }
 
 /// The immediate children of a wholly-ignored directory, for lazy expansion in `All files`
-/// (specs/file-list.md). Everything under an ignored directory is ignored, so this reads the
+/// Everything under an ignored directory is ignored, so this reads the
 /// filesystem directly; sub-directories come back as `is_dir` placeholders to expand in turn.
 /// An unreadable directory yields no children rather than failing the reload, so expansion is
 /// best-effort.

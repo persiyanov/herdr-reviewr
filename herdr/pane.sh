@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The reviewr pane actions and event hook (specs/herdr-host.md).
+# The reviewr pane actions and event hook.
 #
 #   pane.sh toggle      open a reviewr pane, or close every one if any is open
 #   pane.sh open        open a reviewr pane, no-op if one is open
@@ -7,7 +7,7 @@
 #   pane.sh auto-open   worktree.created hook: open, gated by auto_open and placement
 #
 # A reviewr pane is any pane running the review UI in its foreground process group, read
-# live per pane (specs/herdr-host.md, Pane identity). The `reviewr` label is display only
+# live per pane. The `reviewr` label is display only
 # and never read. There is no state file. Actions refuse loudly (exit 1, one stderr line)
 # and report successes on stdout; a refused event reports its config error through stderr
 # for herdr's plugin log.
@@ -50,7 +50,7 @@ auto_open=$(cfg_field auto_open) || unreadable_config
 
 # The stable launch paths track the live plugin root from here, not from the install step:
 # the build step runs in a staging checkout that herdr renames afterwards, so only a runtime
-# invocation knows the real root (specs/herdr-host.md, Install paths). Best effort — never
+# invocation knows the real root. Best effort — never
 # fails an action, and never replaces anything but a symlink.
 if [ -n "${HERDR_PLUGIN_ROOT:-}" ] && [ -x "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" ]; then
   for link_dir in "$HOME/.local/state/herdr/plugins/persiyanov.reviewr/bin" "$HOME/.local/bin"; do
@@ -102,8 +102,7 @@ panes_json=$("$H" pane list --workspace "$ws" 2>/dev/null) && [ -n "$panes_json"
   printf '%s' "$panes_json" | jq -e '.result.panes' >/dev/null 2>&1 ||
   refuse "herdr pane list failed for $ws"
 
-# A reviewr pane runs the review UI in its foreground process group (specs/herdr-host.md,
-# Pane identity). A wrapped launch (`cargo run`) counts through its child; a flag run
+# A reviewr pane runs the review UI in its foreground process group. A wrapped launch (`cargo run`) counts through its child; a flag run
 # (`--resolve-plugin-config`) never counts. The executable name in `argv0`/`argv[0]`
 # decides, never `name`: that field is a rewritable process title (docs/herdr-api-notes.md).
 # The flag exclusion mirrors the dispatch in `src/main.rs`, which recognizes the flag
@@ -135,8 +134,8 @@ is_reviewr_pane() {
   [ "$count" -gt 0 ] 2>/dev/null
 }
 
-# The workspace's reviewr panes: any tab, any placement, however they were launched
-# (HH-LAUNCHER-BLIND) — the actions and a layout's own pane converge on one set. The
+# The workspace's reviewr panes: any tab, any placement, however they were launched.
+# The actions and a layout's own pane converge on one set. The
 # per-pane reads run concurrently, so the sweep costs one process-info round-trip of
 # wall clock, not one per pane in the workspace. Each probe reports through a marker
 # file keyed by its position in the list, so nothing rests on a pane id's spelling.
@@ -178,11 +177,11 @@ EOF
 
 # Plain `pane close`, not `plugin pane close`: the live process read reaches a pane the
 # plugin-pane registry forgot after a herdr restart, and a layout-launched pane was never
-# in that registry at all (specs/herdr-host.md). A close refused because the pane is gone
+# in that registry at all. A close refused because the pane is gone
 # lost a benign race — the pane exited between the read and the close, the same end
 # state — so the sweep still converges and exits 0. A close failing any other way names a
 # pane that may still be running, so the sweep finishes the rest and then refuses rather
-# than reporting that pane closed (specs/herdr-host.md, Failure semantics).
+# than reporting that pane closed.
 close_all() {
   closed=""
   failed=""
@@ -227,8 +226,7 @@ open | auto-open)
 esac
 
 # Opening from here on. Prefer the focused pane's live `foreground_cwd`, read from the
-# pane-list snapshot already in hand, over the context's launch cwd (specs/herdr-host.md,
-# Repo discovery; the launch-vs-live split is docs/herdr-api-notes.md). The mode guard
+# pane-list snapshot already in hand, over the context's launch cwd (the launch-vs-live split is docs/herdr-api-notes.md). The mode guard
 # keeps auto-open on the event payload's cwd set above.
 is_git_repo() { [ -n "$1" ] && git -C "$1" rev-parse --show-toplevel >/dev/null 2>&1; }
 live=""
@@ -245,7 +243,7 @@ elif ! is_git_repo "$cwd"; then
   refuse "not a git repo: '${cwd:-<no cwd>}'${live:+ (live cwd '$live')}"
 fi
 
-# A manual open takes focus. The event never does (specs/herdr-host.md).
+# A manual open takes focus. The event never does.
 focus=--no-focus
 [ "$mode" != auto-open ] && focus=--focus
 
@@ -277,7 +275,7 @@ new=$(printf '%s' "$open_json" | jq -r '.result.plugin_pane.pane.pane_id // empt
 [ -n "$new" ] || refuse "herdr plugin pane open failed"
 
 # A tab open lands in a fresh tab that herdr labels with a bare index; name it
-# after the plugin so the tab bar reads "reviewr" (specs/herdr-host.md). Cosmetic: a
+# after the plugin so the tab bar reads "reviewr". Cosmetic: a
 # failed rename never fails an open that already succeeded.
 if [ "$placement" = tab ]; then
   tab=$(printf '%s' "$open_json" | jq -r '.result.plugin_pane.pane.tab_id // empty' 2>/dev/null)

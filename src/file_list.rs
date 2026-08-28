@@ -1,7 +1,7 @@
 //! The file-list directory tree: the scope's changed files grouped into a collapsible
 //! tree of directories and files, flattened to the rows the navigator paints.
 //!
-//! See `specs/file-list.md`. This module is pure — it turns a `&[ChangedFile]` plus the set
+//! This module is pure — it turns a `&[ChangedFile]` plus the set
 //! of collapsed directory paths into a flat `Vec<Row>`; selection, expansion state, and
 //! rendering live in `app.rs` and `ui.rs`.
 
@@ -19,7 +19,7 @@ pub struct Row {
     /// joined with `/` (single-child directories fold into their child).
     pub name: String,
     pub kind: RowKind,
-    /// Whether git ignores this row's path — rendered dimmed in `All files` (file-list.md).
+    /// Whether git ignores this row's path — rendered dimmed in `All files`.
     pub ignored: bool,
 }
 
@@ -33,7 +33,7 @@ pub enum RowKind {
 }
 
 /// The change a file carries in the active scope, shown inline in the tree. Absent on an
-/// unchanged `All files` file (specs/file-list.md).
+/// unchanged `All files` file.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Annotation {
     pub change: ChangeKind,
@@ -56,7 +56,7 @@ pub struct Entry {
     pub path: String,
     pub previous_path: Option<String>,
     pub annotation: Option<Annotation>,
-    /// Whether git ignores this path — drives dimming in `All files` (file-list.md).
+    /// Whether git ignores this path — drives dimming in `All files`.
     pub ignored: bool,
     /// A wholly-ignored directory placeholder whose children load lazily on expand; never
     /// set on a `Changes` entry.
@@ -101,7 +101,7 @@ struct Dir {
     dirs: BTreeMap<String, Dir>,
     files: BTreeMap<String, usize>,
     /// Set when a wholly-ignored directory placeholder created this node — its row renders
-    /// dimmed (file-list.md). A directory derived from tracked file paths stays `false`.
+    /// dimmed. A directory derived from tracked file paths stays `false`.
     ignored: bool,
 }
 
@@ -126,7 +126,7 @@ pub fn build<S: BuildHasher>(
 
 /// Insert `entry` at `index` into the tree, creating directories along the way. A directory
 /// placeholder (`is_dir`) creates its node and marks it ignored, holding no file — its
-/// children arrive later when the app expands it (file-list.md).
+/// children arrive later when the app expands it.
 fn insert(root: &mut Dir, entry: &Entry, index: usize) {
     let mut segments: Vec<&str> = entry.path.split('/').filter(|s| !s.is_empty()).collect();
     if entry.is_dir {
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn an_ignored_dir_placeholder_renders_as_a_collapsed_ignored_row() {
         // A wholly-ignored directory shows as one dimmed dir row, with no children until the
-        // app loads them on expand (file-list.md).
+        // app loads them on expand.
         let rows = build(&[ignored_dir("target")], &HashSet::new(), false);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].ignored, "the placeholder row is marked ignored (dimmed)");

@@ -826,7 +826,7 @@ fn the_footer_offers_edit_file_on_a_diff_with_no_rows() {
 fn edit_reaches_a_file_the_changeset_only_calls_deleted() {
     // `git rm --cached` reports the file as deleted while it sits in the worktree. Whether a
     // file is there is the disk's answer, and the press is where that question is asked, so
-    // the key has to reach it (`specs/input.md` Edit).
+    // the key has to reach it.
     let r = Repo::init();
     r.write("here.rs", "one\ntwo\n");
     r.commit_all("init");
@@ -1037,7 +1037,7 @@ fn the_expansion_toggles_from_normal_and_survives_a_poll() {
     assert!(!app.keys_expanded, "the footer opens collapsed");
     press(&mut app, &keymap, KeyCode::Char('?'));
     assert!(app.keys_expanded, "`?` opens the expansion");
-    // A poll re-derives the footer's content but never moves the toggle (overview.md Continuity).
+    // A poll re-derives the footer's content but never moves the toggle (Continuity).
     common::land_world(&mut app);
     assert!(app.keys_expanded, "a refresh keeps the expansion open");
     press(&mut app, &keymap, KeyCode::Char('?'));
@@ -1059,7 +1059,7 @@ fn the_expansion_is_inert_in_the_comments_list() {
 #[test]
 fn the_keys_char_is_text_in_the_comment_editor() {
     // `?` is the `keys` binding, but the editor's mode-check runs before the keymap dispatch, so it
-    // types a literal `?` and never toggles the expansion (specs/input.md).
+    // types a literal `?` and never toggles the expansion.
     let mut app = composing_app(); // composing
     let keymap = Keymap::default();
     press(&mut app, &keymap, KeyCode::Char('?'));
@@ -1147,7 +1147,7 @@ fn the_all_files_move_band_drops_the_inert_hunk_step() {
 #[test]
 fn the_go_band_never_repeats_the_empty_scope_primary() {
     // An empty changeset leads row 1 with the other scopes; the `go` band must not list
-    // `scope` a second time (`specs/input.md`).
+    // `scope` a second time.
     let r = Repo::init();
     r.write("a.rs", "one\n");
     r.commit_all("c"); // nothing uncommitted → the empty state
@@ -2180,7 +2180,7 @@ fn editing_a_range_comment_opens_the_box_at_the_ranges_last_row() {
     app.submit_comment();
 
     // The card splices under the range's last row (`card_rows`); `e` reopens the box in
-    // the card's place, never jumping to the range's first line (specs/input.md).
+    // the card's place, never jumping to the range's first line.
     app.diff_cursor = 0;
     app.start_edit();
     assert!(app.composing());
@@ -2567,7 +2567,7 @@ fn agent_in(cwd: &Path, status: Status) -> AgentSample {
 
 /// Drive one enumeration on the worker-owned turn host and mirror its baseline and
 /// membership into the app, exactly as a world completion landing would
-/// (specs/herdr-host.md). `None` is a failed enumeration.
+/// `None` is a failed enumeration.
 fn observe_agents(
     app: &mut App,
     host: &mut herdr_reviewr::world::TurnHost,
@@ -2870,7 +2870,7 @@ fn a_failed_enumeration_keeps_the_previous_membership() {
     let (mut app, mut host) = turn_setup(&r);
 
     // A hiccup before any poll has ever succeeded observed nothing, so it may not claim the
-    // worktree is empty — the reviewr pane has no idea yet (`specs/herdr-host.md`).
+    // worktree is empty — the reviewr pane has no idea yet.
     observe_agents(&mut app, &mut host, None);
     assert_eq!(app.agents_present(), None, "a failed enumeration observes nothing");
     assert_eq!(app.turn_wait_message(), "waiting for the first turn", "so it waits");
@@ -2958,7 +2958,7 @@ fn a_tab_switch_paints_the_stashed_frame_and_requests_its_refresh() {
     assert!(app.entries.iter().any(|e| e.path == "a.rs"), "the first frame is populated");
 
     // A return visit paints the stashed frame as it was and requests its refresh
-    // (specs/tui.md, specs/overview.md Continuity).
+    // (Continuity).
     enter_tab(&mut app, Tab::Changes);
     r.write("b.rs", "fn b() {}\n");
     app.set_tab(Tab::AllFiles).unwrap();
@@ -3102,7 +3102,7 @@ fn switching_scope_on_all_files_remarks_in_place() {
     assert_eq!(annotation_of(&app, "b.rs"), Some(None), "b.rs is unmarked under uncommitted");
 
     // Branch is a superset: the changed set rebuilds before the frame, the tree's
-    // annotations land with the queued refresh (specs/tui.md).
+    // annotations land with the queued refresh.
     app.set_scope(Scope::Branch).unwrap();
     assert_eq!(app.file_cursor, cursor, "the cursor holds across a scope re-mark");
     assert_eq!(app.changed_count(), 2, "branch marks both the committed and the dirty file");
@@ -3495,7 +3495,6 @@ fn a_held_resolution_and_a_transient_detach_keep_the_painted_pr() {
     assert!(matches!(&app.pr, PrView::Pr(s) if s.number == 42));
 
     // A resolution that found nothing but proved the head still contained holds the story
-    // (`specs/forge-host.md` Refresh).
     app.apply_pr(PrView::Held);
     assert!(matches!(&app.pr, PrView::Pr(s) if s.number == 42), "held keeps the snapshot");
 
@@ -3633,7 +3632,7 @@ fn rebinding_down_frees_the_arrow_and_tab_stays_fixed() {
     app.focus = Focus::Diff;
     app.diff_cursor = 0;
 
-    // The arrows are the `down`/`up` defaults, replaced like any other key (`specs/input.md`).
+    // The arrows are the `down`/`up` defaults, replaced like any other key.
     press(&mut app, &keymap, KeyCode::Down);
     assert_eq!(app.diff_cursor, 0, "the freed down arrow answers nothing");
 
@@ -3644,7 +3643,7 @@ fn rebinding_down_frees_the_arrow_and_tab_stays_fixed() {
     assert_eq!(app.focus, Focus::Files, "tab is structural and never rebinds");
 }
 
-// ---- in-file find (specs/find-in-file.md) -----------------------------------------------
+// ---- in-file find -----------------------------------------------
 
 /// A repo whose only change is a new `m.rs`: it renders as all-insertion rows, so the diff has
 /// no context and no folds — one row per line, matching is straightforward.
@@ -3826,7 +3825,7 @@ fn find_is_inert_in_wrong_contexts() {
 #[test]
 fn find_is_inert_without_content_rows() {
     use herdr_reviewr::diff::Row;
-    // An empty file has no content rows, so `find_available` is false (specs/find-in-file.md).
+    // An empty file has no content rows, so `find_available` is false.
     let r = Repo::init();
     r.write("base.txt", "x\n");
     r.commit_all("init");
@@ -3892,7 +3891,7 @@ fn a_poll_keeping_the_open_file_leaves_find_open_and_re_derives() {
     assert_eq!(
         app.mode,
         Mode::Find,
-        "a same-file poll keeps the band open (overview.md Continuity)"
+        "a same-file poll keeps the band open (Continuity)"
     );
     assert_eq!(app.find_count().unwrap().1, before + 1, "the count re-derives from new content");
 }
@@ -4254,7 +4253,7 @@ fn the_diff_view_previews_and_returns_to_the_exact_position() {
     assert_eq!(app.preview_scroll, block, "entry aligns to the nearest current-content block");
 
     // Scrolling the preview and returning leaves the diff cursor and scroll exactly where
-    // they were — the Diff view treats the preview as a peek (specs/diff-view.md).
+    // they were — the Diff view treats the preview as a peek.
     app.preview_scroll_by(1);
     app.toggle_preview();
     assert!(!app.preview_active(), "the toggle returns to the diff");
@@ -4275,7 +4274,7 @@ fn diff_preview_entry_falls_back_to_the_top_with_no_current_line_above() {
     app.focus = Focus::Diff;
 
     // The first visible row is a leading fold, with no current-content line at or above
-    // the cursor, so entry opens the preview at its top (specs/diff-view.md).
+    // the cursor, so entry opens the preview at its top.
     assert!(app.visible[0].new_no().is_none(), "a leading fold has no current-content line");
     app.diff_cursor = 0;
     app.toggle_preview();
@@ -4283,7 +4282,7 @@ fn diff_preview_entry_falls_back_to_the_top_with_no_current_line_above() {
     assert_eq!(app.preview_scroll, 0, "entry with nothing above opens at the top");
 
     // Expanding the fold, then a preview round-trip, leaves the fold expanded — a return
-    // in the Diff view never disturbs the folds (specs/diff-view.md).
+    // in the Diff view never disturbs the folds.
     app.toggle_preview();
     expand_fold(&mut app);
     let expanded = app.visible.len();
@@ -4532,7 +4531,7 @@ fn the_worker_coalesces_queued_jobs_keeping_their_flags() {
     worker.join().unwrap();
 }
 
-// --- Search overlay (specs/search.md) --------------------------------------------------
+// --- Search overlay --------------------------------------------------
 
 mod search_overlay {
     use super::{common, press};
@@ -4574,7 +4573,7 @@ mod search_overlay {
         let keymap = default_keymap().clone();
         let mut app = app_on(&repo);
 
-        // Every tab's footer carries the hint, and `/` opens from each (specs/search.md).
+        // Every tab's footer carries the hint, and `/` opens from each.
         for tab in [Tab::Changes, Tab::Pr, Tab::AllFiles] {
             enter_tab(&mut app, tab);
             let actions: Vec<_> = app.footer_bands().into_iter().map(|(a, _)| a).collect();
@@ -4637,7 +4636,7 @@ mod search_overlay {
     }
 
     /// A world poll reconciles the preview but never reshapes the results or the pick —
-    /// only an edit re-queries (specs/search.md, overview.md Continuity).
+    /// only an edit re-queries (Continuity).
     #[test]
     fn poll_never_reshapes_results_or_pick() {
         let repo = Repo::init();
@@ -4814,7 +4813,7 @@ mod search_overlay {
     }
 
     /// An error completion holds the previous results but paints only its message, so
-    /// `enter` must open nothing off the invisible stale rows (specs/search.md).
+    /// `enter` must open nothing off the invisible stale rows.
     #[test]
     fn error_phase_makes_stale_results_inert() {
         let repo = Repo::init();
@@ -4843,7 +4842,7 @@ mod search_overlay {
     }
 
     /// With nothing pickable the footer offers only the exit, so it never lists a key
-    /// that would not work (specs/input.md, specs/search.md).
+    /// that would not work.
     #[test]
     fn footer_offers_only_esc_when_nothing_pickable() {
         use herdr_reviewr::app::{Band, FooterAction};
@@ -4884,7 +4883,7 @@ mod search_overlay {
     }
 
     /// A divider gesture cancelled by `/` still owns its mouse-up: the release frees the
-    /// capture and never resolves into a pick (specs/input.md, specs/search.md).
+    /// capture and never resolves into a pick.
     #[test]
     fn cancelled_divider_drag_releases_on_mouse_up_in_search() {
         use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -4933,7 +4932,7 @@ mod search_overlay {
         assert_eq!(app.mode, Mode::Search, "the release never resolves into a pick");
     }
 
-    /// The query edits with the comment editor's caret controls (specs/search.md):
+    /// The query edits with the comment editor's caret controls:
     /// word jumps, kills, Home/End, and mid-string inserts, with a paste's newlines
     /// flattened to spaces.
     #[test]
@@ -4980,7 +4979,7 @@ mod search_overlay {
         assert_eq!(q(&app), "multi line", "a paste's newlines become spaces");
     }
 
-    /// `ctrl+n` / `ctrl+p` move the pick, like `↓`/`↑` (specs/search.md Keys). Plain
+    /// `ctrl+n` / `ctrl+p` move the pick, like `↓`/`↑`. Plain
     /// `n`/`p` still type into the query.
     #[test]
     fn ctrl_n_p_move_the_pick() {
@@ -5020,7 +5019,7 @@ mod search_overlay {
 
     /// The preview follows the pick on settle: a retarget doesn't rebuild until the settle
     /// call, which lands on the new pick and carries a code pick's hit; an unchanged pick is
-    /// not rebuilt (specs/search.md Preview).
+    /// not rebuilt.
     #[test]
     fn preview_builds_on_settle_with_hit() {
         let repo = Repo::init();
@@ -5074,7 +5073,7 @@ mod search_overlay {
     }
 
     /// A landed poll repaints the previewed file in place — same scroll, fresh content —
-    /// and a deleted previewed file previews empty (specs/search.md Preview).
+    /// and a deleted previewed file previews empty.
     #[test]
     fn poll_repaints_preview_in_place() {
         let repo = Repo::init();
@@ -5105,7 +5104,7 @@ mod search_overlay {
     }
 
     /// Opening a result is a deliberate leave: it lands in `All files` whatever tab the
-    /// search left, and the origin tab keeps its place (specs/search.md Opening).
+    /// search left, and the origin tab keeps its place.
     #[test]
     fn open_from_changes_lands_in_all_files_keeping_origin_place() {
         let repo = Repo::init();
@@ -5131,7 +5130,7 @@ mod search_overlay {
     }
 
     /// The search divider drags search's own share; the review layout's shares stay
-    /// untouched (specs/search.md).
+    /// untouched.
     #[test]
     fn search_divider_drags_only_the_search_share() {
         let repo = Repo::init();
@@ -5156,7 +5155,7 @@ mod search_overlay {
     #[test]
     fn opening_search_mid_navigator_drag_does_not_hijack_it() {
         // A divider drag held from the review view is cancelled on open, so its remaining
-        // drag events are consumed, not turned into a search-split resize (specs/input.md).
+        // drag events are consumed, not turned into a search-split resize.
         let repo = Repo::init();
         repo.write("a.rs", "one\n");
         repo.commit_all("c");
@@ -5195,7 +5194,7 @@ mod search_overlay {
 
     /// The real engine, end to end: spawn the worker, run a query, and check the contract —
     /// results arrive, ignored files and `.git` never appear, and the worktree gains no
-    /// file (specs/overview.md, the no-writes invariant).
+    /// file (the no-writes invariant).
     #[test]
     fn engine_worker_end_to_end() {
         let repo = Repo::init();
@@ -5239,7 +5238,6 @@ mod search_overlay {
             "ignored files and .git are not searchable: {paths:?}"
         );
         // The code hit's leading indentation is stripped so the row aligns left
-        // (specs/search.md).
         let code = results.code.iter().find(|c| c.path == "src/alpha.rs");
         if let Some(hit) = code {
             assert!(
@@ -5260,7 +5258,7 @@ mod search_overlay {
     }
 }
 
-// --- Agent picker (specs/herdr-host.md, specs/input.md) ------------------------------------
+// --- Agent picker ------------------------------------
 
 fn choice(pane: &str, name: &str) -> AgentChoice {
     AgentChoice { pane_id: pane.into(), name: name.into(), state: "idle".into(), tab: "1".into() }
@@ -5283,7 +5281,7 @@ fn app_with_picker(r: &Repo) -> App {
 fn the_highlight_arms_the_last_sent_agent_else_row_one() {
     let r = edited_repo();
     // Driven through `open_picker`, the verb the send actually calls, so the arming rule and
-    // its wiring are proven together (`specs/herdr-host.md`).
+    // its wiring are proven together.
     let armed = |last_sent: Option<&str>| {
         let mut app = app_on(&r);
         app.last_sent_pane = last_sent.map(str::to_string);
@@ -5381,7 +5379,7 @@ fn the_picker_swallows_every_key_it_does_not_bind() {
     let area = Rect::new(0, 0, 80, 24);
 
     // `q` must not quit and `y` must not copy: both would destroy or consume the review while
-    // the picker is up, and both are live in the comments list (specs/input.md).
+    // the picker is up, and both are live in the comments list.
     for code in [KeyCode::Char('q'), KeyCode::Char('y'), KeyCode::Char('r'), KeyCode::Char('s')] {
         let mut app = app_with_picker(&r);
         let rows_before = app.picker_rows.clone();
@@ -5404,7 +5402,7 @@ fn a_chord_never_fires_the_pickers_irreversible_send() {
     let area = Rect::new(0, 0, 80, 24);
 
     // `alt+enter` and `shift+enter` insert a newline in the comment editor the reviewer left
-    // moments ago (specs/input.md). Carried into the picker, that muscle memory must not send
+    // moments ago. Carried into the picker, that muscle memory must not send
     // the whole review to the armed agent — only the bare key fires an irreversible action.
     for modifiers in [KeyModifiers::ALT, KeyModifiers::SHIFT, KeyModifiers::CONTROL] {
         let mut app = app_with_picker(&r);
@@ -5437,7 +5435,7 @@ fn the_picker_owns_its_keys_on_every_tab() {
 
     // The picker is checked before the tab handlers, so no tab can eat a modal's keys. On the
     // read-only PR tab, `q` quits and the digits switch tabs — both would act behind an open
-    // picker if the modal were checked second (specs/input.md).
+    // picker if the modal were checked second.
     let mut app = app_with_picker(&r);
     app.tab = Tab::Pr;
     handle_key(&mut app, KeyEvent::from(KeyCode::Char('q')), area, &keymap).unwrap();
@@ -5458,7 +5456,7 @@ fn a_second_open_never_stacks_a_picker_that_one_esc_cannot_leave() {
 
     // A second open must not capture `Picker` as the mode to restore, or `esc` would land back
     // in a picker whose rows are gone — a modal that swallows every key and whose `enter` does
-    // nothing. The frozen row set also outranks a later one (specs/herdr-host.md).
+    // nothing. The frozen row set also outranks a later one.
     let mut app = app_with_picker(&r);
     app.picker_goto(2);
     app.open_picker(vec![choice("w8:p9", "other")]);
@@ -5553,7 +5551,7 @@ fn the_picker_owns_the_whole_footer_bar() {
     );
 }
 
-// --- Base picker (specs/input.md Base picker, specs/review-model.md) -----------------------
+// --- Base picker -----------------------
 
 /// A repo on branch `feature` with sibling branches `dev` and `main`, `origin/HEAD`
 /// naming `main` the default, and one committed edit to diff.
@@ -5644,7 +5642,7 @@ fn typing_filters_and_enter_picks_the_highlight() {
 fn a_pick_retags_the_world_input() {
     // The pick is read from its ref at build time, so it is not input identity on its
     // own: the pick must bump the tag, or a build launched before it lands afterwards
-    // and reverts the picked base (`specs/tui.md`).
+    // and reverts the picked base.
     let r = based_repo();
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
@@ -5708,7 +5706,7 @@ fn a_repo_with_no_pickable_branch_still_opens_the_picker() {
     app.set_scope(Scope::Branch).unwrap();
 
     // One branch, checked out, and no origin default: the picker opens empty so a
-    // revision can still be typed (`specs/input.md` Base picker).
+    // revision can still be typed.
     app.open_base_picker();
     assert_eq!(app.mode, Mode::BasePick);
     let bp = app.base_picker.as_ref().unwrap();
@@ -5727,7 +5725,7 @@ fn the_filter_edits_with_the_comment_editors_controls() {
     }
 
     // The filter is a text field like every other one: `ctrl+w` drops a word, the caret
-    // moves, and an insert lands at the caret (`specs/input.md` Base picker).
+    // moves, and an insert lands at the caret.
     app.input_delete_word();
     assert_eq!(app.base_picker.as_ref().unwrap().query, "release ");
     app.input_kill_to_start();
@@ -5742,7 +5740,7 @@ fn the_filter_edits_with_the_comment_editors_controls() {
     assert_eq!(bp.rows[bp.filtered()[bp.cursor]].name(), "dev", "the narrowed view still picks");
 
     // A branch name pasted with the trailing newline it was copied with still filters:
-    // the single-line field takes a newline as a space (`specs/input.md`).
+    // the single-line field takes a newline as a space.
     app.caret_end();
     app.input_kill_to_start();
     app.input_paste("dev\n");
@@ -5798,7 +5796,7 @@ fn the_base_picker_owns_the_whole_footer_bar_and_survives_a_config_error() {
         vec![FooterAction::PickBaseRow, FooterAction::ClosePicker, FooterAction::MoveBaseRow]
     );
 
-    // The config error leaves the picker open for recovery to carry (`specs/tui.md`).
+    // The config error leaves the picker open for recovery to carry.
     app.input_push('d');
     app.set_config_error("theme = \"not-a-theme\"".to_string());
     assert_eq!(app.mode, Mode::BasePick);
@@ -5975,7 +5973,7 @@ fn checking_out_a_picked_branch_does_not_turn_it_into_a_pin() {
     assert_eq!(herdr_reviewr::git::read_base_pick(r.path()).unwrap().as_deref(), Some("dev"));
 }
 
-// ---- mouse text selection (specs/text-selection.md) ----
+// ---- mouse text selection ----
 
 /// A repo whose one uncommitted file exercises the mapping's hard cases: a plain line, a
 /// tab-indented line, and a wide-character line.
@@ -6022,7 +6020,7 @@ fn last_copy() -> Option<String> {
 
 /// Dispatch one mouse event at an absolute cell through the event loop's dispatcher,
 /// painting a frame first — hit tests resolve against the recorded painted layout, exactly
-/// as the event loop paints before it reads input (specs/text-selection.md).
+/// as the event loop paints before it reads input.
 fn sel_mouse(app: &mut App, kind: MouseEventKind, col: u16, row: u16) {
     let backend = ratatui::backend::TestBackend::new(SEL_AREA.width, SEL_AREA.height);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -6072,7 +6070,7 @@ fn a_release_on_the_mouse_down_cell_is_a_click_and_a_real_drag_copies() {
     assert_eq!(app.status, "");
 
     // One cell of drift inside the same character (row 1's tab expansion) is still the
-    // click: the release's point never left the anchor's (specs/text-selection.md).
+    // click: the release's point never left the anchor's.
     app.diff_cursor = 0;
     let (c1a, _) = sel_cell(&app, 1, 1);
     let (c1b, _) = sel_cell(&app, 1, 2);
@@ -6146,7 +6144,6 @@ fn ts_one_surface_a_drag_clamps_to_its_pane_and_skips_cards() {
     assert_eq!(last_copy().as_deref(), Some("watch this"), "the card's own text copies");
 
     // A double on the card copies the word under the cell; no composer opens over the card
-    // (specs/text-selection.md).
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), inner.x + 4, inner.y + 3);
     sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), inner.x + 4, inner.y + 3);
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), inner.x + 4, inner.y + 3);
@@ -6175,7 +6172,7 @@ fn the_gutter_click_and_drag_open_the_composer_and_stay_inert_while_composing() 
     assert!(app.text_drag().is_none());
 
     // A double-click on the frozen view still copies its word — a selection copy, not a
-    // pane click — and the composer holds its line untouched (specs/text-selection.md).
+    // pane click — and the composer holds its line untouched.
     let (c0, r0) = sel_cell(&app, 0, 0);
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
     sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), c0, r0);
@@ -6205,7 +6202,6 @@ fn a_double_click_copies_the_word_and_settles_its_highlight() {
     let r = selection_repo();
     let mut app = app_on(&r);
     // A double on a word copies exactly that word and leaves it highlighted
-    // (specs/text-selection.md).
     let (c0, r0) = sel_cell(&app, 0, 0); // the `a` of `alpha`
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
     sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), c0, r0);
@@ -6219,7 +6215,6 @@ fn a_double_click_copies_the_word_and_settles_its_highlight() {
     assert_eq!((settled.anchor.row, settled.anchor.chr, settled.extent.chr), (0, 0, 4));
 
     // The settled span paints in the selection fill, distinct from the cursor row's
-    // (specs/text-selection.md, theme.md).
     let backend = ratatui::backend::TestBackend::new(SEL_AREA.width, SEL_AREA.height);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     terminal.draw(|f| herdr_reviewr::ui::render(f, &app)).unwrap();
@@ -6227,7 +6222,7 @@ fn a_double_click_copies_the_word_and_settles_its_highlight() {
     let cell = terminal.backend().buffer().cell((inner.x + 5, inner.y)).unwrap();
     assert_eq!(cell.style().bg, Some(app.palette().sel_bg));
 
-    // Any keypress clears the settled highlight (specs/text-selection.md).
+    // Any keypress clears the settled highlight.
     press(&mut app, &Keymap::default(), KeyCode::Char('j'));
     assert!(app.settled_selection().is_none(), "a keypress is the user doing something else");
 
@@ -6258,7 +6253,6 @@ fn a_triple_click_copies_the_whole_line_and_settles_its_highlight() {
     let r = selection_repo();
     let mut app = app_on(&r);
     // A triple on a line copies the whole source line and leaves it highlighted
-    // (specs/text-selection.md).
     let (c0, r0) = sel_cell(&app, 0, 0);
     for _ in 0..3 {
         sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
@@ -6270,7 +6264,7 @@ fn a_triple_click_copies_the_whole_line_and_settles_its_highlight() {
     let settled = app.settled_selection().expect("the copy leaves its highlight");
     assert_eq!((settled.anchor.row, settled.anchor.chr, settled.extent.chr), (0, 0, 9));
 
-    // A fourth click within the window repeats the triple (specs/text-selection.md).
+    // A fourth click within the window repeats the triple.
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
     sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), c0, r0);
     assert_eq!(app.status, "copied 10 chars");
@@ -6282,7 +6276,7 @@ fn a_settled_highlight_survives_an_unrelated_refresh_and_clears_when_its_text_ch
     let r = selection_repo();
     let mut app = app_on(&r);
     // Settle by drag: a completed drag resets the click chain, so the reconcile below
-    // exercises the settled text-compare alone (specs/text-selection.md).
+    // exercises the settled text-compare alone.
     let (c0, r0) = sel_cell(&app, 0, 0);
     let (c9, _) = sel_cell(&app, 0, 9);
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
@@ -6320,7 +6314,6 @@ fn a_settled_preview_highlight_follows_its_source_text() {
 
     // A refresh that leaves the previewed source alone keeps the highlight; one that
     // rewrites it blanks it — the paint is a pure render of that source
-    // (specs/text-selection.md).
     app.reload().unwrap();
     assert!(app.settled_selection().is_some(), "an unchanged preview keeps the highlight");
     r.write("doc.md", "# Title\n\nrewritten body words here\n");
@@ -6334,7 +6327,6 @@ fn a_mouse_down_on_blank_space_arms_no_gesture() {
     let mut app = app_on(&r);
     let inner = herdr_reviewr::ui::read_inner_rect(SEL_AREA, &app);
     // The pane's blank space below the last content row starts nothing
-    // (specs/text-selection.md).
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), inner.x + 4, inner.y + 20);
     assert!(app.text_drag().is_none(), "no drag starts on blank space");
     assert!(!app.gesture_active(), "no gesture arms on blank space");
@@ -6356,7 +6348,7 @@ fn a_drag_release_keeps_the_selection_until_the_next_mouse_down() {
     sel_mouse(&mut app, MouseEventKind::ScrollDown, c0, r0);
     assert!(app.settled_selection().is_some(), "scrolling keeps the settled highlight");
 
-    // The next mouse-down clears it before acting (specs/text-selection.md).
+    // The next mouse-down clears it before acting.
     let (c2, r2) = sel_cell(&app, 2, 0);
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c2, r2);
     assert!(app.settled_selection().is_none(), "a mouse-down is the user doing something else");
@@ -6411,7 +6403,7 @@ fn a_world_result_waits_out_an_active_drag() {
     assert!(app.gesture_active());
 
     // A code drag freezes only the open view: the file list keeps updating beneath it,
-    // exactly as composing behaves (specs/text-selection.md).
+    // exactly as composing behaves.
     r.write("m.rs", "CHANGED first line\n\tif x {\n日本 z\n");
     r.write("n.rs", "new file\n");
     app.reload().unwrap();
@@ -6432,7 +6424,6 @@ fn a_navigator_drag_gates_the_world_drain_and_its_end_lifts_the_gate() {
 
     // The drag anchors to the file rows a snapshot rebuilds: the event loop holds the world
     // drain, so the completion waits in its channel with nothing stored
-    // (specs/text-selection.md).
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), files.x + 1, files.y);
     sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), files.x + 1, files.y + 1);
     assert!(app.gesture_active());
@@ -6466,7 +6457,7 @@ fn a_release_lost_past_the_border_still_copies() {
 
     // The overshoot: the drag's last event sits on the pane's own edge — the exit
     // signature's position half — and the release lands in the next pane, so it never
-    // arrives (specs/text-selection.md).
+    // arrives.
     let edge = SEL_AREA.x + SEL_AREA.width - 1;
     sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), edge, r1);
     let event = MouseEvent {
@@ -6501,7 +6492,6 @@ fn a_still_pointer_inside_the_pane_is_a_held_button_not_an_exit() {
     // A release anywhere inside the pane would have arrived — herdr routes by pointer
     // position — so stillness there proves the button is still down: no exit signature,
     // even on the read pane's own border row, and the gesture waits for a proof
-    // (specs/text-selection.md).
     for (col, row) in [(c1, r1), (c0, content.y + content.height)] {
         let event = MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
@@ -6539,7 +6529,7 @@ fn a_lost_gutter_drag_dissolves_without_the_composer() {
     assert_eq!(app.selection_range(), (0, 2));
 
     // TS-NO-SILENT-LOSS covers selections only: a lost gutter drag dissolves, and the
-    // composer never opens unasked (specs/text-selection.md).
+    // composer never opens unasked.
     herdr_reviewr::complete_gesture(&mut app, SEL_AREA, &SelClipboard);
     assert!(!app.gesture_active());
     assert!(!app.composing(), "the composer opens only on the gutter's own release");
@@ -6556,7 +6546,7 @@ fn a_press_inside_the_double_click_window_still_drags() {
     sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), c0, r0);
     app.status.clear();
     // The second press arms a drag instead of copying its token at the down; the copy waits
-    // for a same-cell release (specs/text-selection.md).
+    // for a same-cell release.
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
     assert!(app.text_drag().is_some(), "the second press arms the drag");
     assert_eq!(app.status, "", "nothing copies at the down");
@@ -6584,7 +6574,6 @@ fn pointer_motion_with_no_button_completes_a_drag_whose_release_was_lost() {
 
     // A `Moved` event proves the button is up and the release was lost: the proof completes
     // the visible selection's copy (TS-NO-SILENT-LOSS), and the held view catches up
-    // (specs/text-selection.md).
     sel_mouse(&mut app, MouseEventKind::Moved, c1, r1);
     assert!(!app.gesture_active());
     assert_eq!(app.status, "copied 12 chars", "the proof completes the copy");
@@ -6602,7 +6591,7 @@ fn the_next_mouse_down_completes_the_old_gesture_then_arms_its_own() {
     sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), c1, r1);
 
     // A fresh mouse-down proves the old drag's release was lost: the old selection copies,
-    // and the same down then acts fully, arming its own gesture (specs/text-selection.md).
+    // and the same down then acts fully, arming its own gesture.
     let (c2, r2) = sel_cell(&app, 2, 1);
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c2, r2);
     assert_eq!(app.status, "copied 12 chars", "the down completes the old gesture first");
@@ -6628,7 +6617,6 @@ fn a_pr_navigator_row_copies_its_full_text_even_when_the_pane_truncates_it() {
     })));
 
     // The pane elides the anchor to its width; the copy receives it whole
-    // (specs/text-selection.md Copy).
     app.gesture = Gesture::Text {
         drag: TextDrag {
             surface: Surface::PrNav,
@@ -6655,7 +6643,7 @@ fn a_completed_drag_resets_the_multi_click_chain() {
     app.status.clear();
 
     // The next press on the release cell counts as a first click, not a double: a completed
-    // drag resets the chain (specs/text-selection.md).
+    // drag resets the chain.
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
     sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), c0, r0);
     assert!(!app.composing(), "a first click opens no comment box");
@@ -6679,7 +6667,7 @@ fn a_gutter_gesture_lands_right_with_the_find_band_open() {
     sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), gutter_x, inner.y + 1);
     assert!(app.composing(), "the gutter release opens the composer under the band's file");
     // The composer replaced the band: a forced return, so the find highlight cannot keep
-    // painting with no way left to close it (specs/find-in-file.md).
+    // painting with no way left to close it.
     assert!(app.find.is_none(), "the gutter release closes the find band");
     press(&mut app, &Keymap::default(), KeyCode::Esc);
 }
@@ -6709,7 +6697,7 @@ fn a_preview_drag_selects_and_copies_the_painted_text() {
     );
 
     // A double on the painted surface copies the word under the cell; the preview never
-    // takes a comment (specs/text-selection.md).
+    // takes a comment.
     app.status.clear();
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), inner.x, inner.y);
     sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), inner.x, inner.y);
@@ -6735,7 +6723,7 @@ fn a_pr_navigator_drag_gates_the_pr_drains() {
     })));
 
     // A drag over the `PR` navigator anchors to the fetched result: the event loop holds
-    // both PR drains while it lives, and its end lifts the gate (specs/text-selection.md).
+    // both PR drains while it lives, and its end lifts the gate.
     let files = herdr_reviewr::ui::files_inner_rect(SEL_AREA, &app);
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), files.x + 1, files.y);
     sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), files.x + 1, files.y + 1);
@@ -6764,7 +6752,7 @@ fn the_wheel_during_a_drag_scrolls_and_extends_together() {
     let before = app.text_drag().unwrap().extent.row;
 
     // The wheel scrolls the pane and the same event extends the selection against the
-    // post-scroll rows (specs/text-selection.md).
+    // post-scroll rows.
     sel_mouse(&mut app, MouseEventKind::ScrollDown, c0, r0 + 2);
     assert_eq!(app.diff_scroll, 3, "the wheel scrolled the drag's pane");
     let extent = app.text_drag().unwrap().extent.row;
@@ -6782,7 +6770,7 @@ fn the_hover_cell_survives_a_keypress() {
     assert_eq!(app.hover, Some((c0, r0)));
 
     // The `+` recomputes each frame from the pointer's last reported cell, so a keypress
-    // does not blank it (specs/diff-view.md).
+    // does not blank it.
     press(&mut app, &Keymap::default(), KeyCode::Char('j'));
     assert_eq!(app.hover, Some((c0, r0)));
 }
@@ -6799,14 +6787,14 @@ fn the_drag_h_scroll_caps_at_the_widest_visible_row() {
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
 
     // A drag held past the right edge scrolls, then stops at the widest visible row's last
-    // column — never stranding the view past all content (specs/text-selection.md).
+    // column — never stranding the view past all content.
     for _ in 0..widest {
         sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), content.x + content.width, r0);
     }
     assert_eq!(app.h_scroll, widest - 1, "the cap keeps the widest row's last column");
 
     // A keyboard scroll already past the cap keeps its place: the cap stops the drag's own
-    // advance, never yanking the view backwards (specs/text-selection.md).
+    // advance, never yanking the view backwards.
     app.h_scroll = widest + 20;
     sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), content.x + content.width, r0);
     assert_eq!(app.h_scroll, widest + 20);
@@ -6821,7 +6809,7 @@ fn the_outermost_row_selects_without_scrolling_and_the_border_scrolls() {
     let (c0, r0) = sel_cell(&app, 0, 0);
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
     // The pane's last inner row selects without scrolling; only the border row and beyond
-    // scroll, so an endpoint can land on the outermost visible line (specs/text-selection.md).
+    // scroll, so an endpoint can land on the outermost visible line.
     sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), c0, inner.y + inner.height - 1);
     assert_eq!(app.diff_scroll, 0, "the last inner row scrolls nothing");
     sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), c0, inner.y + inner.height);
@@ -6829,7 +6817,7 @@ fn the_outermost_row_selects_without_scrolling_and_the_border_scrolls() {
     press(&mut app, &Keymap::default(), KeyCode::Esc);
 }
 
-// --- commit picker (specs/input.md Commit picker, specs/review-model.md Commit pick) --------
+// --- commit picker --------
 
 /// `main` with four commits, root first: `root`, `one`, `two`, `three`, each adding its own
 /// file, plus an uncommitted edit to `root.rs`. Returns the shas root first.

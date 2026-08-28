@@ -106,7 +106,7 @@ fn the_chain_is_flag_then_pick_then_default() {
     r.write("base.rs", "2\n");
     r.commit_all("diverge");
 
-    // Default branch alone: `origin/HEAD` names `main` (specs/review-model.md).
+    // Default branch alone: `origin/HEAD` names `main`.
     let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
     assert_eq!(winner.name(), "main");
 
@@ -130,7 +130,7 @@ fn base_resolves_via_the_pick_without_a_flag() {
     r.write("base.rs", "2\n");
     r.commit_all("diverge");
 
-    // No flag, no origin: only a recorded pick names the base (specs/review-model.md).
+    // No flag, no origin: only a recorded pick names the base.
     assert_eq!(merge_base(r.path(), None), None);
     write_base_pick(r.path(), "main").unwrap();
     assert_eq!(merge_base(r.path(), None), Some(branch_point));
@@ -148,7 +148,7 @@ fn a_nonexistent_flag_falls_through_and_reads_as_skipped() {
     write_base_pick(r.path(), "main").unwrap();
 
     // A `--base` naming no existing ref is skipped, not an error; the pick resolves, and
-    // the header can name the dead flag (specs/review-model.md, specs/tui.md).
+    // the header can name the dead flag.
     assert_eq!(merge_base(r.path(), Some("no-such-ref")), Some(branch_point));
     let status = resolve_base(r.path(), Some("no-such-ref")).unwrap().status;
     assert_eq!(status.skipped.as_deref(), Some("no-such-ref"));
@@ -165,7 +165,7 @@ fn a_prefixed_flag_spelling_resolves_to_the_bare_name() {
     r.commit_all("diverge");
 
     // `--base origin/main` resolves as a verbatim rev, but the header and the PR name
-    // shield carry the bare spelling (specs/tui.md, specs/forge-host.md).
+    // shield carry the bare spelling.
     let winner = resolve_base(r.path(), Some("origin/main")).unwrap().status.winner.unwrap();
     assert_eq!(winner.name(), "main");
 
@@ -195,11 +195,11 @@ fn a_pick_git_could_never_have_written_is_no_pick() {
 
     // The pick ref is shared repository state any tool can write, and a skipped pick paints
     // its name in the header: a blob carrying control bytes is no pick at all, so nothing
-    // can smuggle an escape sequence into the frame (specs/review-model.md).
+    // can smuggle an escape sequence into the frame.
     r.write_raw_base_pick("dev\u{1b}]0;pwned\u{7}");
     assert_eq!(read_base_pick(r.path()).unwrap(), None);
 
-    // A leftover expression in the blob is a spelling (`specs/review-model.md`). Too
+    // A leftover expression in the blob is a spelling. Too
     // deep to resolve, it is skipped, not discarded.
     r.write_raw_base_pick("main~5");
     assert_eq!(read_base_pick(r.path()).unwrap().as_deref(), Some("main~5"));
@@ -226,7 +226,7 @@ fn a_dormant_pick_is_skipped_and_reactivates() {
     assert_eq!(winner.name(), "dev");
 
     // The branch disappears: the pick is kept and skipped, the default wins, and the
-    // header can say so (specs/review-model.md).
+    // header can say so.
     r.git(&["branch", "-D", "dev"]);
     let status = resolve_base(r.path(), None).unwrap().status;
     let winner = status.winner.unwrap();
@@ -248,7 +248,7 @@ fn a_dormant_pick_survives_even_when_nothing_resolves() {
     write_base_pick(r.path(), "gone").unwrap();
 
     // No flag, no default, and the picked branch is missing: the skip still reports, so
-    // the header reads `no base · gone missing`, never a bare `no base` (specs/tui.md).
+    // the header reads `no base · gone missing`, never a bare `no base`.
     let status = resolve_base(r.path(), None).unwrap().status;
     assert_eq!(status.winner, None);
     assert_eq!(status.skipped.as_deref(), Some("gone"));
@@ -452,7 +452,7 @@ fn a_dangling_origin_head_symref_names_no_default() {
     r.set_origin_default("master", "HEAD");
 
     // `fetch --prune` after a server-side rename deletes the target but leaves the
-    // symref: a name resolving to nothing is no default (specs/review-model.md).
+    // symref: a name resolving to nothing is no default.
     r.git(&["update-ref", "-d", "refs/remotes/origin/master"]);
     assert_eq!(default_branch_name(r.path()).unwrap(), None);
 }
@@ -466,7 +466,7 @@ fn a_plain_ref_origin_head_names_the_matching_tip() {
     r.git(&["update-ref", "refs/remotes/origin/trunk", &oid]);
 
     // Some clones carry `origin/HEAD` as a plain ref, not a symref: the default is the
-    // origin tip at the same commit (specs/review-model.md).
+    // origin tip at the same commit.
     r.git(&["update-ref", "refs/remotes/origin/HEAD", &oid]);
     assert_eq!(default_branch_name(r.path()).unwrap().as_deref(), Some("trunk"));
 }
@@ -490,7 +490,7 @@ fn list_branches_merges_names_newest_first_and_hides_the_checked_out() {
     r.git(&["branch", "newer"]);
 
     // Local and origin names merge (main exists only as origin/main here), the newest
-    // commit sorts first, and the checked-out branch is not listed (specs/input.md).
+    // commit sorts first, and the checked-out branch is not listed.
     let names = list_branches(r.path(), default_branch_name(r.path()).unwrap().as_deref()).unwrap();
     assert_eq!(names, ["newer", "main", "older"]);
 }
@@ -557,7 +557,7 @@ fn ignored_paths_never_enter_changes() {
     r.write("build/out.o", "junk\n");
 
     // Every scope respects .gitignore, without exception: a path git ignores is not a
-    // change. To review a file, track it (specs/review-model.md).
+    // change. To review a file, track it.
     let has_ignored = |files: &[ChangedFile]| {
         files.iter().any(|f| f.path.starts_with("ignored/") || f.path.starts_with("build/"))
     };
@@ -585,7 +585,7 @@ fn branch_scope_is_empty_without_a_recorded_base() {
     r.commit_all("feature work");
 
     // base = None and nothing recorded → no base, and the scope lists nothing rather than
-    // guessing (specs/review-model.md).
+    // guessing.
     let files = changed_files(r.path(), Scope::Branch, None).unwrap();
     assert!(files.is_empty(), "no source resolves, so the scope shows nothing");
 
@@ -910,7 +910,7 @@ fn list_ignored_dir_returns_immediate_children_only() {
     assert!(!kids.iter().any(|e| e.path == "target/deep/x.o"), "does not recurse past one level");
 }
 
-// --- commits scope (specs/review-model.md Commit pick) ---------------------------------------
+// --- commits scope ---------------------------------------
 
 /// `main` with three commits over the root, each touching its own file, plus `feature`
 /// with one commit. Returns the shas of the four `main` commits, root first.

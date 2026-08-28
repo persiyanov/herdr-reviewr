@@ -1,5 +1,4 @@
-//! End-to-end send dispatch through a fake herdr binary (`specs/herdr-host.md`,
-//! `specs/input.md`). This file is its own test process, so the HERDR_* environment it
+//! End-to-end send dispatch through a fake herdr binary. This file is its own test process, so the HERDR_* environment it
 //! sets can never leak into another test binary, and no real herdr pane is ever addressed.
 #![cfg(unix)]
 
@@ -131,7 +130,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     let mut app = app_on(&r);
 
     // Several agents: `s` opens the picker over both rows, labelled from `tab list`, and with
-    // nothing sent yet the highlight arms on the first row (`specs/herdr-host.md`).
+    // nothing sent yet the highlight arms on the first row.
     fs::write(fake_dir.join("agents.json"), TWO_AGENTS).unwrap();
     write_comment(&mut app, "one");
     press(&mut app, KeyCode::Char('s'), area, &keymap);
@@ -141,14 +140,14 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert_eq!(app.picker_cursor, 0, "nothing sent this session arms the first row");
 
     // A chosen pane that closed while the picker was open fails the send, and every comment
-    // stays. Nothing arms, since nothing was delivered (specs/herdr-host.md).
+    // stays. Nothing arms, since nothing was delivered.
     fail_on(&fake_dir, "pane send-text w8:p1");
     press(&mut app, KeyCode::Enter, area, &keymap);
     assert_eq!(app.mode, Mode::Normal, "the picker closes whatever the outcome");
     assert_eq!(app.store.len(), 1, "a failed send keeps every comment");
     // One short sentence a reviewer can read. herdr's own wording is a JSON envelope around a
     // pane id, and the argv it came from carries the whole review in its last argument — both
-    // would fill a 40-column footer without naming anything (`specs/herdr-host.md`).
+    // would fill a 40-column footer without naming anything.
     assert_eq!(app.status, "agent not found");
     assert_eq!(app.last_sent_pane, None, "a failed send arms nothing");
     fail_on_nothing(&fake_dir);
@@ -189,7 +188,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert!(log(&fake_dir).contains("agent focus w8:p2"), "a send focuses its pane");
 
     // Several again: the last-sent agent outranks the first row, and a first click on that
-    // armed row sends immediately (specs/input.md).
+    // armed row sends immediately.
     write_comment(&mut app, "three");
     press(&mut app, KeyCode::Char('s'), area, &keymap);
     assert_eq!(app.mode, Mode::Picker);
@@ -236,6 +235,6 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert_eq!(app.mode, Mode::Normal, "a failed enumeration opens no picker");
     assert_eq!(app.store.len(), 1, "a refusal keeps every comment");
     // A failed enumeration says so rather than claiming a count. The argv and herdr's stderr go
-    // to the log, so the sentence still fits a 40-column footer (`specs/input.md`).
+    // to the log, so the sentence still fits a 40-column footer.
     assert_eq!(app.status, "herdr did not answer — copy to the clipboard instead");
 }

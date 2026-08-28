@@ -1,6 +1,6 @@
 //! The shared forge kernel: fetch-input derivation, per-forge dispatch, and the GitHub read.
 //!
-//! See `specs/forge-host.md`. A fetch first derives [`PrFetchInput`] from local Git and one
+//! A fetch first derives [`PrFetchInput`] from local Git and one
 //! validated config snapshot, then routes to the resolved forge's provider: GitHub reads
 //! inline here through explicitly hosted `gh` GraphQL calls, GitLab and Azure DevOps through
 //! their own modules (`crate::gitlab`, `crate::azure_devops`). The normalized [`PrSnapshot`],
@@ -31,13 +31,12 @@ pub enum PrView {
     /// `HEAD` is detached, so there is no branch identity to query.
     Detached,
     /// No PR resolved, but the pinned `HEAD` still contains the painted PR's head commit —
-    /// the story stays on screen (`specs/forge-host.md` Refresh). Never stored: the app
+    /// the story stays on screen. Never stored: the app
     /// keeps its current snapshot when this arrives.
     Held,
     /// The resolved forge's CLI is not on `PATH`.
     NoCli(crate::git::Forge),
     /// The forge CLI is installed but misses the extension its reads require
-    /// (`specs/forge-providers.md` — Azure DevOps).
     NoExtension(crate::git::Forge),
     /// The forge CLI is installed but not authenticated for this canonical host.
     NotAuthed(crate::git::Forge, String),
@@ -95,7 +94,7 @@ impl PrView {
 }
 
 /// The backticked login command the unauthenticated remedy advertises
-/// (`specs/forge-providers.md`). Azure DevOps signs in per account, not per host.
+/// Azure DevOps signs in per account, not per host.
 fn login_hint(forge: crate::git::Forge, host: &str) -> String {
     match forge {
         crate::git::Forge::GitHub | crate::git::Forge::GitLab => {
@@ -108,7 +107,7 @@ fn login_hint(forge: crate::git::Forge, host: &str) -> String {
 }
 
 /// The backticked extension-install command the missing-extension remedy advertises
-/// (`specs/forge-providers.md`). Only Azure DevOps' CLI carries a required extension.
+/// Only Azure DevOps' CLI carries a required extension.
 fn extension_hint(forge: crate::git::Forge) -> Option<&'static str> {
     match forge {
         crate::git::Forge::AzureDevOps => Some("`az extension add --name azure-devops`"),
@@ -122,18 +121,17 @@ pub struct PrSnapshot {
     pub number: u64,
     pub title: String,
     pub url: String,
-    /// The PR description as the forge returns it, empty when none (`specs/forge-host.md`).
+    /// The PR description as the forge returns it, empty when none.
     pub body: String,
     pub state: PrState,
     pub is_draft: bool,
     /// The PR's head branch name — the candidate that resolved, which may differ from the
-    /// worktree's local branch name (`specs/forge-host.md`).
+    /// worktree's local branch name.
     pub head_ref: String,
     /// The head branch lives in another repository — a fork PR; shown as a marker so a
     /// same-named fork PR is visible.
     pub head_is_fork: bool,
     /// The PR's head commit — the hold gate's anchor, never rendered
-    /// (`specs/forge-host.md` Refresh).
     pub head_oid: String,
     pub base_ref: String,
     pub merge: Merge,
@@ -438,14 +436,13 @@ pub(crate) fn join_read<T, E>(
 }
 
 /// The newest `SURFACE_CAP` of `rows`, which arrive oldest-first — the shared tail cut
-/// behind every surface's cap (`specs/forge-host.md`).
+/// behind every surface's cap.
 pub(crate) fn newest_capped<T>(mut rows: Vec<T>) -> Vec<T> {
     let keep = rows.len().min(SURFACE_CAP);
     rows.split_off(rows.len() - keep)
 }
 
 /// Each surface reads at most this many rows, never paged to exhaustion
-/// (`specs/forge-host.md`).
 pub(crate) const SURFACE_CAP: usize = 100;
 
 /// Whether the CLI reported HTTP `code` somewhere that means a status: the `(http <code>)`
@@ -600,7 +597,7 @@ fn fetch_inner(
         return Ok(PrView::Detached);
     }
     // Exhaustive per-forge dispatch: a new forge must be routed here before it builds
-    // (`specs/forge-providers.md`). Each provider owns its whole read and degrades in-band.
+    // Each provider owns its whole read and degrades in-band.
     match repository.forge() {
         crate::git::Forge::GitLab => {
             return Ok(crate::gitlab::fetch(repo, input, repository, cancelled));
@@ -618,7 +615,7 @@ fn fetch_inner(
         cancelled,
     };
     // A fork clone: `origin` is the fork, the target is upstream. Both repositories are
-    // asked, and upstream's pick outranks the fork's own (`specs/forge-host.md`).
+    // asked, and upstream's pick outranks the fork's own.
     let fork = fork_repository(input.origin_repository.as_ref(), repository);
     let head = input.local.head_oid.as_deref();
     let assoc =
@@ -726,7 +723,7 @@ pub struct Association {
 }
 
 /// The GitHub branch lookup: one aliased `pullRequests(headRefName:)` block per name,
-/// every lifecycle state, newest first (`specs/forge-providers.md`). `fork_head_owner`
+/// every lifecycle state, newest first. `fork_head_owner`
 /// is the head filter: `None` keeps only same-repository heads; `Some(owner)` keeps only
 /// heads living in that owner's fork. Values ride as variables, never in the query text.
 fn branch_lookup(
@@ -770,7 +767,7 @@ fn build_branch_query(names: usize) -> String {
 
 /// Split the branch lookup by lifecycle. A node is this branch's only when its head lives
 /// in the queried repository — or, under a fork filter, in that fork — so a stranger's
-/// same-named fork branch never attaches (`specs/forge-host.md` Resolution). Duplicates
+/// same-named fork branch never attaches. Duplicates
 /// across name aliases collapse.
 fn parse_branch_lookup(v: &Value, aliases: usize, fork_head_owner: Option<&str>) -> Association {
     let mut assoc = Association::default();
@@ -784,7 +781,7 @@ fn parse_branch_lookup(v: &Value, aliases: usize, fork_head_owner: Option<&str>)
             let admitted = match fork_head_owner {
                 None => !cross,
                 // A deleted fork nulls the head owner; its merged PR still admits, and
-                // the history ancestry guard keeps strangers out (`specs/forge-host.md`).
+                // the history ancestry guard keeps strangers out.
                 Some(owner) => {
                     cross
                         && (head_owner.eq_ignore_ascii_case(owner)
@@ -827,7 +824,7 @@ pub fn assoc_history(number: u64, head_oid: &str, closed_at: &str) -> AssocPr {
 }
 
 /// The fork this clone works from, when `origin` is a same-host repository other than the
-/// target — the dual-query trigger (`specs/forge-host.md` Resolution). One definition, so
+/// target — the dual-query trigger. One definition, so
 /// the providers cannot drift on what counts as a fork.
 pub(crate) fn fork_repository<'a>(
     origin: Option<&'a crate::git::RepoTarget>,
@@ -845,7 +842,7 @@ pub(crate) fn push_unique(bucket: &mut Vec<AssocPr>, pr: AssocPr) {
 
 /// Resolve the branch's PR: the newest open one wins; with none, the newest finished one
 /// whose head commit the pinned `HEAD` contains — the reused-name guard; with neither,
-/// nothing (`specs/forge-host.md` Resolution). The one enforcement site of that precedence
+/// nothing. The one enforcement site of that precedence
 /// for every provider.
 pub fn resolve_pick(
     repo: &Path,
@@ -885,7 +882,7 @@ fn newest_by(prs: &[AssocPr], key: impl Fn(&AssocPr) -> &str) -> Option<u64> {
 /// reviews, plain comments, and review threads. Each list surface reads its newest 100 rows
 /// (`last:100`, flagged by `hasPreviousPage`) — ample for any real PR in a review pane —
 /// and flags a fuller surface so the UI can mark it, rather than paging to exhaustion
-/// (`specs/forge-host.md`). Checks keep `first:100`/`hasNextPage`.
+/// Checks keep `first:100`/`hasNextPage`.
 fn pr_detail(target: &FetchTarget<'_>, number: u64) -> Result<Value, GhError> {
     let q = build_detail_query(number);
     let vars = vec![
@@ -1015,7 +1012,6 @@ pub(crate) fn upsert_latest(checks: &mut Vec<Check>, check: Check) {
 
 /// The shared comment finish: collapse each bot's PR-level posts to its latest, then order
 /// newest first — ISO-8601 `…Z` strings sort lexically in chronological order
-/// (`specs/forge-host.md`).
 pub(crate) fn finish_comments(out: &mut Vec<Comment>) {
     dedup_bot_prose(out);
     out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -1143,7 +1139,7 @@ pub(crate) fn finding_anchor(path: &str, start: Option<u64>, end: Option<u64>) -
     }
 }
 
-/// Read-pane caption for a finding range (`specs/pr-tab.md`).
+/// Read-pane caption for a finding range.
 pub(crate) fn finding_range_caption(start: u32, end: u32, sign: Option<char>) -> String {
     let (start, end) = if start <= end { (start, end) } else { (end, start) };
     let n = |n: u32| match sign {
@@ -1440,7 +1436,7 @@ mod tests {
     #[test]
     fn fetch_gates_resolve_without_touching_the_forge() {
         // Each early gate returns before any `gh` spawn: identity failures and a
-        // detached HEAD (`specs/forge-host.md`).
+        // detached HEAD.
         let gated = |input: &PrFetchInput| fetch(Path::new("."), input);
         let mut missing = input("head", &["feat"]);
         missing.repository = crate::git::RepositoryIdentity::Missing;

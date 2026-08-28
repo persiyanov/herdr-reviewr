@@ -217,14 +217,14 @@ fn valid_auto_open_runtime_refusal_remains_silent() {
     assert!(!log.exists());
 }
 
-// --- Pane identity (specs/herdr-host.md): the foreground process decides, never the label.
+// --- Pane identity: the foreground process decides, never the label.
 
 #[test]
 fn a_pane_running_the_review_ui_counts_however_it_was_launched() {
     let dir = tempfile::tempdir().unwrap();
     let (herdr, log) = fake_herdr(dir.path());
     // A wrapped launch: `cargo run` holds the group, its child is the review UI, and the
-    // pane carries no `reviewr` label at all (HH-LAUNCHER-BLIND).
+    // pane carries no `reviewr` label at all.
     procinfo(
         dir.path(),
         "w1:p1",
@@ -260,7 +260,7 @@ fn close_sweeps_every_reviewr_pane_and_a_close_that_lost_the_race_still_converge
     let dir = tempfile::tempdir().unwrap();
     let (herdr, log) = fake_herdr(dir.path());
     // w1:p2 is a plain shell wearing a stale `reviewr` label — a crashed binary's leftover.
-    // The label is display only and never read (specs/herdr-host.md, Pane identity), so the
+    // The label is display only and never read, so the
     // sweep below must not touch it.
     fs::write(
         dir.path().join("panes.json"),
@@ -271,8 +271,7 @@ fn close_sweeps_every_reviewr_pane_and_a_close_that_lost_the_race_still_converge
     procinfo(dir.path(), "w1:p1", ui);
     procinfo(dir.path(), "w1:p3", ui);
     // w1:p3's close fails with the pane gone: it exited between the read and the close.
-    // The sweep still exits 0 — the end state is the same (specs/herdr-host.md, Failure
-    // semantics).
+    // The sweep still exits 0 — the end state is the same.
     fs::write(
         dir.path().join("closefail-w1:p3"),
         r#"{"error":{"code":"pane_not_found","message":"pane w1:p3 not found"},"id":"cli:request"}"#,
@@ -289,7 +288,7 @@ fn close_sweeps_every_reviewr_pane_and_a_close_that_lost_the_race_still_converge
     );
     let calls = fs::read_to_string(&log).unwrap();
     // Whole log lines, so a `plugin pane close` could not satisfy the plain-`pane close`
-    // contract these assert (specs/herdr-host.md, Failure semantics).
+    // contract these assert.
     assert!(calls.lines().any(|l| l == "pane close w1:p1"), "{calls}");
     assert!(calls.lines().any(|l| l == "pane close w1:p3"), "{calls}");
     assert!(
@@ -312,7 +311,7 @@ fn a_close_that_fails_for_a_live_pane_sweeps_the_rest_then_refuses() {
     procinfo(dir.path(), "w1:p3", ui);
     // w1:p1's close fails with the pane still there — a wedged herdr, not the benign
     // exited-between-read-and-close race. Reporting it closed would leave a running pane
-    // the user believes gone, so the sweep refuses (specs/herdr-host.md, Failure semantics).
+    // the user believes gone, so the sweep refuses.
     fs::write(
         dir.path().join("closefail-w1:p1"),
         r#"{"error":{"code":"internal","message":"boom"},"id":"cli:request"}"#,
@@ -345,7 +344,7 @@ fn a_gone_pane_skips_and_an_unreadable_read_refuses() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("close: nothing open"));
 
     // Any other read failure refuses, never reads as "no reviewr pane": an open would
-    // stack a duplicate and a close would false-succeed (specs/herdr-host.md).
+    // stack a duplicate and a close would false-succeed.
     fs::write(
         dir.path().join("procfail-w1:p1.json"),
         r#"{"error":{"code":"internal","message":"boom"},"id":"cli:request"}"#,
@@ -368,7 +367,7 @@ fn an_action_repoints_the_stable_launch_paths_at_the_live_plugin_root() {
     let (herdr, _log) = fake_herdr(dir.path());
     // The install's build step runs in a staging checkout herdr renames afterwards, so the
     // actions own the stable links: every valid invocation re-points them at the runtime
-    // root (specs/herdr-host.md, Install paths). `~/.local/bin` only when it exists.
+    // root. `~/.local/bin` only when it exists.
     let home = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     fs::create_dir_all(root.path().join("bin")).unwrap();
@@ -456,7 +455,7 @@ fn a_failed_pane_list_refuses_rather_than_reading_as_no_pane() {
 
 #[test]
 fn the_cli_fallback_resolves_the_config_dir_when_the_env_names_none() {
-    // The launcher-blind half of config resolution (specs/config.md): with no
+    // The launcher-blind half of config resolution: with no
     // `HERDR_PLUGIN_CONFIG_DIR`, the binary asks `herdr plugin config-dir` and reads the
     // directory it names. This is the one test that exercises the real herdr-CLI path —
     // the unit tests drive the resolver with an injected closure.
@@ -479,7 +478,7 @@ fn the_cli_fallback_resolves_the_config_dir_when_the_env_names_none() {
 #[test]
 fn a_wedged_config_dir_lookup_degrades_to_the_defaults_inside_the_bound() {
     // A herdr that does not answer resolves no directory, the missing-file outcome
-    // (specs/config.md, Failure semantics). The fake hangs 5s, well past the binary's
+    // The fake hangs 5s, well past the binary's
     // bound, so a success here can only come from giving the lookup up.
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
@@ -524,7 +523,7 @@ fn the_flag_dispatch_matches_the_actions_anywhere_in_argv() {
     // The other half of the flag-run contract, pinned in the binary itself: `pane.sh`
     // excludes `--resolve-plugin-config` wherever it sits in argv, so `main.rs` must
     // recognize it there too — or a flag run would start the review UI while the actions
-    // refuse to count it (specs/herdr-host.md, Pane identity).
+    // refuse to count it.
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
 
@@ -667,8 +666,7 @@ fn a_toggle_open_falls_back_when_the_live_cwd_is_not_a_repo() {
     let (herdr, log) = fake_herdr(dir.path());
     // The live foreground cwd sits outside any git repo — a shell that wandered off. The
     // live cwd wins only inside a repo; here it yields to the context cwd rather than
-    // refusing an open the context alone could place (specs/herdr-host.md, Repo
-    // discovery). Run as a toggle, so the opening toggle exercises the same block.
+    // refusing an open the context alone could place. Run as a toggle, so the opening toggle exercises the same block.
     let context = serde_json::json!({
         "focused_pane_id": "w1:p1",
         "focused_pane_cwd": env!("CARGO_MANIFEST_DIR"),
@@ -746,7 +744,6 @@ fn auto_open_takes_the_event_payload_cwd_over_the_live_one() {
     let (herdr, log) = fake_herdr(dir.path());
     // The focused pane's live cwd is a real git repo, so only the mode guard keeps it
     // from winning: the event open takes its directory from the payload alone
-    // (specs/herdr-host.md, Repo discovery).
     let live_repo = init_repo(dir.path(), "live-repo");
     pane_with_cwd(dir.path(), "w1:p1", &live_repo);
     let context = serde_json::json!({

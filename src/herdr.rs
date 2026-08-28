@@ -2,7 +2,7 @@
 //! tracking watches, ask herdr for the plugin config directory, and stamp/clear the
 //! pane's cosmetic `reviewr` label.
 //!
-//! See `specs/herdr-host.md`. Uses the herdr CLI via `$HERDR_BIN_PATH`. The two agent readers
+//! Uses the herdr CLI via `$HERDR_BIN_PATH`. The two agent readers
 //! ask different questions and neither narrows the other: [`send_target`] resolves candidates
 //! from the reviewr pane's herdr workspace, while [`agent_samples`] reports every agent and lets
 //! the caller decide membership by worktree. Browsing and the clipboard export never come
@@ -37,7 +37,7 @@ struct AgentList {
 ///
 /// `agent_status` is kept as herdr spelled it, not as the [`Status`] it parses to: the picker
 /// row shows the spelling and looks its label up by it, so a state herdr adds must survive a
-/// round trip reviewr does not understand (`specs/herdr-host.md`).
+/// round trip reviewr does not understand.
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
 struct AgentPane {
     agent: Option<String>,
@@ -46,7 +46,7 @@ struct AgentPane {
     tab_id: String,
     workspace_id: String,
     /// Where the agent works. Turn tracking resolves it to a git top level to decide which
-    /// worktree the agent belongs to (`specs/herdr-host.md`).
+    /// worktree the agent belongs to.
     cwd: Option<String>,
     name: Option<String>,
     display_agent: Option<String>,
@@ -54,7 +54,6 @@ struct AgentPane {
 }
 
 /// One picker row: the pane the send addresses, and the three parts the row shows
-/// (`specs/herdr-host.md`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentChoice {
     pub pane_id: String,
@@ -63,7 +62,7 @@ pub struct AgentChoice {
     pub tab: String,
 }
 
-/// What `Send` does with the agents herdr reports (`specs/herdr-host.md`). A refusal is the
+/// What `Send` does with the agents herdr reports. A refusal is the
 /// `Err` of [`send_target`], so zero agents and a failed enumeration land in one place.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SendTarget {
@@ -122,8 +121,7 @@ fn herdr_on_thread(args: Vec<String>) -> mpsc::Receiver<Result<String>> {
 }
 
 /// Stamp our own pane's cosmetic `reviewr` label — but only when the pane carries no label,
-/// so a name the user gave their pane survives running reviewr in it (`specs/herdr-host.md`
-/// Pane identity: reviewr supplies the default name, never overrides one). Display only:
+/// so a name the user gave their pane survives running reviewr in it (reviewr supplies the default name, never overrides one). Display only:
 /// the actions and the event identify a reviewr pane by its foreground process, never this
 /// label, so a failed read or write just logs — and nothing waits on it, so a hung herdr
 /// cannot sit between the first paint and the event loop. Without a pane id — outside
@@ -142,7 +140,7 @@ pub fn label_pane() {
 }
 
 /// Clear the cosmetic label on a normal exit — but only a `reviewr` label, so a name the
-/// user set is never deleted (`specs/herdr-host.md` Pane identity). The wait is bounded:
+/// user set is never deleted. The wait is bounded:
 /// this runs after the terminal is restored, and a hung herdr must not hold the shell
 /// prompt hostage for a label a stale copy of which changes nothing.
 pub fn clear_pane_label() {
@@ -196,7 +194,7 @@ fn parse_pane_label(json: &str, pane: &str) -> Option<String> {
 
 /// The config directory herdr resolves for this plugin, from `herdr plugin config-dir`.
 /// `None` — herdr absent, refusing, or not answering — means no config directory, never an
-/// error (`specs/config.md`).
+/// error.
 pub fn plugin_config_dir() -> Option<String> {
     plugin_config_dir_with(|| ())
 }
@@ -238,7 +236,7 @@ fn agent_list() -> Result<Vec<AgentPane>> {
 }
 
 /// What `Send` does: one workspace agent sends directly, several open the picker, and no
-/// agent refuses (`specs/herdr-host.md`). A failed enumeration refuses too, but says so rather
+/// agent refuses. A failed enumeration refuses too, but says so rather
 /// than reporting a count herdr never gave. Either refusal is the whole status line, so both
 /// stay one short sentence naming the clipboard the reviewer can fall back to.
 pub fn send_target() -> Result<SendTarget> {
@@ -253,7 +251,7 @@ pub fn send_target() -> Result<SendTarget> {
         }
     };
     // Candidacy is decided once, here: an `agent` field, our workspace, not our own pane.
-    // Rows keep `agent list` order, which is herdr's own (`specs/herdr-host.md`). Turn
+    // Rows keep `agent list` order, which is herdr's own. Turn
     // tracking does not come through here: it asks where each agent works instead.
     let picked = candidates(&agents, ws.as_deref(), me.as_deref());
     match picked.len() {
@@ -268,7 +266,7 @@ pub fn send_target() -> Result<SendTarget> {
 }
 
 impl AgentPane {
-    /// This pane as a picker row (`specs/herdr-host.md`).
+    /// This pane as a picker row.
     fn choice(&self, tabs: &HashMap<String, String>) -> AgentChoice {
         AgentChoice {
             pane_id: self.pane_id.clone(),
@@ -278,7 +276,7 @@ impl AgentPane {
         }
     }
 
-    /// The agent's `name`, else its `display_agent`, else its kind (`specs/herdr-host.md`).
+    /// The agent's `name`, else its `display_agent`, else its kind.
     /// A cleared name arrives as null and falls through like an absent one. The pane id is a
     /// last resort no live agent reaches, so the row and the success line always name something.
     fn row_name(&self) -> String {
@@ -292,7 +290,7 @@ impl AgentPane {
 
     /// The agent's `state_labels` entry for its state, else the state itself. Both the lookup
     /// key and the fallback are herdr's own spelling, so a state reviewr does not know still
-    /// names itself on the row instead of reading `unknown` (`specs/herdr-host.md`).
+    /// names itself on the row instead of reading `unknown`.
     fn row_state(&self) -> String {
         self.state_labels
             .as_ref()
@@ -362,7 +360,6 @@ fn parse_agents(json: &str) -> Result<Vec<AgentPane>> {
 
 /// One agent as turn tracking sees it: where it works, and what it is doing. Membership is
 /// the caller's to decide, since only the worker knows the reviewed worktree
-/// (`specs/herdr-host.md`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentSample {
     pub cwd: Option<String>,
@@ -419,7 +416,7 @@ const PASTE_END: &str = "\x1b[201~";
 
 /// The batch as one bracketed paste event, never raw bytes: a paste inserts verbatim in any
 /// input mode, where raw bytes execute as commands in a vim-style input resting in normal
-/// mode (`specs/herdr-host.md`). A terminator inside the batch would end the frame early and
+/// mode. A terminator inside the batch would end the frame early and
 /// hand the tail to the command interpreter. The body is rebuilt with a suffix check per
 /// character, so a terminator never survives, not even one spliced together by an earlier
 /// removal — and the send stays linear, where a delete-and-rescan loop is quadratic on
@@ -524,7 +521,7 @@ mod tests {
 
     #[test]
     fn a_row_name_prefers_the_rename_then_the_display_agent_then_the_kind() {
-        // `herdr agent rename` sets `name`, which wins (specs/herdr-host.md).
+        // `herdr agent rename` sets `name`, which wins.
         assert_eq!(named("w8:p1", "w8:t1", "w8", Some("release-bot")).row_name(), "release-bot");
         // `--clear` leaves the key present and null, which falls through like an absent one.
         let cleared = named("w8:p1", "w8:t1", "w8", None);
@@ -666,7 +663,7 @@ mod tests {
         assert_eq!(parsed[0].row_state(), "compacting", "the row shows herdr's own spelling");
         assert_eq!(parsed[0].status(), Status::Unknown, "tracking folds it to unknown");
         // And the spelling is the `state_labels` key, so herdr can label a state reviewr has
-        // never heard of (`specs/herdr-host.md`).
+        // never heard of.
         let labelled = r#"{"result":{"agents":[{"agent":"claude","agent_status":"compacting","pane_id":"w8:p1","tab_id":"w8:t1","workspace_id":"w8","state_labels":{"compacting":"Compacting"}}]}}"#;
         assert_eq!(parse_agents(labelled).unwrap()[0].row_state(), "Compacting");
     }

@@ -1,7 +1,7 @@
 //! The structured diff model: a file's changes as rows built from its old and new
 //! content, syntax-highlighted, ready to paint.
 //!
-//! See `specs/diff-view.md`. This module is terminal-free — a `Span` carries an RGB
+//! This module is terminal-free — a `Span` carries an RGB
 //! color, and `src/ui.rs` maps it to a ratatui color.
 
 use std::collections::HashMap;
@@ -121,7 +121,7 @@ pub enum FileState {
 /// How the pane renders the model: the `Changes` diff, or the `All files` whole-file content.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
-    /// Old-versus-new with change rows and folds (specs/diff-view.md).
+    /// Old-versus-new with change rows and folds.
     Diff,
     /// The whole current file as `Context` rows, no folds — the File view.
     File,
@@ -240,7 +240,7 @@ impl FileDiff {
     }
 
     /// Build the File view: the whole current `content` as `Context` rows, syntax-highlighted,
-    /// with no folds, change rows, or emphasis. Powers the `All files` tab (specs/diff-view.md).
+    /// with no folds, change rows, or emphasis. Powers the `All files` tab.
     /// Degrades to a `binary` or `too_large` notice on the same budgets as [`build`](Self::build).
     fn build_file(path: String, content: &str, hl: &Highlighter) -> Self {
         let notice = |state| Self {
