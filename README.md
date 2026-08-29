@@ -53,7 +53,8 @@ Open it in the current workspace:
 herdr plugin action invoke open --plugin persiyanov.reviewr
 ```
 
-reviewr auto-opens in new worktrees. `auto_open = false` keeps it hidden until you ask
+reviewr auto-opens when herdr creates a workspace for a worktree, whether the checkout is new or
+opened from disk. `auto_open = false` keeps it hidden until you ask
 ([Configuration](#configuration)).
 
 **To update**, reinstall. Your config is keyed by plugin id and survives:
@@ -375,19 +376,18 @@ toggle_direction = "down"      # right | down — split only        (default: ri
 - **`zoomed`** fills the tab.
 - **`tab`** opens its own tab.
 
-Every placement takes the keyboard on toggle. New worktrees auto-open only `split` and `tab`,
-and never steal focus.
+Every placement takes the keyboard on toggle. New worktree workspaces auto-open only `split` and
+`tab`, and never steal focus.
 
 ### Auto-open and layout plugins
 
-reviewr auto-opens in every new worktree. `auto_open = false` makes it wait for the toggle:
+reviewr auto-opens when herdr creates a workspace for a new or existing worktree checkout. Opening
+an already-live workspace does not resurrect a reviewr pane you closed there. `auto_open = false`
+makes it wait for the toggle:
 
 ```toml
 auto_open = false   # default: true
 ```
-
-Set this when a layout plugin like [herdr-plus](https://github.com/cloudmanic/herdr-plus)
-arranges your new worktrees, so the two don't race.
 
 A layout places reviewr like any other program. Give one pane the command:
 

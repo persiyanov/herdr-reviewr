@@ -24,7 +24,11 @@ command = ["bash", "herdr/pane.sh", "toggle"]
 
 [[events]]                                  # run a command on a herdr event
 on = "worktree.created"
-command = ["bash", "herdr/pane.sh", "open"]
+command = ["bash", "herdr/pane.sh", "auto-open"]
+
+[[events]]
+on = "worktree.opened"
+command = ["bash", "herdr/pane.sh", "auto-open"]
 ```
 
 Lifecycle: `herdr plugin link <dir>` (local dev, no build) · `herdr plugin install <owner>/<repo>` ·
@@ -108,6 +112,49 @@ herdr runs plugin commands with a minimal `PATH`; prepend common bin dirs for `j
   selector (verified live, 0.7.1: invoked from pane `w1X:p1`, context arrived for focused `w1B`).
 - **`worktree.created` event** (`HERDR_PLUGIN_EVENT_JSON`): `.data.workspace.workspace_id`,
   `.data.workspace.worktree.checkout_path`, and `.data.worktree.{path, branch, open_workspace_id}`.
+- **`worktree.opened` event**: the v0.7.5 tagged serializer and event source produce this raw
+  `HERDR_PLUGIN_EVENT_JSON` shape (representative values):
+
+  ```json
+  {
+    "event": "worktree_opened",
+    "data": {
+      "type": "worktree_opened",
+      "workspace": {
+        "workspace_id": "w3W",
+        "number": 3,
+        "label": "branch-name",
+        "focused": false,
+        "pane_count": 1,
+        "tab_count": 1,
+        "active_tab_id": "w3W:t1",
+        "agent_status": "idle",
+        "worktree": {
+          "repo_key": "repo-key",
+          "repo_name": "repo",
+          "repo_root": "/repo",
+          "checkout_path": "/repo/.herdr/worktrees/branch-name",
+          "is_linked_worktree": true
+        }
+      },
+      "worktree": {
+        "path": "/repo/.herdr/worktrees/branch-name",
+        "branch": "branch-name",
+        "is_bare": false,
+        "is_detached": false,
+        "is_prunable": false,
+        "is_linked_worktree": true,
+        "open_workspace_id": "w3W",
+        "label": "repo"
+      },
+      "already_open": false
+    }
+  }
+  ```
+
+  `already_open = false` means the command created the workspace. `true` means the workspace was
+  already live. The event hook targets `.data.workspace.workspace_id` and
+  `.data.workspace.worktree.checkout_path`; the `worktree` paths remain compatible fallbacks.
 
 ## Keybinding (user config, not the manifest)
 

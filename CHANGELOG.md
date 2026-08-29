@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`auto_open` also opens reviewr when an existing checkout gets a new herdr workspace.** Opening
+  a checkout whose workspace is already live remains a no-op, so it does not resurrect a reviewr
+  pane the user closed there. Layout and session plugins that own reviewr placement still opt out
+  with `auto_open = false`. ([#82](https://github.com/persiyanov/herdr-reviewr/issues/82))
+
 ## [0.36.1] — 2026-08-28
 
 ### Changed

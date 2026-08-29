@@ -41,7 +41,11 @@ title = "reviewr: close pane"
 contexts = ["pane", "workspace"]
 command = ["bash", "herdr/pane.sh", "close"]
 
-# Auto-open a reviewr pane for a freshly created worktree (gated by auto_open; see herdr/pane.sh).
+# Auto-open a reviewr pane when a worktree workspace is born (gated by auto_open; see herdr/pane.sh).
 [[events]]
 on = "worktree.created"
+command = ["bash", "herdr/pane.sh", "auto-open"]
+
+[[events]]
+on = "worktree.opened"
 command = ["bash", "herdr/pane.sh", "auto-open"]

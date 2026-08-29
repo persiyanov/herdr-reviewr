@@ -4,7 +4,7 @@
 #   pane.sh toggle      open a reviewr pane, or close every one if any is open
 #   pane.sh open        open a reviewr pane, no-op if one is open
 #   pane.sh close       close every reviewr pane, no-op if none
-#   pane.sh auto-open   worktree.created hook: open, gated by auto_open and placement
+#   pane.sh auto-open   worktree workspace-birth hook, gated by auto_open and placement
 #
 # A reviewr pane is any pane running the review UI in its foreground process group, read
 # live per pane. The `reviewr` label is display only
@@ -71,6 +71,12 @@ if [ "$mode" = auto-open ]; then
   if [ "$placement" != "split" ] && [ "$placement" != "tab" ]; then
     exit 0
   fi
+  # `worktree.opened` also fires when its workspace is already live. That is a focus/open
+  # request, not a workspace birth: never resurrect a reviewr pane the user closed there.
+  if [ -n "${HERDR_PLUGIN_EVENT_JSON:-}" ] &&
+    printf '%s' "$HERDR_PLUGIN_EVENT_JSON" | jq -e '.data.already_open == true' >/dev/null 2>&1; then
+    exit 0
+  fi
 fi
 
 refuse() {
@@ -85,8 +91,7 @@ cwd=""
 [ -n "${HERDR_PLUGIN_CONTEXT_JSON:-}" ] &&
   cwd=$(printf '%s' "$HERDR_PLUGIN_CONTEXT_JSON" | jq -r '.focused_pane_cwd // .workspace_cwd // empty' 2>/dev/null)
 
-# The event fires without a focused pane; target the fresh workspace from its payload
-# (worktree.created shape: .data.workspace.workspace_id, .data.workspace.worktree.checkout_path).
+# The events fire without a focused pane; target the fresh workspace from their payload.
 if [ "$mode" = auto-open ] && [ -n "${HERDR_PLUGIN_EVENT_JSON:-}" ]; then
   ev="$HERDR_PLUGIN_EVENT_JSON"
   ws=$(printf '%s' "$ev" | jq -r '.data.workspace.workspace_id // .data.worktree.open_workspace_id // empty' 2>/dev/null)

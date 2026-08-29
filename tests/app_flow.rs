@@ -3888,11 +3888,7 @@ fn a_poll_keeping_the_open_file_leaves_find_open_and_re_derives() {
     let snapshot = herdr_reviewr::world::build(&app.world_input()).unwrap();
     app.reconcile_world(snapshot);
 
-    assert_eq!(
-        app.mode,
-        Mode::Find,
-        "a same-file poll keeps the band open (Continuity)"
-    );
+    assert_eq!(app.mode, Mode::Find, "a same-file poll keeps the band open (Continuity)");
     assert_eq!(app.find_count().unwrap().1, before + 1, "the count re-derives from new content");
 }
 
