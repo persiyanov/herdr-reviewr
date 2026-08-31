@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Terminal-following theme.** Set `theme = "terminal"` or use `--theme terminal` to inherit
+  terminal default and named ANSI colors without querying the terminal palette.
+
 ## [0.36.2] — 2026-08-29
 
 ### Fixed

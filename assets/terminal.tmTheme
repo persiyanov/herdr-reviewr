@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>name</key><string>herdr-reviewr Terminal</string>
+  <key>settings</key>
+  <array>
+    <dict><key>settings</key><dict><key>foreground</key><string>#010101</string></dict></dict>
+    <dict><key>scope</key><string>comment</string><key>settings</key><dict><key>foreground</key><string>#010102</string></dict></dict>
+    <dict><key>scope</key><string>string</string><key>settings</key><dict><key>foreground</key><string>#010103</string></dict></dict>
+    <dict><key>scope</key><string>constant.numeric</string><key>settings</key><dict><key>foreground</key><string>#010104</string></dict></dict>
+    <dict><key>scope</key><string>keyword</string><key>settings</key><dict><key>foreground</key><string>#010105</string></dict></dict>
+    <dict><key>scope</key><string>entity.name.function</string><key>settings</key><dict><key>foreground</key><string>#010106</string></dict></dict>
+    <dict><key>scope</key><string>entity.name.type, support.type</string><key>settings</key><dict><key>foreground</key><string>#010107</string></dict></dict>
+    <dict><key>scope</key><string>entity.other.attribute-name</string><key>settings</key><dict><key>foreground</key><string>#010108</string></dict></dict>
+    <dict><key>scope</key><string>keyword.operator</string><key>settings</key><dict><key>foreground</key><string>#010109</string></dict></dict>
+  </array>
+</dict>
+</plist>

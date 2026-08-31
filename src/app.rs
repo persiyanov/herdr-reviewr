@@ -5001,6 +5001,18 @@ mod tests {
     }
 
     #[test]
+    fn cli_theme_overrides_terminal_theme_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "theme = \"terminal\"\n").unwrap();
+        let config = crate::config::plugin_config_in(dir.path()).unwrap();
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        app.set_plugin_config(config);
+        assert_eq!(app.theme_name, "terminal");
+        app.set_cli_theme(Some("gruvbox".to_string()));
+        assert_eq!(app.theme_name, "gruvbox");
+    }
+
+    #[test]
     fn config_recovery_carries_the_last_sent_agent() {
         // The `last used` arming is session memory: a config error between two sends must
         // not move the next picker's default.

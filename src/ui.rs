@@ -104,8 +104,17 @@ fn scrim_behind(frame: &mut Frame, app: &App, area: Rect) {
         for y in band.y..band.y + band.height {
             for x in band.x..band.x + band.width {
                 if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.fg = p.scrim(cell.fg);
-                    cell.bg = p.scrim(cell.bg);
+                    if p.is_terminal() {
+                        cell.set_style(
+                            Style::default()
+                                .fg(Color::Reset)
+                                .bg(Color::Reset)
+                                .add_modifier(Modifier::DIM),
+                        );
+                    } else {
+                        cell.fg = p.scrim(cell.fg);
+                        cell.bg = p.scrim(cell.bg);
+                    }
                 }
             }
         }
@@ -314,7 +323,7 @@ pub fn diff_row_heights(app: &App, area: Rect) -> Vec<usize> {
         .iter()
         .enumerate()
         .map(|(i, r)| {
-            let base = row_height(r, gutter_w, width, app.wrap);
+            let base = row_height(r, gutter_w, width, app.wrap, app.palette());
             let card: usize = cards
                 .iter()
                 .filter(|&&(row, ci)| row == i && Some(ci) != editing)
@@ -376,7 +385,7 @@ fn read_layout(app: &App, inner: Rect) -> Vec<Slot> {
     // A row's slots: its wrapped code lines, then its visible cards' lines — the same order
     // `render_diff_view`'s `row_lines` paints them.
     let row_slots = |i: usize| -> Vec<Slot> {
-        let segs = row_height(&app.visible[i], gutter_w, width, app.wrap);
+        let segs = row_height(&app.visible[i], gutter_w, width, app.wrap, app.palette());
         let mut out: Vec<Slot> = (0..segs).map(|seg| Slot::Code { row: i, seg }).collect();
         for &(_, ci) in cards.iter().filter(|&&(row, _)| row == i) {
             if Some(ci) != editing
@@ -444,7 +453,7 @@ fn seg_cell_range(app: &App, cells: &[Cell], seg: usize, code_width: usize) -> (
 /// The source char at display column `col_in_code` of a code display line, clamped to the
 /// line: past its end selects its last char (a stream selection runs to the row's end).
 fn seg_char_at(app: &App, row: &Row, seg: usize, code_width: usize, col_in_code: usize) -> usize {
-    let cells = code_cells(row, false, &[]);
+    let cells = code_cells(row, false, &[], app.palette());
     let (s, e) = seg_cell_range(app, &cells, seg, code_width);
     if s >= e {
         // The line is scrolled entirely off (h-scroll past its end): past the end selects
@@ -472,7 +481,7 @@ pub fn widest_visible_row(app: &App, area: Rect) -> usize {
         .iter()
         .skip(app.diff_scroll)
         .take(content.height as usize)
-        .map(|r| code_cells(r, false, &[]).iter().map(|c| c.w).sum())
+        .map(|r| code_cells(r, false, &[], app.palette()).iter().map(|c| c.w).sum())
         .max()
         .unwrap_or(0)
 }
@@ -603,7 +612,14 @@ fn render_text_selection(frame: &mut Frame, app: &App, area: Rect) {
     if is_live && drag.anchor == drag.extent {
         return;
     }
-    let style = Style::default().bg(app.palette().sel_bg);
+    let style = if app.palette().is_terminal() {
+        Style::default()
+            .fg(Color::Reset)
+            .bg(Color::Reset)
+            .add_modifier(Modifier::REVERSED | Modifier::UNDERLINED)
+    } else {
+        Style::default().bg(app.palette().sel_bg)
+    };
     let (lo, hi) = drag.ordered();
     match drag.surface {
         Surface::Files => {
@@ -632,7 +648,7 @@ fn render_text_selection(frame: &mut Frame, app: &App, area: Rect) {
                 if !row_ref.is_content() {
                     continue;
                 }
-                let cells = code_cells(row_ref, false, &[]);
+                let cells = code_cells(row_ref, false, &[], app.palette());
                 let (seg_s, seg_e) = seg_cell_range(app, &cells, seg, code_width);
                 let y = pane.inner.y + off as u16;
                 let max_x = (pane.inner.x + pane.inner.width) as usize;
@@ -1076,7 +1092,11 @@ fn composer_lines(
 
 /// The block-cursor style: the character under the caret shown dark-on-orange.
 fn caret_style(p: &Palette) -> Style {
-    Style::default().fg(p.surface0).bg(p.orange)
+    if p.is_terminal() {
+        Style::default().fg(Color::Reset).bg(Color::Reset).add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().fg(p.surface0).bg(p.orange)
+    }
 }
 
 /// One box row with the caret block over the character at `col`.
@@ -1650,9 +1670,15 @@ fn file_row_item(
         // Dim the parent directories the same way, under the match highlight on the runs the
         // engine reported.
         let basename_at = shown.rfind('/').map_or(0, |i| i + 1);
-        spans.extend(emphasized_spans(&shown, &shown_spans, p.match_hl, |byte| {
-            if byte < basename_at { Style::default().fg(p.dim2) } else { base_style }
-        }));
+        spans.extend(emphasized_spans(
+            &shown,
+            &shown_spans,
+            p.match_hl,
+            |byte| {
+                if byte < basename_at { Style::default().fg(p.dim2) } else { base_style }
+            },
+            p.is_terminal(),
+        ));
     }
     if !stats.is_empty() {
         let used: usize = spans.iter().map(Span::width).sum();
@@ -1997,13 +2023,13 @@ fn gutter_prefix_width(gutter_w: usize) -> usize {
 /// How many display rows a row needs: 1 for a fold or with wrap off, else the number of
 /// word-wrapped segments its (tab-expanded) content fills. Shares [`wrap_segments`] with
 /// the renderer so per-row geometry stays aligned with what gets painted.
-fn row_height(row: &Row, gutter_w: usize, width: usize, wrap: bool) -> usize {
+fn row_height(row: &Row, gutter_w: usize, width: usize, wrap: bool, p: &Palette) -> usize {
     if !wrap || matches!(row, Row::Fold { .. }) {
         return 1;
     }
     let code_width = width.saturating_sub(gutter_prefix_width(gutter_w)).max(1);
     // The find highlight never changes wrapping, so height ignores it.
-    wrap_segments(&code_cells(row, false, &[]), code_width, ContinuationSpaces::Trim).len()
+    wrap_segments(&code_cells(row, false, &[], p), code_width, ContinuationSpaces::Trim).len()
 }
 
 /// The diff-pane layout: constant for a frame.
@@ -2053,6 +2079,12 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         if let Some(pad) = width.checked_sub(line.width()).filter(|p| *p > 0) {
             line.push_span(Span::raw(" ".repeat(pad)));
         }
+        if pal.is_terminal() && (cursor || selected) {
+            let modifier = terminal_row_modifier(cursor, selected, focused);
+            let mut spans = line.spans;
+            normalize_terminal_spans(&mut spans, modifier);
+            return vec![Line::from(spans)];
+        }
         let bg = if cursor { pal.cursor_bg(focused) } else { pal.surface0 };
         return vec![line.style(Style::default().bg(bg).add_modifier(Modifier::BOLD))];
     }
@@ -2070,7 +2102,9 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         '+' => ("▌", pal.green),
         _ => (" ", pal.dim2),
     };
-    let row_bg = if cursor {
+    let row_bg = if pal.is_terminal() {
+        None
+    } else if cursor {
         Some(pal.cursor_bg(focused))
     } else if selected {
         Some(pal.surface1)
@@ -2094,7 +2128,7 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
     // like word emphasis.
     let hl_ranges =
         find.map(|(q, cs)| crate::app::find_match_ranges(&row.text(), q, cs)).unwrap_or_default();
-    let cells = code_cells(row, emph_on, &hl_ranges);
+    let cells = code_cells(row, emph_on, &hl_ranges, pal);
 
     let prefix_w = gutter_prefix_width(gutter_w);
     let code_width = width.saturating_sub(prefix_w).max(1);
@@ -2143,15 +2177,22 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
                     Span::raw(" ".repeat(prefix_w - 1)),
                 ]
             };
+            let gutter_modifier = terminal_row_modifier(cursor, selected, focused);
             let mut spans = gutter;
             spans.extend(cells_to_spans(
                 chunk,
                 emph_bg,
                 HlStyle { bg: pal.yellow, fg: pal.surface0 },
+                Interaction { terminal: pal.is_terminal() },
             ));
             let mut line = Line::from(spans);
             if let Some(pad) = width.checked_sub(line.width()).filter(|p| *p > 0) {
                 line.push_span(Span::raw(" ".repeat(pad)));
+            }
+            if pal.is_terminal() && (cursor || selected) {
+                let mut spans = line.spans;
+                normalize_terminal_spans(&mut spans, gutter_modifier);
+                line = Line::from(spans);
             }
             match row_bg {
                 Some(bg) => line.style(Style::default().bg(bg)),
@@ -2159,10 +2200,6 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
             }
         })
         .collect()
-}
-
-pub(crate) fn rgb(c: crate::diff::Rgb) -> Color {
-    Color::Rgb(c.0, c.1, c.2)
 }
 
 /// Tabs expand to this many columns.
@@ -2264,7 +2301,7 @@ struct Cell {
 /// char carries its column width, color, its word-emphasis flag (when `emph_on`), and whether it
 /// falls in an in-file find match (`hl_ranges`, char indices). Width comes from `unicode-width`
 /// so wide glyphs measure as the two columns they paint.
-fn code_cells(row: &Row, emph_on: bool, hl_ranges: &[(u32, u32)]) -> Vec<Cell> {
+fn code_cells(row: &Row, emph_on: bool, hl_ranges: &[(u32, u32)], pal: &Palette) -> Vec<Cell> {
     let emphasis = if emph_on { row.emphasis() } else { &[] };
     let in_emph = |i: u32| emphasis.iter().any(|&(a, b)| i >= a && i < b);
     let in_hl = |i: u32| hl_ranges.iter().any(|&(a, b)| i >= a && i < b);
@@ -2272,7 +2309,7 @@ fn code_cells(row: &Row, emph_on: bool, hl_ranges: &[(u32, u32)]) -> Vec<Cell> {
     let mut idx = 0u32;
     let mut col = 0usize; // display column, so tab stops land right after wide glyphs too
     for s in row.spans() {
-        let fg = rgb(s.color);
+        let fg = pal.coerce_syntax(s.color);
         for ch in s.text.chars() {
             let emph = in_emph(idx);
             let hl = in_hl(idx);
@@ -2295,7 +2332,12 @@ fn code_cells(row: &Row, emph_on: bool, hl_ranges: &[(u32, u32)]) -> Vec<Cell> {
 
 /// Build spans from display cells, merging runs of equal color, emphasis, and find-highlight; a
 /// highlighted run takes `hl_bg` (the find match), else an emphasized run takes `emph_bg`.
-fn cells_to_spans(cells: &[Cell], emph_bg: Color, hl: HlStyle) -> Vec<Span<'static>> {
+fn cells_to_spans(
+    cells: &[Cell],
+    emph_bg: Color,
+    hl: HlStyle,
+    interaction: Interaction,
+) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut buf = String::new();
     let mut cur: Option<(Color, bool, bool)> = None;
@@ -2303,14 +2345,22 @@ fn cells_to_spans(cells: &[Cell], emph_bg: Color, hl: HlStyle) -> Vec<Span<'stat
         let key = (c.fg, c.emph, c.hl);
         if cur != Some(key) {
             if let Some((fg, emph, is_hl)) = cur {
-                spans.push(cell_span(std::mem::take(&mut buf), fg, emph, is_hl, emph_bg, hl));
+                spans.push(cell_span(
+                    std::mem::take(&mut buf),
+                    fg,
+                    emph,
+                    is_hl,
+                    emph_bg,
+                    hl,
+                    interaction,
+                ));
             }
             cur = Some(key);
         }
         buf.push(c.ch);
     }
     if let Some((fg, emph, is_hl)) = cur {
-        spans.push(cell_span(buf, fg, emph, is_hl, emph_bg, hl));
+        spans.push(cell_span(buf, fg, emph, is_hl, emph_bg, hl, interaction));
     }
     spans
 }
@@ -2323,6 +2373,27 @@ struct HlStyle {
     fg: Color,
 }
 
+#[derive(Clone, Copy)]
+struct Interaction {
+    terminal: bool,
+}
+
+fn terminal_row_modifier(cursor: bool, selected: bool, focused: bool) -> Modifier {
+    if cursor {
+        Modifier::REVERSED | if focused { Modifier::BOLD } else { Modifier::empty() }
+    } else if selected {
+        Modifier::REVERSED | Modifier::UNDERLINED
+    } else {
+        Modifier::empty()
+    }
+}
+
+fn normalize_terminal_spans(spans: &mut [Span<'static>], modifiers: Modifier) {
+    for span in spans {
+        span.style = span.style.fg(Color::Reset).bg(Color::Reset).add_modifier(modifiers);
+    }
+}
+
 /// A run's span: a find match reverses to `hl.fg` on `hl.bg`; else word emphasis takes `emph_bg`;
 /// else the plain foreground.
 fn cell_span(
@@ -2332,8 +2403,16 @@ fn cell_span(
     is_hl: bool,
     emph_bg: Color,
     hl: HlStyle,
+    interaction: Interaction,
 ) -> Span<'static> {
-    let style = if is_hl {
+    let style = if interaction.terminal && is_hl {
+        Style::default()
+            .fg(Color::Reset)
+            .bg(Color::Reset)
+            .add_modifier(Modifier::REVERSED | Modifier::BOLD | Modifier::UNDERLINED)
+    } else if interaction.terminal && emph {
+        Style::default().fg(fg).add_modifier(Modifier::BOLD)
+    } else if is_hl {
         Style::default().fg(hl.fg).bg(hl.bg).add_modifier(Modifier::BOLD)
     } else if emph {
         Style::default().fg(fg).bg(emph_bg)
@@ -2447,6 +2526,119 @@ mod tests {
         assert_eq!(age_label(364 * 86_400), "52w");
         assert_eq!(age_label(365 * 86_400), "1y");
         assert_eq!(relative_age("garbage", now), "");
+    }
+
+    #[test]
+    fn terminal_interaction_styles_override_syntax_and_backgrounds() {
+        let span = cell_span(
+            "x".into(),
+            Color::Cyan,
+            true,
+            true,
+            Color::Rgb(1, 2, 3),
+            HlStyle { bg: Color::Rgb(4, 5, 6), fg: Color::Rgb(7, 8, 9) },
+            Interaction { terminal: true },
+        );
+        assert_eq!(span.style.fg, Some(Color::Reset));
+        assert_eq!(span.style.bg, Some(Color::Reset));
+        assert!(span.style.add_modifier.contains(Modifier::REVERSED));
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+        assert!(span.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(!matches!(span.style.fg, Some(Color::Rgb(..) | Color::Indexed(..))));
+    }
+
+    #[test]
+    fn terminal_production_rows_contain_only_terminal_colors_after_interaction_paint() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let palette = crate::theme::resolve(Some("terminal")).palette;
+        let row = Row::Context {
+            old_no: 12,
+            new_no: 12,
+            spans: vec![crate::diff::Span { text: "code".into(), color: Color::Rgb(12, 34, 56) }],
+        };
+        let fold = Row::Fold { lines: vec![row.clone()] };
+        let layout = RowLayout {
+            gutter_w: 4,
+            width: 24,
+            h_scroll: 0,
+            wrap: false,
+            focused: true,
+            pal: &palette,
+            find: None,
+            expand_hint: "enter",
+        };
+        let mut lines = render_row(
+            &row,
+            layout,
+            RowState { commented: false, cursor: true, selected: false, hovered: false },
+        );
+        lines.extend(render_row(
+            &fold,
+            layout,
+            RowState { commented: false, cursor: true, selected: false, hovered: false },
+        ));
+        lines.push(search_preview_line(&row, 4, 24, Some(&[(0, 4)]), &palette));
+
+        let added = Row::Insertion {
+            new_no: 13,
+            spans: vec![crate::diff::Span { text: "added".into(), color: Color::Rgb(1, 2, 3) }],
+            emphasis: vec![],
+        };
+        let normal_added = render_row(
+            &added,
+            layout,
+            RowState { commented: false, cursor: false, selected: false, hovered: false },
+        );
+        assert_eq!(normal_added[0].spans[0].style.fg, Some(palette.green));
+        let removed = Row::Deletion {
+            old_no: 14,
+            spans: vec![crate::diff::Span { text: "removed".into(), color: Color::Rgb(4, 5, 6) }],
+            emphasis: vec![],
+        };
+        let normal_removed = render_row(
+            &removed,
+            layout,
+            RowState { commented: false, cursor: false, selected: false, hovered: false },
+        );
+        assert_eq!(normal_removed[0].spans[0].style.fg, Some(palette.red));
+        let normal_fold = render_row(
+            &fold,
+            layout,
+            RowState { commented: false, cursor: false, selected: false, hovered: false },
+        );
+        assert_eq!(normal_fold[0].spans[0].style.fg, Some(palette.dim0));
+
+        let backend = TestBackend::new(24, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new(lines.clone()), frame.area());
+            })
+            .unwrap();
+        for cell in terminal.backend().buffer().content() {
+            assert_eq!(cell.fg, Color::Reset);
+            assert_eq!(cell.bg, Color::Reset);
+        }
+        let buffer = terminal.backend().buffer();
+        assert!(buffer.content()[0].modifier.contains(Modifier::REVERSED));
+        assert!(buffer.content()[0].modifier.contains(Modifier::BOLD));
+        assert!(buffer.content().iter().any(|cell| cell.modifier.contains(Modifier::UNDERLINED)));
+    }
+
+    #[test]
+    fn terminal_caret_uses_reset_and_reversed_but_fixed_caret_keeps_palette_style() {
+        let terminal = crate::theme::resolve(Some("terminal")).palette;
+        let fixed = crate::theme::resolve(Some("catppuccin")).palette;
+        let terminal_caret = row_with_caret("abc", 1, &terminal).spans[1].style;
+        assert_eq!(terminal_caret.fg, Some(Color::Reset));
+        assert_eq!(terminal_caret.bg, Some(Color::Reset));
+        assert!(terminal_caret.add_modifier.contains(Modifier::REVERSED));
+        let fixed_caret = row_with_caret("abc", 1, &fixed).spans[1].style;
+        assert_eq!(fixed_caret.fg, Some(fixed.surface0));
+        assert_eq!(fixed_caret.bg, Some(fixed.orange));
+        assert!(!fixed_caret.add_modifier.contains(Modifier::REVERSED));
     }
 
     use super::{box_rows, caret_rowcol, composer_caret_cell_position, single_line_caret_view};
@@ -3787,7 +3979,7 @@ fn search_preview_line(
             for sp in row.spans() {
                 spans.push(Span::styled(
                     sp.text.replace('\t', "    "),
-                    Style::default().fg(rgb(sp.color)),
+                    Style::default().fg(p.coerce_syntax(sp.color)),
                 ));
             }
             Line::from(spans)
@@ -3806,7 +3998,7 @@ fn search_preview_line(
             let mut colors: Vec<(usize, Color)> = Vec::new();
             let mut at = 0usize;
             for sp in row.spans() {
-                colors.push((at, rgb(sp.color)));
+                colors.push((at, p.coerce_syntax(sp.color)));
                 at += sp.text.len();
             }
             let mut ci = 0usize;
@@ -3816,7 +4008,7 @@ fn search_preview_line(
                 }
                 Style::default().fg(colors.get(ci).map_or(p.text, |&(_, c)| c))
             };
-            let emphasized = emphasized_spans(&text, &ranges, p.match_hl, base);
+            let emphasized = emphasized_spans(&text, &ranges, p.match_hl, base, p.is_terminal());
             spans.extend(
                 emphasized
                     .into_iter()
@@ -3827,7 +4019,13 @@ fn search_preview_line(
             if pad > 0 {
                 line.push_span(Span::raw(" ".repeat(pad)));
             }
-            line.style(Style::default().bg(p.cursor_bg(true)))
+            if p.is_terminal() {
+                let mut spans = line.spans;
+                normalize_terminal_spans(&mut spans, Modifier::REVERSED);
+                Line::from(spans)
+            } else {
+                line.style(Style::default().bg(p.cursor_bg(true)))
+            }
         }
     }
 }
@@ -3883,7 +4081,7 @@ fn search_code_row(
     if !prefix.is_empty() {
         spans.push(Span::styled(prefix.to_string(), Style::default().fg(p.dim2)));
     }
-    spans.extend(emphasized_spans(shown, &shifted, p.match_hl, |_| text_style(p)));
+    spans.extend(emphasized_spans(shown, &shifted, p.match_hl, |_| text_style(p), p.is_terminal()));
     selectable_row(p, spans, width, fill)
 }
 
@@ -3924,6 +4122,7 @@ fn emphasized_spans(
     ranges: &[(u32, u32)],
     hl: Color,
     mut base: impl FnMut(usize) -> Style,
+    terminal: bool,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut run = String::new();
@@ -3931,7 +4130,14 @@ fn emphasized_spans(
     for (i, c) in text.char_indices() {
         let mut style = base(i);
         if ranges.iter().any(|&(s, e)| (s as usize) <= i && i < (e as usize)) {
-            style = style.bg(hl).add_modifier(Modifier::BOLD);
+            style = if terminal {
+                Style::default()
+                    .fg(Color::Reset)
+                    .bg(Color::Reset)
+                    .add_modifier(Modifier::REVERSED | Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                style.bg(hl).add_modifier(Modifier::BOLD)
+            };
         }
         if run.is_empty() {
             run_style = style;
@@ -4027,16 +4233,26 @@ fn selectable_row(
         for s in &mut spans {
             // A span with its own background (the search match highlight) keeps it, so the
             // match still reads on the selected row; the rest take the selection fill.
-            if s.style.bg.is_none() {
+            if p.is_terminal() {
+                s.style = s
+                    .style
+                    .fg(Color::Reset)
+                    .bg(Color::Reset)
+                    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            } else if s.style.bg.is_none() {
                 s.style = s.style.bg(bg);
             }
             // Dim text lifts, so a selected row keeps its secondary parts: the file list's
             // indent, the search hit's line number, the picker row's state and tab trail.
             // The theme owns which color that is.
-            if let Some(fg) = s.style.fg {
+            if !p.is_terminal()
+                && let Some(fg) = s.style.fg
+            {
                 s.style = s.style.fg(p.on_fill(fg));
             }
-            s.style = s.style.add_modifier(Modifier::BOLD);
+            if !p.is_terminal() {
+                s.style = s.style.add_modifier(Modifier::BOLD);
+            }
         }
     }
     ListItem::new(Line::from(spans))

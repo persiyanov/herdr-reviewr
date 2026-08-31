@@ -1445,6 +1445,98 @@ fn renders_a_light_theme_without_panic() {
     assert!(painted, "the Latte palette reaches the painted buffer");
 }
 
+#[test]
+fn terminal_theme_paints_the_complete_frame_without_fixed_colors() {
+    let repo = Repo::init();
+    repo.write(
+        "syntax.rs",
+        "fn greet(name: &str) -> String {\n    let count = 42;\n    format!(\"hello {name} {count}\")\n}\n",
+    );
+    repo.commit_all("baseline");
+    repo.write(
+        "syntax.rs",
+        "fn greet(name: &str) -> String {\n    let count = 43;\n    format!(\"hello, {name} {count}\")\n}\n",
+    );
+    let mut app = app_on(&repo);
+    let fixed = render_buffer(&app);
+    assert!(fixed.content().iter().any(|cell| matches!(cell.fg, ratatui::style::Color::Rgb(..))));
+
+    app.set_cli_theme(Some("terminal".to_string()));
+    // The cached model still contains fixed syntax colors; terminal rendering must coerce them
+    // before the reload rebuilds the model.
+    let stale_terminal = render_buffer(&app);
+    for cell in stale_terminal.content() {
+        assert!(!matches!(
+            cell.fg,
+            ratatui::style::Color::Rgb(..) | ratatui::style::Color::Indexed(..)
+        ));
+        assert!(!matches!(
+            cell.bg,
+            ratatui::style::Color::Rgb(..) | ratatui::style::Color::Indexed(..)
+        ));
+    }
+
+    app.reload().unwrap();
+    assert!(
+        app.diff.rows.iter().flat_map(herdr_reviewr::diff::Row::spans).any(|span| matches!(
+            span.color,
+            ratatui::style::Color::DarkGray
+                | ratatui::style::Color::Green
+                | ratatui::style::Color::Yellow
+                | ratatui::style::Color::Blue
+                | ratatui::style::Color::Cyan
+                | ratatui::style::Color::Magenta
+                | ratatui::style::Color::LightYellow
+                | ratatui::style::Color::LightCyan
+        )),
+        "terminal reload materializes named ANSI syntax spans"
+    );
+    let rebuilt_terminal = render_buffer(&app);
+    for cell in rebuilt_terminal.content() {
+        assert!(!matches!(
+            cell.fg,
+            ratatui::style::Color::Rgb(..) | ratatui::style::Color::Indexed(..)
+        ));
+        assert!(!matches!(
+            cell.bg,
+            ratatui::style::Color::Rgb(..) | ratatui::style::Color::Indexed(..)
+        ));
+    }
+
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.diff.rows.iter().position(|row| row.marker() == '+').unwrap();
+    app.start_comment();
+    app.input_push('x');
+    app.submit_comment();
+    app.open_list();
+    let modal = render_buffer(&app);
+    for cell in modal.content() {
+        assert!(!matches!(
+            cell.fg,
+            ratatui::style::Color::Rgb(..) | ratatui::style::Color::Indexed(..)
+        ));
+        assert!(!matches!(
+            cell.bg,
+            ratatui::style::Color::Rgb(..) | ratatui::style::Color::Indexed(..)
+        ));
+    }
+    assert!(
+        modal.content().iter().any(|cell| cell.modifier.contains(ratatui::style::Modifier::DIM)),
+        "the terminal modal scrim dims at least one cell behind the popup"
+    );
+
+    app.set_cli_theme(Some("catppuccin".to_string()));
+    let fixed_again = render_buffer(&app);
+    assert!(
+        fixed_again.content().iter().any(|cell| matches!(cell.fg, ratatui::style::Color::Rgb(..))),
+        "switching terminal back to a fixed theme restores RGB painting"
+    );
+    for cell in fixed_again.content() {
+        assert!(matches!(cell.fg, ratatui::style::Color::Rgb(..) | ratatui::style::Color::Reset));
+        assert!(matches!(cell.bg, ratatui::style::Color::Rgb(..) | ratatui::style::Color::Reset));
+    }
+}
+
 /// An `edited_app` running under `[keybindings]` from a real config file.
 fn rebound_app(keybindings: &str) -> App {
     let dir = tempfile::tempdir().unwrap();
