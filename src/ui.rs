@@ -2094,7 +2094,20 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
     // like word emphasis.
     let hl_ranges =
         find.map(|(q, cs)| crate::app::find_match_ranges(&row.text(), q, cs)).unwrap_or_default();
-    let cells = code_cells(row, emph_on, &hl_ranges);
+    let mut cells = code_cells(row, emph_on, &hl_ranges);
+    // A dim syntax color — a comment above all — is unreadable on the emphasis fill, which
+    // `readable_tint` floors against `text` only. Lift the changed words' fg until they clear
+    // the same floor. Find matches already reverse to their own colors.
+    // Cells in a syntax run share one color, so one memo spares the contrast walk per char.
+    let mut last: Option<(Color, Color)> = None;
+    for cell in cells.iter_mut().filter(|c| c.emph && !c.hl) {
+        let lifted = match last {
+            Some((fg, lifted)) if fg == cell.fg => lifted,
+            _ => crate::theme::legible(cell.fg, emph_bg, pal.text),
+        };
+        last = Some((cell.fg, lifted));
+        cell.fg = lifted;
+    }
 
     let prefix_w = gutter_prefix_width(gutter_w);
     let code_width = width.saturating_sub(prefix_w).max(1);

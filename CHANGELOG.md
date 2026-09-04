@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Changed words inside a comment stay readable.** Word emphasis floors the fill's contrast
+  against the palette's `text` only, so a dim syntax color — a comment above all — dropped to
+  ~1.2 on the emphasis fill and the changed words were unreadable. Emphasized cells now lift
+  their foreground toward `text` until they clear the same floor.
+
 ## [0.36.2] — 2026-08-29
 
 ### Fixed

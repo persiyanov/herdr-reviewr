@@ -341,6 +341,25 @@ const BLACK: Color = Color::Rgb(0x00, 0x00, 0x00);
 /// legible on any base.
 const MIN_FILL_CONTRAST: f64 = 4.5;
 
+/// Lift `fg` toward `toward` until it clears [`MIN_FILL_CONTRAST`] against `bg`.
+///
+/// [`readable_tint`] floors a fill against the palette's `text` only; a dim syntax color —
+/// a comment, above all — lands far below that on the same fill, which leaves the changed
+/// words of a commented line unreadable. `toward` is the palette's `text`, so this lightens
+/// on a dark theme and darkens on a light one. When even `toward` cannot clear the floor
+/// (the fill itself sits at the floor for `text`), `toward` is the best available.
+pub fn legible(fg: Color, bg: Color, toward: Color) -> Color {
+    let mut t = 0.0;
+    while t < 1.0 {
+        let lifted = blend(fg, toward, t);
+        if contrast(lifted, bg) >= MIN_FILL_CONTRAST {
+            return lifted;
+        }
+        t += 0.02;
+    }
+    toward
+}
+
 /// A diff-row fill: tint `base` with `accent`, stepping the tint down from its start strength
 /// until the row's `fg` clears [`MIN_FILL_CONTRAST`]. `strong` is the brighter word-emphasis
 /// fill. When even a faint tint can't clear the floor (a light theme with light text), the
@@ -421,7 +440,8 @@ fn channels(color: Color) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Appearance, CATPPUCCIN_LATTE, MIN_FILL_CONTRAST, Palette, contrast, derive, resolve,
+        Appearance, CATPPUCCIN_LATTE, MIN_FILL_CONTRAST, Palette, contrast, derive, legible,
+        resolve,
     };
     use ratatui::style::Color;
 
@@ -461,6 +481,23 @@ mod tests {
     #[test]
     fn latte_is_a_selectable_light_theme() {
         assert_eq!(resolve(Some("catppuccin-latte")).name, "catppuccin-latte");
+    }
+
+    #[test]
+    fn dim_syntax_colors_lift_to_the_floor_on_emphasis_fills() {
+        // Tokyo Night's comment color, the dimmest fg the syntax theme paints: on the raw
+        // emphasis fills it sits near 1.2, far under the floor.
+        let comment = Color::Rgb(0x56, 0x5f, 0x89);
+        for name in ["tokyo-night", "catppuccin", "catppuccin-latte"] {
+            let p = resolve(Some(name)).palette;
+            for fill in [p.emph_del_bg, p.emph_ins_bg] {
+                let lifted = legible(comment, fill, p.text);
+                assert!(
+                    contrast(lifted, fill) >= MIN_FILL_CONTRAST,
+                    "{name}: emphasized comment on {fill:?} stays under the floor",
+                );
+            }
+        }
     }
 
     #[test]
