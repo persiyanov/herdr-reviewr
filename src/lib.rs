@@ -26,6 +26,7 @@ pub mod keymap;
 pub mod log;
 pub mod markdown;
 pub mod model;
+pub mod pane_action;
 pub mod proc;
 pub mod search;
 pub mod selection;

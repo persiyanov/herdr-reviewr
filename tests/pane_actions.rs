@@ -100,10 +100,9 @@ fn pane_with_cwd(dir: &Path, pane: &str, foreground_cwd: &Path) {
 }
 
 fn run(mode: &str, config_dir: &Path, herdr: &Path) -> Output {
-    Command::new("bash")
-        .arg("herdr/pane.sh")
+    Command::new(reviewr_bin())
+        .arg("--pane-action")
         .arg(mode)
-        .env("HERDR_REVIEWR_BIN", reviewr_bin())
         .env("HERDR_PLUGIN_CONFIG_DIR", config_dir)
         .env("HERDR_BIN_PATH", herdr)
         .env("HERDR_WORKSPACE_ID", "workspace-1")
@@ -120,10 +119,9 @@ fn run_open(config_dir: &Path, herdr: &Path) -> Output {
 
 /// Any mode with a caller-shaped action context.
 fn run_with_context(mode: &str, config_dir: &Path, herdr: &Path, context: &str) -> Output {
-    Command::new("bash")
-        .arg("herdr/pane.sh")
+    Command::new(reviewr_bin())
+        .arg("--pane-action")
         .arg(mode)
-        .env("HERDR_REVIEWR_BIN", reviewr_bin())
         .env("HERDR_PLUGIN_CONFIG_DIR", config_dir)
         .env("HERDR_BIN_PATH", herdr)
         .env("HERDR_WORKSPACE_ID", "workspace-1")
@@ -134,11 +132,10 @@ fn run_with_context(mode: &str, config_dir: &Path, herdr: &Path, context: &str) 
 }
 
 fn run_auto_open(config_dir: &Path, herdr: &Path, event: &str, context: Option<&str>) -> Output {
-    let mut command = Command::new("bash");
+    let mut command = Command::new(reviewr_bin());
     command
-        .arg("herdr/pane.sh")
+        .arg("--pane-action")
         .arg("auto-open")
-        .env("HERDR_REVIEWR_BIN", reviewr_bin())
         .env("HERDR_PLUGIN_CONFIG_DIR", config_dir)
         .env("HERDR_BIN_PATH", herdr)
         .env("HERDR_PLUGIN_EVENT_JSON", event);
@@ -161,6 +158,25 @@ fn invalid_config_refuses_manual_action_before_herdr_side_effects() {
         assert!(stderr.contains("config.toml"), "{mode}: {stderr}");
         assert!(stderr.contains("`theme`"), "{mode}: {stderr}");
     }
+    assert!(!log.exists(), "herdr was invoked before validation");
+}
+
+#[test]
+fn an_unrecognized_mode_still_reports_a_broken_config_first() {
+    // Config validates unconditionally before the mode argument is even inspected, so a
+    // combined failure (bad config, bad mode) reports the config error — never masked by an
+    // unrelated argument mistake.
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("config.toml"), "theme = \"not-a-theme\"\n").unwrap();
+    let (herdr, log) = fake_herdr(dir.path());
+
+    let output = run("not-a-real-mode", dir.path(), &herdr);
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("config.toml"), "{stderr}");
+    assert!(stderr.contains("`theme`"), "{stderr}");
+    assert!(!stderr.contains("unknown mode"), "{stderr}");
     assert!(!log.exists(), "herdr was invoked before validation");
 }
 
@@ -213,10 +229,9 @@ fn valid_auto_open_runtime_refusal_remains_silent() {
     let dir = tempfile::tempdir().unwrap();
     let (herdr, log) = fake_herdr(dir.path());
 
-    let output = Command::new("bash")
-        .arg("herdr/pane.sh")
+    let output = Command::new(reviewr_bin())
+        .arg("--pane-action")
         .arg("auto-open")
-        .env("HERDR_REVIEWR_BIN", reviewr_bin())
         .env("HERDR_PLUGIN_CONFIG_DIR", dir.path())
         .env("HERDR_BIN_PATH", &herdr)
         .env_remove("HERDR_WORKSPACE_ID")
@@ -261,29 +276,9 @@ fn auto_open_opened_live_exits_before_herdr_calls() {
     assert!(!log.exists(), "opened-live inspected herdr before exiting");
 }
 
-#[test]
-fn manifest_auto_open_hooks_created_and_opened() {
-    let manifest: toml::Table =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("herdr-plugin.toml"))
-            .unwrap()
-            .parse()
-            .unwrap();
-    let events = manifest.get("events").and_then(toml::Value::as_array).expect("manifest events");
-    let mut auto_open_events = events
-        .iter()
-        .filter_map(|event| {
-            let table = event.as_table()?;
-            let command = table.get("command")?.as_array()?;
-            let command = command.iter().map(toml::Value::as_str).collect::<Option<Vec<_>>>()?;
-            (command == ["bash", "herdr/pane.sh", "auto-open"])
-                .then(|| table.get("on")?.as_str())
-                .flatten()
-        })
-        .collect::<Vec<_>>();
-    auto_open_events.sort_unstable();
-
-    assert_eq!(auto_open_events, ["worktree.created", "worktree.opened"]);
-}
+// Pure `herdr-plugin.toml` shape assertions (manifest_declares_windows_platform and friends)
+// moved to tests/manifest.rs, which has no `#![cfg(unix)]` gate — they don't need `fake_herdr`
+// or `bash` and so should also run on the Windows CI job, unlike everything below here.
 
 // --- Pane identity: the foreground process decides, never the label.
 
@@ -445,10 +440,9 @@ fn an_action_repoints_the_stable_launch_paths_at_the_live_plugin_root() {
     permissions.set_mode(0o755);
     fs::set_permissions(root.path().join("bin/herdr-reviewr"), permissions).unwrap();
     let run_close = |home: &Path| {
-        Command::new("bash")
-            .arg("herdr/pane.sh")
+        Command::new(reviewr_bin())
+            .arg("--pane-action")
             .arg("close")
-            .env("HERDR_REVIEWR_BIN", reviewr_bin())
             .env("HERDR_PLUGIN_CONFIG_DIR", dir.path())
             .env("HERDR_BIN_PATH", &herdr)
             .env("HERDR_WORKSPACE_ID", "workspace-1")

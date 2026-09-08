@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Native Windows support.** Install, open/toggle/close actions, both auto-open events
+  (worktree.created and worktree.opened), Windows-native clipboard export via `clip`, and
+  browser opening via `rundll32`. Includes a Windows release artifact (`x86_64-pc-windows-msvc`).
+
 ## [0.36.2] — 2026-08-29
 
 ### Fixed

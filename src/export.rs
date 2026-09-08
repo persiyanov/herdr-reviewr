@@ -53,13 +53,26 @@ fn counted_comments(count: usize) -> String {
 
 /// A clipboard tool and the args that make it read stdin into the system clipboard. Tried in
 /// order — the first one present on `PATH` wins. macOS ships `pbcopy`; Linux needs one of these
-/// installed (Wayland `wl-copy`, or X11 `xclip`/`xsel`). OSC 52 and Windows are roadmap.
+/// installed (Wayland `wl-copy`, or X11 `xclip`/`xsel`); Windows uses `clip`.
+#[cfg(windows)]
+const CLIPBOARD_TOOLS: &[(&str, &[&str])] = &[("clip", &[])];
+
+#[cfg(unix)]
 const CLIPBOARD_TOOLS: &[(&str, &[&str])] = &[
     ("pbcopy", &[]),
     ("wl-copy", &[]),
     ("xclip", &["-selection", "clipboard"]),
     ("xsel", &["--clipboard", "--input"]),
 ];
+
+/// Platform-specific error message when no clipboard tool is found.
+#[cfg(windows)]
+const CLIPBOARD_NOT_FOUND_ERROR: &str =
+    "no clipboard tool found — `clip` should be built into Windows; use Send instead";
+
+#[cfg(unix)]
+const CLIPBOARD_NOT_FOUND_ERROR: &str =
+    "no clipboard tool found (install wl-clipboard, xclip, or xsel) — use Send instead";
 
 /// The system clipboard, via the first available platform clipboard tool.
 #[derive(Debug)]
@@ -79,10 +92,8 @@ impl ExportTarget for Clipboard {
     }
 
     fn export(&self, text: &str) -> Result<()> {
-        let (cmd, args) = select_tool(CLIPBOARD_TOOLS, crate::proc::on_path).context(
-            "no clipboard tool found (install wl-clipboard, xclip, or xsel) — \
-             use Send instead",
-        )?;
+        let (cmd, args) = crate::proc::select_first_present(CLIPBOARD_TOOLS, crate::proc::on_path)
+            .context(CLIPBOARD_NOT_FOUND_ERROR)?;
         let mut child = crate::proc::command(cmd)
             .args(args)
             .stdin(Stdio::piped())
@@ -99,14 +110,6 @@ impl ExportTarget for Clipboard {
         }
         Ok(())
     }
-}
-
-/// The first clipboard tool the `present` predicate accepts, preserving list order.
-fn select_tool(
-    tools: &'static [(&'static str, &'static [&'static str])],
-    present: impl Fn(&str) -> bool,
-) -> Option<(&'static str, &'static [&'static str])> {
-    tools.iter().copied().find(|(cmd, _)| present(cmd))
 }
 
 /// One chosen agent pane: fill its input via `herdr pane send-text`, then focus it.
@@ -149,25 +152,37 @@ impl ExportTarget for Agent {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Agent, CLIPBOARD_TOOLS, Clipboard, ExportTarget, format_all, format_comment, select_tool,
-    };
+    #[cfg(windows)]
+    use super::CLIPBOARD_NOT_FOUND_ERROR;
+    use super::{Agent, CLIPBOARD_TOOLS, Clipboard, ExportTarget, format_all, format_comment};
     use crate::model::{Comment, Side};
+    use crate::proc::select_first_present;
 
     #[test]
+    #[cfg(unix)]
     fn clipboard_tool_selection_prefers_list_order_and_can_be_empty() {
         // None present -> no tool (the caller surfaces the "install one" error).
-        assert!(select_tool(CLIPBOARD_TOOLS, |_| false).is_none());
+        assert!(select_first_present(CLIPBOARD_TOOLS, |_| false).is_none());
         // Only an X11 tool present -> it's chosen, with its selection args.
         assert_eq!(
-            select_tool(CLIPBOARD_TOOLS, |c| c == "xclip"),
+            select_first_present(CLIPBOARD_TOOLS, |c| c == "xclip"),
             Some(("xclip", &["-selection", "clipboard"][..]))
         );
         // When several are present, earlier in the list wins (pbcopy over xclip).
         assert_eq!(
-            select_tool(CLIPBOARD_TOOLS, |c| c == "pbcopy" || c == "xclip").map(|(cmd, _)| cmd),
+            select_first_present(CLIPBOARD_TOOLS, |c| c == "pbcopy" || c == "xclip")
+                .map(|(cmd, _)| cmd),
             Some("pbcopy")
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn clipboard_tool_selection_prefers_list_order_and_can_be_empty() {
+        // None present -> no tool (the caller surfaces the "install one" error).
+        assert!(select_first_present(CLIPBOARD_TOOLS, |_| false).is_none());
+        // clip is present -> it's chosen
+        assert_eq!(select_first_present(CLIPBOARD_TOOLS, |c| c == "clip"), Some(("clip", &[][..])));
     }
 
     #[test]
@@ -229,5 +244,23 @@ mod tests {
         let a1 = comment("a.rs", Side::New, 3, 3, "+z", "earlier");
         let out = format_all(&[&b, &a2, &a1]);
         assert_eq!(out, "a.rs:3\n+z\nearlier\n\na.rs:20\n+y\nlater\n\nb.rs:5\n+x\ntwo");
+    }
+
+    #[test]
+    fn export_windows_clip_selected_as_tool() {
+        // On Windows, verify that `clip` is selected when present.
+        let windows_tools: &[(&str, &[&str])] = &[("clip", &[])];
+        assert_eq!(select_first_present(windows_tools, |c| c == "clip"), Some(("clip", &[][..])));
+        // Also verify that if clip is absent, select_first_present returns None.
+        assert!(select_first_present(windows_tools, |_| false).is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn export_windows_no_tool_error_is_windows_specific() {
+        // Verify that the Windows error message doesn't mention Linux-specific tools.
+        assert!(!CLIPBOARD_NOT_FOUND_ERROR.contains("wl-clipboard"));
+        assert!(!CLIPBOARD_NOT_FOUND_ERROR.contains("xclip"));
+        assert!(!CLIPBOARD_NOT_FOUND_ERROR.contains("xsel"));
     }
 }

@@ -8,8 +8,8 @@ herdr-reviewr is a Rust TUI (ratatui) code-review pane: it runs in a [herdr](htt
 
 - `just test` — full test suite. Single test: `cargo test <name>` (unit tests live beside the code, integration tests in `tests/`: `cargo test --test app_flow <name>`).
 - `just lint` — clippy with warnings as errors. `just fmt` / `just fmt-check` — rustfmt.
-- `just ci` — exactly what CI runs (fmt-check, lint, test, release build).
-- `just qa-install` — put a local build into the user's real herdr panes. See "QA install" below before using it.
+- `just ci` — what CI runs on every platform (fmt-check, lint, test, release build). The Windows CI job additionally validates every committed `.ps1` file's syntax; `just ci` doesn't run that step locally.
+- `just qa-install` — put a local build into the user's real herdr panes (Unix only; see "QA install" below for Windows). See "QA install" below before using it.
 - `just smoke-edit` — PTY smoke test of the editor path (`e`) against a real release binary. Unit tests stop at the argv; everything after it is terminal state, so run this after any change to `run_editor`, the terminal mode stack, or the editor dialects. Not part of `just ci`: it drives a pty and takes about a minute.
 - `python3 scripts/bench_tui.py --binary target/release/herdr-reviewr --fixture` — perceived-latency benchmark (keypress → painted frame, via PTY), the acceptance instrument. `cargo run --release --example bench_latency -- <repo>` attributes a slow number to its component calls. The one committed baseline is `scripts/bench-results/baseline.json` — replace it when a change moves the numbers, never add per-round runs. Run before/after any change to the reload, render, git, or highlight paths, and compare medians A/B under the same system load (rebuild the old binary to a second target dir and interleave runs — absolute numbers drift with background load).
 
@@ -39,15 +39,19 @@ The runtime is a single-threaded frame loop (`event_loop` in `src/lib.rs`): draw
 - `src/editor.rs` — the editor command: a name-keyed dialect table (how each editor takes a line, and whether it draws in the pane), quote-aware splitting, and the `editor` key's `{file}`/`{line}` template. Pure argv resolution, spawning nowhere. `run_editor` in `lib.rs` owns the spawn, and hands the pane over for a terminal editor, blocking the frame loop for that editor's whole session.
 - `src/export.rs` — comment export: format all, send via `herdr agent send` or clipboard, consume-on-success only.
 - `src/config.rs` — plugin config: the whole file validates before every frame/action. An invalid config blocks all review work until recovery, which carries authored state.
-- `herdr-plugin.toml` + `herdr/pane.sh` — plugin packaging: pane, toggle/open/close actions, and worktree workspace-birth auto-open.
+- `herdr-plugin.toml` + `src/pane_action.rs` — plugin packaging: pane, toggle/open/close actions, and worktree workspace-birth auto-open. One Rust core dispatched via the binary's internal `--pane-action <mode>` command on every platform; `herdr/install.sh` / `herdr/install.ps1` stay the only platform-specific scripts.
 
 ## QA install — putting a local build into the user's herdr panes
 
-The user tests builds in real herdr panes. The panes run the GitHub-installed plugin's binary at `~/.config/herdr/plugins/github/persiyanov.reviewr-<hash>/bin/herdr-reviewr`, NOT anything in this worktree. Full procedure: `docs/qa-install.md`. Short form:
+The user tests builds in real herdr panes. The panes run the GitHub-installed plugin's binary at `~/.config/herdr/plugins/github/persiyanov.reviewr-<hash>/bin/herdr-reviewr` (macOS/Linux) or `%APPDATA%\herdr\plugins\github\persiyanov.reviewr-<hash>\bin\herdr-reviewr.exe` (Windows), NOT anything in this worktree.
+
+**On macOS and Linux**, full procedure: `docs/qa-install.md`. Short form:
 
 ```
 just qa-install
 ```
+
+**On Windows**, `just qa-install` is not available (the scripts are Unix-only). Swap the binary manually into the installed plugin location, following the same three rules below: never overwrite a locked/running binary in place, closing a pane doesn't free the file lock until the pane process exits, and never script the reopen.
 
 Then tell the user to close and reopen their reviewr panes with the toggle keybinding. Done.
 
@@ -55,6 +59,6 @@ Three rules. Each one has already burned a session:
 
 1. **Never overwrite that binary in place.** `cp` onto the existing file keeps the inode and macOS SIGKILLs the binary at every launch (exit 137, blank panes, no log). Replace through a fresh inode and re-sign — which is exactly what `just qa-install` does. Do not improvise the swap by hand.
 2. **Swapping the file does not restart running panes.** They keep the old binary image until closed and reopened. Refresh inside reviewr does nothing for this.
-3. **Never script pane opens.** The plugin's `open`/`toggle` actions act on the currently focused workspace and ignore `HERDR_WORKSPACE_ID`. Automating reopens stacks panes into whatever space the user is looking at. Closing via `herdr/pane.sh close` is safe. Reopening is the user's keystroke, always.
+3. **Never script pane opens.** The plugin's `open`/`toggle` actions act on the currently focused workspace and ignore `HERDR_WORKSPACE_ID`. Automating reopens stacks panes into whatever space the user is looking at. Closing via `bin/herdr-reviewr --pane-action close` is safe. Reopening is the user's keystroke, always.
 
 Rollback: `bin/herdr-reviewr.release-backup` sits beside the installed binary, swap it back the same fresh-inode way (or `herdr plugin install` to restore the release).

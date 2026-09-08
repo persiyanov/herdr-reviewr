@@ -1632,7 +1632,21 @@ mod tests {
             .unwrap();
         assert!(status.success());
         let canonical = std::fs::canonicalize(repo.path()).unwrap();
-        assert_eq!(worktree_of(repo.path()), Worktree::Root(canonical));
+        assert_eq!(worktree_of(repo.path()), Worktree::Root(strip_verbatim_prefix(&canonical)));
+    }
+
+    /// `std::fs::canonicalize` returns a `\\?\`-prefixed verbatim path on Windows; git's own
+    /// `--show-toplevel` output never carries that prefix. Strip it so the two are comparable —
+    /// a test-oracle concern only, not something `worktree_of` itself needs to do.
+    #[cfg(windows)]
+    fn strip_verbatim_prefix(p: &std::path::Path) -> std::path::PathBuf {
+        p.to_str()
+            .and_then(|s| s.strip_prefix(r"\\?\"))
+            .map_or_else(|| p.to_path_buf(), std::path::PathBuf::from)
+    }
+    #[cfg(unix)]
+    fn strip_verbatim_prefix(p: &std::path::Path) -> std::path::PathBuf {
+        p.to_path_buf()
     }
 
     #[test]

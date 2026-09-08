@@ -41,10 +41,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: aarch64-apple-darwin, os: macos-latest }
-          - { target: x86_64-apple-darwin, os: macos-latest }
-          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
-          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest, archive_ext: tar.gz }
+          - { target: x86_64-apple-darwin, os: macos-latest, archive_ext: tar.gz }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, archive_ext: tar.gz }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, archive_ext: tar.gz }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, archive_ext: zip }
     steps:
       - uses: actions/checkout@v7
 
@@ -62,7 +63,7 @@ jobs:
       # The archive the step above built and uploaded gets a signed provenance attestation.
       - uses: actions/attest-build-provenance@v4
         with:
-          subject-path: herdr-reviewr-${{ matrix.target }}.tar.gz
+          subject-path: herdr-reviewr-${{ matrix.target }}.${{ matrix.archive_ext }}
 
   # Publish once every target's assets are attached. Publishing seals an immutable release,
   # so this runs last; a failed target leaves the draft for inspection instead of shipping a

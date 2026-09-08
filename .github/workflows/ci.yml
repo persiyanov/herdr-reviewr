@@ -10,9 +10,15 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  # One job, one shared step list, run once per OS via the matrix — so a step added here can
+  # never drift out of sync between platforms the way two hand-duplicated jobs could.
   check:
-    name: fmt · clippy · test
-    runs-on: ubuntu-latest
+    name: fmt · clippy · test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -34,3 +40,31 @@ jobs:
 
       - name: Build (release)
         run: cargo build --release
+
+      # Windows only: every committed .ps1 file must at least parse.
+      - name: Validate PowerShell files
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $psFiles = @(git ls-files '*.ps1' | Where-Object { $_ } )
+          if ($psFiles.Count -eq 0) {
+            Write-Host "No .ps1 files found (expected at this stage)"
+            exit 0
+          }
+
+          $parseErrors = 0
+          foreach ($file in $psFiles) {
+            try {
+              $content = Get-Content -Path $file -Raw
+              $null = [System.Management.Automation.PSParser]::Tokenize($content, [ref]$null)
+              Write-Host "✓ $file"
+            } catch {
+              Write-Host "✗ $file : $_"
+              $parseErrors++
+            }
+          }
+
+          if ($parseErrors -gt 0) {
+            Write-Host "PowerShell validation failed: $parseErrors file(s) with syntax errors"
+            exit 1
+          }

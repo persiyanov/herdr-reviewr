@@ -10,25 +10,38 @@ Top-level: `id`, `name`, `version`, `min_herdr_version`, `platforms` (required);
 
 ```toml
 [[build]]                                   # run on `plugin install`, skipped by `plugin link`
-command = ["cargo", "install", "--path", "."]
+platforms = ["macos", "linux"]              # `platforms` is optional per entry, but a pane id
+command = ["bash", "herdr/install.sh"]      # must stay unique even across different scopes
+
+[[build]]
+platforms = ["windows"]
+command = ["powershell", "-NoProfile", "-File", "herdr/install.ps1"]
 
 [[panes]]                                   # an openable pane entrypoint
-id = "pane"
+id = "pane-unix"
+platforms = ["macos", "linux"]
 placement = "split"                         # overlay (default) | split | tab | zoomed
-command = ["herdr-reviewr"]                 # see "pane command" below
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-reviewr\""]  # see "pane command" below
+
+[[panes]]
+id = "pane-windows"
+platforms = ["windows"]
+placement = "split"
+command = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+           "& \"$env:HERDR_PLUGIN_ROOT\\bin\\herdr-reviewr.exe\""]
 
 [[actions]]                                 # invokable command, bindable to a key
 id = "toggle"
 contexts = ["pane", "workspace"]
-command = ["bash", "herdr/pane.sh", "toggle"]
+command = ["bin/herdr-reviewr", "--pane-action", "toggle"]  # one relative command, every platform
 
 [[events]]                                  # run a command on a herdr event
 on = "worktree.created"
-command = ["bash", "herdr/pane.sh", "auto-open"]
+command = ["bin/herdr-reviewr", "--pane-action", "auto-open"]
 
 [[events]]
 on = "worktree.opened"
-command = ["bash", "herdr/pane.sh", "auto-open"]
+command = ["bin/herdr-reviewr", "--pane-action", "auto-open"]
 ```
 
 Lifecycle: `herdr plugin link <dir>` (local dev, no build) · `herdr plugin install <owner>/<repo>` ·
@@ -52,8 +65,10 @@ The direct-run mode rides on four calls plus the plain-pane env, all confirmed l
 
   `name` is the rewritable process title, not the executable (a live claude pane reports
   `name: "2.1.220"`), so identity keys on the `argv0`/`argv[0]` basename. A live reviewr pane
-  reports `argv0: "herdr-reviewr"` bare and `argv[0]` as the full binary path. `pane.sh` reads
-  this per pane to find the workspace's reviewr panes.
+  reports `argv0: "herdr-reviewr"` bare and `argv[0]` as the full binary path. On Windows,
+  `argv0`/`argv[0]` may carry a `\\?\` extended-length prefix, `\`-separators, and/or a
+  `.exe` suffix — all optional, all tolerated. `src/pane_action.rs` reads this per pane to
+  find the workspace's reviewr panes.
 
   A `pane list` entry carries no foreground-process fields — its only process-adjacent keys
   are `foreground_cwd` and `terminal_title`/`terminal_title_stripped`, and the title is the
@@ -61,8 +76,8 @@ The direct-run mode rides on four calls plus the plain-pane env, all confirmed l
   `process-info` read is required for identity; nothing in the list snapshot can replace it.
 
   A gone pane answers `{"error":{"code":"pane_not_found",…}}` with exit 1 from both
-  `pane process-info` and plain `pane close` (verified live, 0.7.5). `pane.sh` keys its
-  converge-vs-refuse branches on that code.
+  `pane process-info` and plain `pane close` (verified live, 0.7.5). `src/pane_action.rs`
+  keys its converge-vs-refuse branches on that code.
 - **`herdr pane rename <id> [LABEL]... [--clear]`** sets and clears a pane's label. The binary
   stamps its own pane `reviewr` at startup and clears it on a normal exit — display only,
   nothing reads it back.
@@ -87,26 +102,42 @@ herdr plugin pane close <pane_id>
 - **`plugin pane close` only closes panes in the in-memory plugin-pane registry** — after a herdr
   restart it refuses a still-live pane with `plugin_pane_not_found` (observed, 0.7.1), and a
   layout-launched pane was never registered at all. Plain `herdr pane close <pane_id>` closes any
-  pane by id; `pane.sh` sweeps with it.
+  pane by id; `src/pane_action.rs` sweeps with it.
 - `HERDR_PLUGIN_STATE_DIR` resolves to `~/.local/state/herdr/plugins/<plugin_id>/` (observed, 0.7.1).
-- **Pane command resolves against the pane's cwd (`--cwd`, the repo), not the plugin root** — a relative `./target/...` path fails, so the manifest invokes the binary by absolute path under `$HERDR_PLUGIN_ROOT`.
+- **Pane command resolves against the pane's cwd (`--cwd`, the repo), not the plugin root** — a
+  relative `./target/...` path fails, so the manifest invokes the binary by absolute path under
+  `$HERDR_PLUGIN_ROOT` (`sh -c 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr"'` on Unix; a quoted
+  `$env:HERDR_PLUGIN_ROOT` expansion inside one `powershell -Command` string on Windows, which
+  keeps a spaced plugin root as a single token for the `&` call operator — verified live against
+  a linked plugin root containing a space, `docs/specs/2026-09-08-windows-support/spec.md`).
+  **Actions and events are the opposite**: they run with the plugin root as cwd on every
+  platform (verified live on Windows too), so a bare relative `bin/herdr-reviewr` resolves
+  directly — Windows PATHEXT-completes it to `.exe` before spawning.
+- **Pane ids must be unique even under different `platforms` scopes** (verified live: a
+  manifest with two `[[panes]]` entries sharing `id = "pane"`, scoped to disjoint platforms,
+  is rejected at `plugin link` with `duplicate_plugin_pane_id`). Platform-specific pane
+  entrypoints need platform-specific ids; the caller picks the right one at compile/runtime.
 
 ## Runtime env (plugin commands and panes)
 
 `HERDR_BIN_PATH`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID`, `HERDR_TAB_ID`, `HERDR_WORKSPACE_ID`,
 `HERDR_PLUGIN_ID`, `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_STATE_DIR`,
 `HERDR_PLUGIN_ENTRYPOINT_ID`, `HERDR_PLUGIN_CONTEXT_JSON`, and `HERDR_PLUGIN_EVENT_JSON` (events).
-herdr runs plugin commands with a minimal `PATH`; prepend common bin dirs for `jq`/`git`.
+herdr runs plugin commands with a minimal `PATH`; `src/pane_action.rs` calls the herdr CLI
+directly via `crate::proc` (whose `command()` still prepends the common host bin dirs on Unix,
+exactly as `pane.sh`'s own `export PATH=...` line did) and resolves config in-process via
+`crate::config`, so the only thing the port actually eliminated was the `jq` dependency, not
+the PATH prepending.
 
 - **Action context** (`HERDR_PLUGIN_CONTEXT_JSON`): `workspace_id`, `tab_id`, `focused_pane_id`,
-  `focused_pane_cwd`, `worktree:{repo_root, checkout_path, ...}`. `pane.sh` places a manual
-  open from the focused pane's cwd; the binary reads none of it.
+  `focused_pane_cwd`, `worktree:{repo_root, checkout_path, ...}`. `src/pane_action.rs` places a
+  manual open from the focused pane's cwd; the binary reads none of it.
 - **`focused_pane_cwd` is the pane's *launch* cwd, not its live one** (observed, 0.7.5: a pane
   running `claude -w <worktree>` reported the main checkout it was launched from, while the
   agent process had chdir'd into the worktree). `herdr pane get <id>` carries both: `.result.pane.cwd`
   (launch) and `.result.pane.foreground_cwd` (live foreground process). A `pane list` entry carries
-  `foreground_cwd` too (see above), so `pane.sh` reads it from the pane-list snapshot it already
-  holds and falls back to the context cwd.
+  `foreground_cwd` too (see above), so `src/pane_action.rs` reads it from the pane-list snapshot
+  it already holds and falls back to the context cwd.
 - **`plugin action invoke` resolves context from the focused workspace**, wherever it is run — the
   calling pane's `HERDR_*` env is ignored, and `invoke <action_id> [--plugin ID]` has no workspace
   selector (verified live, 0.7.1: invoked from pane `w1X:p1`, context arrived for focused `w1B`).

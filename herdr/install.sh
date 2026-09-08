@@ -75,7 +75,7 @@ echo "$NAME: installed $BIN_DIR/$NAME"
 # would nest inside it. The binary is already installed, so a skipped or failed link
 # warns without failing the install. This build may run in a staging checkout herdr
 # renames afterwards, so the links aim at the runtime root when herdr provides one, and
-# every action re-points them at the live root regardless (herdr/pane.sh).
+# every action re-points them at the live root regardless (src/pane_action.rs).
 LINK_ROOT="${HERDR_PLUGIN_ROOT:-$ROOT}"
 link_binary() {
   if mkdir -p "$1" 2>/dev/null && { [ -L "$1/$NAME" ] || [ ! -e "$1/$NAME" ]; } &&
