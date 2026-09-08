@@ -50,8 +50,9 @@ Pick the new version with semver: a behavior change or new feature is a minor bu
   (`taiki-e/create-gh-release-action`). A tag with no matching changelog section fails the
   release — finalize the changelog before tagging;
 - builds `herdr-reviewr` for `aarch64-apple-darwin`, `x86_64-apple-darwin`,
-  `x86_64-unknown-linux-gnu`, and `aarch64-unknown-linux-gnu`;
-- uploads each as `herdr-reviewr-<target>.tar.gz` with a `.sha256` sidecar;
+  `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, and `x86_64-pc-windows-msvc`;
+- uploads each with a `.sha256` sidecar: `.tar.gz` for the four Unix targets,
+  `.zip` for the Windows target;
 - publishes the draft only after every target's assets attached. The repo's releases are
   immutable — assets cannot be added after publish — so publish is the last step, and a
   failed target leaves an editable draft instead of a sealed, assetless release.

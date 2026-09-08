@@ -5,47 +5,68 @@ version = "0.36.2"
 # membership, and `cwd` is only verified present from 0.7.5 (docs/herdr-api-notes.md). On an
 # older herdr every agent would parse with no `cwd`, and `last turn` would never track.
 min_herdr_version = "0.7.5"
-platforms = ["macos", "linux"]
+platforms = ["macos", "linux", "windows"]
 description = "Review agent-written diffs beside the chat and add line comments to the agent input."
 
 # On `herdr plugin install`, download the prebuilt `herdr-reviewr` binary for this platform from
 # the matching GitHub Release into $HERDR_PLUGIN_ROOT/bin (no Rust toolchain needed). Skipped by
 # `herdr plugin link` — for a local checkout, build it yourself with `cargo install --path .`.
 [[build]]
+platforms = ["macos", "linux"]
 command = ["bash", "herdr/install.sh"]
 
-# The plugin pane runs the downloaded binary by absolute path under the plugin root, since the
-# pane's cwd is the repo under review (not the plugin root) and the binary isn't on PATH. The
-# toggle action's placement is configurable (default: right split); see herdr/pane.sh.
+[[build]]
+platforms = ["windows"]
+command = ["powershell", "-NoProfile", "-File", "herdr/install.ps1"]
+
+# The pane's cwd is the repo under review (not the plugin root) and the binary isn't on PATH, so
+# each launcher resolves it by absolute path from $HERDR_PLUGIN_ROOT. Pane ids differ per
+# platform because Herdr requires unique pane ids even under different `platforms` scopes
+# (confirmed empirically — docs/specs/2026-09-08-windows-support/spec.md); the pane-action
+# core (`src/pane_action.rs`) picks the matching entrypoint at compile time. The toggle
+# action's placement is configurable (default: right split).
 [[panes]]
-id = "pane"
+id = "pane-unix"
+platforms = ["macos", "linux"]
 title = "reviewr"
 placement = "split"
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-reviewr\""]
 
+[[panes]]
+id = "pane-windows"
+platforms = ["windows"]
+title = "reviewr"
+placement = "split"
+command = ["powershell", "-NoProfile", "-NonInteractive", "-Command", "& \"$env:HERDR_PLUGIN_ROOT\\bin\\herdr-reviewr.exe\""]
+
+# Actions and events run the installed binary itself, relative to the plugin root: Herdr runs
+# these with the plugin directory as cwd on every platform (confirmed empirically), and resolves
+# a bare `herdr-reviewr` via PATHEXT on Windows, so one relative command covers all three
+# platforms — see `src/pane_action.rs` for the shared state machine this dispatches into.
 [[actions]]
 id = "toggle"
 title = "reviewr: toggle pane"
 contexts = ["pane", "workspace"]
-command = ["bash", "herdr/pane.sh", "toggle"]
+command = ["bin/herdr-reviewr", "--pane-action", "toggle"]
 
 [[actions]]
 id = "open"
 title = "reviewr: open pane"
 contexts = ["pane", "workspace"]
-command = ["bash", "herdr/pane.sh", "open"]
+command = ["bin/herdr-reviewr", "--pane-action", "open"]
 
 [[actions]]
 id = "close"
 title = "reviewr: close pane"
 contexts = ["pane", "workspace"]
-command = ["bash", "herdr/pane.sh", "close"]
+command = ["bin/herdr-reviewr", "--pane-action", "close"]
 
-# Auto-open a reviewr pane when a worktree workspace is born (gated by auto_open; see herdr/pane.sh).
+# Auto-open a reviewr pane when a worktree workspace is born (gated by auto_open; see
+# `src/pane_action.rs`).
 [[events]]
 on = "worktree.created"
-command = ["bash", "herdr/pane.sh", "auto-open"]
+command = ["bin/herdr-reviewr", "--pane-action", "auto-open"]
 
 [[events]]
 on = "worktree.opened"
-command = ["bash", "herdr/pane.sh", "auto-open"]
+command = ["bin/herdr-reviewr", "--pane-action", "auto-open"]

@@ -36,7 +36,7 @@ GitLab, or Azure DevOps and never posts.
 - **herdr ≥ 0.7.5** (the plugin system).
 - **git** on `PATH`.
 - A **truecolor** terminal with Unicode box-drawing.
-- **macOS or Linux.**
+- **macOS, Linux, or Windows.**
 - **`gh`** (GitHub), **`glab`** (GitLab), or **`az`** (Azure DevOps, with the `azure-devops` extension), authenticated. Only the **PR** tab needs one.
 
 ## Install
@@ -421,9 +421,8 @@ The known constraints:
 - **Box-drawing glyphs required**, but no Nerd Font.
 
 **Platform**
-- **macOS and Linux only** — no Windows.
-- **Clipboard export** uses `pbcopy`, `wl-copy`, `xclip`, or `xsel`. With none installed it
-  says so, and **Send** still works.
+- **Clipboard export** uses `pbcopy`, `wl-copy`, `xclip`, or `xsel` on macOS and Linux, and
+  `clip` (built into Windows) on Windows. With none available it says so, and **Send** still works.
 
 **herdr coupling**
 - **Send needs an agent in the workspace** — one agent takes the comments straight away, and
@@ -458,12 +457,29 @@ The known constraints:
 
 For the dev setup, tests, and benchmarks, see [CONTRIBUTING.md](CONTRIBUTING.md). To run your
 own build inside herdr panes, link the checkout. `herdr plugin link` runs the binary you build
-at `bin/herdr-reviewr`:
+at `bin/herdr-reviewr` (or `bin\herdr-reviewr.exe` on Windows):
+
+**On macOS and Linux:**
 
 ```bash
 git clone https://github.com/persiyanov/herdr-reviewr
 cd herdr-reviewr
 just install   # build release → bin/herdr-reviewr, ad-hoc re-signed on macOS
+herdr plugin link .
+```
+
+**On Windows:**
+
+`just install` works here too, since `just` runs its recipes through `sh` on every platform —
+which means it needs a POSIX `sh` on `PATH` (Git for Windows, which this page already requires
+for `git` itself, provides one). Without that, build and place the binary manually:
+
+```powershell
+git clone https://github.com/persiyanov/herdr-reviewr
+cd herdr-reviewr
+cargo build --release
+mkdir -p bin
+copy target\release\herdr-reviewr.exe bin\herdr-reviewr.exe
 herdr plugin link .
 ```
 

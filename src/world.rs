@@ -481,7 +481,8 @@ mod tests {
     fn only_an_absolute_cwd_can_name_a_worktree() {
         // A blank or relative cwd would resolve against reviewr's own cwd (the reviewed
         // worktree), so membership must reject it before any git call.
-        assert_eq!(worktree_cwd(Some("/abs/path")), Some("/abs/path"));
+        let abs = if cfg!(windows) { r"C:\abs\path" } else { "/abs/path" };
+        assert_eq!(worktree_cwd(Some(abs)), Some(abs));
         assert_eq!(worktree_cwd(Some("relative/path")), None);
         assert_eq!(worktree_cwd(Some("")), None);
         assert_eq!(worktree_cwd(None), None);

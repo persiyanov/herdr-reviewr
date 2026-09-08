@@ -7,28 +7,58 @@ use std::process::Stdio;
 
 use anyhow::{Context, Result};
 
-/// Platform openers, tried in order: macOS `open`, then the Linux `xdg-open`.
-const OPENERS: &[&str] = &["open", "xdg-open"];
+/// Platform openers, tried in order. Each entry is (program, `additional_args`).
+/// Unix: macOS `open`, then Linux `xdg-open`.
+/// Windows: `rundll32 url.dll,FileProtocolHandler <url>`.
+#[cfg(unix)]
+const OPENERS: &[(&str, &[&str])] = &[("open", &[]), ("xdg-open", &[])];
+
+#[cfg(windows)]
+const OPENERS: &[(&str, &[&str])] = &[("rundll32", &["url.dll,FileProtocolHandler"])];
+
+/// The process for `opener` to open `url` — pure argv construction, no `PATH` probing, so a
+/// test can inspect the exact argv (`Command::get_program`/`get_args`) a regression would
+/// otherwise only be caught by an actual browser launch.
+fn command_for(
+    opener: (&'static str, &'static [&'static str]),
+    url: &str,
+) -> std::process::Command {
+    let (cmd, args) = opener;
+    let mut command = crate::proc::command(cmd);
+    for arg in args {
+        command.arg(arg);
+    }
+    command.arg(url);
+    command
+}
+
+/// The process `open` would spawn for `url`, without spawning it — selects the platform opener
+/// against the real `PATH`, then delegates to [`command_for`].
+fn build_open_command(url: &str) -> Result<std::process::Command> {
+    let opener = crate::proc::select_first_present(OPENERS, crate::proc::on_path).context(
+        #[cfg(unix)]
+        "no URL opener found (need `open` or `xdg-open`)",
+        #[cfg(windows)]
+        "no URL opener found (rundll32 required)",
+    )?;
+    Ok(command_for(opener, url))
+}
 
 /// Open `url` in the default browser via the first available opener. Errors when none is on
 /// `PATH` (the caller surfaces it to the status line). The opener hands the URL to the browser
 /// and exits at once, so this waits for it — reaping the child rather than leaving a zombie, and
 /// returning fast enough for a click handler (mirrors the codebase's synchronous tool calls).
 pub fn open(url: &str) -> Result<()> {
-    let tool = OPENERS
-        .iter()
-        .copied()
-        .find(|t| crate::proc::on_path(t))
-        .context("no URL opener found (need `open` or `xdg-open`)")?;
-    let status = crate::proc::command(tool)
-        .arg(url)
+    let mut command = build_open_command(url)?;
+    let cmd = command.get_program().to_string_lossy().into_owned();
+    let status = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .with_context(|| format!("spawning {tool}"))?;
+        .with_context(|| format!("spawning {cmd}"))?;
     if !status.success() {
-        anyhow::bail!("{tool} failed to open the URL");
+        anyhow::bail!("{cmd} failed to open the URL");
     }
     Ok(())
 }
@@ -48,7 +78,7 @@ pub fn openable_url(url: &str) -> Result<&str, &'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::openable_url;
+    use super::{OPENERS, command_for, openable_url};
 
     #[test]
     fn the_url_guard_admits_http_and_https_case_insensitively() {
@@ -70,6 +100,37 @@ mod tests {
             "",
         ] {
             assert!(openable_url(bad).is_err(), "{bad:?} must not open");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_opener_command_is_rundll32_with_the_file_protocol_handler_arg() {
+        let command = command_for(OPENERS[0], "https://example.com");
+        let program = command.get_program().to_string_lossy().to_lowercase();
+        assert!(program.contains("rundll32"), "{program}");
+        let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args[0], "url.dll,FileProtocolHandler", "{args:?}");
+    }
+
+    #[test]
+    fn an_ampersand_url_reaches_the_opener_as_one_unmangled_argument() {
+        // Real `Command` introspection (`get_args`), not a restatement of the openers table:
+        // if `.arg(url)` were ever replaced with shell-string concatenation, this would fail —
+        // the URL would arrive split across several args, or embedded in a larger one.
+        let url =
+            "https://github.com/example/repo/compare/a...b?expand=1&tab=logs&check_suite_id=123";
+        for opener in OPENERS {
+            let command = command_for(*opener, url);
+            let args: Vec<_> = command.get_args().collect();
+            assert_eq!(
+                args.last().map(|a| a.to_string_lossy()),
+                Some(std::borrow::Cow::Borrowed(url)),
+                "{opener:?}: {args:?}"
+            );
+            // The url is the last arg; anything before it is the opener's own fixed args,
+            // never part of the url itself.
+            assert_eq!(args.len(), opener.1.len() + 1, "{opener:?}: {args:?}");
         }
     }
 }
