@@ -17,6 +17,10 @@ dirs = "6"
 fff-search = "0.10.0"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30"
+# No chafa-dyn: the herdr plugin ships a portable binary without libchafa at runtime.
+# Halfblocks remains the unicode fallback when Kitty/Sixel/iTerm2 are unavailable.
+ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm", "image-defaults"] }
+image = "0.25"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = { version = "3.1.1", features = ["text"] }

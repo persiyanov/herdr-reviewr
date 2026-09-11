@@ -110,12 +110,14 @@ impl Row {
     }
 }
 
-/// Whether the file renders as rows, or a notice instead.
+/// Whether the file renders as rows, or a notice / image preview instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FileState {
     Normal,
     Binary,
     TooLarge,
+    /// A supported image in the Changes Diff view (`specs/diff-view.md` Image preview).
+    Image,
 }
 
 /// How the pane renders the model: the `Changes` diff, or the `All files` whole-file content.
@@ -282,6 +284,22 @@ impl FileDiff {
             view: View::File,
             rows: Vec::new(),
         }
+    }
+
+    /// The Diff-view image placeholder: no rows; the pane paints via `App`'s image state
+    /// (`specs/diff-view.md` Image preview).
+    pub fn image_notice(path: String, previous_path: Option<String>) -> Self {
+        Self { path, previous_path, state: FileState::Image, view: View::Diff, rows: Vec::new() }
+    }
+
+    /// The Diff-view `too_large` notice without reading or diffing the sides.
+    pub fn too_large_diff_notice(path: String, previous_path: Option<String>) -> Self {
+        Self { path, previous_path, state: FileState::TooLarge, view: View::Diff, rows: Vec::new() }
+    }
+
+    /// The Diff-view binary notice without reading or diffing the sides.
+    pub fn binary_notice(path: String, previous_path: Option<String>) -> Self {
+        Self { path, previous_path, state: FileState::Binary, view: View::Diff, rows: Vec::new() }
     }
 }
 
