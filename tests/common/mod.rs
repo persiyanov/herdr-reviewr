@@ -25,6 +25,9 @@ impl Repo {
         // global config. Pin it locally to a name no test creates, so the suite never
         // depends on the machine it runs on.
         repo.git(&["config", "init.defaultBranch", "no-such-default"]);
+        // Hosts with a signing key configured would fail (or sign) test commits; the
+        // fixtures must stay hermetic.
+        repo.git(&["config", "commit.gpgsign", "false"]);
         repo
     }
 

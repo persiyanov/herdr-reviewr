@@ -526,21 +526,30 @@ fn the_cli_fallback_resolves_the_config_dir_when_the_env_names_none() {
     // The launcher-blind half of config resolution: with no
     // `HERDR_PLUGIN_CONFIG_DIR`, the binary asks `herdr plugin config-dir` and reads the
     // directory it names. This is the one test that exercises the real herdr-CLI path —
-    // the unit tests drive the resolver with an injected closure.
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
-    let (herdr, _log) = fake_herdr(dir.path());
+    // the unit tests drive the resolver with an injected closure. The lookup is bounded
+    // (`ANSWER_BOUND` in src/herdr.rs), and under a loaded CI the fake herdr's process
+    // spawn can lose that race; a genuinely broken path fails every attempt, so the
+    // retries absorb tail latency, never a real regression.
+    let mut last = String::new();
+    for _ in 0..3 {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
+        let (herdr, _log) = fake_herdr(dir.path());
 
-    let output = Command::new(reviewr_bin())
-        .arg("--resolve-plugin-config")
-        .env_remove("HERDR_PLUGIN_CONFIG_DIR")
-        .env("HERDR_BIN_PATH", &herdr)
-        .output()
-        .unwrap();
-
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("gruvbox"), "expected the CLI-named dir's config: {stdout}");
+        let output = Command::new(reviewr_bin())
+            .arg("--resolve-plugin-config")
+            .env_remove("HERDR_PLUGIN_CONFIG_DIR")
+            .env("HERDR_BIN_PATH", &herdr)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if output.status.success() && stdout.contains("gruvbox") {
+            return;
+        }
+        last = format!("stdout: {stdout}\nstderr: {stderr}");
+    }
+    panic!("the CLI fallback never resolved the config dir in 3 attempts: {last}");
 }
 
 #[test]

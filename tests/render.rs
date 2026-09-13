@@ -612,10 +612,10 @@ fn the_header_totals_the_scope_and_hides_them_at_zero() {
     r.write("untracked.rs", "one\ntwo\n");
     let app = app_on(&r);
 
-    // 64 columns is the exact fit (the tab strip ends in the two-column reserved
+    // 82 columns is the exact fit (the tab strip ends in the two-column reserved
     // indicator cell). The totals' `−` is multi-byte, so this breaks if the header
     // measures bytes instead of display width.
-    let header = render_at(&app, 64).lines().next().unwrap().to_string();
+    let header = render_at(&app, 82).lines().next().unwrap().to_string();
     assert!(header.contains("2 changed  +3 −1"), "count, then the totals:\n{header}");
 
     let clean = Repo::init();
@@ -624,7 +624,8 @@ fn the_header_totals_the_scope_and_hides_them_at_zero() {
     let app = app_on(&clean);
     let header = render_at(&app, 80).lines().next().unwrap().to_string();
     assert!(header.contains("0 changed"), "the bare count remains:\n{header}");
-    assert!(!header.contains('+'), "an empty changeset shows no totals:\n{header}");
+    let after = header.split("changed").last().unwrap();
+    assert!(after.trim().is_empty(), "an empty changeset shows no totals:\n{header}");
 }
 
 /// The last non-blank rendered row — the footer band.
@@ -917,7 +918,7 @@ fn pr_header_names_the_resolved_branch_and_marks_a_fork() {
     assert!(header.contains("⑂ persiyanov/feature"), "fork head is marked:\n{header}");
     // Narrow bars drop the branch first; the chip's number stays.
     app.pr = snap(false);
-    let narrow = render_at(&app, 46).lines().next().unwrap().to_string();
+    let narrow = render_at(&app, 64).lines().next().unwrap().to_string();
     assert!(!narrow.contains("persiyanov/feature"), "branch drops when narrow:\n{narrow}");
     assert!(narrow.contains("#226"), "the chip survives a narrow bar:\n{narrow}");
 
@@ -3563,7 +3564,7 @@ fn a_named_rev_clips_the_spelling_and_keeps_the_sha() {
     herdr_reviewr::git::write_base_pick(r.path(), &long).unwrap();
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
-    let line0 = dump(&render_size(&app, 80, 20)).lines().next().unwrap().to_string();
+    let line0 = dump(&render_size(&app, 98, 20)).lines().next().unwrap().to_string();
     let short = herdr_reviewr::git::abbreviate_oid(&parent);
     assert!(line0.contains(&format!("({short})")), "the SHA marker survives the clip: {line0}");
     assert!(line0.contains('…'), "the spelling truncates: {line0}");
@@ -3583,7 +3584,7 @@ fn an_overlong_base_name_truncates_with_an_ellipsis() {
     r.commit_all("edit");
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
-    let line0 = dump(&render_size(&app, 80, 20)).lines().next().unwrap().to_string();
+    let line0 = dump(&render_size(&app, 98, 20)).lines().next().unwrap().to_string();
     assert!(line0.contains("vs feature/x"), "the name paints up to the fit: {line0}");
     assert!(line0.contains('…'), "the overflow truncates with a trailing ellipsis: {line0}");
     assert!(line0.contains("1 changed"), "the right-aligned stats survive the long name: {line0}");
@@ -3606,7 +3607,7 @@ fn a_narrow_header_never_maps_a_click_outside_the_painted_base() {
     // The base label truncates to its budget at a narrow width, and the hit test walks the
     // same arithmetic the paint does: every column it claims carries painted label, and the
     // claim is one unbroken run.
-    for width in [40u16, 56, 72] {
+    for width in [58u16, 74, 90] {
         let area = Rect { x: 0, y: 0, width, height: 12 };
         let line0 = dump(&render_size(&app, width, 12)).lines().next().unwrap().to_string();
         let cells: Vec<char> = line0.chars().collect();
@@ -3652,7 +3653,7 @@ fn an_overlong_skipped_tail_never_evicts_the_base_name() {
     r.commit_all("edit");
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
-    let line0 = dump(&render_size(&app, 80, 20)).lines().next().unwrap().to_string();
+    let line0 = dump(&render_size(&app, 98, 20)).lines().next().unwrap().to_string();
     assert!(line0.contains("vs main"), "the resolved name keeps first claim: {line0}");
     assert!(line0.contains("· feature/x"), "the skipped tail paints in what remains: {line0}");
     assert!(line0.contains('…'), "the tail truncates with a trailing ellipsis: {line0}");
@@ -3895,7 +3896,9 @@ fn the_commits_header_names_the_pick_and_its_verdict() {
     app.open_commit_picker();
     app.commit_picker_escape(); // drop the restored anchor: a run of one again
     app.commit_picker_pick().unwrap();
-    let narrow = render_at(&app, 72).lines().next().unwrap().to_string();
+    // 93 is the narrowest bar that keeps the full pick sha, clips the subject,
+    // and leaves the verdict marker: at 91 and under the sha itself clips.
+    let narrow = render_at(&app, 93).lines().next().unwrap().to_string();
     assert!(narrow.contains(short(&shas[3])), "the sha survives: {narrow}");
     assert!(narrow.contains('…'), "the subject clips: {narrow}");
 
@@ -3906,7 +3909,7 @@ fn the_commits_header_names_the_pick_and_its_verdict() {
     common::land_world(&mut app);
     let line0 = render(&app).lines().next().unwrap().to_string();
     assert!(line0.contains("· off branch"), "{line0}");
-    let narrow = render_at(&app, 72).lines().next().unwrap().to_string();
+    let narrow = render_at(&app, 92).lines().next().unwrap().to_string();
     assert!(narrow.contains("· off branch"), "the marker survives truncation: {narrow}");
     // And the picker shows the pick as a row above the list.
     app.open_commit_picker();

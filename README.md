@@ -106,7 +106,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 
 | Key | Action |
 | --- | --- |
-| `1` `2` `3` | Switch tab — Changes / All files / PR |
+| `Shift+1` `Shift+2` `Shift+3` | Switch tab — Changes / All files / PR |
 | `u` `b` `t` `g` | Switch scope — uncommitted / branch / last turn / commits |
 | `B` | Pick the base branch |
 | `G` | Pick the commits to review |
@@ -321,7 +321,7 @@ The action names and their defaults:
 | `next-file` / `prev-file` | `f` / `F` |
 | `scope-uncommitted` / `scope-branch` / `scope-last-turn` / `scope-commits` | `u` / `b` / `t` / `g` |
 | `base-pick` / `commit-pick` | `B` / `G` |
-| `tab-changes` / `tab-all-files` / `tab-pr` | `1` / `2` / `3` |
+| `tab-changes` / `tab-all-files` / `tab-pr` | `shift+1` / `shift+2` / `shift+3` |
 | `wrap` | `w` |
 | `preview` | `m` |
 | `navigator-position` | `p` |
@@ -341,7 +341,8 @@ The action names and their defaults:
 | `refresh` | `r` |
 | `quit` | `q` |
 
-A key is one printable character, or a `ctrl+`/`alt+` chord like `ctrl+f`. `Tab`, `Esc`, and
+A key is one printable character, a named key, or a `ctrl+`/`alt+`/`shift+` chord like
+`ctrl+f`. `Tab`, `Esc`, and
 `Enter` are fixed. Keys still type normally in the comment box.
 
 ### Forge repositories and hosts
@@ -415,6 +416,7 @@ workspace. Put `herdr-reviewr` itself in a layout pane, never the invoke.
 The known constraints:
 
 **Terminal & theme**
+
 - **Truecolor required** — colors are 24-bit RGB with no 256/8-color fallback. Basic terminals
   render wrong colors.
 - **Theme must match the terminal** — the pane keeps the terminal's background, and there is no
@@ -423,11 +425,13 @@ The known constraints:
 - **Box-drawing glyphs required**, but no Nerd Font.
 
 **Platform**
+
 - **macOS and Linux only** — no Windows.
 - **Clipboard export** uses `pbcopy`, `wl-copy`, `xclip`, or `xsel`. With none installed it
   says so, and **Send** still works.
 
 **herdr coupling**
+
 - **Send needs an agent in the workspace** — one agent takes the comments straight away, and
   several open a picker so you choose. With no agent, Send says so and keeps your comments.
 - **last turn relies on polling** (2 s default) — a turn that starts and finishes inside one
@@ -435,6 +439,7 @@ The known constraints:
   own edits included.
 
 **PR tab (GitHub, GitLab, and Azure DevOps)**
+
 - **Read-only** — needs the forge's authenticated CLI (`gh`, `glab`, or `az`) and a
   recognized `upstream` or `origin`. Without either it tells you what to fix, and the other
   tabs keep working. Other forges are not supported.
@@ -446,6 +451,7 @@ The known constraints:
   more.
 
 **Review model**
+
 - **Comments are in-memory and single-session** — closing the pane loses any you haven't sent
   or copied out.
 - **Sending is all-or-nothing** — Send (or copy) delivers the whole set and clears it. A
@@ -454,6 +460,7 @@ The known constraints:
   number. reviewr flags a stale comment instead of dropping it.
 
 **Budgets**
+
 - Files over 2 MB or 50,000 lines show a "too large" notice. Binary files get no diff.
 
 ## Building from source

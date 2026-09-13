@@ -4,11 +4,12 @@
 mod common;
 
 use std::cell::RefCell;
+use std::fmt::Write;
 use std::path::Path;
 
 use anyhow::{Result, bail};
 use common::{Repo, app_on, enter_tab, typed};
-use herdr_reviewr::app::{App, Band, Focus, FooterAction, Mode};
+use herdr_reviewr::app::{App, Band, Focus, FooterAction, Mode, Tab};
 use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::export::ExportTarget;
 use herdr_reviewr::herdr::{AgentChoice, AgentSample};
@@ -71,6 +72,171 @@ fn clamp(app: &mut App, viewport: usize) {
     let heights = vec![1usize; app.visible.len()];
     app.reveal_diff_cursor(&heights, viewport);
     app.bound_diff_scroll(&heights, viewport);
+}
+
+/// A repo whose `a.rs` runs 20 lines and had line 15 edited, so the open diff
+/// shows the hunk around line 15 — enough numbered rows to jump within, past,
+/// and before.
+fn tall_repo() -> Repo {
+    let r = Repo::init();
+    let body: String = (1..=20).fold(String::new(), |mut s, i| {
+        let _ = writeln!(s, "line{i}");
+        s
+    });
+    r.write("a.rs", &body);
+    r.commit_all("init");
+    r.write("a.rs", &body.replace("line15\n", "LINE15\n"));
+    r
+}
+
+/// A repo whose `a.rs` runs 70 lines and had line 60 edited — long enough to jump to line 60
+/// exactly, and far enough past line 1 that line 1 sits in the collapsed head fold.
+fn long_repo() -> Repo {
+    let r = Repo::init();
+    let body: String = (1..=70).fold(String::new(), |mut s, i| {
+        let _ = writeln!(s, "line{i}");
+        s
+    });
+    r.write("a.rs", &body);
+    r.commit_all("init");
+    r.write("a.rs", &body.replace("line60\n", "LINE60\n"));
+    r
+}
+
+fn key(app: &mut App, c: char) {
+    handle_key(app, KeyEvent::from(KeyCode::Char(c)), Rect::new(0, 0, 80, 24), &Keymap::default())
+        .unwrap();
+}
+
+fn key_tab(app: &mut App) {
+    handle_key(app, KeyEvent::from(KeyCode::Tab), Rect::new(0, 0, 80, 24), &Keymap::default())
+        .unwrap();
+}
+
+#[test]
+fn digits_then_g_jump_to_the_named_line() {
+    let r = tall_repo();
+    let mut app = app_on(&r);
+    key_tab(&mut app); // the read pane must own the keys
+    key(&mut app, '1');
+    key(&mut app, '5');
+    key(&mut app, 'g');
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(15));
+}
+
+#[test]
+fn sixty_g_jumps_to_line_sixty() {
+    let r = long_repo();
+    let mut app = app_on(&r);
+    key_tab(&mut app);
+    key(&mut app, '6');
+    key(&mut app, '0');
+    key(&mut app, 'g');
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(60));
+}
+
+#[test]
+fn one_g_jumps_to_the_first_line() {
+    let r = long_repo();
+    let mut app = app_on(&r);
+    key_tab(&mut app);
+    key(&mut app, '1');
+    key(&mut app, 'g');
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(1));
+}
+
+#[test]
+fn a_bare_g_with_no_pending_prefix_switches_the_scope() {
+    let r = tall_repo();
+    let mut app = app_on(&r);
+    key(&mut app, 'g');
+    assert!(app.commit_picker.is_some(), "the bare `g` did its scope switch");
+}
+
+#[test]
+fn a_jump_into_a_collapsed_fold_expands_it_and_lands_on_the_named_line() {
+    let r = Repo::init();
+    let body: String = (1..=100).fold(String::new(), |mut s, i| {
+        let _ = writeln!(s, "line{i}");
+        s
+    });
+    r.write("a.rs", &body);
+    r.commit_all("init");
+    r.write("a.rs", &body.replace("line15\n", "LINE15\n")); // hunk at 15 folds the run above
+    let mut app = app_on(&r);
+    key_tab(&mut app);
+    key(&mut app, '7'); // line 7 sits inside the collapsed fold
+    key(&mut app, 'g');
+    assert_eq!(
+        app.visible[app.diff_cursor].new_no(),
+        Some(7),
+        "the fold must expand to reveal line 7"
+    );
+}
+
+#[test]
+fn a_jump_past_the_last_numbered_line_clamps_to_the_last_row() {
+    let r = tall_repo();
+    let mut app = app_on(&r);
+    key_tab(&mut app);
+    key(&mut app, '9');
+    key(&mut app, '9');
+    key(&mut app, 'g');
+    assert_eq!(app.diff_cursor, app.visible.len() - 1);
+    // The last row is the tail fold — its marker sits at the first hidden line's number,
+    // past every numbered row.
+    assert_eq!(app.visible[app.diff_cursor].fold_anchor(), Some(19));
+}
+
+#[test]
+fn a_digit_prefix_drops_when_any_other_key_follows() {
+    let r = tall_repo();
+    let mut app = app_on(&r);
+    key_tab(&mut app);
+    let before = app.diff_cursor;
+    key(&mut app, '5');
+    key(&mut app, 'j'); // the other key drops the prefix, then runs itself
+    assert_eq!(app.diff_cursor, before + 1, "no jump — `j` just moved a row");
+    key(&mut app, 'g'); // no prefix left: the bare `g` scope switch runs
+    assert!(app.commit_picker.is_some(), "the bare `g` did its scope switch");
+}
+
+#[test]
+fn digits_are_inert_in_the_files_pane() {
+    let r = tall_repo();
+    let mut app = app_on(&r);
+    assert_eq!(app.focus, Focus::Files);
+    key(&mut app, '5');
+    assert_eq!(app.line_count, 0, "digits do not accumulate in the files pane");
+}
+
+#[test]
+fn a_shift_tagged_digit_is_a_chord_not_a_jump_digit() {
+    let r = tall_repo();
+    let mut app = app_on(&r);
+    key_tab(&mut app); // focus the diff pane, where bare digits buffer
+    let event = KeyEvent::new(KeyCode::Char('2'), KeyModifiers::SHIFT);
+    handle_key(&mut app, event, Rect::new(0, 0, 80, 24), &Keymap::default()).unwrap();
+    assert_eq!(app.line_count, 0, "a tagged shift+digit must not buffer into the prefix");
+    assert_eq!(app.tab, Tab::AllFiles, "and it must fire the tab chord");
+}
+
+#[test]
+fn a_line_jump_is_inert_while_the_markdown_preview_is_open() {
+    let r = Repo::init();
+    r.write("a.md", "# title\n");
+    r.commit_all("init");
+    r.write("a.md", "# title\n\nbody\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.toggle_preview();
+    assert!(app.preview_active(), "the markdown preview is open");
+    let cursor = app.diff_cursor;
+    key(&mut app, '2');
+    key(&mut app, 'g');
+    assert_eq!(app.diff_cursor, cursor, "the preview has no cursor to land on");
+    assert!(app.preview_active());
+    assert!(app.commit_picker.is_none(), "the prefix is consumed; no scope switch");
 }
 
 #[test]
@@ -1642,7 +1808,7 @@ fn page_down_rebinds_and_half_page_defaults_hold() {
 
     let keymap = Keymap::resolve(&[(
         Action::PageDown,
-        vec![Key { ctrl: true, alt: false, code: BindingCode::Char('n') }],
+        vec![Key { ctrl: true, alt: false, shift: false, code: BindingCode::Char('n') }],
     )])
     .unwrap();
     app.diff_cursor = 0;
@@ -3898,7 +4064,7 @@ fn find_opens_on_a_rebound_alt_chord_through_the_dispatcher() {
     let mut app = app_on(&r);
     let keymap = Keymap::resolve(&[(
         Action::Find,
-        vec![Key { ctrl: false, alt: true, code: BindingCode::Char('x') }],
+        vec![Key { ctrl: false, alt: true, shift: false, code: BindingCode::Char('x') }],
     )])
     .unwrap();
     app.focus = Focus::Diff;
@@ -5430,16 +5596,20 @@ fn the_picker_owns_its_keys_on_every_tab() {
     let area = Rect::new(0, 0, 80, 24);
 
     // The picker is checked before the tab handlers, so no tab can eat a modal's keys. On the
-    // read-only PR tab, `q` quits and the digits switch tabs — both would act behind an open
+    // read-only PR tab, `q` quits and the tab chords switch tabs — both would act behind an open
     // picker if the modal were checked second.
     let mut app = app_with_picker(&r);
     app.tab = Tab::Pr;
     handle_key(&mut app, KeyEvent::from(KeyCode::Char('q')), area, &keymap).unwrap();
     assert!(!app.should_quit, "`q` quit the app from a picker on the PR tab");
     assert_eq!(app.mode, Mode::Picker, "`q` left the picker");
-    handle_key(&mut app, KeyEvent::from(KeyCode::Char('1')), area, &keymap).unwrap();
-    assert_eq!(app.tab, Tab::Pr, "`1` switched tabs behind the picker");
-    assert_eq!(app.picker_cursor, 0, "`1` moved the highlight, as the picker's own key");
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('1'), KeyModifiers::SHIFT), area, &keymap)
+        .unwrap();
+    assert_eq!(app.tab, Tab::Pr, "`shift+1` switched tabs behind the picker");
+    assert_eq!(
+        app.picker_cursor, 0,
+        "`shift+1` is inert: the chord moved neither the tab nor the highlight"
+    );
     handle_key(&mut app, KeyEvent::from(KeyCode::Esc), area, &keymap).unwrap();
     assert_eq!(app.mode, Mode::Normal, "`esc` still cancels from the PR tab");
 }
@@ -5476,9 +5646,16 @@ fn the_picker_digits_are_literal_whatever_the_tab_keys_are_bound_to() {
     let area = Rect::new(0, 0, 80, 24);
     let tab_before = app.tab;
 
+    // The tab keys are now `shift+` chords. A chord carrying a digit is inert in the
+    // picker — it must not switch tabs (the modal owns the key) and, per the picker's
+    // own rule, must not move the highlight either.
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('2'), KeyModifiers::SHIFT), area, &keymap)
+        .unwrap();
+    assert_eq!(app.picker_cursor, 0, "`shift+2` did not move the highlight");
+    assert_eq!(app.tab, tab_before, "`shift+2` did not switch tabs from inside the picker");
+    // The bare digits remain the picker's literal row keys.
     handle_key(&mut app, KeyEvent::from(KeyCode::Char('2')), area, &keymap).unwrap();
-    assert_eq!(app.picker_cursor, 1, "`2` moved the highlight to row 2");
-    assert_eq!(app.tab, tab_before, "`2` did not switch tabs from inside the picker");
+    assert_eq!(app.picker_cursor, 1, "bare `2` moved the highlight to row 2");
 }
 
 #[test]
@@ -7180,12 +7357,73 @@ fn a_single_pick_reopens_without_an_anchor_so_k_enter_steps() {
     assert_eq!(changed_paths(&app), ["two.rs"]);
 }
 
+/// A shifted glyph reaches the app in two encodings: tagged with the `SHIFT` modifier
+/// (kitty-protocol terminals) and bare (legacy xterm sends `!` for `shift+1` with no
+/// modifier at all). Both must answer the tab chords, and the bare spelling of a
+/// bare-bound glyph (`?`) still answers its own binding in either encoding. The bare
+/// list spans layouts: US `!`/`@`/`#` and the `"`/`§` a German (or British, French,
+/// Spanish) keyboard generates for `shift+2`/`shift+3`.
+#[test]
+fn shifted_glyphs_answer_in_both_terminal_encodings() {
+    let repo = Repo::init();
+    repo.write("a.rs", "one\n");
+    repo.commit_all("c");
+    let keymap = Keymap::default();
+    let area = Rect::new(0, 0, 80, 24);
+
+    for (glyph, tab) in [
+        ('!', herdr_reviewr::app::Tab::Changes),
+        ('@', herdr_reviewr::app::Tab::AllFiles),
+        ('"', herdr_reviewr::app::Tab::AllFiles),
+        ('#', herdr_reviewr::app::Tab::Pr),
+        ('§', herdr_reviewr::app::Tab::Pr),
+    ] {
+        for mods in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            let mut app = app_on(&repo);
+            handle_key(&mut app, KeyEvent::new(KeyCode::Char(glyph), mods), area, &keymap).unwrap();
+            assert_eq!(app.tab, tab, "`{glyph}` as {mods:?} must answer the tab chord");
+        }
+    }
+
+    for mods in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+        let mut app = app_on(&repo);
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('?'), mods), area, &keymap).unwrap();
+        assert!(app.keys_expanded, "`?` as {mods:?} must open the key list");
+    }
+}
+
+/// The layout-shifted digit glyphs are chords in Normal mode, but under the composer they
+/// are the characters the reviewer is typing: a German `shift+2` quote or `shift+3`
+/// section sign lands in the draft, and the tab stays put.
+#[test]
+fn layout_shifted_digit_glyphs_type_while_composing() {
+    let mut app = composing_app();
+    let keymap = Keymap::default();
+    let area = Rect::new(0, 0, 80, 24);
+    for glyph in ['"', '§'] {
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(glyph), KeyModifiers::NONE),
+            area,
+            &keymap,
+        )
+        .unwrap();
+        assert!(app.input.ends_with(glyph), "`{glyph}` types into the draft");
+    }
+    assert_eq!(
+        app.tab,
+        herdr_reviewr::app::Tab::Changes,
+        "the chord did not fire under the composer"
+    );
+}
+
 #[test]
 fn every_other_key_is_inert_inside_the_commit_picker() {
     let (r, _) = commits_repo();
     let mut app = app_on(&r);
     let keymap = Keymap::default();
     press(&mut app, &keymap, KeyCode::Char('G'));
+    let area = Rect::new(0, 0, 120, 40);
     for code in [
         KeyCode::Char('q'),
         KeyCode::Char('/'),
@@ -7210,6 +7448,14 @@ fn every_other_key_is_inert_inside_the_commit_picker() {
         assert_eq!(app.scope, Scope::Uncommitted);
         assert!(!app.should_quit);
         assert!(!app.keys_expanded);
+    }
+    // The tab chords are the keys that would change the tab if the modal didn't own them.
+    for c in ['1', '2', '3'] {
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT), area, &keymap)
+            .unwrap();
+        assert_eq!(app.mode, Mode::CommitPick, "`shift+{c}` is inert");
+        assert_eq!(app.tab, herdr_reviewr::app::Tab::Changes);
+        assert!(!app.should_quit);
     }
     handle_key(
         &mut app,

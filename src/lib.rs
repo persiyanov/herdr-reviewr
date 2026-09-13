@@ -1717,8 +1717,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
     // A key resolving to no action falls through to the fixed keys below
     // (`tab`, `esc`), which stay hardcoded per context.
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let code = match key.code {
-        Char(c) => Some(keymap::KeyCode::Char(c)),
+        // The terminal delivers the shifted character (`shift+1` arrives as `!`), so match
+        // the unshifted base: a `shift+1` binding answers either encoding the terminal uses.
+        Char(c) => Some(keymap::KeyCode::Char(if shift { keymap::unshifted(c) } else { c })),
         Left => Some(keymap::KeyCode::Left),
         Right => Some(keymap::KeyCode::Right),
         Up => Some(keymap::KeyCode::Up),
@@ -1727,7 +1730,25 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
         PageDown => Some(keymap::KeyCode::PageDown),
         _ => None,
     };
-    let action = code.and_then(|code| keymap.action_for(crate::keymap::Key { ctrl, alt, code }));
+    // A shifted glyph reaches the app in two encodings: tagged with the `SHIFT` modifier
+    // (kitty-protocol terminals) or bare (legacy xterm sends `!` for `shift+1` with no
+    // modifier at all). The tagged reading answers first, so a bare binding of the same
+    // glyph (`?` opens the key list) still wins before the shifted one is tried.
+    let action = code
+        .and_then(|code| keymap.action_for(crate::keymap::Key { ctrl, alt, shift, code }))
+        .or_else(|| match (key.code, code) {
+            (KeyCode::Char(c), _) => {
+                let (shift, code) = if shift {
+                    (false, keymap::KeyCode::Char(c))
+                } else if keymap::unshifted(c) != c {
+                    (true, keymap::KeyCode::Char(keymap::unshifted(c)))
+                } else {
+                    return None;
+                };
+                keymap.action_for(crate::keymap::Key { ctrl, alt, shift, code })
+            }
+            _ => None,
+        });
 
     // An armed crossing waits for a repeat of the hunk step that armed it. Every other key drops
     // it, and still does its own work. The steps themselves settle their arm in
@@ -1854,6 +1875,25 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
         return Ok(());
     }
 
+    // The line-jump prefix: bare digits with the read pane focused accumulate a line
+    // number, consumed by the `g` binding. `shift` is excluded like `ctrl` and `alt`:
+    // a modifier-tagged digit is a chord — the `shift+digit` tab bindings — not a jump
+    // digit, and a swallowed chord would leak its number into the next `g`. Every other
+    // key drops the prefix first — including any key that opens a modal — so a prefix
+    // never leaks into a modal or a later `g`. Digits in the files pane are inert and
+    // do not accumulate.
+    let count = app.line_count;
+    app.line_count = 0;
+    if app.focus == Focus::Diff
+        && !ctrl
+        && !alt
+        && !shift
+        && let KeyCode::Char(c) = key.code
+        && c.is_ascii_digit()
+    {
+        app.line_count = count.saturating_mul(10).saturating_add(c.to_digit(10).unwrap());
+        return Ok(());
+    }
     if let Some(action) = action {
         match action {
             K::Quit => app.should_quit = true,
@@ -1895,6 +1935,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::ScopeUncommitted => app.set_scope(Scope::Uncommitted)?,
             K::ScopeBranch => app.set_scope(Scope::Branch)?,
             K::ScopeLastTurn => app.set_scope(Scope::LastTurn)?,
+            K::ScopeCommits if count > 0 => app.jump_to_line(count),
             K::ScopeCommits => app.set_scope(Scope::Commits)?,
             K::BasePick => app.open_base_picker(),
             K::CommitPick => app.open_commit_picker(),

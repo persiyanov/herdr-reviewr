@@ -672,6 +672,9 @@ pub struct App {
     /// Set by a navigation that moves `diff_cursor`; consumed once per frame to scroll the
     /// cursor into view. The wheel never sets it.
     pub reveal_diff: bool,
+    /// Digits accumulated while the read pane is focused, waiting for the `g`
+    /// binding to turn them into a line jump. Dropped by every other key.
+    pub line_count: u32,
     /// The file crossing a hunk step armed when it found no further hunk in the open file. The
     /// next step the same way takes it, and any other input drops it.
     armed_cross: Option<ArmedCross>,
@@ -916,6 +919,7 @@ impl App {
             file_scroll: 0,
             reveal_files: false,
             reveal_diff: false,
+            line_count: 0,
             armed_cross: None,
             resume_list: false,
             toggled_dirs: HashSet::new(),
@@ -3733,6 +3737,56 @@ impl App {
                 self.close_list();
             }
         }
+    }
+
+    /// `Ng`: move the cursor to the open file's `N`-th line. Landing follows
+    /// Continuity's order — identity first, clamp last: the row numbered `N`
+    /// when one is visible, else the first visible row numbered past `N`, else
+    /// the last row. A collapsed fold spanning `N` expands first — the same escape the find
+    /// band uses — so the named line is the one landed on. A
+    /// deletion row carries no new-side number, so it inherits the position of
+    /// the row above it; a fold marker sits at its first hidden line's number.
+    /// Inert with no file open, and while a preview is up — the preview has no
+    /// cursor to land on.
+    pub fn jump_to_line(&mut self, n: u32) {
+        if self.visible.is_empty() || self.preview_active() {
+            return;
+        }
+        let mut pos = 0u32;
+        for (i, row) in self.visible.iter().enumerate() {
+            // `N` hidden inside this fold: expand it and land on the revealed line — the
+            // same escape the find band uses. Folds hold dense context runs, so `N` is in
+            // the fold exactly when its last hidden number reaches it. Checked before the
+            // landing pass: a fold whose first hidden line is `N` would otherwise satisfy
+            // the `>= n` landing below and strand the cursor on the unnumbered marker.
+            if let Row::Fold { lines } = row
+                && let Some(end) = lines.last().and_then(Row::new_no)
+                && end >= n
+            {
+                if let Some(anchor) = row.fold_anchor() {
+                    self.expanded_folds.insert(anchor);
+                    self.rebuild_visible();
+                }
+                self.diff_cursor =
+                    self.visible.iter().position(|r| r.new_no() == Some(n)).unwrap_or(i);
+                self.reveal_diff = true;
+                return;
+            }
+            let row_pos = match row {
+                r @ (Row::Context { .. } | Row::Insertion { .. }) => r.new_no().unwrap(),
+                Row::Fold { .. } => row.fold_anchor().unwrap_or(pos),
+                Row::Deletion { .. } => pos,
+            };
+            if row_pos >= n {
+                // No visible row at `N`: the first visible row numbered `>= n` is the landing.
+                self.diff_cursor = i;
+                self.reveal_diff = true;
+                return;
+            }
+            pos = row_pos;
+        }
+        self.diff_cursor = self.visible.len() - 1;
+        self.reveal_diff = true;
     }
 
     /// Move the diff cursor to the next (`dir >= 0`) or previous commented line.

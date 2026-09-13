@@ -106,37 +106,47 @@ impl KeyCode {
     }
 }
 
-/// One bound key: a base [`KeyCode`], alone or under a `ctrl`/`alt` modifier. A modifier-less
+/// One bound key: a base [`KeyCode`], alone or under a `ctrl`/`alt`/`shift` modifier. A
+/// modifier-less
 /// `Key` is the bare character the keymap answered before chords existed
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Key {
     pub ctrl: bool,
     pub alt: bool,
+    pub shift: bool,
     pub code: KeyCode,
 }
 
 impl Key {
     /// A bare character, no modifier.
     pub const fn plain(ch: char) -> Self {
-        Self { ctrl: false, alt: false, code: KeyCode::Char(ch) }
+        Self { ctrl: false, alt: false, shift: false, code: KeyCode::Char(ch) }
     }
 
     /// A `ctrl+<ch>` chord.
     pub const fn ctrl(ch: char) -> Self {
-        Self { ctrl: true, alt: false, code: KeyCode::Char(ch) }
+        Self { ctrl: true, alt: false, shift: false, code: KeyCode::Char(ch) }
+    }
+
+    /// A `shift+<ch>` chord. The terminal delivers the shifted character (`shift+1`
+    /// arrives as `!`), so the dispatcher normalizes it through [`unshifted`] before
+    /// matching.
+    pub const fn shift(ch: char) -> Self {
+        Self { ctrl: false, alt: false, shift: true, code: KeyCode::Char(ch) }
     }
 
     /// A bare named key, no modifier.
     pub const fn named(code: KeyCode) -> Self {
-        Self { ctrl: false, alt: false, code }
+        Self { ctrl: false, alt: false, shift: false, code }
     }
 
-    /// The `ctrl+`/`alt+` prefixing both spellings share.
+    /// The `ctrl+`/`alt+`/`shift+` prefixing both spellings share.
     fn prefixed(self, base: String) -> String {
-        match (self.ctrl, self.alt) {
-            (true, _) => format!("ctrl+{base}"),
-            (false, true) => format!("alt+{base}"),
-            (false, false) => base,
+        match (self.ctrl, self.alt, self.shift) {
+            (true, _, _) => format!("ctrl+{base}"),
+            (false, true, _) => format!("alt+{base}"),
+            (false, false, true) => format!("shift+{base}"),
+            (false, false, false) => base,
         }
     }
 
@@ -175,9 +185,9 @@ const ACTIONS: [(Action, &str, &[Key]); 42] = [
     (Action::ScopeCommits, "scope-commits", &[Key::plain('g')]),
     (Action::BasePick, "base-pick", &[Key::plain('B')]),
     (Action::CommitPick, "commit-pick", &[Key::plain('G')]),
-    (Action::TabChanges, "tab-changes", &[Key::plain('1')]),
-    (Action::TabAllFiles, "tab-all-files", &[Key::plain('2')]),
-    (Action::TabPr, "tab-pr", &[Key::plain('3')]),
+    (Action::TabChanges, "tab-changes", &[Key::shift('1')]),
+    (Action::TabAllFiles, "tab-all-files", &[Key::shift('2')]),
+    (Action::TabPr, "tab-pr", &[Key::shift('3')]),
     (Action::Wrap, "wrap", &[Key::plain('w')]),
     (Action::Preview, "preview", &[Key::plain('m')]),
     (Action::NavigatorPosition, "navigator-position", &[Key::plain('p')]),
@@ -224,6 +234,42 @@ impl Action {
     /// Every action name, in keymap-table order, for the unknown-action error message.
     pub fn names() -> impl Iterator<Item = &'static str> {
         ACTIONS.iter().map(|(_, name, _)| *name)
+    }
+}
+
+/// The base character a terminal delivers for `shift`+`ch`: `!` comes from `1`, `A`
+/// from `a`. The dispatcher runs every shifted character through this before matching,
+/// so a `shift+1` binding answers the `!` the terminal reports. The digit forms
+/// include the layout-shifted glyphs a legacy (level 0) terminal reports instead of a
+/// tagged key: US `@`/`#` and the `"`/`§` of German, British, French, and Spanish
+/// layouts, so the `shift+digit` tab chords answer on any of them. Characters with
+/// no shifted form (digits, lowercase, the rest of non-ASCII) map to themselves.
+pub fn unshifted(ch: char) -> char {
+    match ch {
+        'A'..='Z' => ch.to_ascii_lowercase(),
+        '!' => '1',
+        '@' | '"' => '2',
+        '#' | '§' => '3',
+        '$' => '4',
+        '%' => '5',
+        '^' => '6',
+        '&' => '7',
+        '*' => '8',
+        '(' => '9',
+        ')' => '0',
+        '_' => '-',
+        '+' => '=',
+        '{' => '[',
+        '}' => ']',
+        '|' => '\\',
+        ':' => ';',
+        // The US `"` (shift+quote) is unreachable here: the German/British/French
+        // `"` (shift+2) claims the glyph, and no `shift+quote` chord is bound.
+        '<' => ',',
+        '>' => '.',
+        '?' => '/',
+        '~' => '`',
+        _ => ch,
     }
 }
 
@@ -319,7 +365,7 @@ impl Keymap {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Key, KeyCode, Keymap};
+    use super::{Action, Key, KeyCode, Keymap, unshifted};
 
     #[test]
     fn defaults_bind_every_action_and_hint_is_first_key() {
@@ -334,7 +380,7 @@ mod tests {
         assert_eq!(keymap.action_for(Key::plain('G')), Some(Action::CommitPick));
         assert_eq!(keymap.action_for(Key::plain('?')), Some(Action::Keys));
         assert_eq!(keymap.hint(Action::Send), Key::plain('s'));
-        assert_eq!(keymap.hint(Action::TabPr), Key::plain('3'));
+        assert_eq!(keymap.hint(Action::TabPr), Key::shift('3'));
         assert_eq!(keymap.action_for(Key::named(KeyCode::Right)), Some(Action::Expand));
         assert_eq!(keymap.action_for(Key::named(KeyCode::Left)), Some(Action::Collapse));
         assert_eq!(keymap.action_for(Key::named(KeyCode::Down)), Some(Action::Down));
@@ -357,7 +403,12 @@ mod tests {
         assert_eq!(keymap.hint(Action::PageUp).config_str(), "pageup");
         assert_eq!(keymap.hint(Action::PageUp).label(), "PageUp");
         assert_eq!(keymap.hint(Action::PageDown).label(), "PageDown");
-        assert_eq!(Key { ctrl: true, alt: false, code: KeyCode::Right }.config_str(), "ctrl+right");
+        assert_eq!(
+            Key { ctrl: true, alt: false, shift: false, code: KeyCode::Right }.config_str(),
+            "ctrl+right"
+        );
+        assert_eq!(Key::shift('1').config_str(), "shift+1");
+        assert_eq!(Key::shift('1').label(), "shift+1");
         // A character key labels as itself, chords included.
         assert_eq!(Key::ctrl('u').label(), "ctrl+u");
         assert_eq!(Action::by_config_name("list-wider"), Some(Action::NavigatorGrow));
@@ -391,7 +442,7 @@ mod tests {
     #[test]
     fn find_rebinds_to_another_chord_or_a_bare_key() {
         // To another chord.
-        let alt_x = Key { ctrl: false, alt: true, code: KeyCode::Char('x') };
+        let alt_x = Key { ctrl: false, alt: true, shift: false, code: KeyCode::Char('x') };
         let keymap = Keymap::resolve(&[(Action::Find, vec![alt_x])]).unwrap();
         assert_eq!(keymap.action_for(alt_x), Some(Action::Find));
         assert_eq!(keymap.action_for(Key::ctrl('f')), None, "the default chord is freed");
@@ -411,6 +462,32 @@ mod tests {
         .unwrap();
         assert_eq!(keymap.action_for(Key::plain('v')), Some(Action::Comment));
         assert_eq!(keymap.action_for(Key::plain('c')), Some(Action::Select));
+    }
+
+    #[test]
+    fn a_shift_chord_spells_shift_prefix_and_answers_its_tab() {
+        let keymap = Keymap::default();
+        // The tab keys are shift chords: the bare digit is free for other actions.
+        assert_eq!(keymap.action_for(Key::shift('1')), Some(Action::TabChanges));
+        assert_eq!(keymap.action_for(Key::shift('2')), Some(Action::TabAllFiles));
+        assert_eq!(keymap.action_for(Key::shift('3')), Some(Action::TabPr));
+        assert_eq!(keymap.action_for(Key::plain('1')), None);
+        assert_eq!(keymap.hint(Action::TabChanges).config_str(), "shift+1");
+        assert_eq!(keymap.hint(Action::TabChanges).label(), "shift+1");
+    }
+
+    #[test]
+    fn unshifted_maps_the_shifted_forms_to_their_base() {
+        assert_eq!(unshifted('!'), '1');
+        assert_eq!(unshifted('A'), 'a');
+        assert_eq!(unshifted('~'), '`');
+        assert_eq!(unshifted('1'), '1', "no shifted form maps to itself");
+        // Legacy terminals report the layout-shifted glyph, not a tagged key: US `@`/`#`,
+        // German/British/French/Spanish `"`/`§`.
+        assert_eq!(unshifted('@'), '2');
+        assert_eq!(unshifted('"'), '2');
+        assert_eq!(unshifted('#'), '3');
+        assert_eq!(unshifted('§'), '3');
     }
 
     #[test]

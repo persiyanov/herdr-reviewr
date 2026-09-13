@@ -480,20 +480,22 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
 }
 
 /// One `[keybindings]` key string → a [`Key`](crate::keymap::Key): a bare character or a
-/// named key, alone or behind a `ctrl+`/`alt+` prefix. The character is
+/// named key, alone or behind a `ctrl+`/`alt+`/`shift+` prefix. The character is
 /// one visible cell — a positive display width also rejects the zero-width class `is_control`
 /// misses (format chars, combining marks).
 fn parse_key(text: &str) -> Option<crate::keymap::Key> {
     use crate::keymap::KeyCode;
-    let (ctrl, alt, rest) = if let Some(rest) = text.strip_prefix("ctrl+") {
-        (true, false, rest)
+    let (ctrl, alt, shift, rest) = if let Some(rest) = text.strip_prefix("ctrl+") {
+        (true, false, false, rest)
     } else if let Some(rest) = text.strip_prefix("alt+") {
-        (false, true, rest)
+        (false, true, false, rest)
+    } else if let Some(rest) = text.strip_prefix("shift+") {
+        (false, false, true, rest)
     } else {
-        (false, false, text)
+        (false, false, false, text)
     };
     if let Some(code) = KeyCode::by_name(rest) {
-        return Some(crate::keymap::Key { ctrl, alt, code });
+        return Some(crate::keymap::Key { ctrl, alt, shift, code });
     }
     let mut it = rest.chars();
     match (it.next(), it.next()) {
@@ -501,7 +503,7 @@ fn parse_key(text: &str) -> Option<crate::keymap::Key> {
             if !ch.is_whitespace()
                 && unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) > 0 =>
         {
-            Some(crate::keymap::Key { ctrl, alt, code: KeyCode::Char(ch) })
+            Some(crate::keymap::Key { ctrl, alt, shift, code: KeyCode::Char(ch) })
         }
         _ => None,
     }
@@ -509,7 +511,7 @@ fn parse_key(text: &str) -> Option<crate::keymap::Key> {
 
 /// Parse and resolve the `[keybindings]` table:
 /// action names from the keymap table in, each bound to a non-empty array of
-/// keys, a bare character or a `ctrl+`/`alt+` chord.
+/// keys, a bare character, a named key, or a `ctrl+`/`alt+`/`shift+` chord.
 fn parse_keybindings(
     path: &Path,
     value: &toml::Value,
@@ -940,7 +942,12 @@ mod tests {
         std::fs::write(&path, "[keybindings]\nfind = [\"alt+x\"]\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(
-            config.keymap().action_for(Key { ctrl: false, alt: true, code: KeyCode::Char('x') }),
+            config.keymap().action_for(Key {
+                ctrl: false,
+                alt: true,
+                shift: false,
+                code: KeyCode::Char('x'),
+            }),
             Some(Action::Find)
         );
         assert_eq!(config.keymap().action_for(Key::ctrl('f')), None);
