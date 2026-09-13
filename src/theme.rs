@@ -1,4 +1,4 @@
-//! The color model: named palettes, derivation from anchors, and selection.
+//! The color model: named palettes, terminal-following colors, and selection.
 //!
 //! A theme is a few anchor colors plus a paired syntax theme;
 //! every other slot is derived from the anchors. One theme — `catppuccin` — instead
@@ -23,6 +23,12 @@ pub enum Appearance {
     Light,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaletteMode {
+    Fixed,
+    Terminal,
+}
+
 /// The syntax theme paired with a palette: a bundled `.tmTheme`'s vendored bytes (for themes
 /// `two-face` lacks, and for Catppuccin Mocha kept byte-identical to today's), or a theme
 /// from the `two-face` embedded set.
@@ -30,6 +36,7 @@ pub enum Appearance {
 pub enum SyntaxChoice {
     Bundled(&'static [u8]),
     Embedded(EmbeddedThemeName),
+    Terminal,
 }
 
 /// A resolved theme: its name, the chrome `Palette`, and its paired syntax theme.
@@ -43,8 +50,9 @@ pub struct Theme {
 /// The resolved colors every UI element paints — one source for chrome and diff fills.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
-    /// The theme's background anchor. Nothing paints it directly — the terminal supplies the
-    /// real background — but the modal scrim blends receding cells toward it.
+    pub mode: PaletteMode,
+    /// The theme's background anchor. Nothing paints it directly. Fixed-mode modal scrims blend
+    /// receding cells toward it.
     pub base: Color,
     pub surface0: Color,
     pub surface1: Color,
@@ -72,6 +80,58 @@ pub struct Palette {
 }
 
 impl Palette {
+    pub fn is_terminal(&self) -> bool {
+        self.mode == PaletteMode::Terminal
+    }
+
+    /// Keep cached syntax spans valid while a theme switch is rebuilding them.
+    pub fn coerce_syntax(&self, color: Color) -> Color {
+        match self.mode {
+            PaletteMode::Fixed => match color {
+                Color::Rgb(..) => color,
+                _ => self.text,
+            },
+            PaletteMode::Terminal => match color {
+                Color::Reset
+                | Color::DarkGray
+                | Color::Green
+                | Color::Yellow
+                | Color::Blue
+                | Color::Cyan
+                | Color::Magenta
+                | Color::LightYellow
+                | Color::LightCyan => color,
+                _ => Color::Reset,
+            },
+        }
+    }
+
+    fn terminal() -> Self {
+        Self {
+            mode: PaletteMode::Terminal,
+            base: Color::Reset,
+            surface0: Color::Reset,
+            surface1: Color::Reset,
+            surface2: Color::Reset,
+            dim2: Color::DarkGray,
+            dim1: Color::Gray,
+            dim0: Color::Gray,
+            text: Color::Reset,
+            red: Color::Red,
+            green: Color::Green,
+            yellow: Color::Yellow,
+            orange: Color::Yellow,
+            purple: Color::Magenta,
+            blue: Color::Cyan,
+            del_bg: Color::Reset,
+            ins_bg: Color::Reset,
+            emph_del_bg: Color::Reset,
+            emph_ins_bg: Color::Reset,
+            match_hl: Color::Reset,
+            sel_bg: Color::Reset,
+        }
+    }
+
     /// The cursor-row fill: the strongest-contrast surface (`surface2`) in the focused pane, a
     /// step softer (`surface1`) when not, so which pane holds the cursor reads at a glance.
     /// ("Strongest", not "brightest": light themes step surfaces toward black, not white.)
@@ -99,8 +159,7 @@ impl Palette {
     }
 }
 
-/// Resolve a theme name to a `Theme`. `None`, an unknown name, or a not-yet-supported
-/// one (including `terminal`) falls back to the default and logs; never a half-palette.
+/// Resolve a theme name to a `Theme`. `None` and unknown names retain the default fallback.
 pub fn resolve(name: Option<&str>) -> Theme {
     match name {
         None => catppuccin(),
@@ -123,6 +182,9 @@ fn build(name: &str) -> Option<Theme> {
     use Appearance::{Dark, Light};
     use EmbeddedThemeName as E;
     Some(match name {
+        "terminal" => {
+            Theme { name: "terminal", palette: Palette::terminal(), syntax: SyntaxChoice::Terminal }
+        }
         "catppuccin" => catppuccin(),
         "catppuccin-latte" => catppuccin_latte(),
         "dracula" => derived("dracula", Dark, E::Dracula, DRACULA),
@@ -178,6 +240,7 @@ fn catppuccin() -> Theme {
     Theme {
         name: "catppuccin",
         palette: Palette {
+            mode: PaletteMode::Fixed,
             base: Color::Rgb(0x1e, 0x1e, 0x2e),
             surface0: Color::Rgb(0x31, 0x32, 0x44),
             surface1: Color::Rgb(0x45, 0x47, 0x5a),
@@ -221,6 +284,16 @@ const TOKYO_NIGHT_TM: &[u8] = include_bytes!("../assets/tokyo-night.tmTheme");
 const TOKYO_NIGHT_DAY_TM: &[u8] = include_bytes!("../assets/tokyo-night-day.tmTheme");
 const ROSE_PINE_TM: &[u8] = include_bytes!("../assets/rose-pine.tmTheme");
 const ROSE_PINE_DAWN_TM: &[u8] = include_bytes!("../assets/rose-pine-dawn.tmTheme");
+pub(crate) const TERMINAL_TM: &[u8] = include_bytes!("../assets/terminal.tmTheme");
+
+pub(crate) const SENTINEL_COMMENT: (u8, u8, u8) = (1, 1, 2);
+pub(crate) const SENTINEL_STRING: (u8, u8, u8) = (1, 1, 3);
+pub(crate) const SENTINEL_NUMBER: (u8, u8, u8) = (1, 1, 4);
+pub(crate) const SENTINEL_KEYWORD: (u8, u8, u8) = (1, 1, 5);
+pub(crate) const SENTINEL_FUNCTION: (u8, u8, u8) = (1, 1, 6);
+pub(crate) const SENTINEL_TYPE: (u8, u8, u8) = (1, 1, 7);
+pub(crate) const SENTINEL_ATTRIBUTE: (u8, u8, u8) = (1, 1, 8);
+pub(crate) const SENTINEL_OPERATOR: (u8, u8, u8) = (1, 1, 9);
 
 /// Catppuccin Latte: a light theme, derived from its anchors to exercise the derivation
 /// path (and paired with `two-face`'s Latte syntax theme).
@@ -311,6 +384,7 @@ fn derive(a: Anchors, appearance: Appearance) -> Palette {
     };
     let surface = |t: f64| blend(a.base, pole, t);
     Palette {
+        mode: PaletteMode::Fixed,
         base: a.base,
         surface0: surface(0.045),
         surface1: surface(0.09),
@@ -452,10 +526,34 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_terminal_fall_back_to_default() {
+    fn unknown_falls_back_but_terminal_is_known() {
         assert_eq!(resolve(Some("nope")).name, "catppuccin");
-        assert_eq!(resolve(Some("terminal")).name, "catppuccin");
+        assert_eq!(resolve(Some("terminal")).name, "terminal");
         assert_eq!(resolve(None).name, "catppuccin");
+    }
+
+    #[test]
+    fn terminal_palette_uses_only_reset_and_named_colors() {
+        let p = resolve(Some("terminal")).palette;
+        assert!(p.is_terminal());
+        assert_eq!(p.base, Color::Reset);
+        assert_eq!(p.text, Color::Reset);
+        assert_eq!(p.del_bg, Color::Reset);
+        assert_eq!(p.ins_bg, Color::Reset);
+        assert_eq!(p.orange, Color::Yellow);
+        for c in [p.dim2, p.dim1, p.red, p.green, p.yellow, p.purple, p.blue] {
+            assert!(!matches!(c, Color::Rgb(..) | Color::Indexed(..)));
+        }
+    }
+
+    #[test]
+    fn syntax_coercion_is_strict_in_both_directions() {
+        let terminal = resolve(Some("terminal")).palette;
+        assert_eq!(terminal.coerce_syntax(Color::Rgb(1, 2, 3)), Color::Reset);
+        assert_eq!(terminal.coerce_syntax(Color::Cyan), Color::Cyan);
+        let fixed = resolve(Some("catppuccin")).palette;
+        assert_eq!(fixed.coerce_syntax(Color::Cyan), fixed.text);
+        assert_eq!(fixed.coerce_syntax(Color::Rgb(1, 2, 3)), Color::Rgb(1, 2, 3));
     }
 
     #[test]

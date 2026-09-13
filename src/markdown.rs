@@ -581,7 +581,7 @@ impl Renderer<'_> {
             self.block_src = block_start + i;
             let fragments: Vec<(String, Style)> = line
                 .into_iter()
-                .map(|s| (sanitize(&s.text), Style::default().fg(crate::ui::rgb(s.color))))
+                .map(|s| (sanitize(&s.text), Style::default().fg(self.p.coerce_syntax(s.color))))
                 .collect();
             self.emit_fragments(fragments, CODE_INDENT);
         }
@@ -942,6 +942,26 @@ mod tests {
     fn setup() -> (Highlighter, Palette) {
         let t = theme::resolve(Some("catppuccin"));
         (Highlighter::new(t.syntax), t.palette)
+    }
+
+    #[test]
+    fn terminal_fenced_markdown_has_no_fixed_colors() {
+        let t = theme::resolve(Some("terminal"));
+        let lines = render_lines(
+            "# Heading\n\n```rust\nlet x = 1;\n```",
+            80,
+            &Highlighter::new(t.syntax),
+            &t.palette,
+        );
+        assert!(lines.iter().flat_map(|l| l.spans.iter()).all(|s| {
+            !matches!(
+                s.style.fg,
+                Some(ratatui::style::Color::Rgb(..) | ratatui::style::Color::Indexed(..))
+            ) && !matches!(
+                s.style.bg,
+                Some(ratatui::style::Color::Rgb(..) | ratatui::style::Color::Indexed(..))
+            )
+        }));
     }
 
     /// The rendered lines alone, for the element-presentation tests.
