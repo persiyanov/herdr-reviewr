@@ -2020,7 +2020,7 @@ mod tests {
     #[test]
     fn empty_and_plain_inputs_render() {
         let (hl, p) = setup();
-        assert!(render_lines("", 80, &hl, &p).is_empty());
+        assert_eq!(render_lines("", 80, &hl, &p), Vec::new());
         let t = texts(&render_lines("just plain prose", 80, &hl, &p));
         assert_eq!(t, vec!["just plain prose"]);
     }
@@ -2144,13 +2144,14 @@ mod tests {
         }
         assert!(silent("> a\n>\n> b\n").is_empty(), "a quote's `>` lines");
         assert!(silent("> [!NOTE]\n>\n> text\n").is_empty(), "a GitHub alert");
-        assert!(
-            silent("<p align=\"center\">\n<img alt=\"logo\" src=\"x.png\">\n</p>\n").is_empty()
+        assert_eq!(
+            silent("<p align=\"center\">\n<img alt=\"logo\" src=\"x.png\">\n</p>\n"),
+            Vec::<usize>::new()
         );
         // A collapsed disclosure's summary stands for its whole element, closing tag and all.
-        assert!(
-            silent("<details>\n<summary>\nMore info\n</summary>\n\nbody\n\n</details>\n")
-                .is_empty()
+        assert_eq!(
+            silent("<details>\n<summary>\nMore info\n</summary>\n\nbody\n\n</details>\n"),
+            Vec::<usize>::new()
         );
         // Open, its closing tag alone on its line renders nothing.
         let open: HashSet<String> = HashSet::from(["More info#0".to_string()]);

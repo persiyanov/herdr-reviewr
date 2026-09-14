@@ -1114,7 +1114,7 @@ mod tests {
         let picked: Vec<_> = rows_of(Some("w3")).iter().map(|r| r.pane_id.clone()).collect();
         assert_eq!(picked, ["w3:p1"]);
         // No workspace id means no candidates — never every agent on the machine.
-        assert!(rows_of(None).is_empty());
+        assert_eq!(rows_of(None), Vec::new());
     }
 
     #[test]
