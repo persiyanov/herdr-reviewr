@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn rows_from_snippet_is_empty_when_the_range_misses() {
         let hunk = "@@ -10,2 +10,2 @@\n-    old\n+    new\n";
-        assert!(snippet(hunk, 99, 99).is_empty());
+        assert_eq!(snippet(hunk, 99, 99), Vec::new());
     }
 
     #[test]

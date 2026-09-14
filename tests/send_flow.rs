@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use common::{Repo, UnifiedRow as _, app_on, fake_herdr, herdr_calls, herdr_error};
-use herdr_reviewr::app::{App, Focus, Mode};
+use herdr_reviewr::app::{App, Focus, Mode, Tab};
+use herdr_reviewr::forge::{Comment, CommentKind, FindingPlace, PrSnapshot, PrView};
 use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::ui;
 use herdr_reviewr::{handle_key, handle_mouse};
@@ -497,4 +498,119 @@ fn a_send_without_a_socket_refuses_as_herdr_not_answering() {
     press(&mut app, KeyCode::Char('s'), area, &keymap);
     assert_eq!(app.status, "herdr didn't answer, press y to copy");
     assert_eq!(app.store.len(), 1, "a refusal keeps every comment");
+}
+
+/// The `PR` tab sends: `s` the comment under the cursor, `a` the whole list; neither consumes
+/// the read-only snapshot.
+#[test]
+fn the_pr_tab_sends_the_selected_comment_and_all_of_them() {
+    if !in_child() {
+        let dir = run_in_child("the_pr_tab_sends_the_selected_comment_and_all_of_them", true);
+        assert!(herdr_calls(dir.path()).contains("agent focus"), "the child delivered no send");
+        return;
+    }
+
+    let socket = FakeSocket::serve(&socket_path());
+    agents(&fixture_dir(), ONE_AGENT);
+    let (_repo, mut app) = app();
+    let keymap = Keymap::default();
+    let area = Rect::new(0, 0, 80, 24);
+    app.set_tab(Tab::Pr).unwrap();
+
+    let finding = Comment {
+        kind: CommentKind::Finding,
+        author: "alice".into(),
+        anchor: "a.rs:2".into(),
+        place: Some(FindingPlace { path: "a.rs".into(), range: Some((2, 2)), side: None }),
+        body: "the beta line needs a test".into(),
+        snippet: Some("@@ -1 +1,2 @@\n-alpha\n+beta".into()),
+        ..common::comment()
+    };
+    let review = Comment {
+        kind: CommentKind::Review,
+        author: "ann".into(),
+        body: "approved".into(),
+        ..common::comment()
+    };
+    // Newest first: the cursor lands on the finding.
+    app.apply_pr(PrView::Pr(Box::new(PrSnapshot {
+        comments: vec![finding, review],
+        ..common::pr_snapshot()
+    })));
+
+    // `s` sends the comment under the cursor — anchor, hunk, and quoted body — and the list
+    // survives: a PR send never consumes the snapshot.
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    assert_eq!(app.mode, Mode::Normal, "one agent sends directly");
+    assert_eq!(app.status, "sent 1 PR comment to claude");
+    assert_eq!(app.last_sent_pane.as_deref(), Some("w8:p1"));
+    assert_eq!(
+        app.pr_snapshot().map(|s| s.comments.len()),
+        Some(2),
+        "a send never consumes the PR list"
+    );
+    let sent = socket.requests().last().cloned().unwrap_or_default();
+    assert!(
+        sent.contains("a.rs:2")
+            && sent.contains("+beta")
+            && sent.contains("@alice: the beta line needs a test"),
+        "the finding rides its anchor, hunk, and quoted body: {sent}"
+    );
+    assert!(!sent.contains("approved"), "the review is not part of a selected send: {sent}");
+
+    // `a` sends every comment in the snapshot's order, and the list survives that too.
+    press(&mut app, KeyCode::Char('a'), area, &keymap);
+    assert_eq!(app.status, "sent 2 PR comments to claude");
+    assert_eq!(
+        app.pr_snapshot().map(|s| s.comments.len()),
+        Some(2),
+        "send-all never consumes the list either"
+    );
+    let sent = socket.requests().last().cloned().unwrap_or_default();
+    let at_finding = sent.rfind("@alice: the beta line needs a test").expect("finding sent");
+    let at_review = sent.rfind("@ann (review): approved").expect("review sent");
+    assert!(at_finding < at_review, "the snapshot's newest-first order is the send order: {sent}");
+
+    // Several agents: `a` opens the picker over the staged PR bytes. A cancel delivers nothing
+    // and drops the bytes — the next open re-stages fresh ones.
+    agents(&fixture_dir(), TWO_AGENTS);
+    press(&mut app, KeyCode::Char('a'), area, &keymap);
+    assert_eq!(app.mode, Mode::Picker, "several agents open the picker");
+    press(&mut app, KeyCode::Esc, area, &keymap);
+    assert_eq!(app.mode, Mode::Normal, "esc cancels the PR picker");
+    assert_eq!(socket.requests().len(), 2, "a cancel delivers nothing");
+
+    press(&mut app, KeyCode::Char('a'), area, &keymap);
+    assert_eq!(app.mode, Mode::Picker, "the next open re-stages the list");
+    press(&mut app, KeyCode::Char('2'), area, &keymap);
+    press(&mut app, KeyCode::Enter, area, &keymap);
+    assert_eq!(app.status, "sent 2 PR comments to codex");
+    assert_eq!(app.last_sent_pane.as_deref(), Some("w8:p2"), "a PR send arms like any other");
+    assert_eq!(socket.sends_to("w8:p2"), 1, "the pick addressed the highlighted agent");
+
+    // A refusal names the clipboard, opens no picker, and keeps the list.
+    agents(&fixture_dir(), r#"{"result":{"agents":[]}}"#);
+    press(&mut app, KeyCode::Char('a'), area, &keymap);
+    assert_eq!(app.mode, Mode::Normal, "an empty workspace opens no picker");
+    assert_eq!(app.status, "no agent in this workspace, press y to copy");
+    assert_eq!(app.pr_snapshot().map(|s| s.comments.len()), Some(2), "a refusal keeps the list");
+
+    // The description row selects nothing, so `s` refuses without a herdr call.
+    app.apply_pr(PrView::Pr(Box::new(PrSnapshot {
+        body: "why".into(),
+        comments: vec![
+            Comment { body: "one".into(), ..common::comment() },
+            Comment { body: "two".into(), ..common::comment() },
+        ],
+        ..common::pr_snapshot()
+    })));
+    app.pr_move(-100); // clamps to the top row — the pinned description
+    let calls_before = herdr_calls(&fixture_dir()).lines().count();
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    assert_eq!(app.status, "no PR comment selected");
+    assert_eq!(
+        herdr_calls(&fixture_dir()).lines().count(),
+        calls_before,
+        "no herdr call behind the refusal"
+    );
 }

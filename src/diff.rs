@@ -708,7 +708,7 @@ mod tests {
         let d = FileDiff::build_file("blob.bin".into(), "a\0b", &hl);
         assert_eq!(d.notice, Some(Notice::Binary));
         assert_eq!(d.view, View::File);
-        assert!(d.rows.is_empty());
+        assert_eq!(d.rows, Vec::new());
     }
 
     fn build(old: &str, new: &str) -> FileDiff {
@@ -952,14 +952,14 @@ mod tests {
         };
         let at = |n: usize| u32::try_from(n + 1).unwrap();
         assert_eq!(pairs_with(SIMILAR_WINDOW - 1), [(1, at(SIMILAR_WINDOW - 1))]);
-        assert!(pairs_with(SIMILAR_WINDOW).is_empty());
+        assert_eq!(pairs_with(SIMILAR_WINDOW), Vec::new());
     }
 
     #[test]
     fn binary_content_is_flagged_not_rowed() {
         let d = build("ok\n", "bin\0ary\n");
         assert_eq!(d.notice, Some(Notice::Binary));
-        assert!(d.rows.is_empty());
+        assert_eq!(d.rows, Vec::new());
     }
 
     #[test]

@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Send PR comments to the agent.** On the `PR` tab, `s` sends the comment under the cursor
+  and `a` sends every comment in the list; with several agents the picker chooses. A finding
+  rides its anchor and stored hunk, and every comment is quoted under its author. The list is
+  read-only world state — a send never consumes it.
+
 ## [0.52.1] — 2026-11-08
 
 ### Changed

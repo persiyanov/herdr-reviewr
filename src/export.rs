@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use crate::forge;
 use crate::herdr;
 use crate::model::Comment;
 
@@ -35,6 +36,32 @@ pub fn format_review(prefix: Option<&str>, worktree: &Path, comments: &[&Comment
         .chain(sorted.iter().map(|c| format_comment(c)))
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// One PR comment as its export block: a finding leads with its anchor and stored hunk, the
+/// quoted lines of the PR head the agent may not share, and the body quoted under its author.
+pub fn format_pr_comment(c: &forge::Comment) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(place) = &c.place {
+        lines.push(place.anchor());
+        if let Some(hunk) = &c.snippet {
+            lines.extend(hunk.lines().map(str::to_string));
+        }
+    }
+    let who = match c.kind {
+        forge::CommentKind::Finding => format!("@{}", c.author),
+        forge::CommentKind::Review => format!("@{} (review)", c.author),
+        forge::CommentKind::Comment => format!("@{} (comment)", c.author),
+    };
+    let body = c.body.trim_end();
+    lines.push(if body.is_empty() { who } else { format!("{who}: {body}") });
+    lines.join("\n")
+}
+
+/// Many PR comments in the snapshot's own order (newest first — the order the list shows),
+/// one blank line between blocks.
+pub fn format_pr_all(comments: &[forge::Comment]) -> String {
+    comments.iter().map(format_pr_comment).collect::<Vec<_>>().join("\n\n")
 }
 
 /// A destination comments can be exported to. Export succeeds or errors as a whole.
@@ -208,7 +235,11 @@ impl ExportTarget for Agent {
 
 #[cfg(test)]
 mod tests {
-    use super::{Agent, Clipboard, ExportTarget, format_comment, format_review, send_failure};
+    use super::{
+        Agent, Clipboard, ExportTarget, format_comment, format_pr_all, format_pr_comment,
+        format_review, send_failure,
+    };
+    use crate::forge;
     use crate::model::{Comment, Side};
 
     #[cfg(not(windows))]
@@ -352,5 +383,92 @@ mod tests {
         assert_eq!(bare, "Worktree: /src/pages\n\na.rs:3\n+z\nrename");
         let blank = format_review(Some(" \r\n"), WT.as_ref(), &[&a]);
         assert_eq!(blank, "Worktree: /src/pages\n\na.rs:3\n+z\nrename");
+    }
+
+    fn pr_comment(
+        kind: forge::CommentKind,
+        author: &str,
+        anchor: &str,
+        place: Option<forge::FindingPlace>,
+        body: &str,
+        snippet: Option<&str>,
+    ) -> forge::Comment {
+        forge::Comment {
+            kind,
+            author: author.into(),
+            author_is_bot: false,
+            anchor: anchor.into(),
+            place,
+            body: body.into(),
+            snippet: snippet.map(str::to_string),
+            created_at: "2026-06-27T10:00:00Z".into(),
+            is_resolved: false,
+            is_outdated: false,
+            replies: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_pr_finding_block_is_anchor_hunk_quoted_body() {
+        let c = pr_comment(
+            forge::CommentKind::Finding,
+            "alice",
+            "a.rs:2",
+            Some(forge::FindingPlace { path: "a.rs".into(), range: Some((2, 2)), side: None }),
+            "the beta line needs a test",
+            Some("@@ -1 +1,2 @@\n-alpha\n+beta"),
+        );
+        assert_eq!(
+            format_pr_comment(&c),
+            "a.rs:2\n@@ -1 +1,2 @@\n-alpha\n+beta\n@alice: the beta line needs a test"
+        );
+    }
+
+    #[test]
+    fn a_pr_finding_without_a_stored_hunk_skips_the_quote() {
+        let c = pr_comment(
+            forge::CommentKind::Finding,
+            "alice",
+            "a.rs:2",
+            Some(forge::FindingPlace { path: "a.rs".into(), range: Some((2, 2)), side: None }),
+            "still right?",
+            None,
+        );
+        assert_eq!(format_pr_comment(&c), "a.rs:2\n@alice: still right?");
+    }
+
+    #[test]
+    fn a_pr_prose_block_names_author_and_kind_and_a_review_without_a_body_is_bare() {
+        let review =
+            pr_comment(forge::CommentKind::Review, "ann", "review", None, "approved", None);
+        assert_eq!(format_pr_comment(&review), "@ann (review): approved");
+        let comment = pr_comment(
+            forge::CommentKind::Comment,
+            "bob",
+            "comment",
+            None,
+            "looks good overall",
+            None,
+        );
+        assert_eq!(format_pr_comment(&comment), "@bob (comment): looks good overall");
+        let bare = pr_comment(forge::CommentKind::Review, "ann", "review", None, "  ", None);
+        assert_eq!(format_pr_comment(&bare), "@ann (review)");
+    }
+
+    #[test]
+    fn pr_all_keeps_the_snapshots_order_with_blank_separators() {
+        let newer = pr_comment(
+            forge::CommentKind::Finding,
+            "alice",
+            "a.rs:2",
+            Some(forge::FindingPlace { path: "a.rs".into(), range: Some((2, 2)), side: None }),
+            "first",
+            None,
+        );
+        let older = pr_comment(forge::CommentKind::Review, "ann", "review", None, "second", None);
+        assert_eq!(
+            format_pr_all(&[newer.clone(), older.clone()]),
+            format!("{}\n\n{}", format_pr_comment(&newer), format_pr_comment(&older))
+        );
     }
 }
