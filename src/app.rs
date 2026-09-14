@@ -573,6 +573,10 @@ pub enum FooterAction {
     Wrap,
     Scope,
     Send,
+    /// Send the PR comment under the navigator cursor — the `PR` tab's `send`.
+    PrSend,
+    /// Send every PR comment — the `PR` tab's `send-all`.
+    PrSendAll,
     List,
     Copy,
     Save,
@@ -779,6 +783,10 @@ pub struct App {
     /// The agent this session last sent to, which arms the picker's highlight. Only a
     /// successful send sets it.
     pub last_sent_pane: Option<String>,
+    /// The PR comment bytes an open agent picker will deliver, with their count for the
+    /// confirmation. A pick sends them; a cancel drops them. `None` for a send of the written
+    /// comments, which formats its store at pick time instead.
+    picker_pr_send: Option<(String, usize)>,
     /// The base picker's rows, filter, and highlight while `Mode::BasePick` is open
     pub base_picker: Option<BasePicker>,
     pub mode: Mode,
@@ -957,6 +965,7 @@ impl App {
             picker_cursor: 0,
             picker_over: Mode::Normal,
             last_sent_pane: None,
+            picker_pr_send: None,
             base_picker: None,
             mode: Mode::Normal,
             input: String::new(),
@@ -4205,6 +4214,15 @@ impl App {
             if self.pr_snapshot().is_some() {
                 out.push((A::OpenPr, Primary));
             }
+            // The sends address the agent, never the forge: `send-all` waits in the `do` band
+            // while the list is non-empty, and `send` — offered only while a comment, not the
+            // description row, is under the cursor — closes row 1 like its file-tab sibling.
+            if self.pr_snapshot().is_some_and(|s| !s.comments.is_empty()) {
+                out.push((A::PrSendAll, Do));
+            }
+            if self.pr_selected_comment().is_some() {
+                out.push((A::PrSend, Send));
+            }
             out.push((A::Search, Go));
             out.push((A::TogglePane, Go));
             out.push((A::NavigatorPosition, Go));
@@ -4386,6 +4404,63 @@ fn armed_row(rows: &[AgentChoice], last_sent: Option<&str>) -> usize {
 }
 
 impl App {
+    /// `send` on the `PR` tab: the comment under the navigator cursor goes to the agent. The
+    /// description row selects nothing, so `send` there refuses without a herdr call.
+    pub fn pr_send_selected(&mut self) {
+        let Some(c) = self.pr_selected_comment().cloned() else {
+            self.status = "no PR comment selected".to_string();
+            return;
+        };
+        self.send_pr_comments(std::slice::from_ref(&c));
+    }
+
+    /// `send-all` on the `PR` tab: every comment in the snapshot goes to the agent.
+    pub fn pr_send_all(&mut self) {
+        let Some(s) = self.pr_snapshot() else {
+            self.status = "no PR comments to send".to_string();
+            return;
+        };
+        let comments = s.comments.clone();
+        if comments.is_empty() {
+            self.status = "no PR comments to send".to_string();
+            return;
+        }
+        self.send_pr_comments(&comments);
+    }
+
+    /// Stage the PR comment bytes for delivery and resolve the agent like `send`: one goes
+    /// straight out, several open the picker. The snapshot is read-only world state — a send
+    /// never consumes it, success or failure.
+    fn send_pr_comments(&mut self, comments: &[forge::Comment]) {
+        let text = crate::export::format_pr_all(comments);
+        match herdr::send_target() {
+            Ok(SendTarget::One(agent)) => self.pr_deliver(&agent, &text, comments.len()),
+            Ok(SendTarget::Many(rows)) => {
+                self.picker_pr_send = Some((text, comments.len()));
+                self.open_picker(rows);
+            }
+            Err(e) => self.status = e.to_string(),
+        }
+    }
+
+    /// Deliver staged PR comment bytes to one decided pane. Nothing re-resolves the pane, and
+    /// only a delivery arms the next picker's highlight, like the written-comment path.
+    fn pr_deliver(&mut self, agent: &AgentChoice, text: &str, count: usize) {
+        let target = Agent { pane: agent.pane_id.clone(), name: agent.name.clone() };
+        match target.export(text) {
+            Ok(()) => {
+                self.last_sent_pane = Some(agent.pane_id.clone());
+                let noun = if count == 1 { "PR comment" } else { "PR comments" };
+                self.status = format!("sent {count} {noun} to {}", agent.name);
+                logln!("pr export ({count}) OK");
+            }
+            Err(e) => {
+                self.status = target.failure_message();
+                logln!("pr export ERR: {e:#}");
+            }
+        }
+    }
+
     /// `Send`: one agent goes straight out, several open the picker, none refuses and names
     /// the clipboard. The empty-store refusal is repeated here, ahead
     /// of [`Self::export`]'s own, so `Send` with nothing written shells out to no herdr call
@@ -4410,8 +4485,10 @@ impl App {
         // A picker with no rows has nothing to choose and no `enter` that acts, and a second open
         // over a live one would capture `Picker` as the mode to restore — either way a modal that
         // swallows every key and that one `esc` cannot leave. The frozen row set also outranks a
-        // later one: it is what the reviewer is reading.
+        // later one: it is what the reviewer is reading. A refused open must also drop any PR
+        // bytes staged for it, or the next picker's pick would deliver them.
         if rows.is_empty() || self.mode == Mode::Picker {
+            self.picker_pr_send = None;
             return;
         }
         self.picker_cursor = armed_row(&rows, self.last_sent_pane.as_deref());
@@ -4428,6 +4505,7 @@ impl App {
         }
         self.picker_rows.clear();
         self.picker_cursor = 0;
+        self.picker_pr_send = None;
     }
 
     pub fn picker_move(&mut self, delta: isize) {
@@ -4446,11 +4524,16 @@ impl App {
 
     /// Send every comment to the highlighted agent, then close whatever the outcome. A
     /// failure reports and keeps the comments, so the reviewer can reopen a fresh picker
-    /// rather than retry against a frozen row.
+    /// rather than retry against a frozen row. A pick with staged PR bytes delivers those
+    /// instead — the PR snapshot is read-only, so nothing is consumed either way.
     pub fn picker_pick(&mut self) {
         let Some(agent) = self.picker_rows.get(self.picker_cursor).cloned() else { return };
+        let pr_send = self.picker_pr_send.take();
         self.close_picker();
-        self.export_to_agent(&agent);
+        match pr_send {
+            Some((text, count)) => self.pr_deliver(&agent, &text, count),
+            None => self.export_to_agent(&agent),
+        }
     }
 
     /// Whether the base picker can open here: a file tab and no `--base` flag, whatever the

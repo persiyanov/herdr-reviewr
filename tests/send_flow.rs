@@ -10,7 +10,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use common::{Repo, app_on};
-use herdr_reviewr::app::{App, Focus, Mode};
+use herdr_reviewr::app::{App, Focus, Mode, Tab};
+use herdr_reviewr::forge::{Comment, CommentKind, FindingPlace, PrSnapshot, PrView};
 use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::ui;
 use herdr_reviewr::{handle_key, handle_mouse};
@@ -237,4 +238,148 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     // A failed enumeration says so rather than claiming a count. The argv and herdr's stderr go
     // to the log, so the sentence still fits a 40-column footer.
     assert_eq!(app.status, "herdr did not answer — copy to the clipboard instead");
+}
+
+#[test]
+fn the_pr_tab_sends_the_selected_comment_and_all_of_them() {
+    if env::var("SEND_FLOW_CHILD").is_err() {
+        let staging = tempfile::TempDir::new().expect("tempdir");
+        let script = write_fake_herdr(staging.path());
+        let out = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "the_pr_tab_sends_the_selected_comment_and_all_of_them",
+                "--nocapture",
+            ])
+            .env("SEND_FLOW_CHILD", "1")
+            .env("FAKE_HERDR_DIR", staging.path())
+            .env("HERDR_BIN_PATH", &script)
+            .env("HERDR_WORKSPACE_ID", "w8")
+            .env("HERDR_PANE_ID", "w8:p9")
+            .output()
+            .expect("re-exec the test with the fake herdr env");
+        assert!(
+            out.status.success(),
+            "child run failed:\n{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        // The libtest exit status alone cannot tell a passing body from a filter that selected
+        // no test — the fake herdr's log is the proof the body ran and delivered.
+        assert!(
+            log(staging.path()).contains("pane send-text"),
+            "the child ran no send — did the test name and the `--exact` filter drift apart?\n{}",
+            String::from_utf8_lossy(&out.stdout),
+        );
+        return;
+    }
+
+    let r = Repo::init();
+    r.write("a.rs", "alpha\n");
+    r.commit_all("init");
+    r.write("a.rs", "alpha\nbeta\n");
+
+    let fake_dir = PathBuf::from(env::var("FAKE_HERDR_DIR").expect("set by the parent run"));
+    let keymap = Keymap::default();
+    let area = Rect::new(0, 0, 80, 24);
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+
+    let finding = Comment {
+        kind: CommentKind::Finding,
+        author: "alice".into(),
+        anchor: "a.rs:2".into(),
+        place: Some(FindingPlace { path: "a.rs".into(), range: Some((2, 2)), side: None }),
+        body: "the beta line needs a test".into(),
+        snippet: Some("@@ -1 +1,2 @@\n-alpha\n+beta".into()),
+        ..common::comment()
+    };
+    let review = Comment {
+        kind: CommentKind::Review,
+        author: "ann".into(),
+        body: "approved".into(),
+        ..common::comment()
+    };
+    // Newest first: the cursor lands on the finding.
+    app.apply_pr(PrView::Pr(Box::new(PrSnapshot {
+        comments: vec![finding, review],
+        ..common::pr_snapshot()
+    })));
+    fs::write(fake_dir.join("agents.json"), ONE_AGENT).unwrap();
+
+    // `s` sends the comment under the cursor — anchor, hunk, and quoted body — and the list
+    // survives: a PR send never consumes the snapshot.
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    assert_eq!(app.mode, Mode::Normal, "one agent sends directly");
+    assert_eq!(app.status, "sent 1 PR comment to claude");
+    assert_eq!(app.last_sent_pane.as_deref(), Some("w8:p1"));
+    assert_eq!(
+        app.pr_snapshot().map(|s| s.comments.len()),
+        Some(2),
+        "a send never consumes the PR list"
+    );
+    let sent = log(&fake_dir);
+    assert!(
+        sent.contains("a.rs:2")
+            && sent.contains("+beta")
+            && sent.contains("@alice: the beta line needs a test"),
+        "the finding rides its anchor, hunk, and quoted body: {sent}"
+    );
+    assert!(!sent.contains("approved"), "the review is not part of a selected send: {sent}");
+
+    // `a` sends every comment in the snapshot's order, and the list survives that too.
+    press(&mut app, KeyCode::Char('a'), area, &keymap);
+    assert_eq!(app.status, "sent 2 PR comments to claude");
+    assert_eq!(
+        app.pr_snapshot().map(|s| s.comments.len()),
+        Some(2),
+        "send-all never consumes the list either"
+    );
+    let sent = log(&fake_dir);
+    let at_finding = sent.rfind("@alice: the beta line needs a test").expect("finding sent");
+    let at_review = sent.rfind("@ann (review): approved").expect("review sent");
+    assert!(at_finding < at_review, "the snapshot's newest-first order is the send order: {sent}");
+
+    // Several agents: `a` opens the picker over the staged PR bytes. A cancel delivers nothing
+    // and drops the bytes — the next open re-stages fresh ones.
+    fs::write(fake_dir.join("agents.json"), TWO_AGENTS).unwrap();
+    let sends_before = log(&fake_dir).matches("pane send-text").count();
+    press(&mut app, KeyCode::Char('a'), area, &keymap);
+    assert_eq!(app.mode, Mode::Picker, "several agents open the picker");
+    press(&mut app, KeyCode::Esc, area, &keymap);
+    assert_eq!(app.mode, Mode::Normal, "esc cancels the PR picker");
+    assert_eq!(
+        log(&fake_dir).matches("pane send-text").count(),
+        sends_before,
+        "a cancel delivers nothing"
+    );
+
+    press(&mut app, KeyCode::Char('a'), area, &keymap);
+    assert_eq!(app.mode, Mode::Picker, "the next open re-stages the list");
+    press(&mut app, KeyCode::Char('2'), area, &keymap);
+    press(&mut app, KeyCode::Enter, area, &keymap);
+    assert_eq!(app.status, "sent 2 PR comments to codex");
+    assert_eq!(app.last_sent_pane.as_deref(), Some("w8:p2"), "a PR send arms like any other");
+
+    // A refusal names the clipboard, opens no picker, and keeps the list.
+    fs::write(fake_dir.join("agents.json"), r#"{"result":{"agents":[]}}"#).unwrap();
+    press(&mut app, KeyCode::Char('a'), area, &keymap);
+    assert_eq!(app.mode, Mode::Normal, "an empty workspace opens no picker");
+    assert_eq!(app.status, "no agent here — copy to the clipboard instead");
+    assert_eq!(app.pr_snapshot().map(|s| s.comments.len()), Some(2), "a refusal keeps the list");
+
+    // The description row selects nothing, so `s` refuses without a herdr call.
+    app.apply_pr(PrView::Pr(Box::new(PrSnapshot {
+        body: "why".into(),
+        comments: vec![
+            Comment { body: "one".into(), ..common::comment() },
+            Comment { body: "two".into(), ..common::comment() },
+        ],
+        ..common::pr_snapshot()
+    })));
+    app.pr_move(-100); // clamps to the top row — the pinned description
+    let calls_before = log(&fake_dir).lines().count();
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    assert_eq!(app.status, "no PR comment selected");
+    assert_eq!(log(&fake_dir).lines().count(), calls_before, "no herdr call behind the refusal");
 }

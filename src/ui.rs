@@ -2585,6 +2585,15 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
             "scope",
         ),
         A::Send => return (hint(K::Send), format!("send {}", app.store.len())),
+        // The PR tab's sends: `send` takes the comment under the navigator cursor, `send-all`
+        // the whole list, count included.
+        A::PrSend => (hint(K::Send), "send"),
+        A::PrSendAll => {
+            return (
+                hint(K::SendAll),
+                format!("send all {}", app.pr_snapshot().map_or(0, |s| s.comments.len())),
+            );
+        }
         A::List => (hint(K::Comments), "comments"),
         A::Copy => (hint(K::Copy), "copy"),
         A::Save => ("enter".into(), "save"),

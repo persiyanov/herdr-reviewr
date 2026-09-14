@@ -3486,6 +3486,55 @@ fn apply_pr_follows_the_selected_comment_across_a_refresh() {
 }
 
 #[test]
+fn the_pr_tab_offers_its_sends_only_where_they_act() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{PrSnapshot, PrView};
+
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+
+    let has = |a: &App, x: FooterAction| a.footer_bands().iter().any(|&(act, _)| act == x);
+    let band = |a: &App, x: FooterAction| -> Option<Band> {
+        a.footer_bands().into_iter().find(|&(act, _)| act == x).map(|(_, b)| b)
+    };
+
+    // No snapshot yet: neither send is offered.
+    assert!(!has(&app, FooterAction::PrSend) && !has(&app, FooterAction::PrSendAll));
+
+    // Two comments, no description: the cursor is on the first, so both sends are offered —
+    // `send` closes row 1 like its file-tab sibling, `send-all` waits in the `do` band.
+    app.apply_pr(PrView::Pr(Box::new(PrSnapshot {
+        comments: vec![common::comment(), common::comment()],
+        ..common::pr_snapshot()
+    })));
+    assert!(has(&app, FooterAction::PrSendAll), "a non-empty list offers send-all");
+    assert!(has(&app, FooterAction::PrSend), "a comment under the cursor offers send");
+    assert_eq!(
+        band(&app, FooterAction::PrSend),
+        Some(Band::Send),
+        "send never drops, like the file tabs'"
+    );
+    assert_eq!(band(&app, FooterAction::PrSendAll), Some(Band::Do));
+
+    // The description row selects nothing: `send` drops, `send-all` stays.
+    app.apply_pr(PrView::Pr(Box::new(PrSnapshot {
+        body: "why".into(),
+        comments: vec![common::comment()],
+        ..common::pr_snapshot()
+    })));
+    app.pr_move(-100); // clamps to the top row — the pinned description
+    assert!(!has(&app, FooterAction::PrSend), "the description row selects no comment");
+    assert!(has(&app, FooterAction::PrSendAll), "the list is still there");
+
+    // An empty list offers neither.
+    app.apply_pr(PrView::Pr(Box::new(PrSnapshot { ..common::pr_snapshot() })));
+    assert!(!has(&app, FooterAction::PrSend) && !has(&app, FooterAction::PrSendAll));
+}
+
+#[test]
 fn a_held_resolution_and_a_transient_detach_keep_the_painted_pr() {
     use herdr_reviewr::forge::{PrSnapshot, PrView};
 
