@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Bitbucket Server/Data Center pull requests.** reviewr now detects Bitbucket Server and Data Center remotes (HTTP and SSH), discovers open pull requests for the active branch, and surfaces PR metadata, inline review discussions, and commit build status checks. Configured via optional `bitbucket_host` in `config.toml` and authenticated using the `BITBUCKET_TOKEN` environment variable.
+
 ## [0.37.1] — 2026-09-13
 
 ### Changed

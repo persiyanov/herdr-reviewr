@@ -66,7 +66,7 @@ impl Config {
     }
 }
 
-const PLUGIN_CONFIG_KEYS: [&str; 11] = [
+const PLUGIN_CONFIG_KEYS: [&str; 12] = [
     "theme",
     "default_scope",
     "navigator_position",
@@ -76,6 +76,7 @@ const PLUGIN_CONFIG_KEYS: [&str; 11] = [
     "github_host",
     "gitlab_host",
     "azure_devops_host",
+    "bitbucket_host",
     "editor",
     "keybindings",
 ];
@@ -166,6 +167,7 @@ pub struct PluginConfig {
     github_host: Option<String>,
     gitlab_host: Option<String>,
     azure_devops_host: Option<String>,
+    bitbucket_host: Option<String>,
     editor: Option<String>,
     keymap: crate::keymap::Keymap,
 }
@@ -182,6 +184,7 @@ impl Default for PluginConfig {
             github_host: None,
             gitlab_host: None,
             azure_devops_host: None,
+            bitbucket_host: None,
             editor: None,
             keymap: crate::keymap::Keymap::default(),
         }
@@ -227,12 +230,17 @@ impl PluginConfig {
         self.azure_devops_host.as_deref()
     }
 
+    pub fn bitbucket_host(&self) -> Option<&str> {
+        self.bitbucket_host.as_deref()
+    }
+
     /// The forge host set one fetch resolves remotes against.
     pub fn forge_hosts(&self) -> crate::git::ForgeHosts<'_> {
         crate::git::ForgeHosts {
             github: self.github_host(),
             gitlab: self.gitlab_host(),
             azure_devops: self.azure_devops_host(),
+            bitbucket: self.bitbucket_host(),
         }
     }
 
@@ -267,6 +275,7 @@ impl PluginConfig {
             "github_host": self.github_host,
             "gitlab_host": self.gitlab_host,
             "azure_devops_host": self.azure_devops_host,
+            "bitbucket_host": self.bitbucket_host,
             "editor": self.editor,
             "keybindings": keybindings,
         })
@@ -436,6 +445,9 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
     if let Some(value) = table.get("azure_devops_host") {
         config.azure_devops_host = Some(parse_forge_host(path, "azure_devops_host", value)?);
     }
+    if let Some(value) = table.get("bitbucket_host") {
+        config.bitbucket_host = Some(parse_forge_host(path, "bitbucket_host", value)?);
+    }
     if let Some(value) = table.get("editor") {
         let command = value
             .as_str()
@@ -459,6 +471,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         ("github_host", &config.github_host),
         ("gitlab_host", &config.gitlab_host),
         ("azure_devops_host", &config.azure_devops_host),
+        ("bitbucket_host", &config.bitbucket_host),
     ];
     for (index, (key, value)) in host_keys.iter().enumerate() {
         let Some(value) = value else { continue };

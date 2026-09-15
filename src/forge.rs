@@ -103,6 +103,7 @@ fn login_hint(forge: crate::git::Forge, host: &str) -> String {
         crate::git::Forge::AzureDevOps => {
             "`az login` (or `az devops login` with a PAT)".to_string()
         }
+        crate::git::Forge::Bitbucket => "export BITBUCKET_TOKEN=...".to_string(),
     }
 }
 
@@ -111,7 +112,9 @@ fn login_hint(forge: crate::git::Forge, host: &str) -> String {
 fn extension_hint(forge: crate::git::Forge) -> Option<&'static str> {
     match forge {
         crate::git::Forge::AzureDevOps => Some("`az extension add --name azure-devops`"),
-        crate::git::Forge::GitHub | crate::git::Forge::GitLab => None,
+        crate::git::Forge::GitHub | crate::git::Forge::GitLab | crate::git::Forge::Bitbucket => {
+            None
+        }
     }
 }
 
@@ -604,6 +607,9 @@ fn fetch_inner(
         }
         crate::git::Forge::AzureDevOps => {
             return Ok(crate::azure_devops::fetch(repo, input, repository, cancelled));
+        }
+        crate::git::Forge::Bitbucket => {
+            return Ok(crate::bitbucket::fetch(repo, input, repository, cancelled));
         }
         crate::git::Forge::GitHub => {}
     }
