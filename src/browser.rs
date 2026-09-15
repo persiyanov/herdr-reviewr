@@ -1,26 +1,36 @@
 //! Open a URL in the user's browser — the `PR` tab's only outward action.
 //!
-//! Mirrors the clipboard-tool probe in
-//! `export.rs`: the first platform opener on `PATH` wins; none present errors clearly.
+//! A configured opener wins; otherwise the host platform's default is used.
 
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
 
-/// Platform openers, tried in order: macOS `open`, then the Linux `xdg-open`.
+#[cfg(target_os = "macos")]
+const OPENERS: &[&str] = &["open"];
+#[cfg(target_os = "linux")]
+const OPENERS: &[&str] = &["xdg-open"];
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 const OPENERS: &[&str] = &["open", "xdg-open"];
 
 /// Open `url` in the default browser via the first available opener. Errors when none is on
 /// `PATH` (the caller surfaces it to the status line). The opener hands the URL to the browser
 /// and exits at once, so this waits for it — reaping the child rather than leaving a zombie, and
 /// returning fast enough for a click handler (mirrors the codebase's synchronous tool calls).
-pub fn open(url: &str) -> Result<()> {
-    let tool = OPENERS
-        .iter()
-        .copied()
-        .find(|t| crate::proc::on_path(t))
-        .context("no URL opener found (need `open` or `xdg-open`)")?;
-    let status = crate::proc::command(tool)
+pub fn open(url: &str, configured: Option<&str>) -> Result<()> {
+    let (tool, mut command) = if let Some(tool) = configured {
+        let command = crate::proc::user_command(tool)
+            .with_context(|| format!("URL opener {tool:?} was not found"))?;
+        (tool, command)
+    } else {
+        let tool = OPENERS
+            .iter()
+            .copied()
+            .find(|candidate| crate::proc::on_path(candidate))
+            .context("no URL opener found; configure `url_opener`")?;
+        (tool, crate::proc::command(tool))
+    };
+    let status = command
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

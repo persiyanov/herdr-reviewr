@@ -298,6 +298,16 @@ else is your editor's:
 editor = "code -g {file}:{line}"
 ```
 
+### URL opener
+
+Set an opener on a remote host where the native browser command is not useful:
+
+```toml
+url_opener = "remote-open"
+```
+
+reviewr passes the URL as the command's only argument. An absolute path also works.
+
 ### Keybindings
 
 `[keybindings]` maps an action name to an array of keys. The array replaces that action's

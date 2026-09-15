@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **URL opening on remote hosts.** `url_opener` can delegate links to a browser bridge.
+
 ## [0.37.1] — 2026-09-13
 
 ### Changed

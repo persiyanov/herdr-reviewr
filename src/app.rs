@@ -1966,7 +1966,8 @@ impl App {
             return;
         }
         if let Ok(clean) = crate::browser::openable_url(url) {
-            match crate::browser::open(clean) {
+            let opener = self.plugin_config().and_then(crate::config::PluginConfig::url_opener);
+            match crate::browser::open(clean, opener) {
                 Ok(()) => self.status = "opened link in browser".to_string(),
                 Err(e) => self.status = e.to_string(),
             }
@@ -2538,7 +2539,8 @@ impl App {
         let Some(url) = self.pr_snapshot().map(|s| s.url.clone()) else {
             return;
         };
-        match crate::browser::open(&url) {
+        let opener = self.plugin_config().and_then(crate::config::PluginConfig::url_opener);
+        match crate::browser::open(&url, opener) {
             Ok(()) => self.status = format!("opened {} in browser", self.pr_forge.abbr()),
             Err(e) => self.status = e.to_string(),
         }

@@ -66,7 +66,7 @@ impl Config {
     }
 }
 
-const PLUGIN_CONFIG_KEYS: [&str; 11] = [
+const PLUGIN_CONFIG_KEYS: [&str; 12] = [
     "theme",
     "default_scope",
     "navigator_position",
@@ -77,6 +77,7 @@ const PLUGIN_CONFIG_KEYS: [&str; 11] = [
     "gitlab_host",
     "azure_devops_host",
     "editor",
+    "url_opener",
     "keybindings",
 ];
 
@@ -167,6 +168,7 @@ pub struct PluginConfig {
     gitlab_host: Option<String>,
     azure_devops_host: Option<String>,
     editor: Option<String>,
+    url_opener: Option<String>,
     keymap: crate::keymap::Keymap,
 }
 
@@ -183,6 +185,7 @@ impl Default for PluginConfig {
             gitlab_host: None,
             azure_devops_host: None,
             editor: None,
+            url_opener: None,
             keymap: crate::keymap::Keymap::default(),
         }
     }
@@ -241,6 +244,10 @@ impl PluginConfig {
         self.editor.as_deref()
     }
 
+    pub fn url_opener(&self) -> Option<&str> {
+        self.url_opener.as_deref()
+    }
+
     /// The resolved keymap: the defaults with this snapshot's `[keybindings]` applied.
     pub fn keymap(&self) -> &crate::keymap::Keymap {
         &self.keymap
@@ -268,6 +275,7 @@ impl PluginConfig {
             "gitlab_host": self.gitlab_host,
             "azure_devops_host": self.azure_devops_host,
             "editor": self.editor,
+            "url_opener": self.url_opener,
             "keybindings": keybindings,
         })
     }
@@ -451,6 +459,13 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             ));
         }
         config.editor = Some(command.to_owned());
+    }
+    if let Some(value) = table.get("url_opener") {
+        let command = value
+            .as_str()
+            .filter(|command| !command.trim().is_empty())
+            .ok_or_else(|| value_error(path, "url_opener", "a non-empty executable"))?;
+        config.url_opener = Some(command.to_owned());
     }
     // A hostname is recognized by at most one forge; a cross-key collision is an invalid
     // value under CFG-WHOLE-FILE. Scanned as a set so a new key joins by
@@ -728,6 +743,7 @@ mod tests {
         assert_eq!(config.toggle_direction(), ToggleDirection::Right);
         assert!(config.auto_open());
         assert_eq!(config.github_host(), None);
+        assert_eq!(config.url_opener(), None);
     }
 
     #[test]
@@ -783,6 +799,16 @@ mod tests {
     }
 
     #[test]
+    fn the_url_opener_reaches_the_resolved_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "url_opener = \"remote-open\"\n").unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.url_opener(), Some("remote-open"));
+        assert_eq!(config.to_json()["url_opener"], "remote-open");
+    }
+
+    #[test]
     fn unknown_key_and_syntax_error_fail_the_whole_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -824,6 +850,8 @@ mod tests {
             // A brace that closes nothing opens nothing: `{fil` would reach the editor whole.
             ("editor = \"code {fil\"\n", "`editor`"),
             ("editor = \"code {fi{le} {file}\"\n", "`editor`"),
+            ("url_opener = \"\"\n", "`url_opener`"),
+            ("url_opener = 42\n", "`url_opener`"),
             ("github_host = \"github.com\"\n", "`github_host`"),
             ("github_host = \"gitlab.com\"\n", "`github_host`"),
             ("gitlab_host = \"gitlab.com\"\n", "`gitlab_host`"),
