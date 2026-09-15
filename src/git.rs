@@ -109,6 +109,7 @@ pub enum Forge {
     GitHub,
     GitLab,
     AzureDevOps,
+    Bitbucket,
 }
 
 /// The per-forge display vocabulary — the CLI, noun, and reference table in
@@ -119,13 +120,14 @@ impl Forge {
             Self::GitHub => "GitHub",
             Self::GitLab => "GitLab",
             Self::AzureDevOps => "Azure DevOps",
+            Self::Bitbucket => "Bitbucket",
         }
     }
 
     /// The forge's full noun: the word its users say.
     pub fn noun(self) -> &'static str {
         match self {
-            Self::GitHub | Self::AzureDevOps => "pull request",
+            Self::GitHub | Self::AzureDevOps | Self::Bitbucket => "pull request",
             Self::GitLab => "merge request",
         }
     }
@@ -133,7 +135,7 @@ impl Forge {
     /// The forge's noun abbreviation: `PR` on GitHub, `MR` on GitLab.
     pub fn abbr(self) -> &'static str {
         match self {
-            Self::GitHub | Self::AzureDevOps => "PR",
+            Self::GitHub | Self::AzureDevOps | Self::Bitbucket => "PR",
             Self::GitLab => "MR",
         }
     }
@@ -141,7 +143,7 @@ impl Forge {
     /// The reference sigil before a number: `#226` on GitHub, `!42` on GitLab.
     pub fn sigil(self) -> char {
         match self {
-            Self::GitHub | Self::AzureDevOps => '#',
+            Self::GitHub | Self::AzureDevOps | Self::Bitbucket => '#',
             Self::GitLab => '!',
         }
     }
@@ -152,6 +154,7 @@ impl Forge {
             Self::GitHub => "gh",
             Self::GitLab => "glab",
             Self::AzureDevOps => "az",
+            Self::Bitbucket => "curl",
         }
     }
 }
@@ -162,6 +165,7 @@ pub struct ForgeHosts<'a> {
     pub github: Option<&'a str>,
     pub gitlab: Option<&'a str>,
     pub azure_devops: Option<&'a str>,
+    pub bitbucket: Option<&'a str>,
 }
 
 /// A canonical forge repository target: the forge, its hostname, and the repository path.
@@ -185,7 +189,7 @@ impl RepoTarget {
     pub(crate) fn with_path(forge: Forge, host: &str, segments: &[&str]) -> Option<Self> {
         let host = host.to_ascii_lowercase();
         let valid_len = match forge {
-            Forge::GitHub => segments.len() == 2,
+            Forge::GitHub | Forge::Bitbucket => segments.len() == 2,
             // GitLab reserves `-` as the separator between a project path and the rest of a web
             // URL, so a pasted browse link is a malformed remote, not a deep namespace.
             Forge::GitLab => segments.len() >= 2 && !segments.contains(&"-"),
@@ -196,6 +200,7 @@ impl RepoTarget {
         // which arrive percent-encoded and are decoded by `ado_canonicalize`.
         let valid_component: fn(&str) -> bool = match forge {
             Forge::AzureDevOps => valid_ado_component,
+            Forge::Bitbucket => valid_bitbucket_component,
             _ => valid_repository_component,
         };
         let components_ok = segments.iter().all(|part| valid_component(part));
@@ -261,6 +266,15 @@ fn valid_ado_component(value: &str) -> bool {
         && value.chars().all(|c| !c.is_control())
 }
 
+fn valid_bitbucket_component(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
+}
+
 /// Host classification for one candidate repository remote.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RepositoryIdentity {
@@ -304,6 +318,12 @@ fn classify_remote(url: &str, hosts: &ForgeHosts<'_>) -> RepositoryIdentity {
             let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
             RepoTarget::with_path(forge, &host, &segments)
         }),
+        Forge::Bitbucket => {
+            bitbucket_canonicalize(&host, &segments, hosts).and_then(|(host, segments)| {
+                let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+                RepoTarget::with_path(forge, &host, &segments)
+            })
+        }
         _ => RepoTarget::with_path(forge, &host, &segments),
     };
     match target {
@@ -330,6 +350,19 @@ pub(crate) fn forge_for_host(host: &str, hosts: &ForgeHosts<'_>) -> Option<Forge
         || hosts.azure_devops == Some(host)
     {
         return Some(Forge::AzureDevOps);
+    }
+    if hosts.bitbucket == Some(host)
+        || hosts.bitbucket.is_some_and(|configured| {
+            if let Some(rest) = configured.strip_prefix("stash-ui.") {
+                host == format!("stash.{rest}")
+            } else if let Some(rest) = configured.strip_prefix("bitbucket.") {
+                host == format!("stash.{rest}") || host == format!("bitbucket-ssh.{rest}")
+            } else {
+                false
+            }
+        })
+    {
+        return Some(Forge::Bitbucket);
     }
     None
 }
@@ -383,6 +416,20 @@ fn ado_canonicalize(host: &str, segments: &[&str]) -> Option<(String, Vec<String
         *organization = organization.to_ascii_lowercase();
     }
     (path.len() == 3).then_some((host, path))
+}
+
+fn bitbucket_canonicalize(
+    host: &str,
+    segments: &[&str],
+    hosts: &ForgeHosts<'_>,
+) -> Option<(String, Vec<String>)> {
+    let segments = if segments.first() == Some(&"scm") { &segments[1..] } else { segments };
+    if segments.len() != 2 {
+        return None;
+    }
+    let canonical_host =
+        if let Some(bb_host) = hosts.bitbucket { bb_host.to_string() } else { host.to_string() };
+    Some((canonical_host, segments.iter().map(|s| (*s).to_string()).collect()))
 }
 
 /// Decode `%XX` escapes in one URL path segment, or `None` when an escape is broken or the
@@ -1679,7 +1726,8 @@ mod tests {
         parse_name_status, parse_numstat,
     };
 
-    const NONE: ForgeHosts<'_> = ForgeHosts { github: None, gitlab: None, azure_devops: None };
+    const NONE: ForgeHosts<'_> =
+        ForgeHosts { github: None, gitlab: None, azure_devops: None, bitbucket: None };
 
     fn github(host: &str) -> ForgeHosts<'_> {
         ForgeHosts { github: Some(host), ..NONE }
@@ -1691,6 +1739,10 @@ mod tests {
 
     fn azure_devops(host: &str) -> ForgeHosts<'_> {
         ForgeHosts { azure_devops: Some(host), ..NONE }
+    }
+
+    fn bitbucket(host: &str) -> ForgeHosts<'_> {
+        ForgeHosts { bitbucket: Some(host), ..NONE }
     }
 
     #[test]
@@ -1799,6 +1851,52 @@ mod tests {
         assert_eq!(
             classify_remote("https://gitlab.com/owner", &NONE),
             RepositoryIdentity::Malformed("gitlab.com".to_string())
+        );
+    }
+
+    #[test]
+    fn repository_identity_parses_bitbucket_remote_forms() {
+        assert_eq!(
+            classify_remote(
+                "ssh://git@stash.example.com:7999/project/repo.git",
+                &bitbucket("stash-ui.example.com")
+            ),
+            RepositoryIdentity::Repository(
+                RepoTarget::with_path(
+                    Forge::Bitbucket,
+                    "stash-ui.example.com",
+                    &["project", "repo"]
+                )
+                .unwrap()
+            )
+        );
+        assert_eq!(
+            classify_remote(
+                "https://stash-ui.example.com/scm/project/repo.git",
+                &bitbucket("stash-ui.example.com")
+            ),
+            RepositoryIdentity::Repository(
+                RepoTarget::with_path(
+                    Forge::Bitbucket,
+                    "stash-ui.example.com",
+                    &["project", "repo"]
+                )
+                .unwrap()
+            )
+        );
+        assert_eq!(
+            classify_remote(
+                "https://bitbucket.example.com/scm/project/repo.git",
+                &bitbucket("bitbucket.example.com")
+            ),
+            RepositoryIdentity::Repository(
+                RepoTarget::with_path(
+                    Forge::Bitbucket,
+                    "bitbucket.example.com",
+                    &["project", "repo"]
+                )
+                .unwrap()
+            )
         );
     }
 

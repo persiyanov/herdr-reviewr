@@ -10,6 +10,7 @@
 
 pub mod app;
 pub mod azure_devops;
+pub mod bitbucket;
 pub mod browser;
 pub mod config;
 pub mod diff;
