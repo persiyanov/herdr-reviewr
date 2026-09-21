@@ -347,7 +347,8 @@ A key is one printable character, or a `ctrl+`/`alt+` chord like `ctrl+f`. `Tab`
 ### Forge repositories and hosts
 
 The PR tab reads `upstream` when you have one, otherwise `origin`. A standard fork clone works
-without setup.
+without setup. Checking out a contributor PR with `gh pr checkout` in an upstream clone
+attaches that pull request too.
 
 GitHub.com, GitLab.com, dev.azure.com, and the `*.visualstudio.com` organization hosts work
 without configuration. For one self-hosted instance per forge, set its bare hostname:

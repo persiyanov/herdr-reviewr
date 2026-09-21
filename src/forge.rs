@@ -631,7 +631,7 @@ fn fetch_inner(
     let fork = fork_repository(input.origin_repository.as_ref(), repository);
     let head = input.local.head_oid.as_deref();
     let assoc =
-        branch_lookup(&target, fork.map(crate::git::RepoTarget::owner), &input.local.names)?;
+        branch_lookup(&target, fork.map(crate::git::RepoTarget::owner), &input.local.names, head)?;
     let mut pick = resolve_pick(repo, &assoc, head)
         .map_err(|error| GhError::LocalGit(error.0))?
         .map(|number| (number, repository));
@@ -645,7 +645,7 @@ fn fetch_inner(
             name: fork_repo.name(),
             cancelled,
         };
-        let fork_assoc = branch_lookup(&fork_target, None, &input.local.names)?;
+        let fork_assoc = branch_lookup(&fork_target, None, &input.local.names, head)?;
         pick = resolve_pick(repo, &fork_assoc, head)
             .map_err(|error| GhError::LocalGit(error.0))?
             .map(|number| (number, fork_repo));
@@ -737,12 +737,14 @@ pub struct Association {
 
 /// The GitHub branch lookup: one aliased `pullRequests(headRefName:)` block per name,
 /// every lifecycle state, newest first. `fork_head_owner`
-/// is the head filter: `None` keeps only same-repository heads; `Some(owner)` keeps only
-/// heads living in that owner's fork. Values ride as variables, never in the query text.
+/// is the head filter: `None` keeps only same-repository heads (plus a fork PR whose
+/// head commit this clone holds); `Some(owner)` keeps only heads living in that owner's
+/// fork. Values ride as variables, never in the query text.
 fn branch_lookup(
     target: &FetchTarget<'_>,
     fork_head_owner: Option<&str>,
     names: &[String],
+    head: Option<&str>,
 ) -> Result<Association, GhError> {
     let q = build_branch_query(names.len());
     let mut vars = vec![
@@ -753,7 +755,8 @@ fn branch_lookup(
         vars.push((format!("b{i}"), name.clone()));
     }
     let v = graphql(target.repo, target.host, &q, &vars, target.cancelled)?;
-    Ok(parse_branch_lookup(&v, names.len(), fork_head_owner))
+    parse_branch_lookup(&v, names.len(), fork_head_owner, head, Some(target.repo))
+        .map_err(|error| GhError::LocalGit(error.0))
 }
 
 /// The branch-lookup query text: per name, an open block (`o{i}`) apart from the finished
@@ -780,9 +783,17 @@ fn build_branch_query(names: usize) -> String {
 
 /// Split the branch lookup by lifecycle. A node is this branch's only when its head lives
 /// in the queried repository — or, under a fork filter, in that fork — so a stranger's
-/// same-named fork branch never attaches. Duplicates
-/// across name aliases collapse.
-fn parse_branch_lookup(v: &Value, aliases: usize, fork_head_owner: Option<&str>) -> Association {
+/// same-named fork branch never attaches. In an upstream clone a cross-repository head
+/// still admits when the pinned `HEAD` is that PR's head commit, or contains it: the
+/// `gh pr checkout` of a contributor PR, including local commits on top of it.
+/// Duplicates across name aliases collapse.
+fn parse_branch_lookup(
+    v: &Value,
+    aliases: usize,
+    fork_head_owner: Option<&str>,
+    local_head: Option<&str>,
+    repo: Option<&Path>,
+) -> Result<Association, crate::git::GitFail> {
     let mut assoc = Association::default();
     let keys = (0..aliases).flat_map(|i| [format!("o{i}"), format!("h{i}")]);
     for key in keys {
@@ -791,8 +802,22 @@ fn parse_branch_lookup(v: &Value, aliases: usize, fork_head_owner: Option<&str>)
             let cross = node["isCrossRepository"].as_bool() == Some(true);
             let head_owner = node["headRepositoryOwner"]["login"].as_str().unwrap_or_default();
             let state = node["state"].as_str().unwrap_or_default();
+            let pr_head = node["headRefOid"].as_str().unwrap_or_default();
+            let same_head = !pr_head.is_empty()
+                && local_head.is_some_and(|head| head.eq_ignore_ascii_case(pr_head));
             let admitted = match fork_head_owner {
-                None => !cross,
+                None => {
+                    if !cross || same_head {
+                        true
+                    } else {
+                        match (repo, local_head) {
+                            (Some(repo), Some(head)) if !pr_head.is_empty() => {
+                                crate::git::contains_commit(repo, head, pr_head)?
+                            }
+                            _ => false,
+                        }
+                    }
+                }
                 // A deleted fork nulls the head owner; its merged PR still admits, and
                 // the history ancestry guard keeps strangers out.
                 Some(owner) => {
@@ -807,7 +832,7 @@ fn parse_branch_lookup(v: &Value, aliases: usize, fork_head_owner: Option<&str>)
             let Some(number) = node["number"].as_u64() else { continue };
             let pr = AssocPr {
                 number,
-                head_oid: node["headRefOid"].as_str().unwrap_or_default().to_string(),
+                head_oid: pr_head.to_string(),
                 head_ref: node["headRefName"].as_str().unwrap_or_default().to_string(),
                 created_at: node["createdAt"].as_str().unwrap_or_default().to_string(),
                 closed_at: node["closedAt"].as_str().unwrap_or_default().to_string(),
@@ -821,7 +846,7 @@ fn parse_branch_lookup(v: &Value, aliases: usize, fork_head_owner: Option<&str>)
             }
         }
     }
-    assoc
+    Ok(assoc)
 }
 
 /// A finished-history row for integration tests: only the fields the pick consults.
@@ -1575,8 +1600,8 @@ mod tests {
 
     #[test]
     fn parse_branch_lookup_splits_lifecycles_and_filters_stranger_forks() {
-        let node = |number: u64, state: &str, cross: bool, owner: &str| {
-            serde_json::json!({"number": number, "state": state, "headRefOid": "abc",
+        let node = |number: u64, state: &str, cross: bool, owner: &str, oid: &str| {
+            serde_json::json!({"number": number, "state": state, "headRefOid": oid,
                 "headRefName": "feat", "createdAt": "2026-07-01T00:00:00Z",
                 "closedAt": null, "isCrossRepository": cross,
                 "headRepositoryOwner": {"login": owner}})
@@ -1585,29 +1610,90 @@ mod tests {
             // The open PR arrives only through its own state-filtered block — on a
             // churny branch name the finished page's cap must never hide it.
             "o0": {"nodes": [
-                node(7, "OPEN", false, "acme"),
+                node(7, "OPEN", false, "acme", "abc"),
                 // A stranger's same-named fork branch never attaches.
-                node(10, "OPEN", true, "stranger")
+                node(10, "OPEN", true, "stranger", "stranger-oid")
             ]},
             "h0": {"nodes": [
-                node(8, "MERGED", false, "acme"),
-                node(9, "CLOSED", false, "acme"),
+                node(8, "MERGED", false, "acme", "abc"),
+                node(9, "CLOSED", false, "acme", "abc"),
                 // A merged fork PR whose fork was deleted: GitHub nulls the head owner.
-                node(11, "MERGED", true, "")
+                node(11, "MERGED", true, "", "abc")
             ]},
             // A duplicate across name aliases lands once.
-            "o1": {"nodes": [node(7, "OPEN", false, "acme")]},
+            "o1": {"nodes": [node(7, "OPEN", false, "acme", "abc")]},
             "h1": {"nodes": []}
         }}});
-        let a = parse_branch_lookup(&v, 2, None);
+        let a = parse_branch_lookup(&v, 2, None, None, None).unwrap();
         assert_eq!(a.open.iter().map(|p| p.number).collect::<Vec<_>>(), [7]);
         assert_eq!(a.history.iter().map(|p| p.number).collect::<Vec<_>>(), [8, 9]);
         // Under a fork filter, only the named fork's heads count: same-repository heads
         // are upstream's own branches, not this clone's. The deleted-fork merged PR
         // still admits — the history ancestry guard keeps strangers out downstream.
-        let a = parse_branch_lookup(&v, 2, Some("stranger"));
+        let a = parse_branch_lookup(&v, 2, Some("stranger"), None, None).unwrap();
         assert_eq!(a.open.iter().map(|p| p.number).collect::<Vec<_>>(), [10]);
         assert_eq!(a.history.iter().map(|p| p.number).collect::<Vec<_>>(), [11]);
+
+        // `gh pr checkout` of a fork PR in an upstream clone: origin is the target, so
+        // there is no fork filter, but HEAD is the PR's head commit. That PR attaches;
+        // a coincidentally-named stranger fork PR on a different commit does not.
+        let checkout = serde_json::json!({"data": {"repository": {
+            "o0": {"nodes": [
+                node(10, "OPEN", true, "stranger", "stranger-oid"),
+                node(12, "OPEN", true, "contributor", "checkout-oid")
+            ]},
+            "h0": {"nodes": []}
+        }}});
+        let a = parse_branch_lookup(&checkout, 1, None, Some("checkout-oid"), None).unwrap();
+        assert_eq!(a.open.iter().map(|p| p.number).collect::<Vec<_>>(), [12]);
+        let a = parse_branch_lookup(&checkout, 1, None, Some("my-local-oid"), None).unwrap();
+        assert!(a.open.is_empty(), "a stranger's same-named fork PR stays out");
+    }
+
+    #[test]
+    fn parse_branch_lookup_admits_a_fork_pr_the_branch_grew_from() {
+        // Local commits on top of `gh pr checkout`: HEAD is a descendant of the PR
+        // head, not equal to it. The Azure fork-node rule is the same containment.
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@herdr.test")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@herdr.test")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "pr-head"]);
+        let pr_head = git(&["rev-parse", "HEAD"]);
+        std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
+        git(&["add", "b.txt"]);
+        git(&["commit", "-q", "-m", "local"]);
+        let tip = git(&["rev-parse", "HEAD"]);
+
+        let node = |number: u64, oid: &str| {
+            serde_json::json!({"number": number, "state": "OPEN", "headRefOid": oid,
+                "headRefName": "feat", "createdAt": "2026-07-01T00:00:00Z",
+                "closedAt": null, "isCrossRepository": true,
+                "headRepositoryOwner": {"login": "contributor"}})
+        };
+        let v = serde_json::json!({"data": {"repository": {
+            "o0": {"nodes": [
+                node(12, &pr_head),
+                node(99, "0123456789012345678901234567890123456789")
+            ]},
+            "h0": {"nodes": []}
+        }}});
+        let a = parse_branch_lookup(&v, 1, None, Some(&tip), Some(dir.path())).unwrap();
+        assert_eq!(a.open.iter().map(|p| p.number).collect::<Vec<_>>(), [12]);
     }
 
     #[test]

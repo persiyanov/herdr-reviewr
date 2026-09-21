@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **The PR tab attaches a pull request opened from a fork.** Checking out a contributor PR
+  (`gh pr checkout`) in an upstream clone used to leave the tab at `No pull request yet`
+  because every cross-repository head was dropped. The tab now shows that PR when `HEAD` is
+  its head commit, or contains it. A stranger's same-named fork branch still does not attach.
+  ([#105](https://github.com/persiyanov/herdr-reviewr/issues/105))
+
 ## [0.38.0] — 2026-09-16
 
 ### Changed
