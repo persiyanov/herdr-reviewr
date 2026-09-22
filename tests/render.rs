@@ -1979,7 +1979,7 @@ fn a_gitlab_repository_renders_merge_request_nouns_and_remedies() {
 }
 
 #[test]
-fn an_unsupported_host_points_at_the_per_forge_host_keys() {
+fn an_unsupported_host_offers_cli_discovery_and_explicit_fallbacks() {
     use herdr_reviewr::forge::PrView;
     let r = Repo::init();
     r.write("x.rs", "y\n");
@@ -1989,9 +1989,25 @@ fn an_unsupported_host_points_at_the_per_forge_host_keys() {
     app.apply_pr(PrView::UnsupportedHost("code.corp.example".to_string()));
     let out = render(&app);
     assert!(out.contains("code.corp.example"), "the host is named:\n{out}");
-    assert!(out.contains("github_host"), "GitHub key offered:\n{out}");
-    assert!(out.contains("gitlab_host"), "GitLab key offered:\n{out}");
-    assert!(out.contains("azure_devops_host"), "Azure DevOps key offered:\n{out}");
+    assert!(out.contains("Sign in with `gh` or `glab`"), "CLI discovery remedy:\n{out}");
+    assert!(out.contains("github_host"), "GitHub fallback:\n{out}");
+    assert!(out.contains("gitlab_host"), "GitLab fallback:\n{out}");
+    assert!(out.contains("azure_devops_host"), "Azure fallback:\n{out}");
+}
+
+#[test]
+fn an_ambiguous_discovered_host_asks_for_an_explicit_forge() {
+    use herdr_reviewr::forge::PrView;
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    app.apply_pr(PrView::AmbiguousHost("code.corp.example".to_string()));
+    let out = render(&app);
+    assert!(out.contains("Both `gh` and `glab` know code.corp.example"), "ambiguity:\n{out}");
+    assert!(out.contains("github_host"), "GitHub override:\n{out}");
+    assert!(out.contains("gitlab_host"), "GitLab override:\n{out}");
 }
 
 #[test]
