@@ -4678,9 +4678,12 @@ fn pr_empty_msg(
         }
         forge::PrView::UnsupportedHost(host) => {
             format!(
-                "Unsupported host: {host}. Self-hosted? Set `github_host`, `gitlab_host`, or `azure_devops_host`."
+                "Unsupported host: {host}. Sign in with `gh` or `glab`, or set `github_host`, `gitlab_host`, or `azure_devops_host`."
             )
         }
+        forge::PrView::AmbiguousHost(host) => format!(
+            "Both `gh` and `glab` know {host}. Set `github_host` or `gitlab_host` to choose."
+        ),
         forge::PrView::MalformedOrigin(host) => {
             format!("The origin remote must point to a repository path on {host}.")
         }

@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result, bail};
 
@@ -268,7 +269,18 @@ pub enum RepositoryIdentity {
     Missing,
     Hostless,
     Unsupported(String),
+    Ambiguous(String),
     Malformed(String),
+}
+
+/// The result of asking the installed forge CLIs whether they know an otherwise unknown host.
+/// Kept separate from [`RepositoryIdentity`] because discovery chooses the path grammar before a
+/// repository target can be built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostDiscovery {
+    None,
+    Forge(Forge),
+    Ambiguous,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -280,7 +292,19 @@ enum RemoteTransport {
 
 /// Classify one repository URL against the built-in forge hosts and the configured
 /// self-hosted keys.
+#[cfg(test)]
 fn classify_remote(url: &str, hosts: &ForgeHosts<'_>) -> RepositoryIdentity {
+    classify_remote_with(url, hosts, |_| HostDiscovery::None)
+}
+
+/// Classify one repository URL, consulting `discover` only when neither the built-in host set nor
+/// an explicit config key owns its hostname. The split keeps the URL grammar deterministic in unit
+/// tests while the PR worker can add the user's authenticated CLI hosts.
+fn classify_remote_with(
+    url: &str,
+    hosts: &ForgeHosts<'_>,
+    discover: impl FnOnce(&str) -> HostDiscovery,
+) -> RepositoryIdentity {
     let Some((transport, host, path, has_port)) = split_remote(url) else {
         return RepositoryIdentity::Hostless;
     };
@@ -293,8 +317,13 @@ fn classify_remote(url: &str, hosts: &ForgeHosts<'_>) -> RepositoryIdentity {
     {
         return RepositoryIdentity::Unsupported(host);
     }
-    let Some(forge) = forge_for_host(&host, hosts) else {
-        return RepositoryIdentity::Unsupported(host);
+    let forge = match forge_for_host(&host, hosts) {
+        Some(forge) => forge,
+        None => match discover(&host) {
+            HostDiscovery::Forge(forge) => forge,
+            HostDiscovery::None => return RepositoryIdentity::Unsupported(host),
+            HostDiscovery::Ambiguous => return RepositoryIdentity::Ambiguous(host),
+        },
     };
     let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
@@ -310,6 +339,90 @@ fn classify_remote(url: &str, hosts: &ForgeHosts<'_>) -> RepositoryIdentity {
         Some(target) => RepositoryIdentity::Repository(target),
         None => RepositoryIdentity::Malformed(host),
     }
+}
+
+/// Discover one self-hosted forge from the host configuration the official CLIs already own.
+/// Positive answers are stable enough to cache for the process: logging out does not change which
+/// forge runs on a host, and the provider's normal fetch still reports the new auth failure. Misses
+/// are deliberately not cached, so signing in and pressing refresh recovers without restarting the
+/// pane.
+fn discover_forge_for_host(host: &str) -> HostDiscovery {
+    static CACHE: OnceLock<Mutex<HashMap<String, HostDiscovery>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(discovered) =
+        cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(host).copied()
+    {
+        return discovered;
+    }
+
+    let github = env_host_matches(&["GH_HOST"], host) || github_cli_knows_host(host);
+    let gitlab = env_host_matches(&["GITLAB_HOST", "GITLAB_URI", "GL_HOST"], host)
+        || gitlab_cli_knows_host(host);
+    let discovered = match (github, gitlab) {
+        (true, false) => HostDiscovery::Forge(Forge::GitHub),
+        (false, true) => HostDiscovery::Forge(Forge::GitLab),
+        (true, true) => HostDiscovery::Ambiguous,
+        (false, false) => HostDiscovery::None,
+    };
+    if discovered != HostDiscovery::None {
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(host.to_owned(), discovered);
+    }
+    discovered
+}
+
+fn env_host_matches(names: &[&str], host: &str) -> bool {
+    names
+        .iter()
+        .any(|name| std::env::var(name).is_ok_and(|value| value.trim().eq_ignore_ascii_case(host)))
+}
+
+/// `gh auth status --json hosts` is the CLI's stable machine-readable inventory. It keeps the
+/// hostname in the response even when an account needs to sign in again, which lets the provider
+/// produce reviewr's existing authentication remedy instead of losing the forge identity.
+fn github_cli_knows_host(host: &str) -> bool {
+    let output = crate::proc::command("gh")
+        .args(["auth", "status", "--hostname", host, "--json", "hosts"])
+        // Discovery is about durable CLI configuration. A process-wide token without a matching
+        // host does not prove whether an arbitrary remote is GitHub or GitLab.
+        .env_remove("GH_HOST")
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("GH_ENTERPRISE_TOKEN")
+        .env_remove("GITHUB_ENTERPRISE_TOKEN")
+        .output();
+    output.is_ok_and(|output| github_status_names_host(&output.stdout, host))
+}
+
+fn github_status_names_host(stdout: &[u8], host: &str) -> bool {
+    serde_json::from_slice::<serde_json::Value>(stdout)
+        .ok()
+        .and_then(|value| value.get("hosts")?.as_object().cloned())
+        .is_some_and(|hosts| hosts.keys().any(|known| known.eq_ignore_ascii_case(host)))
+}
+
+/// `glab config get api_host --host` is a local config read: an unknown host prints nothing, while
+/// every host written by `glab auth login` resolves to its API hostname. Clear host overrides so a
+/// setting for some other instance cannot claim this remote.
+fn gitlab_cli_knows_host(host: &str) -> bool {
+    let output = crate::proc::command("glab")
+        .args(["config", "get", "api_host", "--host", host])
+        .env_remove("GITLAB_HOST")
+        .env_remove("GITLAB_URI")
+        .env_remove("GL_HOST")
+        .env_remove("GITLAB_API_HOST")
+        .output();
+    output
+        .is_ok_and(|output| output.status.success() && gitlab_config_names_api_host(&output.stdout))
+}
+
+fn gitlab_config_names_api_host(stdout: &[u8]) -> bool {
+    std::str::from_utf8(stdout).is_ok_and(|api_host| {
+        let api_host = api_host.trim();
+        !api_host.is_empty() && crate::config::valid_host_syntax(api_host)
+    })
 }
 
 /// The forge that recognizes `host`, if any — the one authority for the built-in host set.
@@ -883,7 +996,7 @@ fn remote_identity(
     if out.status.success() {
         let url = std::str::from_utf8(&out.stdout)
             .map_err(|_| GitFail(format!("git remote get-url {remote}: invalid UTF-8")))?;
-        return Ok(classify_remote(url.trim(), hosts));
+        return Ok(classify_remote_with(url.trim(), hosts, discover_forge_for_host));
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.to_lowercase().contains("no such remote") {
@@ -1675,8 +1788,9 @@ fn parse_name_status(out: &str) -> Vec<(ChangeKind, String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeKind, Forge, ForgeHosts, RepoTarget, RepositoryIdentity, classify_remote,
-        parse_name_status, parse_numstat,
+        ChangeKind, Forge, ForgeHosts, HostDiscovery, RepoTarget, RepositoryIdentity,
+        classify_remote, classify_remote_with, github_status_names_host,
+        gitlab_config_names_api_host, parse_name_status, parse_numstat,
     };
 
     const NONE: ForgeHosts<'_> = ForgeHosts { github: None, gitlab: None, azure_devops: None };
@@ -1800,6 +1914,64 @@ mod tests {
             classify_remote("https://gitlab.com/owner", &NONE),
             RepositoryIdentity::Malformed("gitlab.com".to_string())
         );
+    }
+
+    #[test]
+    fn cli_discovery_selects_the_unknown_hosts_repository_grammar() {
+        let github = classify_remote_with("git@code.example.com:owner/repo.git", &NONE, |_| {
+            HostDiscovery::Forge(Forge::GitHub)
+        });
+        let RepositoryIdentity::Repository(github) = github else {
+            panic!("expected a discovered GitHub repository");
+        };
+        assert_eq!(github.forge(), Forge::GitHub);
+        assert_eq!(github.host(), "code.example.com");
+
+        let gitlab =
+            classify_remote_with("https://code.example.com/group/subgroup/repo.git", &NONE, |_| {
+                HostDiscovery::Forge(Forge::GitLab)
+            });
+        let RepositoryIdentity::Repository(gitlab) = gitlab else {
+            panic!("expected a discovered GitLab repository");
+        };
+        assert_eq!(gitlab.forge(), Forge::GitLab);
+        assert_eq!(gitlab.full_path(), "group/subgroup/repo");
+    }
+
+    #[test]
+    fn explicit_host_configuration_outranks_cli_discovery() {
+        let identity = classify_remote_with(
+            "https://code.example.com/owner/repo.git",
+            &github("code.example.com"),
+            |_| panic!("an explicit host must not run discovery"),
+        );
+        let RepositoryIdentity::Repository(target) = identity else {
+            panic!("expected the explicitly configured repository");
+        };
+        assert_eq!(target.forge(), Forge::GitHub);
+    }
+
+    #[test]
+    fn two_cli_claims_leave_an_unknown_host_ambiguous() {
+        assert_eq!(
+            classify_remote_with("https://code.example.com/owner/repo.git", &NONE, |_| {
+                HostDiscovery::Ambiguous
+            }),
+            RepositoryIdentity::Ambiguous("code.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn cli_host_inventory_parsers_accept_only_named_hosts() {
+        let github = br#"{"hosts":{"github.example.com":[{"state":"failure"}]}}"#;
+        assert!(github_status_names_host(github, "github.example.com"));
+        assert!(github_status_names_host(github, "GITHUB.EXAMPLE.COM"));
+        assert!(!github_status_names_host(github, "other.example.com"));
+        assert!(!github_status_names_host(b"not json", "github.example.com"));
+
+        assert!(gitlab_config_names_api_host(b"gitlab.example.com\n"));
+        assert!(!gitlab_config_names_api_host(b"\n"));
+        assert!(!gitlab_config_names_api_host(b"https://gitlab.example.com\n"));
     }
 
     #[test]

@@ -350,7 +350,10 @@ The PR tab reads `upstream` when you have one, otherwise `origin`. A standard fo
 without setup.
 
 GitHub.com, GitLab.com, dev.azure.com, and the `*.visualstudio.com` organization hosts work
-without configuration. For one self-hosted instance per forge, set its bare hostname:
+without configuration. Self-hosted GitHub and GitLab hosts are also detected when their remote
+hostname is configured in `gh` or `glab` (normally by signing in with that CLI). An explicit bare
+hostname overrides discovery and remains the fallback for an unauthenticated host or a self-hosted
+Azure DevOps server:
 
 ```toml
 github_host = "github.example.com"
@@ -361,7 +364,7 @@ azure_devops_host = "tfs.corp.example"
 Matching is exact. reviewr does not infer SSH aliases like `github.com-work` — use a
 canonical-host remote or an `insteadOf` rewrite. Authenticate with
 `gh auth login --hostname github.example.com`, `glab auth login --hostname git.corp.example`,
-or `az login`.
+or `az login`. If both `gh` and `glab` know the same hostname, set its forge key explicitly.
 
 ### Pane placement
 

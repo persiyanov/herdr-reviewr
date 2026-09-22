@@ -44,6 +44,8 @@ pub enum PrView {
     NeedsForgeRemote,
     /// The fallback `origin` names a hosted forge outside the supported forge hosts.
     UnsupportedHost(String),
+    /// More than one forge CLI claims the fallback `origin`'s hostname.
+    AmbiguousHost(String),
     /// The fallback `origin` names a supported host but not a valid repository path.
     MalformedOrigin(String),
     /// A local Git read failed before the forge fetch could start.
@@ -599,6 +601,9 @@ fn fetch_inner(
         }
         crate::git::RepositoryIdentity::Unsupported(host) => {
             return Ok(PrView::UnsupportedHost(host.clone()));
+        }
+        crate::git::RepositoryIdentity::Ambiguous(host) => {
+            return Ok(PrView::AmbiguousHost(host.clone()));
         }
         crate::git::RepositoryIdentity::Malformed(host) => {
             return Ok(PrView::MalformedOrigin(host.clone()));
@@ -1552,6 +1557,10 @@ mod tests {
         unsupported.repository =
             crate::git::RepositoryIdentity::Unsupported("bitbucket.org".into());
         assert_eq!(gated(&unsupported), PrView::UnsupportedHost("bitbucket.org".into()));
+
+        let mut ambiguous = input("head", &["feat"]);
+        ambiguous.repository = crate::git::RepositoryIdentity::Ambiguous("code.example.com".into());
+        assert_eq!(gated(&ambiguous), PrView::AmbiguousHost("code.example.com".into()));
 
         let repo = crate::git::RepositoryIdentity::Repository(
             crate::git::RepoTarget::new("github.com", "owner", "repo").unwrap(),

@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Self-hosted GitHub and GitLab remotes configure themselves.** The PR tab recognizes a remote
+  hostname already configured in `gh` or `glab`; `github_host` and `gitlab_host` remain explicit
+  overrides instead of required setup.
+
 ## [0.38.0] — 2026-09-16
 
 ### Changed
