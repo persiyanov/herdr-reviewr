@@ -392,8 +392,12 @@ fn branch_admitted(
         ),
         _ => None,
     };
-    let is_repo = |repo: &crate::git::RepoTarget| fork_repo.as_ref().is_some_and(|f| f.is(repo));
-    if !crate::forge::admits(heads, target, &pr.head_ref, node["forkSource"].is_null(), is_repo) {
+    let head_repo = if node["forkSource"].is_null() {
+        crate::forge::HeadRepo::Queried
+    } else {
+        crate::forge::HeadRepo::Other(fork_repo.iter().collect())
+    };
+    if !crate::forge::admits(heads, target, &pr.head_ref, &head_repo) {
         return None;
     }
     // An enumeration node is the complete pull request, so the pick it becomes needs no

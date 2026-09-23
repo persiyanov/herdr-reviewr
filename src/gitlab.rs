@@ -187,13 +187,10 @@ fn fetch_inner(
 ) -> Result<PrView, GlabError> {
     // `glab mr checkout` recorded the merge request itself: exact, so it outranks the
     // lookup. A pin GitLab no longer resolves (a stale record) falls back to the lookup.
-    let pinned = match crate::forge::pinned(&input.local, crate::git::Forge::GitLab) {
-        Some(pin) => pin_outcome(read_mr(repo, &pin.repo, pin.number, cancelled))?
-            .map(|mr| (mr, pin.number, &pin.repo)),
-        None => None,
-    };
-    let (mr, iid, project) = if let Some(found) = pinned {
-        found
+    let (mr, iid, project) = if let Some(pin) = input.local.pin_on(crate::git::Forge::GitLab)
+        && let Some(mr) = pin_outcome(read_mr(repo, &pin.repo, pin.number, cancelled))?
+    {
+        (mr, pin.number, &pin.repo)
     } else {
         let Some((iid, project)) = associate_by_branch(repo, input, target, cancelled)? else {
             return Ok(PrView::NoPr);
@@ -436,10 +433,17 @@ fn mr_admitted(
 ) -> bool {
     let source = node["source_project_id"].as_u64();
     let head_ref = node["source_branch"].as_str().unwrap_or_default();
-    let same_repo = source.is_some() && source == project_id(ids, queried);
-    crate::forge::admits(heads, queried, head_ref, same_repo, |repo| {
-        source.is_some() && project_id(ids, repo) == source
-    })
+    let head_repo = if source.is_some() && source == project_id(ids, queried) {
+        crate::forge::HeadRepo::Queried
+    } else {
+        crate::forge::HeadRepo::Other(
+            ids.iter()
+                .filter(|(_, id)| source.is_some() && *id == source)
+                .map(|(project, _)| *project)
+                .collect(),
+        )
+    };
+    crate::forge::admits(heads, queried, head_ref, &head_repo)
 }
 
 /// The projects whose numeric id the association reads, target first: the target, the fork
@@ -935,6 +939,19 @@ mod tests {
         // An unreadable fork project admits nothing sourced there.
         let unreadable = [(&upstream, Some(7)), (&fork, None)];
         assert!(!mr_admitted(&mr("fix", 9), &upstream, &unreadable, &fork_fix));
+    }
+
+    #[test]
+    fn a_renamed_fork_matches_through_either_path_sharing_its_id() {
+        let upstream = gl(&["acme", "widgets"]);
+        let (new, old) = (gl(&["alice", "new"]), gl(&["alice", "old"]));
+        let ids = [(&upstream, Some(7)), (&new, Some(9)), (&old, Some(9))];
+        let heads = [
+            crate::git::Head { repo: new.clone(), name: "work".into() },
+            crate::git::Head { repo: old.clone(), name: "feature".into() },
+        ];
+        let mr = json!({"source_branch": "feature", "source_project_id": 9});
+        assert!(mr_admitted(&mr, &upstream, &ids, &heads));
     }
 
     #[test]

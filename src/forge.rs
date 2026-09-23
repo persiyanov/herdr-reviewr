@@ -414,6 +414,8 @@ fn classify_failure(stderr: &str, host: &str) -> GhError {
         || s.contains("bad credentials")
     {
         GhError::NotAuthed(host.to_owned())
+    } else if s.contains("could not resolve to a ") {
+        GhError::NotFound(stderr.trim().to_string())
     } else {
         GhError::Other(stderr.trim().to_string())
     }
@@ -486,6 +488,8 @@ pub(crate) fn reports_status(lowercased_stderr: &str, code: u16) -> bool {
 enum GhError {
     NoGh,
     NotAuthed(String),
+    /// GraphQL could not resolve the addressed pull request or repository.
+    NotFound(String),
     LocalGit(String),
     Other(String),
 }
@@ -496,7 +500,7 @@ impl From<GhError> for PrView {
             GhError::NoGh => PrView::NoCli(crate::git::Forge::GitHub),
             GhError::NotAuthed(host) => PrView::NotAuthed(crate::git::Forge::GitHub, host),
             GhError::LocalGit(message) => PrView::GitError(message),
-            GhError::Other(m) => PrView::Error(crate::git::Forge::GitHub, m),
+            GhError::NotFound(m) | GhError::Other(m) => PrView::Error(crate::git::Forge::GitHub, m),
         }
     }
 }
@@ -622,7 +626,7 @@ fn fetch_inner(
     }
     // `gh pr checkout` recorded the pull request itself: exact, so it outranks the lookup.
     // A pin the forge no longer knows (a stale record) falls back to the lookup.
-    if let Some(pin) = pinned(&input.local, crate::git::Forge::GitHub)
+    if let Some(pin) = input.local.pin_on(crate::git::Forge::GitHub)
         && let Some(view) = pin_outcome(read_pr(repo, input, &pin.repo, pin.number, cancelled))?
     {
         return Ok(view);
@@ -633,20 +637,12 @@ fn fetch_inner(
     Ok(read_pr(repo, input, detail_repo, number, cancelled)?.unwrap_or(PrView::NoPr))
 }
 
-/// The branch's pin, when it pins a pull request on `forge` — each provider reads only its own.
-pub(crate) fn pinned(
-    local: &crate::git::PrLocalState,
-    forge: crate::git::Forge,
-) -> Option<&crate::git::PrPin> {
-    local.pin.as_ref().filter(|pin| pin.repo.forge() == forge)
-}
-
 /// What a pinned pull request's read decides: its view, or `None` to fall back to the head
-/// lookup — a pin the forge no longer resolves (GitHub answers a missing pull request with a
-/// GraphQL "Could not resolve" error) is a stale record, never the tab's answer.
+/// lookup — a pin the forge no longer resolves (its pull request or repository is gone) is a
+/// stale record, never the tab's answer.
 fn pin_outcome(read: Result<Option<PrView>, GhError>) -> Result<Option<PrView>, GhError> {
     match read {
-        Err(GhError::Other(message)) if message.contains("Could not resolve to a ") => Ok(None),
+        Err(GhError::NotFound(_)) => Ok(None),
         read => read,
     }
 }
@@ -716,22 +712,32 @@ fn lookup_pick<'a>(
     }
 }
 
-/// Whether a pull request whose head branch is `head_ref` belongs to the checked-out branch:
-/// its head (repository, name) must be one of the branch's published heads. `same_repo` is
-/// the forge's own flag for a head inside `queried` — it survives renames and transfers, so
-/// a head in the queried repository matches by it alone. Any other head matches only when
-/// `is_repo` recognizes the forge-reported head repository as that head's. The one
+/// Where a pull request's head lives, as the forge reports it.
+pub(crate) enum HeadRepo<'a> {
+    /// In the queried repository itself, by the forge's own same-repo flag — which survives
+    /// renames and transfers.
+    Queried,
+    /// In another repository: every local spelling the forge's head identity resolves to —
+    /// none for a deleted or unreadable fork, several when renamed paths share one project.
+    Other(Vec<&'a crate::git::RepoTarget>),
+}
+
+/// Whether a pull request whose head is `head_ref` in `head_repo` belongs to the checked-out
+/// branch: its head (repository, name) must be one of the branch's published heads. The one
 /// admission rule every provider calls.
 pub(crate) fn admits(
     heads: &[crate::git::Head],
     queried: &crate::git::RepoTarget,
     head_ref: &str,
-    same_repo: bool,
-    is_repo: impl Fn(&crate::git::RepoTarget) -> bool,
+    head_repo: &HeadRepo<'_>,
 ) -> bool {
     heads.iter().any(|head| {
         head.name == head_ref
-            && if head.repo.is(queried) { same_repo } else { !same_repo && is_repo(&head.repo) }
+            && match (head.repo.is(queried), head_repo) {
+                (true, HeadRepo::Queried) => true,
+                (false, HeadRepo::Other(repos)) => repos.iter().any(|repo| repo.is(&head.repo)),
+                _ => false,
+            }
     })
 }
 
@@ -856,7 +862,7 @@ fn parse_branch_lookup(
             let head_ref = node["headRefName"].as_str().unwrap_or_default();
             let cross = node["isCrossRepository"].as_bool() == Some(true);
             // A deleted fork nulls `headRepository`, so its head names no repository.
-            let head_repo = node["headRepository"]["nameWithOwner"]
+            let reported = node["headRepository"]["nameWithOwner"]
                 .as_str()
                 .and_then(|full| full.split_once('/'))
                 .and_then(|(owner, name)| {
@@ -866,9 +872,9 @@ fn parse_branch_lookup(
                         &[owner, name],
                     )
                 });
-            let is_repo =
-                |repo: &crate::git::RepoTarget| head_repo.as_ref().is_some_and(|h| h.is(repo));
-            if !admits(heads, queried, head_ref, !cross, is_repo) {
+            let head_repo =
+                if cross { HeadRepo::Other(reported.iter().collect()) } else { HeadRepo::Queried };
+            if !admits(heads, queried, head_ref, &head_repo) {
                 continue;
             }
             let state = node["state"].as_str().unwrap_or_default();
@@ -1701,7 +1707,8 @@ mod tests {
         assert_eq!(pin_outcome(found).unwrap(), Some(PrView::NoPr), "a read pin is the answer");
         assert_eq!(pin_outcome(Ok(None)).unwrap(), None, "a null node falls back");
         let missing = "gh: Could not resolve to a PullRequest with the number of 999999.";
-        assert_eq!(pin_outcome(Err(GhError::Other(missing.into()))).unwrap(), None);
+        assert!(matches!(classify_failure(missing, "github.com"), GhError::NotFound(_)));
+        assert_eq!(pin_outcome(Err(classify_failure(missing, "github.com"))).unwrap(), None);
         // Anything else is a real failure: it surfaces instead of hiding behind the lookup.
         assert!(pin_outcome(Err(GhError::Other("gh: HTTP 502".into()))).is_err());
         assert!(pin_outcome(Err(GhError::NotAuthed("github.com".into()))).is_err());
@@ -1710,10 +1717,10 @@ mod tests {
     #[test]
     fn each_provider_reads_only_its_own_forges_pin() {
         let mut local = input("head", &["feat"]).local;
-        assert!(pinned(&local, crate::git::Forge::GitHub).is_none());
+        assert!(local.pin_on(crate::git::Forge::GitHub).is_none());
         local.pin = Some(crate::git::PrPin { repo: gh("acme", "widgets"), number: 108 });
-        assert_eq!(pinned(&local, crate::git::Forge::GitHub).map(|p| p.number), Some(108));
-        assert!(pinned(&local, crate::git::Forge::GitLab).is_none());
+        assert_eq!(local.pin_on(crate::git::Forge::GitHub).map(|p| p.number), Some(108));
+        assert!(local.pin_on(crate::git::Forge::GitLab).is_none());
     }
 
     #[test]

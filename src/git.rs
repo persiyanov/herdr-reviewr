@@ -536,6 +536,13 @@ pub struct PrPin {
 }
 
 impl PrLocalState {
+    /// The branch's pin, when it pins a pull request on `forge` — each provider reads only
+    /// its own.
+    #[must_use]
+    pub fn pin_on(&self, forge: Forge) -> Option<&PrPin> {
+        self.pin.as_ref().filter(|pin| pin.repo.forge() == forge)
+    }
+
     /// The distinct head branch names, in head order — the forge lookup's query keys.
     #[must_use]
     pub fn head_names(&self) -> Vec<String> {
@@ -564,8 +571,15 @@ pub(crate) fn pr_local(
     let resolution = resolve_base(repo, base_flag)?;
     let bases = resolution.oids();
     let config = GitConfig::read(repo)?;
+    let remote_list = remote_names(&config);
+    let tips = remote_tips(repo, &remote_list)?;
     let mut remotes = Remotes::new(repo, &config, hosts);
     let push_remote_record = config.get(&format!("branch.{branch}.pushremote"));
+    // A base resolved without a configured name (through `origin/HEAD` or a verbatim `--base`
+    // rev) is recognized by the recorded remote's tracking tip sitting on it.
+    let tracks_base_tip = |remote: &str, name: &str| {
+        tips.iter().any(|tip| tip.remote == remote && tip.name == name && bases.contains(&tip.oid))
+    };
 
     // The upstream record. One that only tracks a base (`git switch -c x origin/main`) is no
     // publication — unless the branch also pushes there, which is how `gh`/`glab` record a
@@ -573,8 +587,7 @@ pub(crate) fn pr_local(
     let record = match branch_record(&config, &branch) {
         Some((remote, BranchMerge::Branch(name)))
             if push_remote_record != Some(remote.as_str())
-                && (resolution.recorded.contains(&name)
-                    || tracking_tip_is_base(repo, &config, &remote, &name, &bases)?) =>
+                && (resolution.recorded.contains(&name) || tracks_base_tip(&remote, &name)) =>
         {
             None
         }
@@ -613,7 +626,7 @@ pub(crate) fn pr_local(
     if let Some(head) = &head_oid
         && !bases.is_empty()
     {
-        for (remote, name) in frontier_names(repo, &config, head, &bases)? {
+        for (remote, name) in frontier_names(repo, &remote_list, &tips, head, &bases)? {
             push_head(remotes.resolve(&remote, false)?, &name, &mut heads);
         }
     }
@@ -861,52 +874,64 @@ pub fn checked_out_branch(repo: &Path) -> Result<Option<String>, GitFail> {
     git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])
 }
 
-/// The `origin` remote-tracking tips as `(OID, bare name)`, `origin/HEAD` excluded — one
-/// listing per pass serves the frontier names and the published-at-all short-circuit.
+/// The `origin` remote-tracking tips as `(OID, bare name)`, `origin/HEAD` excluded.
 fn origin_tips(repo: &Path) -> Result<Vec<(String, String)>, GitFail> {
-    let out = git_strict(
-        repo,
-        &["for-each-ref", "refs/remotes/origin", "--format=%(objectname) %(refname)"],
-    )?;
+    Ok(remote_tips(repo, &["origin"])?.into_iter().map(|tip| (tip.oid, tip.name)).collect())
+}
+
+/// One remote-tracking tip: its OID, its remote, and its branch name there.
+struct RemoteTip {
+    oid: String,
+    remote: String,
+    name: String,
+}
+
+/// The remote-tracking tips of the given remotes, `<remote>/HEAD` excluded — one listing per
+/// pass. `remotes` must come longest first, so a remote name containing `/` splits right;
+/// a ref left behind by a remote no longer configured belongs to none of them.
+fn remote_tips(repo: &Path, remotes: &[&str]) -> Result<Vec<RemoteTip>, GitFail> {
+    let out =
+        git_strict(repo, &["for-each-ref", "refs/remotes", "--format=%(objectname) %(refname)"])?;
     Ok(out
         .lines()
         .filter_map(|line| {
             let (oid, refname) = line.split_once(' ')?;
-            let name = refname.strip_prefix("refs/remotes/origin/")?;
-            (name != "HEAD").then(|| (oid.to_string(), name.to_string()))
+            let rest = refname.strip_prefix("refs/remotes/")?;
+            let (remote, name) = remotes.iter().find_map(|remote| {
+                Some((*remote, rest.strip_prefix(remote)?.strip_prefix('/')?))
+            })?;
+            (name != "HEAD").then(|| RemoteTip {
+                oid: oid.to_string(),
+                remote: remote.to_string(),
+                name: name.to_string(),
+            })
         })
         .collect())
 }
 
-/// The remote-tracking branches at the pushed frontier, on every remote, as `(remote, name)`:
+/// The remote-tracking branches at the pushed frontier, on every configured remote, as
+/// `(remote, name)`:
 /// the tips at the boundary of the unpushed range — or at `head` itself when nothing is
 /// unpushed. A tip on base history carries no work of this branch and contributes nothing.
 /// Bounded at 32 boundary commits, so a merge-heavy frontier stays cheap.
 fn frontier_names(
     repo: &Path,
-    config: &GitConfig,
+    remotes: &[&str],
+    tips: &[RemoteTip],
     head: &str,
     bases: &[String],
 ) -> Result<Vec<(String, String)>, GitFail> {
-    let remotes = remote_names(config);
-    let listing =
-        git_strict(repo, &["for-each-ref", "refs/remotes", "--format=%(objectname) %(refname)"])?;
-    let tips: Vec<(String, String, String)> = listing
-        .lines()
-        .filter_map(|line| {
-            let (oid, refname) = line.split_once(' ')?;
-            let rest = refname.strip_prefix("refs/remotes/")?;
-            let remote = remotes.iter().find(|r| rest.starts_with(&format!("{r}/")))?;
-            let name = &rest[remote.len() + 1..];
-            (name != "HEAD").then(|| (oid.to_string(), (*remote).to_string(), name.to_string()))
-        })
-        .collect();
     if tips.is_empty() {
         // Nothing is published at all; skip the history walk, which `--not --remotes` would
         // otherwise run unbounded.
         return Ok(Vec::new());
     }
-    let out = git_strict(repo, &["rev-list", "--boundary", head, "--not", "--remotes"])?;
+    // Only configured remotes bound the walk: a ref a removed remote left behind is no
+    // publication and must not hide the real frontier.
+    let excluded: Vec<String> = remotes.iter().map(|r| format!("--remotes={r}")).collect();
+    let mut args = vec!["rev-list", "--boundary", head, "--not"];
+    args.extend(excluded.iter().map(String::as_str));
+    let out = git_strict(repo, &args)?;
     let mut oids: Vec<String> = Vec::new();
     let mut saw_unpushed = false;
     for line in out.lines() {
@@ -930,9 +955,9 @@ fn frontier_names(
         if !beyond_all_bases(repo, &oid, bases)? {
             continue;
         }
-        for (tip, remote, name) in &tips {
-            let pair = (remote.clone(), name.clone());
-            if *tip == oid && !names.contains(&pair) {
+        for tip in tips {
+            let pair = (tip.remote.clone(), tip.name.clone());
+            if tip.oid == oid && !names.contains(&pair) {
                 names.push(pair);
             }
         }
@@ -977,8 +1002,8 @@ pub(crate) fn remote_identities(
     repo: &Path,
     hosts: &ForgeHosts<'_>,
 ) -> Result<(RepositoryIdentity, Option<RepoTarget>), GitFail> {
-    let upstream = remote_identity(repo, "upstream", hosts, false)?;
-    let origin = remote_identity(repo, "origin", hosts, false);
+    let upstream = remote_identity(repo, "upstream", hosts)?;
+    let origin = remote_identity(repo, "origin", hosts);
     let origin_target = match &origin {
         Ok(RepositoryIdentity::Repository(target)) => Some(target.clone()),
         _ => None,
@@ -994,13 +1019,8 @@ fn remote_identity(
     repo: &Path,
     remote: &str,
     hosts: &ForgeHosts<'_>,
-    push: bool,
 ) -> Result<RepositoryIdentity, GitFail> {
-    let mut args = vec!["remote", "get-url"];
-    if push {
-        args.push("--push");
-    }
-    args.extend(["--", remote]);
+    let args = ["remote", "get-url", "--", remote];
     let out = run_git(repo, &args)?;
     if out.status.success() {
         let url = std::str::from_utf8(&out.stdout)
@@ -1174,7 +1194,7 @@ fn branch_record(config: &GitConfig, branch: &str) -> Option<(String, BranchMerg
         BranchMerge::Pull(Forge::GitHub, number)
     } else if let Some(number) = pull("refs/merge-requests/") {
         BranchMerge::Pull(Forge::GitLab, number)
-    } else if let Some(name) = merge.strip_prefix("refs/heads/") {
+    } else if let Some(name) = merge.strip_prefix("refs/heads/").filter(|name| !name.is_empty()) {
         BranchMerge::Branch(name.to_string())
     } else if !merge.is_empty() && !merge.starts_with("refs/") {
         BranchMerge::Branch(merge.to_string())
@@ -1182,25 +1202,6 @@ fn branch_record(config: &GitConfig, branch: &str) -> Option<(String, BranchMerg
         BranchMerge::Other
     };
     Some((remote.to_string(), kind))
-}
-
-/// Whether the recorded remote's tracking ref for `name` sits on a resolved base — how a base
-/// resolved without a configured name (through `origin/HEAD` or a verbatim `--base` rev) is
-/// recognized. A pruned tracking ref no longer resolves; the record then still counts (a stale
-/// local record costs recall, never correctness).
-fn tracking_tip_is_base(
-    repo: &Path,
-    config: &GitConfig,
-    remote: &str,
-    name: &str,
-    base_oids: &[String],
-) -> Result<bool, GitFail> {
-    if !is_named_remote(config, remote) {
-        return Ok(false);
-    }
-    let probe = format!("refs/remotes/{remote}/{name}^{{commit}}");
-    Ok(git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])?
-        .is_some_and(|tip| base_oids.contains(&tip)))
 }
 
 /// git's own rule for a remote-valued setting: a configured remote name, else a URL.
@@ -1216,8 +1217,9 @@ fn remote_names(config: &GitConfig) -> Vec<&str> {
         .iter()
         .filter_map(|(key, _)| key.strip_prefix("remote.")?.strip_suffix(".url"))
         .collect();
-    names.sort_by_key(|name| std::cmp::Reverse(name.len()));
+    names.sort_unstable();
     names.dedup();
+    names.sort_by_key(|name| std::cmp::Reverse(name.len()));
     names
 }
 
@@ -1234,32 +1236,28 @@ impl<'a> Remotes<'a> {
         Self { repo, config, hosts, seen: Vec::new() }
     }
 
-    /// The forge repository `value` names, the way git resolves it. A configured remote reads
-    /// through `remote get-url` (`pushurl` and `pushInsteadOf` on the push side, `insteadOf`
-    /// always); when its push URL names no forge repository — an ssh Host alias — its fetch
-    /// URL does. A URL value reads through `ls-remote --get-url` (`insteadOf`; git offers no
-    /// command that applies `pushInsteadOf` to a bare URL). A remote that no longer exists or
-    /// a host this config does not support names nothing — never a fallback to another remote.
+    /// The forge repository `value` (a remote name or a URL) names, the way git resolves it:
+    /// `ls-remote --get-url` (`insteadOf`), and on the push side of a configured remote
+    /// `remote get-url --push` (`pushurl`, `pushInsteadOf`; git offers no command that applies
+    /// `pushInsteadOf` to a bare URL). When the push side names no forge repository — an ssh
+    /// Host alias, a mirror — the fetch side does. A remote that no longer exists or a host
+    /// this config does not support names nothing — never a fallback to another remote.
     fn resolve(&mut self, value: &str, push: bool) -> Result<Option<RepoTarget>, GitFail> {
         let key = (value.to_string(), push);
         if let Some((_, repo)) = self.seen.iter().find(|(k, _)| *k == key) {
             return Ok(repo.clone());
         }
-        let repo = if is_named_remote(self.config, value) {
-            match remote_identity(self.repo, value, self.hosts, push)? {
-                RepositoryIdentity::Repository(target) => Some(target),
-                _ if push => self.resolve(value, false)?,
-                _ => None,
-            }
-        } else if value.contains(':') || value.contains('/') {
-            let url = git_strict(self.repo, &["ls-remote", "--get-url", "--", value])?;
-            match classify_remote(url.trim(), self.hosts) {
-                RepositoryIdentity::Repository(target) => Some(target),
-                _ => None,
-            }
+        let url = if push && is_named_remote(self.config, value) {
+            git_strict(self.repo, &["remote", "get-url", "--push", "--", value])?
         } else {
-            // A bare word that is no configured remote: a deleted remote's leftover record.
-            None
+            // A configured name or a URL alike. A deleted remote's leftover name prints back
+            // verbatim and names no host.
+            git_strict(self.repo, &["ls-remote", "--get-url", "--", value])?
+        };
+        let repo = match classify_remote(url.trim(), self.hosts) {
+            RepositoryIdentity::Repository(target) => Some(target),
+            _ if push && is_named_remote(self.config, value) => self.resolve(value, false)?,
+            _ => None,
         };
         self.seen.push((key, repo.clone()));
         Ok(repo)

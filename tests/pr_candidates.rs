@@ -603,6 +603,32 @@ fn a_glab_checkout_without_push_access_pins_the_merge_request() {
 }
 
 #[test]
+fn a_ref_left_by_a_removed_remote_neither_publishes_nor_hides_the_frontier() {
+    let repo = worktree();
+    repo.git(&["update-ref", "refs/remotes/origin/pushed", &head(&repo)]);
+    repo.write("c.txt", "three\n");
+    repo.commit_all("unpushed");
+    // `old` was removed from config, but its tracking ref survived on the unpushed commit.
+    repo.git(&["update-ref", "refs/remotes/old/stale", &head(&repo)]);
+    assert_eq!(heads(&repo), ["owner/repo:work", "owner/repo:pushed"]);
+}
+
+#[test]
+fn an_empty_merge_branch_is_no_head() {
+    let repo = worktree();
+    repo.git(&["config", "branch.work.remote", "origin"]);
+    repo.git(&["config", "branch.work.merge", "refs/heads/"]);
+    assert_eq!(heads(&repo), ["owner/repo:work"]);
+}
+
+#[test]
+fn a_push_url_on_an_unsupported_host_falls_back_to_the_fetch_url() {
+    let repo = worktree();
+    repo.git(&["remote", "set-url", "--push", "origin", "https://bitbucket.org/owner/mirror.git"]);
+    assert_eq!(heads(&repo), ["owner/repo:work"]);
+}
+
+#[test]
 fn a_branch_with_no_record_publishes_on_origin() {
     let repo = worktree();
     assert_eq!(heads(&repo), ["owner/repo:work"]);
