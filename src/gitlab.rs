@@ -1,7 +1,7 @@
 //! Read-only GitLab access: the merge request's identity, state, pipelines, and discussions.
 //!
 //! The GitLab provider behind `src/forge.rs`. It follows the
-//! neutral resolution contract in — the branch's forge names list
+//! neutral resolution contract in — the branch's published heads list
 //! merge requests by `source_branch` — through `glab api` REST calls, and fills the
 //! same normalized [`PrSnapshot`] the GitHub provider does. It never writes to GitLab.
 
@@ -198,7 +198,7 @@ fn fetch_inner(
         host,
         &target_path,
         fork_path.as_deref(),
-        &input.local.names,
+        &input.local.head_names(),
         head,
         cancelled,
     )?

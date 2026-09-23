@@ -1,7 +1,7 @@
 //! Read-only Azure DevOps access: the pull request's identity, state, policies, and threads.
 //!
 //! The Azure DevOps provider behind `src/forge.rs`. It follows
-//! the neutral resolution contract in — the branch's forge names
+//! the neutral resolution contract in — the branch's published heads
 //! filter an enumeration by `sourceRefName` — through the `az` CLI with the `azure-devops`
 //! extension, and fills the same normalized [`PrSnapshot`] the other providers do. It never
 //! writes to Azure DevOps.
@@ -316,7 +316,7 @@ fn associate_by_branch(
     input: &PrFetchInput,
     cancelled: &AtomicBool,
 ) -> Result<(Association, Option<String>), AzError> {
-    let names = &input.local.names;
+    let names = &input.local.head_names();
     let head = input.local.head_oid.as_deref();
     let mut assoc = Association::default();
 
