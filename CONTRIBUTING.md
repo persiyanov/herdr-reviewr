@@ -37,17 +37,16 @@ lands in that spec and the code together, in the same PR.
 in `CHANGELOG.md`. That text becomes the release notes verbatim, so write it for the person
 reading the release page.
 
-**Performance changes bring numbers.** The PTY benchmark measures what a user feels — keypress to
-painted frame:
+**Benchmark when it helps.** The PTY benchmark measures what a user feels — keypress to painted
+frame. It's a tool to reach for when a change might feel slower, not a requirement for every PR:
 
 ```bash
 python3 scripts/bench_tui.py --binary target/release/herdr-reviewr --fixture
 ```
 
 The one committed baseline is `scripts/bench-results/baseline.json`. Replace it when a change
-moves the numbers, and keep per-round A/B runs out of the tree. For anything touching the
-reload, render, git, or highlight paths, run it before and after under the same system load and
-put both numbers in the PR. `examples/bench_latency.rs` attributes a slow number to its
+moves the numbers, and keep per-round A/B runs out of the tree. For an A/B, run both binaries
+under the same system load. `examples/bench_latency.rs` attributes a slow number to its
 component calls.
 
 ## Pull requests

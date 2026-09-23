@@ -213,9 +213,9 @@ impl BasePicker {
             return (0..self.rows.len()).collect();
         }
         let names: Vec<&str> = self.rows.iter().map(BaseChoice::name).collect();
-        let config = neo_frizbee::Config { sort: false, ..neo_frizbee::Config::default() };
-        let mut matches = neo_frizbee::match_list(&self.query, &names, &config);
-        matches.sort_by_key(|m| std::cmp::Reverse(m.score));
+        // The default sort is score descending, then input order: the tie rule above.
+        let config = neo_frizbee::Config::default();
+        let matches = neo_frizbee::Matcher::new(self.query.as_str(), &config).match_list(&names);
         matches.into_iter().map(|m| m.index as usize).collect()
     }
 
