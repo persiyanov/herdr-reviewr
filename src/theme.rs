@@ -341,18 +341,22 @@ const BLACK: Color = Color::Rgb(0x00, 0x00, 0x00);
 /// legible on any base.
 const MIN_FILL_CONTRAST: f64 = 4.5;
 
-/// Lift `fg` toward `toward` until it clears [`MIN_FILL_CONTRAST`] against `bg`.
+/// Lift a syntax `fg` painted on `fill` just enough that the fill costs it no legibility: to
+/// its own contrast on the plain `base`, capped at [`MIN_FILL_CONTRAST`].
 ///
-/// [`readable_tint`] floors a fill against the palette's `text` only; a dim syntax color —
-/// a comment, above all — lands far below that on the same fill, which leaves the changed
-/// words of a commented line unreadable. `toward` is the palette's `text`, so this lightens
-/// on a dark theme and darkens on a light one. When even `toward` cannot clear the floor
-/// (the fill itself sits at the floor for `text`), `toward` is the best available.
-pub fn legible(fg: Color, bg: Color, toward: Color) -> Color {
+/// [`readable_tint`] floors a fill against the palette's `text` only, so a dim syntax color —
+/// a code comment, above all — can drop far lower on the same fill. Other tools keep the
+/// syntax color and never check. Lifting everything to the floor instead erases syntax hue on
+/// themes whose fills sit near it. Holding each color to its own plain-background contrast
+/// keeps it as readable as it was, and keeps a comment dimmer than code. `toward` is the
+/// palette's `text`, so this lightens on a dark theme and darkens on a light one; a color
+/// already at its target comes back unchanged.
+pub fn legible(fg: Color, fill: Color, base: Color, toward: Color) -> Color {
+    let target = contrast(fg, base).min(MIN_FILL_CONTRAST);
     let mut t = 0.0;
     while t < 1.0 {
         let lifted = blend(fg, toward, t);
-        if contrast(lifted, bg) >= MIN_FILL_CONTRAST {
+        if contrast(lifted, fill) >= target {
             return lifted;
         }
         t += 0.02;
@@ -484,18 +488,42 @@ mod tests {
     }
 
     #[test]
-    fn dim_syntax_colors_lift_to_the_floor_on_emphasis_fills() {
-        // Tokyo Night's comment color, the dimmest fg the syntax theme paints: on the raw
-        // emphasis fills it sits near 1.2, far under the floor.
+    fn an_emphasized_color_keeps_its_plain_background_legibility() {
+        // Tokyo Night's comment color: on the raw emphasis fills it sits near 1.2.
         let comment = Color::Rgb(0x56, 0x5f, 0x89);
-        for name in ["tokyo-night", "catppuccin", "catppuccin-latte"] {
+        for &(name, _) in NAMED {
+            let p = resolve(Some(name)).palette;
+            let target = contrast(comment, p.base).min(MIN_FILL_CONTRAST);
+            for fill in [p.emph_del_bg, p.emph_ins_bg] {
+                let lifted = legible(comment, fill, p.base, p.text);
+                assert!(
+                    contrast(lifted, fill) >= target,
+                    "{name}: {fill:?} still costs legibility"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_color_already_legible_on_the_fill_is_untouched() {
+        let p = resolve(Some("catppuccin")).palette;
+        assert_eq!(legible(p.text, p.emph_ins_bg, p.base, p.text), p.text);
+    }
+
+    #[test]
+    fn distinct_syntax_colors_stay_distinct_on_floor_hugging_themes() {
+        // These themes keep their fills just above the floor for `text`; lifting every color to
+        // that floor would paint them all as `text`.
+        let (comment, keyword) = (Color::Rgb(0x56, 0x5f, 0x89), Color::Rgb(0x9d, 0x7c, 0xd8));
+        for name in ["tokyo-night-day", "solarized", "tokyo-night"] {
             let p = resolve(Some(name)).palette;
             for fill in [p.emph_del_bg, p.emph_ins_bg] {
-                let lifted = legible(comment, fill, p.text);
-                assert!(
-                    contrast(lifted, fill) >= MIN_FILL_CONTRAST,
-                    "{name}: emphasized comment on {fill:?} stays under the floor",
+                let (a, b) = (
+                    legible(comment, fill, p.base, p.text),
+                    legible(keyword, fill, p.base, p.text),
                 );
+                assert_ne!(a, b, "{name}: two syntax colors merged on {fill:?}");
+                assert_ne!(a, p.text, "{name}: the comment lost its hue on {fill:?}");
             }
         }
     }

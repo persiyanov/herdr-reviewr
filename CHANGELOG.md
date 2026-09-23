@@ -7,7 +7,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
-- **Changed words inside a comment stay readable** on the word-emphasis highlight.
+- **Changed words in dim code, like comments, stay as readable on the word-emphasis highlight** as off it.
   Thanks [@ubuntudroid](https://github.com/ubuntudroid) ([#91](https://github.com/persiyanov/herdr-reviewr/pull/91)).
 
 ## [0.38.1] — 2026-09-23
