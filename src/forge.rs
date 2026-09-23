@@ -24,9 +24,10 @@ pub enum PrView {
     Pending,
     /// Work crossed the loading-indicator delay without producing a snapshot.
     Loading,
-    /// An open (or merged/closed) PR resolved from the current branch's forge names.
+    /// An open (or merged/closed) PR resolved from the current branch's published heads, or
+    /// the one its upstream record pins.
     Pr(Box<PrSnapshot>),
-    /// No PR resolves from the current branch's names.
+    /// No PR resolves from the current branch's heads.
     NoPr,
     /// `HEAD` is detached, so there is no branch identity to query.
     Detached,
@@ -117,6 +118,7 @@ fn extension_hint(forge: crate::git::Forge) -> Option<&'static str> {
 
 /// One pull request's state, read fresh from the forge each poll.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct PrSnapshot {
     pub number: u64,
     pub title: String,
@@ -138,9 +140,10 @@ pub struct PrSnapshot {
     pub sync: Sync,
     pub checks: Vec<Check>,
     pub comments: Vec<Comment>,
-    /// A capped surface (reviews/comments/threads/checks) had more rows than the 100-row fetch
-    /// returned — the lists shown are a prefix, not the whole set. Drives a "more on the forge" marker.
-    pub truncated: bool,
+    /// Reviews, conversation comments, or threads had more rows than the 100-row fetch.
+    pub comments_truncated: bool,
+    /// Checks had more rows than the 100-row fetch.
+    pub checks_truncated: bool,
 }
 
 /// The PR lifecycle.
@@ -207,7 +210,17 @@ pub struct Comment {
     pub created_at: String,
     pub is_resolved: bool,
     pub is_outdated: bool,
-    pub reply_count: u32,
+    /// Replies after the root, oldest first. Empty for a single card.
+    pub replies: Vec<Reply>,
+}
+
+/// One reply on a thread. The root lives on [`Comment`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reply {
+    pub author: String,
+    pub author_is_bot: bool,
+    pub body: String,
+    pub created_at: String,
 }
 
 /// What a comment is anchored to.
@@ -401,6 +414,8 @@ fn classify_failure(stderr: &str, host: &str) -> GhError {
         || s.contains("bad credentials")
     {
         GhError::NotAuthed(host.to_owned())
+    } else if s.contains("could not resolve to a ") {
+        GhError::NotFound(stderr.trim().to_string())
     } else {
         GhError::Other(stderr.trim().to_string())
     }
@@ -473,6 +488,8 @@ pub(crate) fn reports_status(lowercased_stderr: &str, code: u16) -> bool {
 enum GhError {
     NoGh,
     NotAuthed(String),
+    /// GraphQL could not resolve the addressed pull request or repository.
+    NotFound(String),
     LocalGit(String),
     Other(String),
 }
@@ -483,7 +500,7 @@ impl From<GhError> for PrView {
             GhError::NoGh => PrView::NoCli(crate::git::Forge::GitHub),
             GhError::NotAuthed(host) => PrView::NotAuthed(crate::git::Forge::GitHub, host),
             GhError::LocalGit(message) => PrView::GitError(message),
-            GhError::Other(m) => PrView::Error(crate::git::Forge::GitHub, m),
+            GhError::NotFound(m) | GhError::Other(m) => PrView::Error(crate::git::Forge::GitHub, m),
         }
     }
 }
@@ -534,7 +551,7 @@ fn fetch_input_inner(
             local: crate::git::PrLocalState::default(),
         });
     };
-    let local = match crate::git::pr_local(repo, base) {
+    let local = match crate::git::pr_local(repo, base, &config.forge_hosts()) {
         Ok(local) => local,
         Err(error) => {
             let (current, _) = crate::git::remote_identities(repo, &config.forge_hosts())
@@ -592,8 +609,8 @@ fn fetch_inner(
             return Ok(PrView::MalformedOrigin(host.clone()));
         }
     };
-    if input.local.detached {
-        // A detached HEAD (e.g. after `gh pr merge --delete-branch`) has no pin.
+    if input.local.branch.is_none() {
+        // A detached HEAD (e.g. after `gh pr merge --delete-branch`) has no branch story.
         return Ok(PrView::Detached);
     }
     // Exhaustive per-forge dispatch: a new forge must be routed here before it builds
@@ -607,40 +624,37 @@ fn fetch_inner(
         }
         crate::git::Forge::GitHub => {}
     }
-    let target = FetchTarget {
-        repo,
-        host: repository.host(),
-        owner: repository.owner(),
-        name: repository.name(),
-        cancelled,
-    };
-    // A fork clone: `origin` is the fork, the target is upstream. Both repositories are
-    // asked, and upstream's pick outranks the fork's own.
-    let fork = fork_repository(input.origin_repository.as_ref(), repository);
-    let head = input.local.head_oid.as_deref();
-    let assoc =
-        branch_lookup(&target, fork.map(crate::git::RepoTarget::owner), &input.local.names)?;
-    let mut pick = resolve_pick(repo, &assoc, head)
-        .map_err(|error| GhError::LocalGit(error.0))?
-        .map(|number| (number, repository));
-    if pick.is_none()
-        && let Some(fork_repo) = fork
+    // `gh pr checkout` recorded the pull request itself: exact, so it outranks the lookup.
+    // A pin the forge no longer knows (a stale record) falls back to the lookup.
+    if let Some(pin) = input.local.pin_on(crate::git::Forge::GitHub)
+        && let Some(view) = pin_outcome(read_pr(repo, input, &pin.repo, pin.number, cancelled))?
     {
-        let fork_target = FetchTarget {
-            repo,
-            host: fork_repo.host(),
-            owner: fork_repo.owner(),
-            name: fork_repo.name(),
-            cancelled,
-        };
-        let fork_assoc = branch_lookup(&fork_target, None, &input.local.names)?;
-        pick = resolve_pick(repo, &fork_assoc, head)
-            .map_err(|error| GhError::LocalGit(error.0))?
-            .map(|number| (number, fork_repo));
+        return Ok(view);
     }
-    let Some((number, detail_repo)) = pick else {
+    let Some((number, detail_repo)) = lookup_pick(repo, input, repository, cancelled)? else {
         return Ok(PrView::NoPr);
     };
+    Ok(read_pr(repo, input, detail_repo, number, cancelled)?.unwrap_or(PrView::NoPr))
+}
+
+/// What a pinned pull request's read decides: its view, or `None` to fall back to the head
+/// lookup — a pin the forge no longer resolves (its pull request or repository is gone) is a
+/// stale record, never the tab's answer.
+fn pin_outcome(read: Result<Option<PrView>, GhError>) -> Result<Option<PrView>, GhError> {
+    match read {
+        Err(GhError::NotFound(_)) => Ok(None),
+        read => read,
+    }
+}
+
+/// Read one pull request's full snapshot. `None` when the forge reports no such PR.
+fn read_pr(
+    repo: &Path,
+    input: &PrFetchInput,
+    detail_repo: &crate::git::RepoTarget,
+    number: u64,
+    cancelled: &AtomicBool,
+) -> Result<Option<PrView>, GhError> {
     let target = FetchTarget {
         repo,
         host: detail_repo.host(),
@@ -648,17 +662,83 @@ fn fetch_inner(
         name: detail_repo.name(),
         cancelled,
     };
-    let detail = pr_detail(&target, number)?;
+    let mut detail = pr_detail(&target, number)?;
+    complete_review_thread_comments(&target, &mut detail)?;
     let node = &detail["data"]["repository"]["pullRequest"];
     if node.is_null() {
-        return Ok(PrView::NoPr);
+        return Ok(None);
     }
     // Sync compares the fetch's pinned HEAD to the PR head, so a checkout or commit landing
     // mid-fetch never pairs one branch's PR with another branch's count.
     let pr_head = node["headRefOid"].as_str().unwrap_or_default();
     let sync = local_sync(repo, input.local.head_oid.as_deref(), pr_head)
         .map_err(|error| GhError::LocalGit(error.0))?;
-    Ok(PrView::Pr(Box::new(build_snapshot(node, sync))))
+    Ok(Some(PrView::Pr(Box::new(build_snapshot(node, sync)))))
+}
+
+/// The branch's PR by head lookup. A fork clone (`origin` is the fork, the target is
+/// upstream) asks both repositories, and upstream's pick outranks the fork's own.
+fn lookup_pick<'a>(
+    repo: &Path,
+    input: &'a PrFetchInput,
+    repository: &'a crate::git::RepoTarget,
+    cancelled: &AtomicBool,
+) -> Result<Option<(u64, &'a crate::git::RepoTarget)>, GhError> {
+    let names = input.local.head_names();
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let head = input.local.head_oid.as_deref();
+    let heads = &input.local.heads;
+    let pick_in = |queried: &'a crate::git::RepoTarget| -> Result<Option<(u64, _)>, GhError> {
+        let target = FetchTarget {
+            repo,
+            host: queried.host(),
+            owner: queried.owner(),
+            name: queried.name(),
+            cancelled,
+        };
+        let assoc = branch_lookup(&target, queried, heads, &names)?;
+        Ok(resolve_pick(repo, &assoc, head)
+            .map_err(|error| GhError::LocalGit(error.0))?
+            .map(|number| (number, queried)))
+    };
+    if let Some(pick) = pick_in(repository)? {
+        return Ok(Some(pick));
+    }
+    match fork_repository(input.origin_repository.as_ref(), repository) {
+        Some(fork) => pick_in(fork),
+        None => Ok(None),
+    }
+}
+
+/// Where a pull request's head lives, as the forge reports it.
+pub(crate) enum HeadRepo<'a> {
+    /// In the queried repository itself, by the forge's own same-repo flag — which survives
+    /// renames and transfers.
+    Queried,
+    /// In another repository: every local spelling the forge's head identity resolves to —
+    /// none for a deleted or unreadable fork, several when renamed paths share one project.
+    Other(Vec<&'a crate::git::RepoTarget>),
+}
+
+/// Whether a pull request whose head is `head_ref` in `head_repo` belongs to the checked-out
+/// branch: its head (repository, name) must be one of the branch's published heads. The one
+/// admission rule every provider calls.
+pub(crate) fn admits(
+    heads: &[crate::git::Head],
+    queried: &crate::git::RepoTarget,
+    head_ref: &str,
+    head_repo: &HeadRepo<'_>,
+) -> bool {
+    heads.iter().any(|head| {
+        head.name == head_ref
+            && match (head.repo.is(queried), head_repo) {
+                (true, HeadRepo::Queried) => true,
+                (false, HeadRepo::Other(repos)) => repos.iter().any(|repo| repo.is(&head.repo)),
+                _ => false,
+            }
+    })
 }
 
 /// The local sync against the PR's reported head: `Unknown` when either side is unpinned,
@@ -723,12 +803,12 @@ pub struct Association {
 }
 
 /// The GitHub branch lookup: one aliased `pullRequests(headRefName:)` block per name,
-/// every lifecycle state, newest first. `fork_head_owner`
-/// is the head filter: `None` keeps only same-repository heads; `Some(owner)` keeps only
-/// heads living in that owner's fork. Values ride as variables, never in the query text.
+/// every lifecycle state, newest first, admitted against the branch's heads. Values ride
+/// as variables, never in the query text.
 fn branch_lookup(
     target: &FetchTarget<'_>,
-    fork_head_owner: Option<&str>,
+    queried: &crate::git::RepoTarget,
+    heads: &[crate::git::Head],
     names: &[String],
 ) -> Result<Association, GhError> {
     let q = build_branch_query(names.len());
@@ -740,7 +820,7 @@ fn branch_lookup(
         vars.push((format!("b{i}"), name.clone()));
     }
     let v = graphql(target.repo, target.host, &q, &vars, target.cancelled)?;
-    Ok(parse_branch_lookup(&v, names.len(), fork_head_owner))
+    Ok(parse_branch_lookup(&v, names.len(), queried, heads))
 }
 
 /// The branch-lookup query text: per name, an open block (`o{i}`) apart from the finished
@@ -756,7 +836,7 @@ fn build_branch_query(names: usize) -> String {
     q.push_str("){repository(owner:$o,name:$n){");
     let fields = "first:20, orderBy:{field:CREATED_AT, direction:DESC}){nodes{\
                   number state headRefOid headRefName createdAt closedAt \
-                  isCrossRepository headRepositoryOwner{login}}} ";
+                  isCrossRepository headRepository{nameWithOwner}}} ";
     for i in 0..names {
         let _ = write!(q, "o{i}:pullRequests(headRefName:$b{i}, states:[OPEN], {fields}");
         let _ = write!(q, "h{i}:pullRequests(headRefName:$b{i}, states:[MERGED,CLOSED], {fields}");
@@ -765,37 +845,44 @@ fn build_branch_query(names: usize) -> String {
     q
 }
 
-/// Split the branch lookup by lifecycle. A node is this branch's only when its head lives
-/// in the queried repository — or, under a fork filter, in that fork — so a stranger's
-/// same-named fork branch never attaches. Duplicates
-/// across name aliases collapse.
-fn parse_branch_lookup(v: &Value, aliases: usize, fork_head_owner: Option<&str>) -> Association {
+/// Split the branch lookup by lifecycle, keeping only nodes whose head is one of the
+/// branch's (`admits`). A deleted fork nulls `headRepository`, so its head matches nothing.
+/// Duplicates across name aliases collapse.
+fn parse_branch_lookup(
+    v: &Value,
+    aliases: usize,
+    queried: &crate::git::RepoTarget,
+    heads: &[crate::git::Head],
+) -> Association {
     let mut assoc = Association::default();
     let keys = (0..aliases).flat_map(|i| [format!("o{i}"), format!("h{i}")]);
     for key in keys {
         let nodes = &v["data"]["repository"][key.as_str()]["nodes"];
         for node in nodes.as_array().into_iter().flatten() {
+            let head_ref = node["headRefName"].as_str().unwrap_or_default();
             let cross = node["isCrossRepository"].as_bool() == Some(true);
-            let head_owner = node["headRepositoryOwner"]["login"].as_str().unwrap_or_default();
-            let state = node["state"].as_str().unwrap_or_default();
-            let admitted = match fork_head_owner {
-                None => !cross,
-                // A deleted fork nulls the head owner; its merged PR still admits, and
-                // the history ancestry guard keeps strangers out.
-                Some(owner) => {
-                    cross
-                        && (head_owner.eq_ignore_ascii_case(owner)
-                            || (head_owner.is_empty() && state != "OPEN"))
-                }
-            };
-            if !admitted {
+            // A deleted fork nulls `headRepository`, so its head names no repository.
+            let reported = node["headRepository"]["nameWithOwner"]
+                .as_str()
+                .and_then(|full| full.split_once('/'))
+                .and_then(|(owner, name)| {
+                    crate::git::RepoTarget::with_path(
+                        crate::git::Forge::GitHub,
+                        queried.host(),
+                        &[owner, name],
+                    )
+                });
+            let head_repo =
+                if cross { HeadRepo::Other(reported.iter().collect()) } else { HeadRepo::Queried };
+            if !admits(heads, queried, head_ref, &head_repo) {
                 continue;
             }
+            let state = node["state"].as_str().unwrap_or_default();
             let Some(number) = node["number"].as_u64() else { continue };
             let pr = AssocPr {
                 number,
                 head_oid: node["headRefOid"].as_str().unwrap_or_default().to_string(),
-                head_ref: node["headRefName"].as_str().unwrap_or_default().to_string(),
+                head_ref: head_ref.to_string(),
                 created_at: node["createdAt"].as_str().unwrap_or_default().to_string(),
                 closed_at: node["closedAt"].as_str().unwrap_or_default().to_string(),
                 // A lookup node is a reduced row, never the full pull request.
@@ -830,7 +917,7 @@ pub(crate) fn fork_repository<'a>(
     origin: Option<&'a crate::git::RepoTarget>,
     target: &crate::git::RepoTarget,
 ) -> Option<&'a crate::git::RepoTarget> {
-    origin.filter(|origin| origin.host() == target.host() && *origin != target)
+    origin.filter(|origin| origin.host() == target.host() && !origin.is(target))
 }
 
 /// Push `pr` unless its number is already in `bucket` — a PR's identity is its number.
@@ -903,9 +990,9 @@ fn build_detail_query(number: u64) -> String {
          ... on CheckRun{{name status conclusion}} ... on StatusContext{{context state}}}}}}}}}}}}}} \
          reviews(last:100){{pageInfo{{hasPreviousPage}} nodes{{author{{login}} body submittedAt}}}} \
          comments(last:100){{pageInfo{{hasPreviousPage}} nodes{{author{{login}} body createdAt}}}} \
-         reviewThreads(last:100){{pageInfo{{hasPreviousPage}} nodes{{isResolved isOutdated path \
+         reviewThreads(last:100){{pageInfo{{hasPreviousPage}} nodes{{id isResolved isOutdated path \
          startLine line originalStartLine originalLine diffSide \
-         comments(first:1){{totalCount nodes{{author{{login}} body createdAt diffHunk}}}}}}}}}}}}}}"
+         comments(first:100){{pageInfo{{hasNextPage endCursor}} nodes{{author{{login}} body createdAt diffHunk}}}}}}}}}}}}}}"
     )
 }
 
@@ -923,6 +1010,71 @@ fn graphql(
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = gh(repo, host, &arg_refs, cancelled)?;
     serde_json::from_str(&out).map_err(|e| GhError::Other(e.to_string()))
+}
+
+/// Page every shown thread whose first comments page is incomplete. Extra round trips
+/// are allowed. The snapshot still lands as one generation, or this errors and the last
+/// good view stays.
+fn complete_review_thread_comments(
+    target: &FetchTarget<'_>,
+    detail: &mut Value,
+) -> Result<(), GhError> {
+    let Some(threads) =
+        detail["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"].as_array_mut()
+    else {
+        return Ok(());
+    };
+    for thread in threads {
+        while let Some((id, after)) = next_thread_page(thread)? {
+            let page = thread_comments_page(target, &id, &after)?;
+            append_thread_comment_page(thread, &page)?;
+        }
+    }
+    Ok(())
+}
+
+/// `None` when this thread's comments are complete. `Err` when GitHub says there is
+/// another page but the cursor cannot follow it — the snapshot must not land.
+fn next_thread_page(thread: &Value) -> Result<Option<(String, String)>, GhError> {
+    if thread["comments"]["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
+        return Ok(None);
+    }
+    let id = thread["id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| GhError::Other("review thread missing id".into()))?;
+    let after = thread["comments"]["pageInfo"]["endCursor"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| GhError::Other("incomplete thread comments page".into()))?;
+    Ok(Some((id.to_string(), after.to_string())))
+}
+
+fn append_thread_comment_page(thread: &mut Value, page: &Value) -> Result<(), GhError> {
+    let comments = &page["data"]["node"]["comments"];
+    if comments["pageInfo"].is_null() {
+        return Err(GhError::Other("thread comments page missing".into()));
+    }
+    let more = comments["nodes"].as_array().cloned().unwrap_or_default();
+    thread["comments"]["nodes"]
+        .as_array_mut()
+        .ok_or_else(|| GhError::Other("thread comments missing".into()))?
+        .extend(more);
+    thread["comments"]["pageInfo"] = comments["pageInfo"].clone();
+    Ok(())
+}
+
+fn thread_comments_page(target: &FetchTarget<'_>, id: &str, after: &str) -> Result<Value, GhError> {
+    let q = "query($id:ID!,$after:String!){node(id:$id){... on PullRequestReviewThread{\
+             comments(first:100, after:$after){pageInfo{hasNextPage endCursor} \
+             nodes{author{login} body createdAt}}}}}";
+    graphql(
+        target.repo,
+        target.host,
+        q,
+        &[("id".into(), id.to_string()), ("after".into(), after.to_string())],
+        target.cancelled,
+    )
 }
 
 fn graphql_args(host: &str, query: &str, vars: &[(String, String)]) -> Vec<String> {
@@ -954,10 +1106,9 @@ fn build_snapshot(node: &Value, sync: Sync) -> PrSnapshot {
         conn["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false)
             || conn["pageInfo"]["hasPreviousPage"].as_bool().unwrap_or(false)
     };
-    let truncated = more(contexts)
-        || more(&node["reviews"])
-        || more(&node["comments"])
-        || more(&node["reviewThreads"]);
+    let comments_truncated =
+        more(&node["reviews"]) || more(&node["comments"]) || more(&node["reviewThreads"]);
+    let checks_truncated = more(contexts);
     PrSnapshot {
         number: node["number"].as_u64().unwrap_or_default(),
         title: node["title"].as_str().unwrap_or_default().to_string(),
@@ -977,7 +1128,8 @@ fn build_snapshot(node: &Value, sync: Sync) -> PrSnapshot {
             &node["comments"]["nodes"],
             &node["reviewThreads"]["nodes"],
         ),
-        truncated,
+        comments_truncated,
+        checks_truncated,
     }
 }
 
@@ -1081,7 +1233,13 @@ fn merge_comments(reviews: &Value, issues: &Value, threads: &Value) -> Vec<Comme
 
     // Inline review threads (the `finding` cards), with resolved/outdated and replies.
     for t in threads.as_array().into_iter().flatten() {
-        let root = &t["comments"]["nodes"][0];
+        let nodes = t["comments"]["nodes"].as_array().map_or(&[][..], Vec::as_slice);
+        let Some(root_i) =
+            nodes.iter().position(|n| !n["body"].as_str().unwrap_or("").trim().is_empty())
+        else {
+            continue;
+        };
+        let root = &nodes[root_i];
         let login = root["author"]["login"].as_str().unwrap_or("").to_string();
         let path = t["path"].as_str().unwrap_or("");
         let diff_side = t["diffSide"].as_str();
@@ -1109,7 +1267,7 @@ fn merge_comments(reviews: &Value, issues: &Value, threads: &Value) -> Vec<Comme
             created_at: root["createdAt"].as_str().unwrap_or("").to_string(),
             is_resolved: t["isResolved"].as_bool().unwrap_or(false),
             is_outdated: t["isOutdated"].as_bool().unwrap_or(false),
-            reply_count: t["comments"]["totalCount"].as_u64().unwrap_or(1).saturating_sub(1) as u32,
+            replies: replies_from_nodes(&nodes[root_i..]),
         });
     }
 
@@ -1195,8 +1353,29 @@ pub(crate) fn prose_row(
         created_at,
         is_resolved: false,
         is_outdated: false,
-        reply_count: 0,
+        replies: Vec::new(),
     }
+}
+
+/// Replies are every comment node after the root, skipping empty bodies the way roots do.
+fn replies_from_nodes(nodes: &[Value]) -> Vec<Reply> {
+    nodes
+        .iter()
+        .skip(1)
+        .filter_map(|n| {
+            let body = n["body"].as_str().unwrap_or("").trim();
+            if body.is_empty() {
+                return None;
+            }
+            let login = n["author"]["login"].as_str().unwrap_or("").to_string();
+            Some(Reply {
+                author_is_bot: is_bot(&login),
+                author: login,
+                body: body.to_string(),
+                created_at: n["createdAt"].as_str().unwrap_or("").to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Keep only the latest PR-level (`review`/`comment`) post per bot author; humans keep all.
@@ -1317,10 +1496,8 @@ mod tests {
             "comments": {"pageInfo": {"hasNextPage": false}, "nodes": []},
             "reviewThreads": {"pageInfo": {"hasNextPage": false}, "nodes": []}
         });
-        assert!(
-            !build_snapshot(&base, Sync::InSync).truncated,
-            "all pages complete → not truncated"
-        );
+        let s = build_snapshot(&base, Sync::InSync);
+        assert!(!s.comments_truncated && !s.checks_truncated, "all pages complete");
         // The description parses when present and stays empty when GitHub returns null.
         assert_eq!(build_snapshot(&base, Sync::InSync).body, "");
         let mut with_body = base.clone();
@@ -1330,22 +1507,24 @@ mod tests {
         // Comments and threads read `last:100`, so their "more exist" flag pages backward.
         let mut comments_more = base.clone();
         comments_more["comments"]["pageInfo"]["hasPreviousPage"] = serde_json::json!(true);
-        assert!(build_snapshot(&comments_more, Sync::InSync).truncated);
+        assert!(build_snapshot(&comments_more, Sync::InSync).comments_truncated);
+        assert!(!build_snapshot(&comments_more, Sync::InSync).checks_truncated);
 
         let mut threads_more = base.clone();
         threads_more["reviewThreads"]["pageInfo"]["hasPreviousPage"] = serde_json::json!(true);
-        assert!(build_snapshot(&threads_more, Sync::InSync).truncated);
+        assert!(build_snapshot(&threads_more, Sync::InSync).comments_truncated);
 
         let mut checks_more = base.clone();
         checks_more["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["pageInfo"]
             ["hasNextPage"] = serde_json::json!(true);
-        assert!(build_snapshot(&checks_more, Sync::InSync).truncated);
+        assert!(build_snapshot(&checks_more, Sync::InSync).checks_truncated);
+        assert!(!build_snapshot(&checks_more, Sync::InSync).comments_truncated);
 
         // `reviews` pages backward (last:100), so its "more exist" flag is `hasPreviousPage` —
         // checking `hasNextPage` here (the old bug) would leave this surface never marked.
         let mut reviews_more = base.clone();
         reviews_more["reviews"]["pageInfo"]["hasPreviousPage"] = serde_json::json!(true);
-        assert!(build_snapshot(&reviews_more, Sync::InSync).truncated);
+        assert!(build_snapshot(&reviews_more, Sync::InSync).comments_truncated);
     }
 
     #[test]
@@ -1392,7 +1571,8 @@ mod tests {
             sync: Sync::InSync,
             checks: statuses.iter().map(|&s| Check { name: "c".into(), status: s }).collect(),
             comments: Vec::new(),
-            truncated: false,
+            comments_truncated: false,
+            checks_truncated: false,
         };
         assert_eq!(snap(&[]).checks_rollup(), None);
         assert_eq!(
@@ -1416,10 +1596,25 @@ mod tests {
             local: crate::git::PrLocalState {
                 head_oid: Some(head.to_string()),
                 base_oid: Some("base".to_string()),
-                names: names.iter().map(|n| (*n).to_string()).collect(),
-                detached: false,
+                branch: names.first().map(|n| (*n).to_string()),
+                heads: names
+                    .iter()
+                    .map(|n| crate::git::Head {
+                        repo: gh("acme", "widgets"),
+                        name: (*n).to_string(),
+                    })
+                    .collect(),
+                pin: None,
             },
         }
+    }
+
+    fn gh(owner: &str, name: &str) -> crate::git::RepoTarget {
+        crate::git::RepoTarget::new("github.com", owner, name).unwrap()
+    }
+
+    fn head(repo: crate::git::RepoTarget, name: &str) -> crate::git::Head {
+        crate::git::Head { repo, name: name.to_string() }
     }
 
     fn assoc(number: u64, head_oid: &str, head_ref: &str) -> AssocPr {
@@ -1452,7 +1647,7 @@ mod tests {
         );
         let mut detached = input("head", &["feat"]);
         detached.repository = repo;
-        detached.local.detached = true;
+        detached.local.branch = None;
         assert_eq!(gated(&detached), PrView::Detached);
     }
 
@@ -1468,53 +1663,179 @@ mod tests {
     }
 
     #[test]
-    fn parse_branch_lookup_splits_lifecycles_and_filters_stranger_forks() {
-        let node = |number: u64, state: &str, cross: bool, owner: &str| {
+    fn parse_branch_lookup_splits_lifecycles_and_collapses_aliases() {
+        let node = |number: u64, state: &str| {
             serde_json::json!({"number": number, "state": state, "headRefOid": "abc",
                 "headRefName": "feat", "createdAt": "2026-07-01T00:00:00Z",
-                "closedAt": null, "isCrossRepository": cross,
-                "headRepositoryOwner": {"login": owner}})
+                "closedAt": null, "isCrossRepository": false,
+                "headRepository": {"nameWithOwner": "acme/widgets"}})
         };
         let v = serde_json::json!({"data": {"repository": {
             // The open PR arrives only through its own state-filtered block — on a
             // churny branch name the finished page's cap must never hide it.
-            "o0": {"nodes": [
-                node(7, "OPEN", false, "acme"),
-                // A stranger's same-named fork branch never attaches.
-                node(10, "OPEN", true, "stranger")
-            ]},
-            "h0": {"nodes": [
-                node(8, "MERGED", false, "acme"),
-                node(9, "CLOSED", false, "acme"),
-                // A merged fork PR whose fork was deleted: GitHub nulls the head owner.
-                node(11, "MERGED", true, "")
-            ]},
+            "o0": {"nodes": [node(7, "OPEN")]},
+            "h0": {"nodes": [node(8, "MERGED"), node(9, "CLOSED")]},
             // A duplicate across name aliases lands once.
-            "o1": {"nodes": [node(7, "OPEN", false, "acme")]},
+            "o1": {"nodes": [node(7, "OPEN")]},
             "h1": {"nodes": []}
         }}});
-        let a = parse_branch_lookup(&v, 2, None);
+        let heads = [head(gh("acme", "widgets"), "feat")];
+        let a = parse_branch_lookup(&v, 2, &gh("acme", "widgets"), &heads);
         assert_eq!(a.open.iter().map(|p| p.number).collect::<Vec<_>>(), [7]);
         assert_eq!(a.history.iter().map(|p| p.number).collect::<Vec<_>>(), [8, 9]);
-        // Under a fork filter, only the named fork's heads count: same-repository heads
-        // are upstream's own branches, not this clone's. The deleted-fork merged PR
-        // still admits — the history ancestry guard keeps strangers out downstream.
-        let a = parse_branch_lookup(&v, 2, Some("stranger"));
-        assert_eq!(a.open.iter().map(|p| p.number).collect::<Vec<_>>(), [10]);
-        assert_eq!(a.history.iter().map(|p| p.number).collect::<Vec<_>>(), [11]);
     }
 
     #[test]
     fn the_branch_query_lists_open_prs_apart_from_the_capped_finished_page() {
         // One open block and one finished block per name: `resolve_pick` promises any
         // open PR outranks history, and it can only honor that for rows it receives —
-        // a mixed-state page 20 deep could bury an older still-open PR.
+        // a mixed-state page 20 deep could bury an older still-open PR. Each row names its
+        // head repository, the half of the head `admits` needs.
         let q = build_branch_query(2);
         for i in 0..2 {
             assert!(q.contains(&format!("o{i}:pullRequests(headRefName:$b{i}, states:[OPEN]")));
             assert!(
                 q.contains(&format!("h{i}:pullRequests(headRefName:$b{i}, states:[MERGED,CLOSED]"))
             );
+        }
+        assert!(q.contains("isCrossRepository headRepository{nameWithOwner}"));
+    }
+
+    #[test]
+    fn a_pin_answers_unless_the_forge_no_longer_resolves_it() {
+        let found = Ok(Some(PrView::NoPr));
+        assert_eq!(pin_outcome(found).unwrap(), Some(PrView::NoPr), "a read pin is the answer");
+        assert_eq!(pin_outcome(Ok(None)).unwrap(), None, "a null node falls back");
+        let missing = "gh: Could not resolve to a PullRequest with the number of 999999.";
+        assert!(matches!(classify_failure(missing, "github.com"), GhError::NotFound(_)));
+        assert_eq!(pin_outcome(Err(classify_failure(missing, "github.com"))).unwrap(), None);
+        // Anything else is a real failure: it surfaces instead of hiding behind the lookup.
+        assert!(pin_outcome(Err(GhError::Other("gh: HTTP 502".into()))).is_err());
+        assert!(pin_outcome(Err(GhError::NotAuthed("github.com".into()))).is_err());
+    }
+
+    #[test]
+    fn each_provider_reads_only_its_own_forges_pin() {
+        let mut local = input("head", &["feat"]).local;
+        assert!(local.pin_on(crate::git::Forge::GitHub).is_none());
+        local.pin = Some(crate::git::PrPin { repo: gh("acme", "widgets"), number: 108 });
+        assert_eq!(local.pin_on(crate::git::Forge::GitHub).map(|p| p.number), Some(108));
+        assert!(local.pin_on(crate::git::Forge::GitLab).is_none());
+    }
+
+    #[test]
+    fn a_pull_request_attaches_only_when_its_head_is_one_of_the_branchs() {
+        let upstream = gh("acme", "widgets");
+        let fork = gh("contributor", "widgets-fork");
+        // (head_ref, isCrossRepository, headRepository) as GitHub reports a node.
+        let node = |head_ref: &str, cross: bool, head_repo: Option<&str>| {
+            serde_json::json!({"number": 1, "state": "MERGED", "headRefOid": "abc",
+                "headRefName": head_ref, "createdAt": "", "closedAt": "",
+                "isCrossRepository": cross,
+                "headRepository": head_repo.map(|n| serde_json::json!({"nameWithOwner": n}))})
+        };
+        let admitted = |queried: &crate::git::RepoTarget,
+                        heads: &[crate::git::Head],
+                        node: serde_json::Value| {
+            let v = serde_json::json!({"data": {"repository": {
+                "o0": {"nodes": []}, "h0": {"nodes": [node]}}}});
+            !parse_branch_lookup(&v, 1, queried, heads).history.is_empty()
+        };
+        let on_main = [head(upstream.clone(), "main")];
+        let checkout = [head(fork.clone(), "fix-typo"), head(upstream.clone(), "fix-typo")];
+        let cases: &[(
+            &str,
+            &crate::git::RepoTarget,
+            &[crate::git::Head],
+            serde_json::Value,
+            bool,
+        )] = &[
+            // The hole: a stranger's fork PR from their `main` never attaches to upstream `main`.
+            (
+                "stranger fork main on main",
+                &upstream,
+                &on_main,
+                node("main", true, Some("stranger/widgets")),
+                false,
+            ),
+            (
+                "own same-repo main",
+                &upstream,
+                &on_main,
+                node("main", false, Some("acme/widgets")),
+                true,
+            ),
+            // #105: the fork `gh pr checkout` recorded attaches, by repo and name.
+            (
+                "checked-out fork PR",
+                &upstream,
+                &checkout,
+                node("fix-typo", true, Some("Contributor/Widgets-Fork")),
+                true,
+            ),
+            (
+                "same name, another fork",
+                &upstream,
+                &checkout,
+                node("fix-typo", true, Some("stranger/widgets")),
+                false,
+            ),
+            // A renamed target: the same-repo flag decides, never the reported name.
+            (
+                "renamed target",
+                &upstream,
+                &on_main,
+                node("main", false, Some("acme/renamed")),
+                true,
+            ),
+            // A deleted fork nulls headRepository: it matches nothing.
+            ("deleted fork", &upstream, &checkout, node("fix-typo", true, None), false),
+            // A same-named repository on another host is another repository.
+            (
+                "fork on another host",
+                &upstream,
+                &[head(
+                    crate::git::RepoTarget::new("ghe.corp.test", "contributor", "widgets-fork")
+                        .unwrap(),
+                    "fix-typo",
+                )],
+                node("fix-typo", true, Some("contributor/widgets-fork")),
+                false,
+            ),
+            // Querying the fork: an upstream head is cross-repository there.
+            (
+                "upstream head, fork queried",
+                &fork,
+                &[head(upstream.clone(), "fix")],
+                node("fix", false, Some("contributor/widgets-fork")),
+                false,
+            ),
+            // A fork clone's branch that only tracks upstream main has no upstream head.
+            (
+                "fork clone, upstream's own fix",
+                &upstream,
+                &[head(fork.clone(), "fix")],
+                node("fix", false, Some("acme/widgets")),
+                false,
+            ),
+            (
+                "fork clone, its own fix",
+                &upstream,
+                &[head(fork.clone(), "fix")],
+                node("fix", true, Some("contributor/widgets-fork")),
+                true,
+            ),
+            // The fork's own PRs, queried in the fork: same-repo there.
+            (
+                "fork's internal PR",
+                &fork,
+                &[head(fork.clone(), "fix")],
+                node("fix", false, Some("contributor/widgets-fork")),
+                true,
+            ),
+        ];
+        for (label, queried, heads, node, expected) in cases {
+            assert_eq!(admitted(queried, heads, node.clone()), *expected, "{label}");
         }
     }
 
@@ -1575,7 +1896,10 @@ mod tests {
         ]);
         let threads = serde_json::json!([
             {"isResolved": false, "isOutdated": true, "path": "a.py", "line": null,
-             "comments": {"totalCount": 2, "nodes": [{"author": {"login": "claude[bot]"}, "body": "SSRF", "createdAt": "2026-06-27T11:00:00Z"}]}}
+             "comments": {"nodes": [
+                {"author": {"login": "claude[bot]"}, "body": "SSRF", "createdAt": "2026-06-27T11:00:00Z"},
+                {"author": {"login": "persijano"}, "body": "Addressed in abc", "createdAt": "2026-06-27T11:30:00Z"}
+             ]}}
         ]);
         let cs = merge_comments(&reviews, &issues, &threads);
         assert_eq!(cs.len(), 3);
@@ -1594,7 +1918,52 @@ mod tests {
         let f = cs.iter().find(|c| c.kind == CommentKind::Finding).unwrap();
         assert_eq!(f.anchor, "a.py");
         assert!(f.is_outdated);
-        assert_eq!(f.reply_count, 1);
+        assert_eq!(f.replies.len(), 1);
+        assert_eq!(f.replies[0].author, "persijano");
+        assert_eq!(f.replies[0].body, "Addressed in abc");
+    }
+
+    #[test]
+    fn a_short_thread_page_does_not_land() {
+        let incomplete = serde_json::json!({
+            "id": "T1",
+            "comments": {"pageInfo": {"hasNextPage": true, "endCursor": ""}, "nodes": [{"body": "root"}]}
+        });
+        assert!(next_thread_page(&incomplete).is_err(), "empty cursor is a failed page");
+        let missing_id = serde_json::json!({
+            "comments": {"pageInfo": {"hasNextPage": true, "endCursor": "c1"}, "nodes": [{"body": "root"}]}
+        });
+        assert!(next_thread_page(&missing_id).is_err(), "missing id is a failed page");
+        let done = serde_json::json!({
+            "id": "T1",
+            "comments": {"pageInfo": {"hasNextPage": false, "endCursor": "c1"}, "nodes": [{"body": "root"}]}
+        });
+        assert_eq!(next_thread_page(&done).unwrap(), None);
+        let more = serde_json::json!({
+            "id": "T1",
+            "comments": {"pageInfo": {"hasNextPage": true, "endCursor": "c1"}, "nodes": [{"body": "root"}]}
+        });
+        assert_eq!(next_thread_page(&more).unwrap(), Some(("T1".into(), "c1".into())));
+        let null_page = serde_json::json!({"data": {"node": {}}});
+        let mut thread = more;
+        assert!(append_thread_comment_page(&mut thread, &null_page).is_err());
+    }
+
+    #[test]
+    fn an_empty_leading_github_note_is_not_the_root() {
+        let threads = serde_json::json!([{
+            "isResolved": false, "isOutdated": false, "path": "a.rs", "line": 1,
+            "comments": {"nodes": [
+                {"author": {"login": "bot"}, "body": "  ", "createdAt": "2026-06-27T11:00:00Z"},
+                {"author": {"login": "bot"}, "body": "the finding", "createdAt": "2026-06-27T11:01:00Z"},
+                {"author": {"login": "ann"}, "body": "Addressed", "createdAt": "2026-06-27T11:02:00Z"}
+            ]}
+        }]);
+        let cs = merge_comments(&serde_json::json!([]), &serde_json::json!([]), &threads);
+        assert_eq!(cs.len(), 1);
+        assert_eq!(cs[0].body, "the finding");
+        assert_eq!(cs[0].replies.len(), 1);
+        assert_eq!(cs[0].replies[0].body, "Addressed");
     }
 
     #[test]
@@ -1687,7 +2056,7 @@ mod tests {
             created_at: created_at.to_string(),
             is_resolved: false,
             is_outdated: false,
-            reply_count: 0,
+            replies: Vec::new(),
         };
         let mut out = vec![
             row(CommentKind::Review, "review", "approved", ""),

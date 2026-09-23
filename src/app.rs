@@ -109,6 +109,7 @@ struct TabStash {
     preview_scroll: usize,
     preview_scrolled: bool,
     preview_text: String,
+    preview_expanded_details: HashSet<String>,
     /// Whether this tab has ever completed a reload. A never-visited tab has nothing worth
     /// painting, so its first entry loads before the frame instead of deferring.
     visited: bool,
@@ -127,8 +128,8 @@ struct ArmedCross {
 /// at open; the filter and highlight are the reviewer's own place state.
 #[derive(Clone, Debug)]
 pub struct BasePicker {
-    /// Pickable rows: branches (PR target starred first, default next, recency, checked-out
-    /// excluded) plus a current non-branch spelling so the highlight can open on it.
+    /// Pickable rows: every branch (the PR's target first, the default next, the rest by
+    /// tip recency) plus a current non-branch spelling so the highlight can open on it.
     pub rows: Vec<BaseChoice>,
     /// The highlighted row, an index into the visible view.
     pub cursor: usize,
@@ -151,10 +152,14 @@ pub enum BaseProbe {
     Miss,
 }
 
-/// One base picker row.
+/// One base picker row. A branch carries the facts its trail paints: the open PR's
+/// target (`pr base`), the repo's default (`default`), checked out here (`current`), and
+/// its tip's commit time, painted as an age at render like the commit picker's rows so
+/// it never goes stale while the picker sits open (`0` when unknown: no age). A typed
+/// revision carries its oid instead.
 #[derive(Clone, Debug)]
 pub enum BaseChoice {
-    Branch { name: String, starred: bool, is_default: bool },
+    Branch { name: String, pr_base: bool, is_default: bool, current: bool, tip_secs: u64 },
     Rev { name: String, oid: String },
 }
 
@@ -167,13 +172,27 @@ impl BaseChoice {
     }
 
     #[must_use]
-    pub fn starred(&self) -> bool {
-        matches!(self, Self::Branch { starred: true, .. })
+    pub fn pr_base(&self) -> bool {
+        matches!(self, Self::Branch { pr_base: true, .. })
     }
 
     #[must_use]
     pub fn is_default(&self) -> bool {
         matches!(self, Self::Branch { is_default: true, .. })
+    }
+
+    #[must_use]
+    pub fn current(&self) -> bool {
+        matches!(self, Self::Branch { current: true, .. })
+    }
+
+    /// The tip's commit time, `0` on a revision row or a probe hit.
+    #[must_use]
+    pub fn tip_secs(&self) -> u64 {
+        match self {
+            Self::Branch { tip_secs, .. } => *tip_secs,
+            Self::Rev { .. } => 0,
+        }
     }
 
     #[must_use]
@@ -186,22 +205,40 @@ impl BaseChoice {
 }
 
 impl BasePicker {
-    /// Frozen rows whose name contains the query, matched case-insensitively and
-    /// anywhere in the name.
+    /// Frozen rows the query fuzzily matches, best score first, by the matcher the search
+    /// screen uses (`neo_frizbee`, fff's engine). Ties keep the frozen order, so an empty
+    /// query is the list as opened.
     pub fn filtered(&self) -> Vec<usize> {
-        let q = self.query.to_lowercase();
-        (0..self.rows.len()).filter(|&i| self.rows[i].name().to_lowercase().contains(&q)).collect()
+        if self.query.is_empty() {
+            return (0..self.rows.len()).collect();
+        }
+        let names: Vec<&str> = self.rows.iter().map(BaseChoice::name).collect();
+        // The default sort is score descending, then input order: the tie rule above.
+        let config = neo_frizbee::Config::default();
+        let matches = neo_frizbee::Matcher::new(self.query.as_str(), &config).match_list(&names);
+        matches.into_iter().map(|m| m.index as usize).collect()
     }
 
-    /// The on-screen rows: a live probe hit, else the frozen matches.
+    /// Whether a frozen row spells the query, case aside: then no revision probe runs,
+    /// since Enter would pick that row. Case is ignored because the fuzzy filter already
+    /// shows `main` for `MAIN`, and a probe of `MAIN` on a case-insensitive filesystem
+    /// would resolve and offer a second, wrongly spelled row.
+    #[must_use]
+    pub fn query_is_listed(&self) -> bool {
+        self.rows.iter().any(|r| r.name().eq_ignore_ascii_case(&self.query))
+    }
+
+    /// The on-screen rows: the frozen matches, then a live probe hit as one more row. The
+    /// hit is appended, never inserted, so it cannot move the highlight.
     pub fn visible(&self) -> Vec<&BaseChoice> {
-        let matched = self.filtered();
+        let mut rows: Vec<&BaseChoice> =
+            self.filtered().into_iter().map(|i| &self.rows[i]).collect();
         if let BaseProbe::Hit(probe) = &self.probe
-            && matched.is_empty()
+            && !rows.iter().any(|r| r.name() == probe.name())
         {
-            return vec![probe];
+            rows.push(probe);
         }
-        matched.into_iter().map(|i| &self.rows[i]).collect()
+        rows
     }
 }
 
@@ -701,6 +738,12 @@ pub struct App {
     /// The painted markdown body's heading anchors as `(slug, content line index)`,
     /// covering the whole body — an anchor click can jump past the viewport.
     painted_anchors: std::cell::RefCell<Vec<(String, usize)>>,
+    /// `<details>` summary hit boxes painted this frame.
+    painted_details: std::cell::RefCell<Vec<PaintedDetails>>,
+    /// Open `<details>` on the selected PR description or thread.
+    pr_expanded_details: HashSet<String>,
+    /// Open `<details>` in the file-tab markdown preview. Stashed per file tab.
+    preview_expanded_details: HashSet<String>,
     /// The PR read pane's maximum useful scroll, noted the same way for
     /// [`Self::pr_scroll_read`].
     pr_read_max_scroll: std::cell::Cell<usize>,
@@ -840,6 +883,14 @@ struct PaintedLink {
     url: std::sync::Arc<str>,
 }
 
+#[derive(Clone, Debug)]
+struct PaintedDetails {
+    x_start: u16,
+    x_end: u16,
+    y: u16,
+    summary: std::sync::Arc<str>,
+}
+
 #[derive(Debug)]
 enum PluginConfigState {
     Ready(crate::config::PluginConfig),
@@ -902,6 +953,9 @@ impl App {
             painted_links: std::cell::RefCell::new(Vec::new()),
             painted_slots: std::cell::RefCell::new(Vec::new()),
             painted_anchors: std::cell::RefCell::new(Vec::new()),
+            painted_details: std::cell::RefCell::new(Vec::new()),
+            pr_expanded_details: HashSet::new(),
+            preview_expanded_details: HashSet::new(),
             pr_read_max_scroll: std::cell::Cell::new(usize::MAX),
             navigator_position: crate::config::NavigatorPosition::Right,
             navigator_side_pct: DEFAULT_SIDE_PCT,
@@ -1114,6 +1168,8 @@ impl App {
                 self.preview_scroll = old.preview_scroll;
                 self.preview_scrolled = old.preview_scrolled;
                 self.preview_text = std::mem::take(&mut old.preview_text);
+                self.preview_expanded_details = std::mem::take(&mut old.preview_expanded_details);
+                self.pr_expanded_details = std::mem::take(&mut old.pr_expanded_details);
                 self.mode = old.mode.clone();
                 self.input = std::mem::take(&mut old.input);
                 self.caret = old.caret;
@@ -1438,6 +1494,7 @@ impl App {
             self.preview = false;
             self.preview_scroll = 0;
             self.preview_max_scroll.set(usize::MAX);
+            self.preview_expanded_details.clear();
         }
         self.diff_path = Some(path.clone());
         let (old, new) = self.content_sides(&path, previous_path.as_deref());
@@ -1463,6 +1520,7 @@ impl App {
             self.preview = false;
             self.preview_scroll = 0;
             self.preview_max_scroll.set(usize::MAX);
+            self.preview_expanded_details.clear();
         }
         self.diff_path = Some(path.to_string());
         self.expanded_folds.clear(); // the File view has no folds
@@ -1876,6 +1934,7 @@ impl App {
     pub(crate) fn clear_painted_frame(&self) {
         self.painted_links.borrow_mut().clear();
         self.painted_anchors.borrow_mut().clear();
+        self.painted_details.borrow_mut().clear();
         self.painted_slots.borrow_mut().clear();
     }
 
@@ -1951,10 +2010,86 @@ impl App {
         }
     }
 
-    /// Render `text` as markdown wrapped to `width`, through the one-slot memo
+    /// Render `text` as markdown wrapped to `width`, through the memo, with the
+    /// current body's expanded `<details>` summaries.
     #[must_use]
     pub(crate) fn markdown_render(&self, text: &str, width: usize) -> crate::markdown::Rendered {
-        self.markdown_cache.borrow_mut().get(text, width, &self.highlighter, &self.palette)
+        let expanded = if self.tab == Tab::Pr {
+            &self.pr_expanded_details
+        } else {
+            &self.preview_expanded_details
+        };
+        self.markdown_cache.borrow_mut().get_expanded(
+            text,
+            width,
+            &self.highlighter,
+            &self.palette,
+            expanded,
+        )
+    }
+
+    fn active_expanded_details_mut(&mut self) -> &mut HashSet<String> {
+        if self.tab == Tab::Pr {
+            &mut self.pr_expanded_details
+        } else {
+            &mut self.preview_expanded_details
+        }
+    }
+
+    pub(crate) fn note_painted_details(
+        &self,
+        x_start: u16,
+        x_end: u16,
+        y: u16,
+        summary: std::sync::Arc<str>,
+    ) {
+        self.painted_details.borrow_mut().push(PaintedDetails { x_start, x_end, y, summary });
+    }
+
+    #[must_use]
+    pub fn painted_details_at(&self, col: u16, row: u16) -> Option<std::sync::Arc<str>> {
+        self.painted_details
+            .borrow()
+            .iter()
+            .find(|d| d.y == row && col >= d.x_start && col < d.x_end)
+            .map(|d| d.summary.clone())
+    }
+
+    pub fn toggle_details(&mut self, summary: &str) {
+        let set = self.active_expanded_details_mut();
+        if !set.remove(summary) {
+            set.insert(summary.to_string());
+        }
+    }
+
+    pub fn expand_pr_details(&mut self) {
+        let width = self.pane_width.get().max(1);
+        let bodies = self.pr_markdown_bodies();
+        let mut summaries = HashSet::new();
+        for text in &bodies {
+            for m in &self.markdown_render(text, width).meta {
+                if let Some(d) = &m.details {
+                    summaries.insert(d.summary.to_string());
+                }
+            }
+        }
+        self.pr_expanded_details.extend(summaries);
+    }
+
+    pub fn collapse_pr_details(&mut self) {
+        self.pr_expanded_details.clear();
+    }
+
+    fn pr_markdown_bodies(&self) -> Vec<String> {
+        if self.pr_on_description() {
+            return self.pr_snapshot().map(|s| vec![s.body.clone()]).unwrap_or_default();
+        }
+        let Some(cm) = self.pr_selected_comment() else {
+            return Vec::new();
+        };
+        let mut bodies = vec![cm.body.clone()];
+        bodies.extend(cm.replies.iter().map(|r| r.body.clone()));
+        bodies
     }
 
     /// Finding hunk rows for the PR read pane, through the one-slot memo.
@@ -2333,6 +2468,7 @@ impl App {
         self.pr_read_scroll = 0;
         self.pr_nav_scroll.set(0);
         self.reveal_pr_nav.set(true);
+        self.pr_expanded_details.clear();
     }
 
     /// Apply a snapshot fetched off-thread (`forge::fetch` runs on a worker so the UI never
@@ -2367,13 +2503,16 @@ impl App {
         // it survives while the new snapshot still has a description, and an emptied one
         // vanishes like a deleted comment.
         let on_description = self.pr_on_description();
+        let old_number = self.pr_snapshot().map(|s| s.number);
         let selected = self
             .pr_selected_comment()
             .map(|c| (c.author.clone(), c.created_at.clone(), c.anchor.clone()));
         self.pr = view;
         let offset = self.pr_description_offset();
         let restored = if on_description {
-            self.pr_has_description().then_some(0)
+            self.pr_has_description()
+                .then_some(0)
+                .filter(|_| self.pr_snapshot().map(|s| s.number) == old_number)
         } else {
             selected.as_ref().and_then(|(author, created, anchor)| {
                 let i = self.pr_snapshot()?.comments.iter().position(|c| {
@@ -2393,6 +2532,7 @@ impl App {
                 self.pr_read_scroll = 0;
             }
             self.pr_cursor = self.pr_cursor.min(clamped);
+            self.pr_expanded_details.clear();
         }
     }
 
@@ -2477,6 +2617,7 @@ impl App {
         self.pr_cursor = i;
         self.pr_read_scroll = 0;
         self.reveal_pr_nav.set(true);
+        self.pr_expanded_details.clear();
     }
 
     pub(crate) fn pr_scroll_nav(&mut self, delta: isize) {
@@ -2529,6 +2670,10 @@ impl App {
         std::mem::swap(&mut self.preview_scroll, &mut self.stash.preview_scroll);
         std::mem::swap(&mut self.preview_text, &mut self.stash.preview_text);
         std::mem::swap(&mut self.preview_scrolled, &mut self.stash.preview_scrolled);
+        std::mem::swap(
+            &mut self.preview_expanded_details,
+            &mut self.stash.preview_expanded_details,
+        );
         std::mem::swap(&mut self.tab_visited, &mut self.stash.visited);
     }
 
@@ -3326,11 +3471,11 @@ impl App {
 
     /// Re-seat the base picker's highlight after a filter edit: it follows its own row into
     /// the narrowed view when the row survives, else rests on the first match
-    /// (Continuity). An empty frozen list with a non-empty query
-    /// schedules a commit probe.
+    /// (Continuity). A non-empty query no row spells exactly schedules a revision probe,
+    /// whatever the fuzzy matches: `v1.2` must reach the tag even beside `v1.2-hotfix`.
     fn refilter_base_picker(&mut self, highlighted: Option<String>) {
         let Some(bp) = self.base_picker.as_mut() else { return };
-        bp.probe = if bp.filtered().is_empty() && !bp.query.is_empty() {
+        bp.probe = if !bp.query.is_empty() && !bp.query_is_listed() {
             BaseProbe::Pending(Instant::now() + BASE_PROBE_DELAY)
         } else {
             BaseProbe::Idle
@@ -3366,7 +3511,7 @@ impl App {
     /// Check the query as a commit now. Tests call this instead of sleeping.
     pub fn run_base_probe(&mut self) {
         let Some(bp) = &self.base_picker else { return };
-        if bp.query.is_empty() || !bp.filtered().is_empty() {
+        if bp.query.is_empty() || bp.query_is_listed() {
             if let Some(bp) = self.base_picker.as_mut() {
                 bp.probe = BaseProbe::Idle;
             }
@@ -3375,9 +3520,13 @@ impl App {
         let query = bp.query.clone();
         let hit = git::resolve_spelling(&self.repo, &query).map(|resolved| {
             resolved.map(|c| match c {
-                git::ResolvedBase::Branch { name, .. } => {
-                    BaseChoice::Branch { name, starred: false, is_default: false }
-                }
+                git::ResolvedBase::Branch { name, .. } => BaseChoice::Branch {
+                    name,
+                    pr_base: false,
+                    is_default: false,
+                    current: false,
+                    tip_secs: 0,
+                },
                 git::ResolvedBase::Rev { spelling, oid } => {
                     BaseChoice::Rev { name: git::complete_sha_prefix(&spelling, &oid), oid }
                 }
@@ -3385,10 +3534,7 @@ impl App {
         });
         let Some(bp) = self.base_picker.as_mut() else { return };
         match hit {
-            Ok(Some(choice)) => {
-                bp.probe = BaseProbe::Hit(choice);
-                bp.cursor = 0;
-            }
+            Ok(Some(choice)) => bp.probe = BaseProbe::Hit(choice),
             Ok(None) => bp.probe = BaseProbe::Miss,
             Err(e) => {
                 bp.probe = BaseProbe::Miss;
@@ -4423,18 +4569,33 @@ impl App {
         self.tab.is_file_tab() && self.base.is_none()
     }
 
-    /// Open the base picker: one row per branch name, the open PR's target starred first,
-    /// the default branch next, the rest by commit recency.
-    /// A current non-branch pick is inserted as a row. The highlight opens on the current
-    /// base, else the first row. Still opens when that list is empty, so a revision can
-    /// be typed.
+    /// Open the base picker: one row per branch, the open PR's target first, the default
+    /// branch next, the rest by tip recency, each with its trail facts. Picking the
+    /// default row is the way back to the default: its name deletes the pick instead of
+    /// recording it. A current non-branch pick is inserted as a row. The highlight opens
+    /// on the current base, else the first row. Still opens when that list is empty, so a
+    /// revision can be typed.
     pub fn open_base_picker(&mut self) {
         if !self.base_pick_available() || self.mode != Mode::Normal {
             return;
         }
-        let default = git::default_branch_name(&self.repo).ok().flatten();
-        let names = match git::list_branches(&self.repo, default.as_deref()) {
-            Ok(names) => names,
+        // The base is re-resolved here, not read from `branch_base`: that lands only while
+        // `branch` is showing, and the picker opens from every scope. One pass serves both
+        // the winner and the default row's mark.
+        let resolution = match git::resolve_base(&self.repo, self.base.as_deref()) {
+            Ok(r) => r,
+            Err(e) => {
+                self.status = e.0;
+                return;
+            }
+        };
+        let (winner, default) = (resolution.status.winner, resolution.default);
+        let listed = git::list_branches(&self.repo).and_then(|rows| {
+            let current = git::checked_out_branch(&self.repo)?;
+            Ok((rows, current))
+        });
+        let (branches, current) = match listed {
+            Ok(v) => v,
             Err(e) => {
                 self.status = e.0;
                 return;
@@ -4444,25 +4605,18 @@ impl App {
             .pr_snapshot()
             .filter(|s| s.state == forge::PrState::Open)
             .map(|s| s.base_ref.clone());
-        let mut rows: Vec<BaseChoice> = names
+        let mut rows: Vec<BaseChoice> = branches
             .into_iter()
-            .map(|name| BaseChoice::Branch {
-                starred: target.as_deref() == Some(name.as_str()),
-                is_default: default.as_deref() == Some(name.as_str()),
-                name,
+            .map(|b| BaseChoice::Branch {
+                pr_base: target.as_deref() == Some(b.name.as_str()),
+                is_default: default.as_deref() == Some(b.name.as_str()),
+                current: current.as_deref() == Some(b.name.as_str()),
+                tip_secs: b.tip_secs,
+                name: b.name,
             })
             .collect();
         // A stable sort, so recency still orders the promoted pair and the rest alike.
-        rows.sort_by_key(|r| (!r.starred(), !r.is_default()));
-        // The base is re-resolved here, not read from `branch_base`: that lands only while
-        // `branch` is showing, and the picker opens from every scope.
-        let winner = match git::resolve_base(&self.repo, self.base.as_deref()) {
-            Ok(r) => r.status.winner,
-            Err(e) => {
-                self.status = e.0;
-                return;
-            }
-        };
+        rows.sort_by_key(|r| (!r.pr_base(), !r.is_default()));
         if let Some(git::ResolvedBase::Rev { spelling, oid }) = &winner
             && !rows.iter().any(|r| r.name() == spelling)
         {
@@ -4506,8 +4660,9 @@ impl App {
     }
 
     /// Pick the highlighted row: persist its spelling, then rebuild the changeset
-    /// against it. With no visible row, Enter checks the query immediately and
-    /// records it if it resolves.
+    /// against it. The default row is the way back: its spelling deletes the ref instead
+    /// (`git::write_base_pick`), so the pane follows the repo's default again. With no
+    /// visible row, Enter checks the query immediately and records it if it resolves.
     pub fn base_picker_pick(&mut self) -> Result<()> {
         let Some(bp) = &self.base_picker else { return Ok(()) };
         if bp.visible().is_empty() {
@@ -5023,8 +5178,10 @@ mod tests {
         old.base_picker = Some(super::BasePicker {
             rows: vec![super::BaseChoice::Branch {
                 name: "dev".to_string(),
-                starred: false,
+                pr_base: false,
                 is_default: false,
+                current: false,
+                tip_secs: 0,
             }],
             cursor: 0,
             query: "d".to_string(),
@@ -5339,7 +5496,8 @@ mod tests {
                 "navigator, on a directory row",
                 Box::new(|a: &mut App| {
                     a.focus = crate::Focus::Files;
-                    a.file_rows[0].kind = RowKind::Dir { path: "src".into(), expanded: true };
+                    a.file_rows[0].kind =
+                        RowKind::Dir { path: "src".into(), expanded: true, has_change: false };
                 }),
                 None,
             ),

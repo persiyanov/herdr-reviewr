@@ -169,8 +169,8 @@ links, and scroll with the wheel.
 ## The three tabs
 
 - **Changes** — the active scope's changed files with `+/-` stats and totals in the header.
-- **All files** — any file's current content from the whole worktree, comments too. Ignored
-  paths show dimmed.
+- **All files** — any file's current content from the whole worktree, comments too. A collapsed
+  folder with a changed file under it shows a dot. Ignored paths show dimmed.
 - **PR** — a read-only mirror of the branch's pull request (GitHub, Azure DevOps) or merge
   request (GitLab): state, checks, description, and comments, rendered as markdown. reviewr
   never writes to the forge.
@@ -264,16 +264,18 @@ back.
 
 ### Base branch
 
-The **branch** scope diffs against the merge-base with your repo's default branch, the one
-`origin/HEAD` names. The header shows the resolved base, `vs main`.
+The **branch** scope diffs against the merge-base with your repo's default branch, with or
+without a remote. The header shows the resolved base, `vs main`.
 
 When the trunk is something else, or you review a stacked branch, press `B` (or click the
-base name) and pick the branch. The pick is stored for this worktree and holds until you
-pick again. Other worktrees on the same clone keep their own pick. Choosing the default
-branch records that name.
+base name) and pick the branch. Every branch is a row with its age, and a row says when it
+is the open PR's target (`pr base`), the repo's `default`, or the branch checked out here
+(`current`). Type to narrow the list, fuzzily. The pick is stored for this worktree and holds
+until you pick again. Other worktrees on the same clone keep their own pick. Pick the default
+branch to go back to it.
 
-You can also type any revision, like `HEAD~2`, a tag, or a SHA prefix. The header shows what
-resolved: `vs HEAD~2 (a1b2c3d)`.
+You can also type any revision, like `HEAD~2`, a tag, or a SHA prefix. It appears as one more
+row under the matches, and the header shows what resolved: `vs HEAD~2 (a1b2c3d)`.
 
 `--base <ref>` sets the base for this pane. It wins over the pick and disables the picker.
 
@@ -345,7 +347,8 @@ A key is one printable character, or a `ctrl+`/`alt+` chord like `ctrl+f`. `Tab`
 ### Forge repositories and hosts
 
 The PR tab reads `upstream` when you have one, otherwise `origin`. A standard fork clone works
-without setup.
+without setup. Checking out a contributor PR (`gh pr checkout`, `glab mr checkout`) in an
+upstream clone attaches it too.
 
 GitHub.com, GitLab.com, dev.azure.com, and the `*.visualstudio.com` organization hosts work
 without configuration. For one self-hosted instance per forge, set its bare hostname:
@@ -482,10 +485,6 @@ Structured (JSON) export, a side-by-side split view, mark-file-reviewed,
 named-key notation for keybindings, OSC light/dark theme autodetect, more themes
 (`kanagawa`, `vesper`, `everforest`, `ayu`, a dark `github`), a `terminal`-following palette,
 and OSC 52 clipboard.
-
-## Design
-
-Change specs live in [`docs/specs/`](docs/specs/), one folder per change.
 
 ## License
 

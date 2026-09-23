@@ -1,8 +1,8 @@
 //! The file-list directory tree: the scope's changed files grouped into a collapsible
 //! tree of directories and files, flattened to the rows the navigator paints.
 //!
-//! This module is pure — it turns a `&[ChangedFile]` plus the set
-//! of collapsed directory paths into a flat `Vec<Row>`; selection, expansion state, and
+//! This module is pure — it turns a `&[Entry]` plus the set of directory paths toggled
+//! from the tab's resting state into a flat `Vec<Row>`; selection, expansion state, and
 //! rendering live in `app.rs` and `ui.rs`.
 
 use std::collections::{BTreeMap, HashSet};
@@ -26,8 +26,10 @@ pub struct Row {
 /// What a [`Row`] is: a directory (togglable) or a file (opens the read pane).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RowKind {
-    /// A directory: its full path keys its expansion state.
-    Dir { path: String, expanded: bool },
+    /// A directory: its full path keys its expansion state. `has_change` says a listed
+    /// annotated entry lies under it, in either state, so the renderer can mark a collapsed
+    /// `All files` folder that holds a change.
+    Dir { path: String, expanded: bool, has_change: bool },
     /// A file: its index into the source `&[Entry]`, plus its annotation when changed.
     File { index: usize, annotation: Option<Annotation> },
 }
@@ -103,6 +105,11 @@ struct Dir {
     /// Set when a wholly-ignored directory placeholder created this node — its row renders
     /// dimmed. A directory derived from tracked file paths stays `false`.
     ignored: bool,
+    /// Whether a listed annotated entry lies under this node at any depth. Marked on every
+    /// ancestor as an annotated entry is inserted, so no later walk is needed. An ignored
+    /// placeholder's unloaded children are not entries, so they do not count until it is
+    /// expanded.
+    has_change: bool,
 }
 
 /// Flatten `entries` into the visible tree rows. `default_expanded` sets a directory's
@@ -138,9 +145,11 @@ fn insert(root: &mut Dir, entry: &Entry, index: usize) {
         return;
     }
     let Some(base) = segments.pop() else { return };
+    let changed = entry.annotation.is_some();
     let mut cur = root;
     for seg in segments {
         cur = cur.dirs.entry(seg.to_string()).or_default();
+        cur.has_change |= changed;
     }
     cur.files.insert(base.to_string(), index);
 }
@@ -165,7 +174,7 @@ fn flatten<S: BuildHasher>(
             rows.push(Row {
                 depth,
                 name: display,
-                kind: RowKind::Dir { path: path.clone(), expanded },
+                kind: RowKind::Dir { path: path.clone(), expanded, has_change: node.has_change },
                 ignored: node.ignored,
             });
             if expanded {
@@ -320,6 +329,57 @@ mod tests {
         assert!(matches!(rows[0].kind, RowKind::File { annotation: None, .. }));
     }
 
+    fn plain(path: &str) -> Entry {
+        Entry {
+            path: path.into(),
+            previous_path: None,
+            annotation: None,
+            ignored: false,
+            is_dir: false,
+        }
+    }
+
+    fn has_change(row: &super::Row) -> bool {
+        matches!(row.kind, RowKind::Dir { has_change: true, .. })
+    }
+
+    #[test]
+    fn a_directory_row_marks_a_change_beneath_it() {
+        // One changed file among unchanged siblings marks the folder.
+        let mut es = entries(&[file("src/ui.rs")]);
+        es.push(plain("src/app.rs"));
+        es.push(plain("docs/a.md"));
+        es.push(plain("docs/b.md"));
+        let rows = build(&es, &HashSet::new(), false);
+        assert_eq!(shape_rows(&rows), ["0:dir:docs", "0:dir:src"]);
+        assert!(!has_change(&rows[0]), "docs/ holds no change");
+        assert!(has_change(&rows[1]), "src/ holds ui.rs");
+
+        // The mark is on the row in both states.
+        let toggled: HashSet<String> = ["src".to_string()].into_iter().collect();
+        let rows = build(&es, &toggled, false);
+        assert_eq!(shape_rows(&rows), ["0:dir:docs", "0:dir:src", "1:file:app.rs", "1:file:ui.rs"]);
+        assert!(has_change(&rows[1]), "expanded src/ still carries the mark");
+
+        // A zero-line change of any kind (a pure rename, a binary) still counts.
+        let mut zero = file("bin/x.png");
+        zero.kind = ChangeKind::Renamed;
+        zero.additions = 0;
+        let mut es = vec![Entry::from_changed(&zero)];
+        es.push(plain("bin/y.png"));
+        let rows = build(&es, &HashSet::new(), false);
+        assert!(has_change(&rows[0]), "a zero-line annotation marks the folder");
+
+        // A change deep in a subtree marks every ancestor folder row.
+        let mut es = entries(&[file("a/b/deep.rs")]);
+        es.push(plain("a/top.rs"));
+        es.push(plain("a/b/other.rs"));
+        let toggled: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let rows = build(&es, &toggled, false);
+        assert_eq!(shape_rows(&rows), ["0:dir:a", "1:dir:b", "1:file:top.rs"]);
+        assert!(has_change(&rows[0]) && has_change(&rows[1]), "a/ and a/b/ both marked");
+    }
+
     fn ignored_dir(path: &str) -> Entry {
         Entry {
             path: path.into(),
@@ -337,7 +397,7 @@ mod tests {
         let rows = build(&[ignored_dir("target")], &HashSet::new(), false);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].ignored, "the placeholder row is marked ignored (dimmed)");
-        assert!(matches!(rows[0].kind, RowKind::Dir { expanded: false, .. }));
+        assert!(matches!(rows[0].kind, RowKind::Dir { expanded: false, has_change: false, .. }));
     }
 
     #[test]

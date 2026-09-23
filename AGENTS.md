@@ -11,11 +11,11 @@ herdr-reviewr is a Rust TUI (ratatui) code-review pane: it runs in a [herdr](htt
 - `just ci` — exactly what CI runs (fmt-check, lint, test, release build).
 - `just qa-install` — put a local build into the user's real herdr panes. See "QA install" below before using it.
 - `just smoke-edit` — PTY smoke test of the editor path (`e`) against a real release binary. Unit tests stop at the argv; everything after it is terminal state, so run this after any change to `run_editor`, the terminal mode stack, or the editor dialects. Not part of `just ci`: it drives a pty and takes about a minute.
-- `python3 scripts/bench_tui.py --binary target/release/herdr-reviewr --fixture` — perceived-latency benchmark (keypress → painted frame, via PTY), the acceptance instrument. `cargo run --release --example bench_latency -- <repo>` attributes a slow number to its component calls. The one committed baseline is `scripts/bench-results/baseline.json` — replace it when a change moves the numbers, never add per-round runs. Run before/after any change to the reload, render, git, or highlight paths, and compare medians A/B under the same system load (rebuild the old binary to a second target dir and interleave runs — absolute numbers drift with background load).
+- `python3 scripts/bench_tui.py --binary target/release/herdr-reviewr --fixture` — perceived-latency benchmark (keypress → painted frame, via PTY). Ad-hoc tooling, not a gate: run it when a change might feel slower. `cargo run --release --example bench_latency -- <repo>` attributes a slow number to its component calls. The one committed baseline is `scripts/bench-results/baseline.json` — replace it when a change moves the numbers, never add per-round runs. For an A/B, rebuild the old binary to a second target dir and interleave runs under the same system load — absolute numbers drift with background load.
 
-## Spec-first
+## Invariants
 
-New behavior is designed with `/brainstorming` and sequenced with `/planning`. Each change lives in `docs/specs/YYYY-MM-DD-<slug>/` (`spec.md`, then `plan.md` and `tickets/`). Read that change's spec before touching user-visible behavior.
+New behavior is designed with `/brainstorming` and sequenced with `/planning` in the conversation; the repo keeps no spec tree. The commit message and the changelog carry the decisions.
 
 Load-bearing invariants. Cite them by name:
 
@@ -32,7 +32,7 @@ The runtime is a single-threaded frame loop (`event_loop` in `src/lib.rs`): draw
 - `src/git.rs` — every git subprocess. `changed_files` (scope changesets), `all_files` (tracked + untracked + ignored via `ls-files` — never use `git status --ignored`, it walks inside ignored trees and costs seconds), `snapshot_worktree` (temp-index `add -A` + `write-tree` for turn baselines), baseline refs.
 - `src/diff.rs` — `FileDiff` build (syntect highlight both sides, similar-line pairing, word emphasis, folds) and `DiffCache`, keyed by path and gated by content hash. Cleared on scope switch and theme change.
 - `src/ui.rs` — all rendering. Row heights and wrapping recompute per frame across the visible diff, so render cost scales with open-file size.
-- `src/forge.rs` + the `PrRefresh`/`PrCoordinator` state machines in `lib.rs` — the PR snapshot. Fetches are tagged with the input (repository identity, pinned HEAD and base, the branch's forge names) that produced them, and a result paints only if a fresh probe proves the input still matches. This generation/input-tag pattern is the template for moving other derived state off-thread.
+- `src/forge.rs` + the `PrRefresh`/`PrCoordinator` state machines in `lib.rs` — the PR snapshot. Fetches are tagged with the input (repository identity, pinned HEAD and base, the branch's published heads and pin) that produced them, and a result paints only if a fresh probe proves the input still matches. This generation/input-tag pattern is the template for moving other derived state off-thread.
 - `src/gitlab.rs` / `src/azure_devops.rs` — the `glab` and `az` providers behind the forge boundary in `forge.rs`, each mapping its CLI's payloads onto the one `PrSnapshot` shape.
 - `src/turn.rs` — the pure turn state machine: a resting→working edge starts a turn, and a pending candidate promotes to the `last-turn` baseline once the worktree diverges from it. The world worker's `TurnHost` drives it; `src/herdr.rs` holds the herdr CLI calls.
 - `src/model.rs` — `CommentStore` (in-memory), comment anchoring (`diff_anchored` distinguishes diff comments from All-files content comments — each renders only in its own view).

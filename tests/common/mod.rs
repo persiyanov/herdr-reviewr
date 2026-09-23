@@ -21,6 +21,10 @@ impl Repo {
     pub fn init() -> Self {
         let repo = Self { dir: TempDir::new().expect("tempdir") };
         repo.git(&["init", "-q", "-b", "main"]);
+        // The base chain reads `init.defaultBranch`, and `--get` sees the developer's
+        // global config. Pin it locally to a name no test creates, so the suite never
+        // depends on the machine it runs on.
+        repo.git(&["config", "init.defaultBranch", "no-such-default"]);
         repo
     }
 
@@ -178,7 +182,8 @@ pub fn pr_snapshot() -> herdr_reviewr::forge::PrSnapshot {
         sync: Sync::InSync,
         checks: Vec::new(),
         comments: Vec::new(),
-        truncated: false,
+        comments_truncated: false,
+        checks_truncated: false,
     }
 }
 
@@ -197,7 +202,7 @@ pub fn comment() -> herdr_reviewr::forge::Comment {
         created_at: "2026-06-27T10:00:00Z".into(),
         is_resolved: false,
         is_outdated: false,
-        reply_count: 0,
+        replies: Vec::new(),
     }
 }
 

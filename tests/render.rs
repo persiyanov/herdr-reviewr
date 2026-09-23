@@ -151,8 +151,10 @@ fn the_base_picker_anchors_the_terminal_cursor_at_its_caret() {
     app.base_picker = Some(BasePicker {
         rows: vec![BaseChoice::Branch {
             name: "main".to_string(),
-            starred: false,
+            pr_base: false,
             is_default: true,
+            current: false,
+            tip_secs: 1,
         }],
         cursor: 0,
         query: String::new(),
@@ -879,12 +881,46 @@ fn the_pr_footer_keeps_the_open_action_when_the_state_line_is_long() {
         merge: Merge::Conflicting, // a long state line: conflicts · behind · failing · +more
         sync: Sync::Behind(3),
         checks: vec![Check { name: "ci".into(), status: CheckStatus::Failure }],
-        truncated: true,
+        comments_truncated: true,
+        checks_truncated: true,
         ..common::pr_snapshot()
     }));
     // At narrow width the state line is capped so the primary `o open ↗` is never crowded off.
     let footer = footer_line(&render_at(&app, 60));
     assert!(footer.contains("o open"), "the open action survives a long state line:\n{footer}");
+}
+
+#[test]
+fn the_pr_footer_names_a_capped_list_in_the_pane() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{Check, CheckStatus, PrSnapshot, PrView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    app.pr = PrView::Pr(Box::new(PrSnapshot { comments_truncated: true, ..common::pr_snapshot() }));
+    let footer = footer_line(&render(&app));
+    assert!(footer.contains("newest 100 comments"), "{footer}");
+    assert!(!footer.contains("+more on"), "{footer}");
+
+    app.pr = PrView::Pr(Box::new(PrSnapshot {
+        checks: vec![Check { name: "ci".into(), status: CheckStatus::Success }],
+        checks_truncated: true,
+        ..common::pr_snapshot()
+    }));
+    let footer = footer_line(&render(&app));
+    assert!(footer.contains("newest 100 checks"), "{footer}");
+    assert!(!footer.contains("+more on"), "{footer}");
+
+    app.pr = PrView::Pr(Box::new(PrSnapshot {
+        comments_truncated: true,
+        checks_truncated: true,
+        ..common::pr_snapshot()
+    }));
+    let footer = footer_line(&render(&app));
+    assert!(footer.contains("newest 100 comments"), "{footer}");
+    assert!(footer.contains("newest 100 checks"), "{footer}");
 }
 
 #[test]
@@ -2226,6 +2262,97 @@ fn an_anchor_in_a_comment_body_jumps_past_the_snippet_offset() {
     assert!(!out.contains("jump go"), "the body's top scrolled away:\n{out}");
 }
 
+#[test]
+fn a_finding_paints_its_replies_in_the_read_pane() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{Comment, CommentKind, PrSnapshot, PrView, Reply};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    app.pr = PrView::Pr(Box::new(PrSnapshot {
+        comments: vec![Comment {
+            kind: CommentKind::Finding,
+            author: "codex".into(),
+            author_is_bot: true,
+            anchor: "x.rs:1".into(),
+            place: Some(herdr_reviewr::forge::FindingPlace::from_anchor(
+                "x.rs:1",
+                Some(herdr_reviewr::model::Side::New),
+            )),
+            body: "the finding".into(),
+            replies: vec![Reply {
+                author: "persijano".into(),
+                author_is_bot: false,
+                body: "Addressed in abc".into(),
+                created_at: "2026-06-27T11:30:00Z".into(),
+            }],
+            ..common::comment()
+        }],
+        ..common::pr_snapshot()
+    }));
+    let out = render(&app);
+    assert!(out.contains("the finding"), "{out}");
+    assert!(out.contains("@codex · "), "root byline with age:\n{out}");
+    assert!(out.contains("@persijano · "), "reply byline with age:\n{out}");
+    assert!(out.contains("Addressed in abc"), "{out}");
+    assert!(out.contains('─'), "a rule separates turns:\n{out}");
+    assert!(!out.contains("open on"), "{out}");
+    assert!(!out.contains("↳"), "{out}");
+}
+
+#[test]
+fn details_expand_on_the_pr_tab_and_reset_on_row_change() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{Comment, PrSnapshot, PrView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    let body = "<details> <summary>About Codex</summary>\n\nchrome lives here\n\n</details>";
+    app.pr = PrView::Pr(Box::new(PrSnapshot {
+        comments: vec![
+            Comment { author: "codex".into(), body: body.into(), ..common::comment() },
+            Comment { author: "ann".into(), body: "plain".into(), ..common::comment() },
+        ],
+        ..common::pr_snapshot()
+    }));
+    let out = render(&app);
+    assert!(out.contains("About Codex"), "{out}");
+    assert!(!out.contains("chrome lives here"), "{out}");
+
+    app.expand_pr_details();
+    let out = render(&app);
+    assert!(out.contains("chrome lives here"), "{out}");
+
+    app.apply_pr(PrView::Pr(Box::new(PrSnapshot {
+        comments: vec![
+            Comment { author: "codex".into(), body: body.into(), ..common::comment() },
+            Comment { author: "ann".into(), body: "plain".into(), ..common::comment() },
+        ],
+        ..common::pr_snapshot()
+    })));
+    let out = render(&app);
+    assert!(out.contains("chrome lives here"), "same thread keeps it open:\n{out}");
+
+    app.pr_move(1);
+    let out = render(&app);
+    assert!(out.contains("plain"), "{out}");
+    assert!(!out.contains("chrome lives here"), "row change collapses:\n{out}");
+
+    app.pr_move(-1);
+    let _ = render(&app);
+    let hit = (0..40u16)
+        .flat_map(|y| (0..140u16).map(move |x| (x, y)))
+        .find_map(|(x, y)| app.painted_details_at(x, y));
+    let summary = hit.expect("summary is clickable after a paint");
+    app.toggle_details(&summary);
+    let out = render(&app);
+    assert!(out.contains("chrome lives here"), "click opens:\n{out}");
+}
+
 // In-file find rendering.
 #[test]
 fn the_find_band_and_match_highlight_paint() {
@@ -3136,9 +3263,153 @@ fn the_branch_header_names_the_base_and_its_click_opens_the_picker() {
     let keymap = app.keymap().clone();
     handle_mouse(&mut app, click, AREA, &[], &keymap, &herdr_reviewr::export::Clipboard).unwrap();
     let frame = render(&app);
-    assert!(frame.contains("base · 2 branches"), "the click opens the picker popup");
+    assert!(frame.contains("base · 3 branches"), "the click opens the picker popup");
     assert!(frame.contains("dev"), "the sibling branch is a row");
     assert!(frame.contains("default"), "the default branch is marked");
+    assert!(frame.contains("current"), "the checked-out branch is marked");
+    assert!(!frame.contains('★'), "no glyph: the trail words carry the facts");
+
+    // The box is sized to its rows: the filter line, three branch rows, two borders, and
+    // no blank row held for a probe that is not showing.
+    let top = frame.lines().position(|l| l.contains("┌ base")).unwrap();
+    let bottom = frame.lines().skip(top).position(|l| l.contains("└────")).unwrap();
+    assert_eq!(bottom, 5, "top border, filter line, three rows, bottom border: {frame}");
+}
+
+#[test]
+fn the_picker_title_counts_matches_while_filtering() {
+    let (r, mut app) = based_app();
+    app.open_base_picker();
+    assert!(render(&app).contains("base · 3 branches"));
+    app.input_push('d');
+    assert!(render(&app).contains("base · 1/3"), "matched over total: {}", render(&app));
+    app.close_base_picker();
+
+    // A current non-branch pick is a row, never a count: `HEAD~1` is listed under the
+    // three branches but both numbers still say three.
+    herdr_reviewr::git::write_base_pick(r.path(), "HEAD~1").unwrap();
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    let frame = render(&app);
+    assert!(frame.contains("HEAD~1"), "{frame}");
+    assert!(frame.contains("base · 3 branches"), "{frame}");
+    app.input_push('e');
+    let frame = render(&app);
+    assert!(
+        frame.contains("base · 2/3"),
+        "dev and feature match, the rev row counts nowhere: {frame}"
+    );
+}
+
+#[test]
+fn a_probe_row_still_fits_when_every_branch_matches() {
+    // One branch, and it matches the query: the frozen full-list height has no spare
+    // row, so the box must grow by the hit's row or the tag is unpainted and unclickable.
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    r.git(&["checkout", "-q", "-b", "v1.2-hotfix"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    r.git(&["branch", "-D", "main"]);
+    r.git(&["tag", "v1.2", "HEAD~1"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    for ch in "v1.2".chars() {
+        app.input_push(ch);
+    }
+    app.run_base_probe();
+    let frame = render(&app);
+    assert!(frame.contains("v1.2-hotfix"), "{frame}");
+    assert!(frame.contains('(') && frame.contains("v1.2 "), "the tag row paints: {frame}");
+    let rows: std::collections::BTreeSet<usize> = (0..AREA.height)
+        .flat_map(|row| (0..AREA.width).map(move |col| (col, row)))
+        .filter_map(|(col, row)| ui::hit_base_picker_row(AREA, &app, col, row))
+        .collect();
+    assert_eq!(rows.into_iter().collect::<Vec<_>>(), [0, 1], "the hit row is inside the box");
+}
+
+fn now_minus(secs: u64) -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+        .saturating_sub(secs)
+}
+
+/// A row carrying every trail word, painted at a width that fits and at widths that do not.
+fn worst_case_picker(app: &mut App) {
+    app.base_picker = Some(BasePicker {
+        rows: vec![BaseChoice::Branch {
+            name: "main".to_string(),
+            pr_base: true,
+            is_default: true,
+            current: true,
+            tip_secs: now_minus(2 * 3600),
+        }],
+        cursor: 0,
+        query: String::new(),
+        caret: 0,
+        probe: BaseProbe::Idle,
+    });
+    app.mode = Mode::BasePick;
+}
+
+#[test]
+fn a_narrow_pane_sheds_trail_words_before_the_name() {
+    let mut app = edited_app();
+    worst_case_picker(&mut app);
+    let wide = dump(&render_size(&app, 80, 20));
+    assert!(wide.contains("main"), "{wide}");
+    assert!(wide.contains("pr base · default · current · 2h"), "every word fits at 80: {wide}");
+
+    // The popup never exceeds the body, so a narrow pane narrows the row. Words drop from
+    // the right, the age first, and the name is the last thing to clip.
+    let narrow = dump(&render_size(&app, 34, 20));
+    assert!(narrow.contains("main"), "{narrow}");
+    assert!(narrow.contains("pr base"), "the first word survives: {narrow}");
+    assert!(!narrow.contains("2h"), "the age goes first: {narrow}");
+    let tiny = dump(&render_size(&app, 14, 20));
+    assert!(tiny.contains("main"), "the name outlives every word: {tiny}");
+    assert!(!tiny.contains("pr base"), "{tiny}");
+}
+
+#[test]
+fn a_probe_row_is_clickable_below_the_matches() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.set_origin_default("main", "main");
+    r.git(&["branch", "v1.2-hotfix"]);
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    r.git(&["tag", "v1.2", "HEAD~1"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    for ch in "v1.2".chars() {
+        app.input_push(ch);
+    }
+    app.run_base_probe();
+    let frame = render(&app);
+    assert!(frame.contains("v1.2-hotfix"), "{frame}");
+    let hits: Vec<(u16, u16, usize)> = (0..AREA.height)
+        .flat_map(|row| (0..AREA.width).map(move |col| (col, row)))
+        .filter_map(|(col, row)| {
+            ui::hit_base_picker_row(AREA, &app, col, row).map(|i| (col, row, i))
+        })
+        .collect();
+    let rows: std::collections::BTreeSet<usize> = hits.iter().map(|h| h.2).collect();
+    assert_eq!(
+        rows.into_iter().collect::<Vec<_>>(),
+        [0, 1],
+        "both rows hit-test, the probe row too"
+    );
+    let probe_y = hits.iter().find(|h| h.2 == 1).unwrap().1;
+    let branch_y = hits.iter().find(|h| h.2 == 0).unwrap().1;
+    assert_eq!(probe_y, branch_y + 1, "the probe row sits under the match");
 }
 
 #[test]
@@ -3350,6 +3621,7 @@ fn without_a_resolving_base_the_header_reads_no_base() {
     let r = Repo::init();
     r.write("hello.rs", "alpha\n");
     r.commit_all("init");
+    r.git(&["branch", "-m", "main", "trunk"]); // no `main`/`master`: no default to fall back on
     r.git(&["checkout", "-q", "-b", "feature"]);
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
@@ -3360,10 +3632,36 @@ fn without_a_resolving_base_the_header_reads_no_base() {
 }
 
 #[test]
+fn a_local_only_repo_has_its_main_as_the_base() {
+    // No remote at all: `origin/HEAD` names nothing, and the local `main` is the default,
+    // so the header never reads `no base` in a repo that plainly has a trunk.
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("hello.rs", "alpha\nBETA\n");
+    r.commit_all("edit");
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    assert!(line0.contains("[branch] vs main"), "the local main is the base: {line0}");
+    assert!(!line0.contains("missing"), "nothing is skipped: {line0}");
+    assert!(line0.contains("1 changed"), "the branch diffs against it: {line0}");
+
+    // On `main` itself the base is still `main`: the scope is the uncommitted diff.
+    r.git(&["checkout", "-q", "main"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let line0 = render(&app).lines().next().unwrap().to_string();
+    assert!(line0.contains("[branch] vs main"), "{line0}");
+}
+
+#[test]
 fn a_dormant_pick_shows_beside_the_empty_state() {
     let r = Repo::init();
     r.write("hello.rs", "alpha\n");
     r.commit_all("init");
+    r.git(&["branch", "-m", "main", "trunk"]); // no `main`/`master`: no default to fall back on
     herdr_reviewr::git::write_base_pick(r.path(), "gone").unwrap();
     r.git(&["checkout", "-q", "-b", "feature"]);
     let mut app = app_on(&r);
@@ -3910,4 +4208,186 @@ fn a_row_shows_one_ref_by_what_matters_most() {
     let out = render(&app);
     let top = out.lines().skip(1).find(|l| l.contains(&shas[3][..7])).unwrap();
     assert!(top.contains("  pr ") && !top.contains("origin/feature"), "{top}");
+}
+
+/// The default-right navigator's first inner column on the 140-wide test frame.
+const FILES_X0: u16 = 140 - 140 * 32 / 100 + 1;
+/// Its last inner column: the frame edge less the right border.
+const FILES_X1: u16 = 140 - 2;
+
+/// The files-pane row holding `token`: its y, and its text from the pane's first inner
+/// column to its last, untrimmed, so a test can check both what a row ends in and where.
+fn files_row_at(buf: &Buffer, token: &str) -> (u16, String) {
+    let row = |y: u16| -> String {
+        (FILES_X0..=FILES_X1).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect()
+    };
+    let y = (0..buf.area.height)
+        .find(|&y| row(y).contains(token))
+        .unwrap_or_else(|| panic!("no files-pane row holds {token:?}"));
+    (y, row(y))
+}
+
+/// The files-pane row holding `token`, trailing padding trimmed.
+fn files_row(app: &App, token: &str) -> String {
+    files_row_at(&render_buffer(app), token).1.trim_end().to_string()
+}
+
+/// Whether the row holding `token` ends in the dot, painted in the pane's last inner column
+/// and in the `M` marker's color (the cell style of `m_marker_fg`).
+fn dot_at_edge(app: &App, token: &str) -> bool {
+    let buf = render_buffer(app);
+    let (y, _) = files_row_at(&buf, token);
+    let cell = buf.cell((FILES_X1, y)).unwrap();
+    cell.symbol() == "•" && cell.style().fg == Some(m_marker_fg(&buf))
+}
+
+/// The color of the `M` marker on the fixtures' edited `zz.rs` row.
+fn m_marker_fg(buf: &Buffer) -> ratatui::style::Color {
+    let (y, text) = files_row_at(buf, "M zz.rs");
+    let x = FILES_X0 + text.find("M zz.rs").unwrap() as u16;
+    buf.cell((x, y)).unwrap().style().fg.expect("the marker is colored")
+}
+
+/// A worktree with `src/{app.rs,ui.rs}` and `docs/{a.md,b.md}` committed and `src/ui.rs`
+/// edited, plus a top-level edited `zz.rs` so an `M` marker is always painted for the color
+/// reference.
+fn dotted_repo() -> Repo {
+    let r = Repo::init();
+    r.write("src/app.rs", "x\n");
+    r.write("src/ui.rs", "y\n");
+    r.write("docs/a.md", "a\n");
+    r.write("docs/b.md", "b\n");
+    r.write("zz.rs", "z\n");
+    r.commit_all("init");
+    r.write("src/ui.rs", "y2\n");
+    r.write("zz.rs", "z2\n");
+    r
+}
+
+#[test]
+fn a_collapsed_all_files_folder_with_a_change_wears_a_dot() {
+    let r = dotted_repo();
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(dot_at_edge(&app, "src/"), "src/ holds the edit: {:?}", files_row(&app, "src/"));
+    assert!(!files_row(&app, "docs/").contains('•'), "docs/ holds no change");
+    assert!(files_row(&app, "src/").starts_with("▸ src/"), "the chevron is the first column");
+
+    // Expanded, the children carry their own marker and the folder drops the dot.
+    app.focus = Focus::Files;
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
+    app.expand_dir();
+    assert!(!files_row(&app, "src/").contains('•'), "an expanded folder wears no dot");
+    assert!(files_row(&app, "ui.rs").starts_with("  M ui.rs"), "the child carries the marker");
+}
+
+#[test]
+fn a_kept_change_under_an_ignored_folder_wears_the_same_dot() {
+    // The folder name dims, the dot keeps its color.
+    let r = dotted_repo();
+    r.write(".gitignore", "vendor/\n");
+    r.write("vendor/lib.rs", "v\n");
+    r.write("vendor/other.rs", "o\n");
+    r.git(&["add", "-f", "vendor/lib.rs", "vendor/other.rs", ".gitignore"]);
+    r.commit_all("vendor");
+    r.write("vendor/lib.rs", "v2\n");
+    r.write("zz.rs", "z3\n");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(dot_at_edge(&app, "vendor/"), "{:?}", files_row(&app, "vendor/"));
+}
+
+#[test]
+fn a_folder_whose_only_change_has_no_row_wears_no_dot() {
+    // A staged deletion leaves the index, so `All files` has no row for it and the folder
+    // stays quiet: a dot there would open onto nothing. A plain `rm` keeps the index entry,
+    // so its row stays, marked `D`, and the folder wears the dot.
+    let r = dotted_repo();
+    r.write("gone/a.rs", "a\n");
+    r.write("gone/b.rs", "b\n");
+    r.write("rmd/a.rs", "a\n");
+    r.write("rmd/b.rs", "b\n");
+    r.commit_all("more");
+    r.git(&["rm", "-q", "gone/a.rs"]);
+    std::fs::remove_file(r.path_buf().join("rmd/a.rs")).unwrap();
+    r.write("zz.rs", "z3\n");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(!files_row(&app, "gone/").contains('•'), "{:?}", files_row(&app, "gone/"));
+    assert!(dot_at_edge(&app, "rmd/"), "{:?}", files_row(&app, "rmd/"));
+}
+
+#[test]
+fn a_collapsed_changes_folder_wears_no_dot_and_reserves_nothing() {
+    // On `Changes` every folder holds a change, so the dot would say nothing, and the row
+    // keeps its full width for the name.
+    let r = dotted_repo();
+    r.write("src/app.rs", "x2\n"); // two changed files keep `src/` a directory row
+    let mut app = app_on(&r);
+    app.focus = Focus::Files;
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
+    app.collapse_dir();
+    assert!(!files_row(&app, "src/").contains('•'), "no dot on Changes");
+    let wide = "n".repeat((FILES_X1 - FILES_X0) as usize - 2); // `▸ ` + name + `/` fills the row
+    r.write(&format!("{wide}/a.rs"), "a\n");
+    r.write(&format!("{wide}/b.rs"), "b\n");
+    app.reload().unwrap();
+    let row = files_row(&app, &wide[..20]);
+    assert_eq!(row, format!("▾ {wide}/"), "the exact-fit name is whole on Changes");
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(dot_at_edge(&app, "…"), "{:?}", files_row(&app, "…"));
+    assert_eq!(
+        files_row(&app, "…"),
+        format!("▸ …{}/ •", &wide[3..]),
+        "the reserve elides two columns"
+    );
+}
+
+#[test]
+fn the_folder_dot_follows_the_scope() {
+    let r = Repo::init();
+    r.write("src/a.rs", "x\n");
+    r.write("src/b.rs", "y\n");
+    r.write("zz.rs", "z\n");
+    r.commit_all("base");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("src/a.rs", "x2\n");
+    r.write("zz.rs", "z2\n");
+    r.commit_all("feature work"); // committed on the branch, worktree clean
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, Some("main".to_string()));
+    app.reload().unwrap();
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(!files_row(&app, "src/").contains('•'), "nothing uncommitted under src/");
+
+    app.set_scope(Scope::Branch).unwrap();
+    common::land_world(&mut app);
+    assert!(dot_at_edge(&app, "src/"), "the branch scope changed src/a.rs");
+
+    app.set_scope(Scope::Uncommitted).unwrap();
+    common::land_world(&mut app);
+    assert!(!files_row(&app, "src/").contains('•'), "back to uncommitted, the dot clears");
+}
+
+#[test]
+fn a_long_folder_name_leaves_room_for_the_dot() {
+    let r = Repo::init();
+    let dir = "a_directory_name_far_wider_than_the_files_pane_can_ever_hold_at_this_width";
+    r.write(&format!("{dir}/one.rs"), "1\n");
+    r.write(&format!("{dir}/two.rs"), "2\n");
+    r.write("zz.rs", "z\n");
+    r.commit_all("init");
+    r.write(&format!("{dir}/one.rs"), "1b\n");
+    r.write("zz.rs", "z2\n");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(dot_at_edge(&app, "…"), "{:?}", files_row(&app, "…"));
+    let row = files_row(&app, "…");
+    assert!(row.starts_with("▸ …") && row.contains("this_width/ •"), "head-elided: {row:?}");
+    let collapsed_name = row.trim_end_matches(" •").to_string();
+
+    app.focus = Focus::Files;
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some(dir)).unwrap();
+    app.expand_dir();
+    let row = files_row(&app, "…");
+    assert_eq!(row.replacen('▾', "▸", 1), collapsed_name, "the name reads the same expanded");
 }

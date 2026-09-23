@@ -5549,6 +5549,14 @@ fn the_picker_owns_the_whole_footer_bar() {
 
 // --- Base picker -----------------------
 
+/// Move the base picker's highlight to the row named `name`. Rows past the promoted pair
+/// sort by tip time, and two commits in one second tie, so tests pick rows by name.
+fn goto_row(app: &mut App, name: &str) {
+    let bp = app.base_picker.as_ref().expect("picker open");
+    let i = bp.visible().iter().position(|r| r.name() == name).expect("row listed");
+    app.base_picker_goto(i);
+}
+
 /// A repo on branch `feature` with sibling branches `dev` and `main`, `origin/HEAD`
 /// naming `main` the default, and one committed edit to diff.
 fn based_repo() -> Repo {
@@ -5572,7 +5580,7 @@ fn the_base_picker_opens_on_every_scope_without_a_flag_and_a_pick_switches_to_br
     app.close_base_picker();
     assert_eq!(app.scope, Scope::Uncommitted, "a cancel leaves the scope alone");
     app.open_base_picker();
-    app.base_picker_move(1);
+    goto_row(&mut app, "dev");
     app.base_picker_pick().unwrap();
     assert_eq!(app.scope, Scope::Branch, "a pick switches to the scope it configures");
     assert_eq!(
@@ -5590,9 +5598,12 @@ fn the_base_picker_opens_on_every_scope_without_a_flag_and_a_pick_switches_to_br
     assert_eq!(app.mode, Mode::BasePick);
     let bp = app.base_picker.as_ref().expect("picker state");
     let names: Vec<&str> = bp.rows.iter().map(herdr_reviewr::app::BaseChoice::name).collect();
-    assert!(!names.contains(&"feature"), "the checked-out branch is not listed");
+    assert!(names.contains(&"feature"), "the checked-out branch is a row like any other");
+    let feature = bp.rows.iter().find(|r| r.name() == "feature").unwrap();
+    assert!(feature.current() && !feature.is_default());
     assert_eq!(bp.rows[0].name(), "main", "the default branch sorts ahead of recency");
-    assert!(bp.rows[0].is_default());
+    assert!(bp.rows[0].is_default() && !bp.rows[0].current());
+    assert!(bp.rows.iter().all(|r| r.tip_secs() > 0), "every branch row carries its tip time");
     assert!(names.contains(&"dev"));
     assert_eq!(bp.rows[bp.cursor].name(), "dev", "the highlight opens on the current base");
     app.close_base_picker();
@@ -5650,7 +5661,7 @@ fn a_pick_retags_the_world_input() {
 }
 
 #[test]
-fn picking_the_default_records_the_name() {
+fn picking_the_default_deletes_the_pick() {
     let r = based_repo();
     herdr_reviewr::git::write_base_pick(r.path(), "dev").unwrap();
     let mut app = app_on(&r);
@@ -5664,15 +5675,31 @@ fn picking_the_default_records_the_name() {
     assert_eq!(bp.rows[bp.cursor].name(), "dev", "the highlight opens on the current base");
     app.base_picker_goto(0);
     app.base_picker_pick().unwrap();
+    assert_eq!(app.scope, Scope::Branch);
     assert_eq!(
         app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
         Some("main")
     );
     assert_eq!(
-        herdr_reviewr::git::read_base_pick(r.path()).unwrap().as_deref(),
-        Some("main"),
-        "choosing the default records that name"
+        herdr_reviewr::git::read_base_pick(r.path()).unwrap(),
+        None,
+        "the default row is the way back: the ref is gone, so a re-default is followed"
     );
+    assert!(
+        app.entries.iter().any(|e| e.path == "a.rs"),
+        "the changeset rebuilds against the default before the frame"
+    );
+
+    // Enter on the default row with no pick writes nothing either.
+    let stale = app.world_input();
+    app.open_base_picker();
+    app.base_picker_pick().unwrap();
+    assert_eq!(herdr_reviewr::git::read_base_pick(r.path()).unwrap(), None);
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
+        Some("main")
+    );
+    assert_ne!(app.world_input(), stale, "the pick still retags the world input");
 }
 
 #[test]
@@ -5690,24 +5717,179 @@ fn a_filter_with_no_match_leaves_enter_inert_and_backspace_recovers() {
     app.input_backspace();
     app.input_backspace();
     app.input_backspace();
-    assert_eq!(app.base_picker.as_ref().unwrap().filtered().len(), 2);
+    assert_eq!(app.base_picker.as_ref().unwrap().filtered().len(), 3);
 }
 
 #[test]
-fn a_repo_with_no_pickable_branch_still_opens_the_picker() {
+fn a_one_branch_repo_lists_that_branch() {
+    // `~/.agents/skills`: one local `main`, checked out, no remote. The header has a base
+    // and the picker has a row, marked as both the default and the current branch.
     let r = Repo::init();
     r.write("a.rs", "one\n");
     r.commit_all("init");
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
+        Some("main")
+    );
+    app.open_base_picker();
+    let bp = app.base_picker.as_ref().unwrap();
+    assert_eq!(bp.rows.len(), 1);
+    assert!(bp.rows[0].is_default() && bp.rows[0].current());
+    assert_eq!(bp.rows[bp.cursor].name(), "main");
+    app.close_base_picker();
 
-    // One branch, checked out, and no origin default: the picker opens empty so a
-    // revision can still be typed.
+    // Even with no default at all, the checked-out branch is a row, never an empty list.
+    r.git(&["branch", "-m", "main", "trunk"]);
+    app.open_base_picker();
+    let bp = app.base_picker.as_ref().unwrap();
+    assert_eq!(bp.rows.len(), 1);
+    assert!(bp.rows[0].current() && !bp.rows[0].is_default());
+}
+
+#[test]
+fn the_pr_target_row_sorts_first_and_says_so() {
+    let r = based_repo();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.pr = herdr_reviewr::forge::PrView::Pr(Box::new(herdr_reviewr::forge::PrSnapshot {
+        base_ref: "dev".to_string(),
+        ..common::pr_snapshot()
+    }));
+    app.open_base_picker();
+    let bp = app.base_picker.as_ref().unwrap();
+    let names: Vec<&str> = bp.rows.iter().map(herdr_reviewr::app::BaseChoice::name).collect();
+    assert_eq!(names, ["dev", "main", "feature"], "pr base, then default, then recency");
+    let shown: Vec<&str> = bp.visible().iter().map(|c| c.name()).collect();
+    assert_eq!(shown, names, "an empty filter shows the rows as opened");
+    assert!(bp.rows[0].pr_base() && !bp.rows[0].is_default());
+    assert!(bp.rows[1].is_default() && !bp.rows[1].pr_base());
+    assert_eq!(bp.rows[bp.cursor].name(), "main", "the highlight still opens on the base");
+}
+
+#[test]
+fn a_detached_head_opens_the_picker_with_no_current_row() {
+    let r = based_repo();
+    r.git(&["checkout", "-q", "--detach"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
     app.open_base_picker();
     assert_eq!(app.mode, Mode::BasePick);
     let bp = app.base_picker.as_ref().unwrap();
-    assert!(bp.rows.is_empty());
-    assert!(bp.visible().is_empty());
+    assert_eq!(bp.rows.len(), 3);
+    assert!(bp.rows.iter().all(|r| !r.current()), "nothing is checked out");
+}
+
+#[test]
+fn a_refresh_landing_mid_picker_changes_nothing() {
+    let r = based_repo();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    goto_row(&mut app, "dev");
+    app.input_push('d');
+    let before = app.base_picker.clone().unwrap();
+
+    // The world moves under the open picker: a new branch, a new commit, a landing.
+    r.git(&["branch", "dev-2"]);
+    r.write("a.rs", "three\n");
+    r.commit_all("more");
+    common::land_world(&mut app);
+    let after = app.base_picker.as_ref().unwrap();
+    let names = |bp: &herdr_reviewr::app::BasePicker| -> Vec<String> {
+        bp.rows.iter().map(|c| c.name().to_string()).collect()
+    };
+    assert_eq!(names(after), names(&before), "rows freeze at open");
+    assert_eq!(after.visible()[after.cursor].name(), before.visible()[before.cursor].name());
+    assert_eq!(after.query, before.query);
+    assert_eq!(app.mode, Mode::BasePick);
+}
+
+#[test]
+fn the_filter_is_fuzzy_and_ranks_the_closer_name_first() {
+    let r = based_repo();
+    r.git(&["branch", "feat/main"]);
+    r.git(&["branch", "oauth-test"]);
+    r.git(&["branch", "auth-fix"]);
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    for ch in "fmain".chars() {
+        app.input_push(ch);
+    }
+    let bp = app.base_picker.as_ref().unwrap();
+    let shown: Vec<&str> = bp.visible().iter().map(|c| c.name()).collect();
+    assert_eq!(shown, ["feat/main"], "characters in order, across a slash");
+
+    app.input_kill_to_start();
+    for ch in "auth".chars() {
+        app.input_push(ch);
+    }
+    let bp = app.base_picker.as_ref().unwrap();
+    let shown: Vec<&str> = bp.visible().iter().map(|c| c.name()).collect();
+    assert_eq!(shown, ["auth-fix", "oauth-test"], "a name-start match ranks first");
+    assert_eq!(bp.visible()[bp.cursor].name(), "auth-fix", "the highlight rests on the best");
+}
+
+#[test]
+fn a_typed_revision_is_one_more_row_below_the_matches() {
+    let r = based_repo();
+    r.git(&["branch", "v1.2-hotfix"]);
+    r.git(&["tag", "v1.2", "HEAD~1"]);
+    let tagged = r.git(&["rev-parse", "HEAD~1"]).trim().to_string();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    app.open_base_picker();
+    for ch in "v1.2".chars() {
+        app.input_push(ch);
+    }
+    // The branch matches, so the old rule would never have probed. The tag still gets a
+    // row, below the match, and the highlight stays on the branch.
+    assert!(app.base_probe_wait().is_some(), "an inexact query schedules the probe");
+    app.run_base_probe();
+    let bp = app.base_picker.as_ref().unwrap();
+    let shown: Vec<&str> = bp.visible().iter().map(|c| c.name()).collect();
+    assert_eq!(shown, ["v1.2-hotfix", "v1.2"]);
+    assert_eq!(bp.visible()[bp.cursor].name(), "v1.2-hotfix", "a hit never moves the highlight");
+    assert_eq!(bp.visible()[1].oid(), Some(tagged.as_str()));
+    app.base_picker_move(1);
+    app.base_picker_pick().unwrap();
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
+        Some("v1.2")
+    );
+
+    // A query spelling a listed name exactly runs no probe.
+    app.open_base_picker();
+    for ch in "dev".chars() {
+        app.input_push(ch);
+    }
+    assert!(app.base_probe_wait().is_none(), "an exact spelling is a row, not a revision");
+    app.run_base_probe();
+    assert!(matches!(app.base_picker.as_ref().unwrap().probe, herdr_reviewr::app::BaseProbe::Idle));
+}
+
+#[test]
+fn the_page_keys_move_the_highlight_and_home_end_move_the_caret() {
+    let r = based_repo();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Branch).unwrap();
+    let keymap = Keymap::default();
+    app.open_base_picker();
+    press(&mut app, &keymap, KeyCode::PageDown);
+    let bp = app.base_picker.as_ref().unwrap();
+    assert_eq!(bp.cursor, bp.visible().len() - 1, "a page down clamps to the last row");
+    press(&mut app, &keymap, KeyCode::PageUp);
+    assert_eq!(app.base_picker.as_ref().unwrap().cursor, 0);
+    for ch in "de".chars() {
+        app.input_push(ch);
+    }
+    press(&mut app, &keymap, KeyCode::Home);
+    assert_eq!(app.base_picker.as_ref().unwrap().caret, 0, "home is the filter's");
+    press(&mut app, &keymap, KeyCode::End);
+    assert_eq!(app.base_picker.as_ref().unwrap().caret, 2);
+    assert_eq!(app.mode, Mode::BasePick);
 }
 
 #[test]
@@ -5751,9 +5933,7 @@ fn the_highlight_follows_its_row_through_a_narrowing_filter() {
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
     app.open_base_picker();
-    app.base_picker_move(1); // main -> dev
-    let bp = app.base_picker.as_ref().unwrap();
-    assert_eq!(bp.rows[bp.filtered()[bp.cursor]].name(), "dev");
+    goto_row(&mut app, "dev");
     app.input_push('d');
     let bp = app.base_picker.as_ref().unwrap();
     assert_eq!(
@@ -5761,6 +5941,15 @@ fn the_highlight_follows_its_row_through_a_narrowing_filter() {
         "dev",
         "the highlight keeps its row when the row survives the filter"
     );
+
+    // A filter that drops the highlighted row rests the highlight on the first match.
+    app.input_push('x');
+    app.input_backspace();
+    app.input_backspace();
+    app.input_push('m');
+    let bp = app.base_picker.as_ref().unwrap();
+    assert_eq!(bp.cursor, 0);
+    assert_eq!(bp.visible()[0].name(), "main", "the first match: {:?}", bp.query);
 }
 
 #[test]
@@ -5768,11 +5957,12 @@ fn the_branch_scope_with_no_base_leads_the_footer_with_the_picker() {
     let r = Repo::init();
     r.write("a.rs", "one\n");
     r.commit_all("init");
+    r.git(&["branch", "-m", "main", "trunk"]); // no `main`/`master`: no default to fall back on
     r.git(&["branch", "dev"]);
     r.git(&["checkout", "-q", "-b", "feature"]);
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
-    assert!(app.branch_base.winner.is_none(), "no origin/HEAD, no pick: nothing resolves");
+    assert!(app.branch_base.winner.is_none(), "no origin/HEAD, no main, no pick: nothing resolves");
     assert!(app.entries.is_empty(), "the empty state is legible, never a guessed base");
     let bands: Vec<(FooterAction, Band)> = app.footer_bands();
     assert_eq!(bands[0], (FooterAction::BasePick, Band::Primary));
@@ -7423,4 +7613,40 @@ fn all_files_marks_the_run_and_lists_the_worktree() {
         app.entries.iter().filter(|e| e.annotation.is_some()).map(|e| e.path.as_str()).collect();
     assert_eq!(marked, ["three.rs"], "only the run's files carry a mark");
     assert!(app.entries.iter().any(|e| e.path == "root.rs"), "the tree lists the worktree");
+}
+
+#[test]
+fn the_folder_dot_appears_under_a_poll_without_moving_the_cursor() {
+    // Continuity: the dot is derived state. A poll that adds a change under a collapsed
+    // `All files` folder marks the row and moves the cursor off nothing, even when a new
+    // folder above it shifts its row index.
+    let r = Repo::init();
+    r.write("src/a.rs", "x\n");
+    r.write("src/b.rs", "y\n");
+    r.write("root.rs", "z\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
+    app.focus = Focus::Files;
+    let dir_row = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
+    app.file_cursor = dir_row;
+    let marked = |app: &App| {
+        matches!(
+            app.file_rows[app.file_cursor].kind,
+            herdr_reviewr::file_list::RowKind::Dir { has_change: true, expanded: false, .. }
+        )
+    };
+    assert!(!marked(&app), "a clean worktree marks nothing");
+
+    r.write("src/a.rs", "x2\n");
+    r.write("aaa/one.rs", "1\n"); // a new folder sorting above `src/` shifts its row
+    r.write("aaa/two.rs", "2\n");
+    common::land_world(&mut app);
+    assert_eq!(
+        app.file_rows[app.file_cursor].dir_path(),
+        Some("src"),
+        "the cursor follows the folder by path"
+    );
+    assert_eq!(app.file_cursor, dir_row + 1, "the folder's row moved down one");
+    assert!(marked(&app), "the folder is marked and still collapsed");
 }

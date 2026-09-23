@@ -7,10 +7,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
-- **Changed words inside a comment stay readable.** Word emphasis floors the fill's contrast
-  against the palette's `text` only, so a dim syntax color — a comment above all — dropped to
-  ~1.2 on the emphasis fill and the changed words were unreadable. Emphasized cells now lift
-  their foreground toward `text` until they clear the same floor.
+- **Changed words inside a comment stay readable** on the word-emphasis highlight.
+  Thanks [@ubuntudroid](https://github.com/ubuntudroid) ([#91](https://github.com/persiyanov/herdr-reviewr/pull/91)).
+
+## [0.38.1] — 2026-09-23
+
+### Fixed
+- **A checked-out fork PR shows on the PR tab**, from `gh pr checkout` or `glab mr checkout`.
+  Thanks [@tombeckenham](https://github.com/tombeckenham) ([#108](https://github.com/persiyanov/herdr-reviewr/pull/108)).
+
+## [0.38.0] — 2026-09-16
+
+### Changed
+- **PR comments paint as comments.** Badge images become P1/P2/P3 chips, mermaid fences become
+  a `⧉ mermaid` placeholder, HTML headings match markdown headings, `<details>` starts collapsed,
+  and HTML tags no longer leak as source. The same renderer drives the All-files preview.
+- **A review thread shows every reply in the read pane.** GitHub, GitLab, and Azure DevOps.
+  The `↳ N replies — open on GitHub` line is gone. Click a `<details>` summary to toggle it;
+  on the PR tab `→`/`←` expand/collapse every details in the open thread.
+- **A capped list says so in the pane** (`newest 100 comments` / `newest 100 checks`) instead of
+  sending you to the forge.
+
+## [0.37.1] — 2026-09-13
+
+### Changed
+- **Base picker.** Every branch is a row with its age and role (`pr base`, `default`, `current`),
+  the filter is fuzzy, and a typed revision is one more row. Picking the default clears the pick.
+- **A repo with no remote has a base.** `init.defaultBranch`, `main`, or `master` stands in for `origin/HEAD`.
+
+## [0.37.0] — 2026-09-13
+
+### Added
+- **A collapsed `All files` folder with a changed file under it shows a dot.** A collapsed tree
+  tells you which folders to open.
 
 ## [0.36.2] — 2026-08-29
 

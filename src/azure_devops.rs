@@ -1,8 +1,8 @@
 //! Read-only Azure DevOps access: the pull request's identity, state, policies, and threads.
 //!
 //! The Azure DevOps provider behind `src/forge.rs`. It follows
-//! the neutral resolution contract in — the branch's forge names
-//! filter an enumeration by `sourceRefName` — through the `az` CLI with the `azure-devops`
+//! the neutral resolution contract — the branch's published heads
+//! filter an enumeration by source repository and branch — through the `az` CLI with the `azure-devops`
 //! extension, and fills the same normalized [`PrSnapshot`] the other providers do. It never
 //! writes to Azure DevOps.
 
@@ -13,7 +13,8 @@ use serde_json::Value;
 
 use crate::forge::{
     AssocPr, Association, Check, CheckStatus, Comment, CommentKind, Merge, PrFetchInput,
-    PrSnapshot, PrState, PrView, Sync, finish_comments, prose_row, push_unique, upsert_latest,
+    PrSnapshot, PrState, PrView, Reply, Sync, finish_comments, prose_row, push_unique,
+    upsert_latest,
 };
 
 /// Read Azure DevOps for one already-derived input. Degradation stays in-band for the PR tab.
@@ -149,8 +150,7 @@ fn fetch_inner(
     let repo_name = target.name();
 
     let head = input.local.head_oid.as_deref();
-    let (mut assoc, project_guid) =
-        associate_by_branch(repo, &org_url, project, repo_name, input, cancelled)?;
+    let (mut assoc, project_guid) = associate_by_branch(repo, &org_url, target, input, cancelled)?;
     let Some(id) = crate::forge::resolve_pick(repo, &assoc, head)
         .map_err(|error| AzError::LocalGit(error.0))?
     else {
@@ -260,7 +260,8 @@ fn fetch_inner(
         checks,
         &rows,
         &evaluations,
-        threads_capped || checks_capped,
+        threads_capped,
+        checks_capped,
     ))))
 }
 
@@ -301,22 +302,23 @@ fn fetch_evaluations(
 }
 
 /// Ask Azure DevOps for the branch's pull requests: the newest 100 active and newest 100
-/// completed enumerate in one concurrent wave, and a node joins when its source branch is
-/// one of the names. A fork node has no provable source
-/// repository in the enumeration, so it joins only when the pinned `HEAD` contains its
-/// source tip. Also returns the target's project GUID as the enumeration nodes report it,
-/// so the policy read need not wait for anything else.
+/// completed enumerate in one concurrent wave, and a node joins when its source (repository,
+/// branch) is one of the branch's heads (`branch_admitted`). Also returns the target's
+/// project GUID as the enumeration nodes report it, so the policy read need not wait for
+/// anything else.
 fn associate_by_branch(
     repo: &Path,
     org_url: &str,
-    project: &str,
-    repo_name: &str,
+    target: &crate::git::RepoTarget,
     input: &PrFetchInput,
     cancelled: &AtomicBool,
 ) -> Result<(Association, Option<String>), AzError> {
-    let names = &input.local.names;
-    let head = input.local.head_oid.as_deref();
+    let (project, repo_name) = (target.project(), target.name());
+    let heads = &input.local.heads;
     let mut assoc = Association::default();
+    if heads.is_empty() {
+        return Ok((assoc, None));
+    }
 
     let enumerate = |status: &'static str| {
         az_json(
@@ -357,51 +359,51 @@ fn associate_by_branch(
     };
     for node in active.as_array().into_iter().flatten() {
         note_guid(node);
-        if let Some(pr) = branch_admitted(repo, node, names, head)? {
+        if let Some(pr) = branch_admitted(node, heads, target) {
             push_unique(&mut assoc.open, pr);
         }
     }
     for node in completed.as_array().into_iter().flatten() {
         note_guid(node);
-        if let Some(pr) = branch_admitted(repo, node, names, head)? {
+        if let Some(pr) = branch_admitted(node, heads, target) {
             push_unique(&mut assoc.history, pr);
         }
     }
     Ok((assoc, project_guid))
 }
 
-/// The enumeration node's pick fields when its source branch is one of the names. A fork
-/// node's source branch lives in an unnamed repository, so it is admitted only when the
-/// pinned `HEAD` contains its source tip.
+/// The enumeration node's pick fields when its source (repository, branch) is one of the
+/// branch's heads. A node with no `forkSource` lives in the target itself; a fork node names
+/// its repository by project and name within the target's organization, which must be the
+/// head's.
 fn branch_admitted(
-    repo: &Path,
     node: &Value,
-    names: &[String],
-    head: Option<&str>,
-) -> Result<Option<AssocPr>, AzError> {
-    let Some(mut pr) = assoc_pr(node) else { return Ok(None) };
-    if !names.contains(&pr.head_ref) {
-        return Ok(None);
-    }
-    // This containment check answers a different question than the shared history
-    // guard: whether a fork node — open ones included — is this clone's at all, since
-    // the enumeration cannot name the fork repository.
-    if !node["forkSource"].is_null() {
-        let contained = match head {
-            Some(head) if !pr.head_oid.is_empty() => {
-                crate::git::contains_commit(repo, head, &pr.head_oid)
-                    .map_err(|error| AzError::LocalGit(error.0))?
-            }
-            _ => false,
-        };
-        if !contained {
-            return Ok(None);
-        }
+    heads: &[crate::git::Head],
+    target: &crate::git::RepoTarget,
+) -> Option<AssocPr> {
+    let mut pr = assoc_pr(node)?;
+    let fork = &node["forkSource"]["repository"];
+    // A fork shares the target's organization and host; the node names its project and name.
+    let fork_repo = match (fork["project"]["name"].as_str(), fork["name"].as_str()) {
+        (Some(project), Some(name)) => crate::git::RepoTarget::with_path(
+            crate::git::Forge::AzureDevOps,
+            target.host(),
+            &[target.owner(), project, name],
+        ),
+        _ => None,
+    };
+    let head_repo = if node["forkSource"].is_null() {
+        crate::forge::HeadRepo::Queried
+    } else {
+        crate::forge::HeadRepo::Other(fork_repo.iter().collect())
+    };
+    if !crate::forge::admits(heads, target, &pr.head_ref, &head_repo) {
+        return None;
     }
     // An enumeration node is the complete pull request, so the pick it becomes needs no
     // detail read; the payload travels with the admission that proved it.
     pr.raw = Some(node.clone());
-    Ok(Some(pr))
+    Some(pr)
 }
 
 /// The project GUID one enumeration node reports on its repository's project.
@@ -456,7 +458,8 @@ fn build_snapshot(
     checks: Vec<Check>,
     rows: &[&Value],
     evaluations: &Value,
-    truncated: bool,
+    comments_truncated: bool,
+    checks_truncated: bool,
 ) -> PrSnapshot {
     let id = pr["pullRequestId"].as_u64().unwrap_or_default();
     PrSnapshot {
@@ -480,7 +483,8 @@ fn build_snapshot(
         sync,
         checks,
         comments: merge_comments(rows, pr),
-        truncated,
+        comments_truncated,
+        checks_truncated,
     }
 }
 
@@ -600,19 +604,34 @@ fn comment_root(thread: &Value) -> Option<&Value> {
 }
 
 /// A comment that renders: human-authored, not deleted, and carrying content. The one
-/// predicate behind the root pick and the reply count, so the two can never disagree.
+/// predicate behind the root pick and `replies`, so the two can never disagree.
 fn is_comment(comment: &Value) -> bool {
     comment["commentType"].as_str() != Some("system")
         && !comment["isDeleted"].as_bool().unwrap_or(false)
         && !comment["content"].as_str().unwrap_or("").trim().is_empty()
 }
 
-/// Replies beyond the root: the rendering comments on the thread, less one.
-fn reply_count(thread: &Value) -> u32 {
-    let comments = thread["comments"]
-        .as_array()
-        .map_or(0, |comments| comments.iter().filter(|comment| is_comment(comment)).count());
-    comments.saturating_sub(1) as u32
+/// Replies beyond the root: every later rendering comment.
+fn replies_from_thread(thread: &Value) -> Vec<Reply> {
+    let Some(comments) = thread["comments"].as_array() else {
+        return Vec::new();
+    };
+    let Some(root_i) = comments.iter().position(is_comment) else {
+        return Vec::new();
+    };
+    comments[root_i + 1..]
+        .iter()
+        .filter(|comment| is_comment(comment))
+        .map(|comment| {
+            let author = comment["author"]["displayName"].as_str().unwrap_or("").to_string();
+            Reply {
+                author_is_bot: is_azure_bot(&comment["author"]),
+                author,
+                body: comment["content"].as_str().unwrap_or("").trim().to_string(),
+                created_at: comment["publishedDate"].as_str().unwrap_or("").to_string(),
+            }
+        })
+        .collect()
 }
 
 fn thread_line_range(context: &Value) -> (Option<u64>, Option<u64>) {
@@ -670,7 +689,7 @@ fn merge_comments(threads: &[&Value], pr: &Value) -> Vec<Comment> {
             created_at: root["publishedDate"].as_str().unwrap_or("").to_string(),
             is_resolved,
             is_outdated: false,
-            reply_count: reply_count(thread),
+            replies: replies_from_thread(thread),
         });
     }
     for reviewer in pr["reviewers"].as_array().into_iter().flatten() {
@@ -729,7 +748,7 @@ mod tests {
              "author": {"displayName": "Author"}}
         ]});
         assert_eq!(comment_root(&thread).unwrap()["content"], "The real comment.");
-        assert_eq!(reply_count(&thread), 0);
+        assert!(replies_from_thread(&thread).is_empty());
     }
 
     #[test]
@@ -862,7 +881,8 @@ mod tests {
         assert!(finding.snippet.is_none(), "a thread carries no code context");
         let comment = comments.iter().find(|c| c.kind == CommentKind::Comment).unwrap();
         assert_eq!(comment.author, "Mark Wilkie");
-        assert_eq!(comment.reply_count, 1);
+        assert_eq!(comment.replies.len(), 1);
+        assert_eq!(comment.replies[0].body, "Agreed.");
         let votes: Vec<&Comment> =
             comments.iter().filter(|c| c.kind == CommentKind::Review).collect();
         assert_eq!(votes.len(), 2, "a zero vote and a container render nothing");
@@ -871,30 +891,77 @@ mod tests {
     }
 
     #[test]
-    fn an_enumeration_node_admits_by_source_branch_name() {
-        let node = json!({
-            "pullRequestId": 5,
-            "status": "completed",
-            "sourceRefName": "refs/heads/feature",
-            "lastMergeSourceCommit": {"commitId": "3aae318f"},
-            "lastMergeCommit": {"commitId": "af56d96f"},
-        });
-        let names = vec!["feature".to_string()];
-        let admitted = branch_admitted(Path::new("."), &node, &names, None).unwrap();
-        assert_eq!(admitted.unwrap().number, 5);
-        // A different branch name proves nothing.
-        let other = vec!["other".to_string()];
-        assert!(branch_admitted(Path::new("."), &node, &other, None).unwrap().is_none());
-        // A fork node has no provable source repository, so with no pinned HEAD to
-        // contain its tip it never admits.
-        let fork = json!({
-            "pullRequestId": 7,
-            "status": "active",
-            "sourceRefName": "refs/pull/7/source",
-            "lastMergeSourceCommit": {"commitId": "3aae318f"},
-            "forkSource": {"name": "refs/heads/feature", "repository": {"id": "b0bf"}},
-        });
-        assert!(branch_admitted(Path::new("."), &fork, &names, None).unwrap().is_none());
+    fn an_enumeration_node_admits_only_when_its_source_is_one_of_the_branchs_heads() {
+        let ado = |project: &str, name: &str| {
+            crate::git::RepoTarget::with_path(
+                crate::git::Forge::AzureDevOps,
+                "dev.azure.com",
+                &["org", project, name],
+            )
+            .unwrap()
+        };
+        let target = ado("Proj", "app");
+        let fork = ado("Proj", "app-fork");
+        let head = |repo: &crate::git::RepoTarget, name: &str| crate::git::Head {
+            repo: repo.clone(),
+            name: name.to_string(),
+        };
+        let own = |branch: &str| {
+            json!({"pullRequestId": 5, "status": "completed",
+                "sourceRefName": format!("refs/heads/{branch}"),
+                "lastMergeSourceCommit": {"commitId": "3aae318f"}})
+        };
+        let forked = |branch: &str, project: &str, name: &str| {
+            json!({"pullRequestId": 7, "status": "completed",
+                "sourceRefName": "refs/pull/7/source",
+                "lastMergeSourceCommit": {"commitId": "3aae318f"},
+                "forkSource": {"name": format!("refs/heads/{branch}"),
+                    "repository": {"id": "b0bf", "name": name, "project": {"name": project}}}})
+        };
+        let on_main = [head(&target, "main")];
+        let checkout = [head(&fork, "fix")];
+        let cases: &[(&str, &[crate::git::Head], Value, bool)] = &[
+            ("own same-repo main", &on_main, own("main"), true),
+            ("another branch", &on_main, own("other"), false),
+            // The hole Azure had: a completed fork PR from a fork's `main` on upstream `main`.
+            ("stranger fork main on main", &on_main, forked("main", "Proj", "stranger"), false),
+            ("checked-out fork PR", &checkout, forked("fix", "proj", "APP-FORK"), true),
+            ("same name, another fork", &checkout, forked("fix", "Proj", "stranger"), false),
+            // A fork clone's head: the target's own same-named branch is a stranger's.
+            ("target's own fix, fork head", &checkout, own("fix"), false),
+            (
+                "fork missing its identity",
+                &checkout,
+                json!({"pullRequestId": 7, "forkSource": {"name": "refs/heads/fix",
+                    "repository": {"id": "b0bf"}}}),
+                false,
+            ),
+        ];
+        for (label, heads, node, expected) in cases {
+            assert_eq!(branch_admitted(node, heads, &target).is_some(), *expected, "{label}");
+        }
+        // The fork lives in the target's organization; a same-named fork elsewhere is another.
+        let elsewhere = crate::git::RepoTarget::with_path(
+            crate::git::Forge::AzureDevOps,
+            "dev.azure.com",
+            &["org2", "Proj", "app-fork"],
+        )
+        .unwrap();
+        let heads = [head(&elsewhere, "fix")];
+        assert!(branch_admitted(&forked("fix", "Proj", "app-fork"), &heads, &target).is_none());
+        // A same-path fork on a server host is another namespace; the legacy cloud host is not.
+        let host = |host: &str| {
+            crate::git::RepoTarget::with_path(
+                crate::git::Forge::AzureDevOps,
+                host,
+                &["org", "Proj", "app-fork"],
+            )
+            .unwrap()
+        };
+        let server = [head(&host("ado.corp.test"), "fix")];
+        assert!(branch_admitted(&forked("fix", "Proj", "app-fork"), &server, &target).is_none());
+        let legacy = [head(&host("org.visualstudio.com"), "fix")];
+        assert!(branch_admitted(&forked("fix", "Proj", "app-fork"), &legacy, &target).is_some());
     }
 
     #[test]
