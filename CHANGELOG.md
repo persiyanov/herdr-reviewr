@@ -7,11 +7,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
-- **The PR tab attaches a pull request opened from a fork.** Checking out a contributor PR
-  (`gh pr checkout`) in an upstream clone used to leave the tab at `No pull request yet`
-  because every cross-repository head was dropped. The tab now shows that PR when `HEAD` is
-  its head commit, or contains it. A stranger's same-named fork branch still does not attach.
-  ([#105](https://github.com/persiyanov/herdr-reviewr/issues/105))
+- **`gh pr checkout` of a fork PR shows it on the PR tab.** A PR attaches when its head repository
+  and branch are where your branch lives, so a stranger's fork PR never lands on your `main`.
+  Found and first fixed by @tombeckenham ([#105](https://github.com/persiyanov/herdr-reviewr/issues/105)).
 
 ## [0.38.0] — 2026-09-16
 
