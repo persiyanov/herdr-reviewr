@@ -622,15 +622,24 @@ fn fetch_inner(
     }
     // `gh pr checkout` recorded the pull request itself: exact, so it outranks the lookup.
     // A pin the forge no longer knows (a stale record) falls back to the lookup.
-    if let Some((number, pin_repo)) = pinned_pr(&input.local)
-        && let Some(view) = read_pr(repo, input, pin_repo, number, cancelled)?
-    {
-        return Ok(view);
+    if let Some((number, pin_repo)) = pinned_pr(&input.local) {
+        match read_pr(repo, input, pin_repo, number, cancelled) {
+            Ok(Some(view)) => return Ok(view),
+            Ok(None) => {}
+            Err(error) if unresolved(&error) => {}
+            Err(error) => return Err(error),
+        }
     }
     let Some((number, detail_repo)) = lookup_pick(repo, input, repository, cancelled)? else {
         return Ok(PrView::NoPr);
     };
     Ok(read_pr(repo, input, detail_repo, number, cancelled)?.unwrap_or(PrView::NoPr))
+}
+
+/// Whether `gh` failed because GraphQL could not resolve the addressed object — GitHub's
+/// answer for a pull request or repository that does not exist.
+fn unresolved(error: &GhError) -> bool {
+    matches!(error, GhError::Other(message) if message.contains("Could not resolve to a "))
 }
 
 /// The GitHub pull request the branch's upstream record pins, if any.
@@ -1677,6 +1686,14 @@ mod tests {
             );
         }
         assert!(q.contains("isCrossRepository headRepository{nameWithOwner}"));
+    }
+
+    #[test]
+    fn a_missing_pull_request_reads_as_unresolved_and_nothing_else_does() {
+        let missing = "gh: Could not resolve to a PullRequest with the number of 999999.";
+        assert!(unresolved(&GhError::Other(missing.to_string())));
+        assert!(!unresolved(&GhError::Other("gh: HTTP 502".to_string())));
+        assert!(!unresolved(&GhError::NotAuthed("github.com".to_string())));
     }
 
     #[test]
