@@ -37,16 +37,11 @@ fn defaults() -> PluginConfig {
     PluginConfig::default()
 }
 
-/// `pr_local` against the repository the PR tab would read, as `fetch_input` resolves it.
+/// The local state the PR fetch derives, through the production path.
 fn pr_local(repo: &Path, base: Option<&str>) -> Result<PrLocalState, GitFail> {
-    let target = match fetch_input(repo, None, &defaults()) {
-        Ok(input) => match input.repository {
-            RepositoryIdentity::Repository(target) => target,
-            other => return Err(GitFail(format!("no target: {other:?}"))),
-        },
-        Err(error) => return Err(GitFail(format!("{error:?}"))),
-    };
-    herdr_reviewr::git::pr_local(repo, base, &defaults().forge_hosts(), &target)
+    fetch_input(repo, base, &defaults())
+        .map(|input| input.local)
+        .map_err(|e| GitFail(format!("{e:?}")))
 }
 
 fn assert_target(identity: &RepositoryIdentity, host: &str, owner: &str, name: &str) {
@@ -557,6 +552,57 @@ fn the_head_cap_keeps_the_own_name_and_the_record_first() {
 }
 
 #[test]
+fn a_bare_push_to_the_only_remote_is_found_at_the_frontier() {
+    // An upstream-only clone; the agent ran `git push upstream HEAD` with no upstream record.
+    let repo = worktree();
+    repo.git(&["remote", "rename", "origin", "upstream"]);
+    let tip = head(&repo);
+    repo.git(&["update-ref", "refs/remotes/upstream/work", &tip]);
+    assert_eq!(heads(&repo), ["owner/repo:work"]);
+}
+
+#[test]
+fn a_push_url_behind_an_ssh_alias_falls_back_to_the_fetch_url() {
+    let repo = worktree();
+    repo.git(&["remote", "set-url", "--push", "origin", "git@github-work:owner/repo.git"]);
+    assert_eq!(heads(&repo), ["owner/repo:work"]);
+}
+
+#[test]
+fn tracking_a_third_remotes_base_is_still_tracking() {
+    let repo = worktree();
+    repo.git(&["remote", "add", "colleague", "https://github.com/colleague/repo.git"]);
+    let main = repo.git(&["rev-parse", "main"]).trim().to_string();
+    repo.git(&["update-ref", "refs/remotes/colleague/main", &main]);
+    repo.git(&["switch", "-qc", "fix", "--track", "colleague/main"]);
+    assert_eq!(heads(&repo), ["owner/repo:fix"], "colleague's main is a base, not a head");
+}
+
+#[test]
+fn a_bare_merge_name_reads_as_a_branch_and_the_first_merge_wins() {
+    let repo = worktree();
+    repo.git(&["config", "branch.work.remote", "origin"]);
+    repo.git(&["config", "branch.work.merge", "main"]);
+    assert_eq!(heads(&repo), ["owner/repo:work"], "bare `main` is the base: tracking");
+    repo.git(&["config", "--replace-all", "branch.work.merge", "refs/heads/pub"]);
+    repo.git(&["config", "--add", "branch.work.merge", "refs/heads/second"]);
+    assert_eq!(heads(&repo), ["owner/repo:work", "owner/repo:pub"]);
+}
+
+#[test]
+fn a_glab_checkout_without_push_access_pins_the_merge_request() {
+    let repo = worktree();
+    repo.git(&["remote", "set-url", "origin", "https://gitlab.com/owner/repo.git"]);
+    repo.git(&["config", "branch.work.remote", "origin"]);
+    repo.git(&["config", "branch.work.merge", "refs/merge-requests/45/head"]);
+    let pin = pr_local(repo.path(), None).unwrap().pin.expect("the merge request pins");
+    assert_eq!((pin.repo.forge(), pin.number), (herdr_reviewr::git::Forge::GitLab, 45));
+    // A GitHub-shaped pull ref on a GitLab remote pins nothing.
+    repo.git(&["config", "branch.work.merge", "refs/pull/45/head"]);
+    assert!(pr_local(repo.path(), None).unwrap().pin.is_none());
+}
+
+#[test]
 fn a_branch_with_no_record_publishes_on_origin() {
     let repo = worktree();
     assert_eq!(heads(&repo), ["owner/repo:work"]);
@@ -589,7 +635,10 @@ fn a_missing_origin_is_absence_but_a_non_repo_is_failure() {
     assert_eq!(input.local, PrLocalState::default(), "no target, no branch story");
 
     let dir = tempfile::tempdir().unwrap();
-    assert!(pr_local(dir.path(), None).is_err(), "a non-repo directory is a failure");
+    assert!(
+        fetch_input(dir.path(), None, &defaults()).is_err(),
+        "a non-repo directory is a failure"
+    );
 }
 
 #[test]

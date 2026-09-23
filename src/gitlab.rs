@@ -185,18 +185,26 @@ fn fetch_inner(
     target: &crate::git::RepoTarget,
     cancelled: &AtomicBool,
 ) -> Result<PrView, GlabError> {
-    let host = target.host();
-
-    let Some((iid, project)) = associate_by_branch(repo, input, target, cancelled)? else {
-        return Ok(PrView::NoPr);
+    // `glab mr checkout` recorded the merge request itself: exact, so it outranks the
+    // lookup. A pin GitLab no longer resolves (a stale record) falls back to the lookup.
+    let pinned = match crate::forge::pinned(&input.local, crate::git::Forge::GitLab) {
+        Some(pin) => pin_outcome(read_mr(repo, &pin.repo, pin.number, cancelled))?
+            .map(|mr| (mr, pin.number, &pin.repo)),
+        None => None,
     };
+    let (mr, iid, project) = if let Some(found) = pinned {
+        found
+    } else {
+        let Some((iid, project)) = associate_by_branch(repo, input, target, cancelled)? else {
+            return Ok(PrView::NoPr);
+        };
+        let Some(mr) = read_mr(repo, project, iid, cancelled)? else {
+            return Ok(PrView::NoPr);
+        };
+        (mr, iid, project)
+    };
+    let host = project.host();
     let project_path = crate::forge::urlencode(&project.full_path());
-
-    let mr =
-        glab_api(repo, host, &format!("projects/{project_path}/merge_requests/{iid}"), cancelled)?;
-    if mr["iid"].as_u64().is_none() {
-        return Ok(PrView::NoPr);
-    }
     // Sync compares the fetch's pinned HEAD to the MR head, so a checkout or commit landing
     // mid-fetch never pairs one branch's MR with another branch's count.
     let mr_head = mr["sha"].as_str().unwrap_or_default();
@@ -308,6 +316,32 @@ fn assemble_discussions(page1: Vec<Value>, total: u64, later: Vec<Value>) -> (Ve
     (crate::forge::newest_capped(pool), truncated)
 }
 
+/// One merge request's detail. `None` when the response names no merge request.
+fn read_mr(
+    repo: &Path,
+    project: &crate::git::RepoTarget,
+    iid: u64,
+    cancelled: &AtomicBool,
+) -> Result<Option<Value>, GlabError> {
+    let path = crate::forge::urlencode(&project.full_path());
+    let mr = glab_api(
+        repo,
+        project.host(),
+        &format!("projects/{path}/merge_requests/{iid}"),
+        cancelled,
+    )?;
+    Ok(mr["iid"].as_u64().is_some().then_some(mr))
+}
+
+/// What a pinned merge request's read decides: the MR, or `None` to fall back to the head
+/// lookup — a pin GitLab no longer resolves (404) is a stale record, never the tab's answer.
+fn pin_outcome(read: Result<Option<Value>, GlabError>) -> Result<Option<Value>, GlabError> {
+    match read {
+        Err(GlabError::Unavailable(_)) => Ok(None),
+        read => read,
+    }
+}
+
 /// Ask GitLab for the branch's merge requests: the `source_branch` listings per head name
 /// against the target project — and the fork project on a fork clone — with the project
 /// lookups that name each head's project id, all in one concurrent wave. An MR joins only
@@ -366,17 +400,18 @@ fn read_ids<'a>(
     projects: &[&'a crate::git::RepoTarget],
     responses: &mut impl Iterator<Item = Result<Value, GlabError>>,
 ) -> Result<Vec<(&'a crate::git::RepoTarget, Option<u64>)>, GlabError> {
-    let mut ids = Vec::with_capacity(projects.len());
-    for (i, project) in projects.iter().enumerate() {
+    let Some((target, others)) = projects.split_first() else { return Ok(Vec::new()) };
+    let target_id = responses.next().transpose()?.and_then(|v| v["id"].as_u64());
+    let Some(target_id) = target_id else {
+        return Err(GlabError::Other("project lookup returned no id".to_string()));
+    };
+    let mut ids = vec![(*target, Some(target_id))];
+    for project in others {
         let id = match responses.next() {
             Some(Ok(v)) => v["id"].as_u64(),
-            Some(Err(GlabError::Unavailable(_))) if i > 0 => None,
+            Some(Err(GlabError::Unavailable(_))) | None => None,
             Some(Err(error)) => return Err(error),
-            None => None,
         };
-        if i == 0 && id.is_none() {
-            return Err(GlabError::Other("project lookup returned no id".to_string()));
-        }
         ids.push((*project, id));
     }
     Ok(ids)
@@ -928,6 +963,16 @@ mod tests {
         // A transient failure on another project fails the fetch, never reads as "no MR".
         let mut wave = vec![Ok(json!({"id": 7})), Err(GlabError::Other("502".into()))].into_iter();
         assert!(matches!(read_ids(&projects, &mut wave), Err(GlabError::Other(_))));
+    }
+
+    #[test]
+    fn a_pinned_merge_request_falls_back_only_when_gitlab_no_longer_has_it() {
+        let mr = json!({"iid": 45});
+        assert_eq!(pin_outcome(Ok(Some(mr.clone()))).unwrap(), Some(mr));
+        assert_eq!(pin_outcome(Ok(None)).unwrap(), None);
+        assert_eq!(pin_outcome(Err(GlabError::Unavailable("404".into()))).unwrap(), None);
+        assert!(pin_outcome(Err(GlabError::Other("502".into()))).is_err());
+        assert!(pin_outcome(Err(GlabError::NotAuthed)).is_err());
     }
 
     #[test]

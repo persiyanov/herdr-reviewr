@@ -7,8 +7,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
-- **`gh pr checkout` of a fork PR shows it on the PR tab.** A PR attaches when its head repository
-  and branch are where your branch lives, so a stranger's fork PR never lands on your `main`.
+- **A checked-out fork PR shows on the PR tab**, from `gh pr checkout` or `glab mr checkout`.
   Found and first fixed by @tombeckenham ([#105](https://github.com/persiyanov/herdr-reviewr/issues/105)).
 
 ## [0.38.0] — 2026-09-16
