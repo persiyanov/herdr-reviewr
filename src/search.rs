@@ -1,9 +1,9 @@
 //! The search worker: the `fff-search` engine behind request/completion channels.
 //!
 //! The engine owns matching, ranking, and indexing; reviewr passes the query through and
-//! renders results in the engine's order (specs/search.md). The worker owns the picker and
+//! renders results in the engine's order. The worker owns the picker and
 //! its background scan, so a query never runs on the frame loop. Completions are
-//! generation-tagged and land latest-wins, like the world worker's (specs/tui.md Refresh).
+//! generation-tagged and land latest-wins, like the world worker's.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -26,7 +26,6 @@ const GREP_BUDGET_MS: u64 = 80;
 const WARMUP_POLL: Duration = Duration::from_millis(50);
 
 /// The engine's cache home. The frecency store lives here, never the worktree
-/// (specs/search.md).
 pub fn cache_dir() -> PathBuf {
     dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("herdr-reviewr")
 }
@@ -37,7 +36,7 @@ pub enum SearchJob {
     /// Run `query`; the completion echoes the generation back.
     Query { generation: u64, query: String },
     /// Record a picked result in the engine's frecency store, so ranking improves with
-    /// use (specs/search.md).
+    /// use.
     Track { path: String },
 }
 
@@ -71,7 +70,7 @@ pub struct SearchResults {
 }
 
 /// A finished query's outcome — the three states the overlay's phases mirror, at the wire
-/// layer (specs/search.md).
+/// layer.
 #[derive(Debug)]
 pub enum SearchOutcome {
     /// Results for the query; the previously landed set stays painted until this lands.
@@ -99,7 +98,7 @@ struct Engine {
 
 impl Engine {
     /// Start the picker's background scan, watcher, and content indexing. The frecency
-    /// store opens under `cache_dir`, never the worktree (specs/search.md).
+    /// store opens under `cache_dir`, never the worktree.
     fn start(repo: PathBuf, cache_dir: &Path) -> Result<Self, String> {
         let shared = SharedFilePicker::default();
         let frecency = SharedFrecency::default();
@@ -158,7 +157,7 @@ impl Engine {
         let file_total = found.total_matched.max(files.len());
 
         // The empty query paints the frecency-ranked Files group alone: an empty grep is
-        // engine-defined noise, not something the spec describes (specs/search.md).
+        // engine-defined noise, not something the spec describes.
         if raw.trim().is_empty() {
             return Ok(SearchResults { files, code: Vec::new(), file_total, code_more: false });
         }
@@ -173,7 +172,7 @@ impl Engine {
         );
         // Drop each match line's leading indentation so the row text aligns at the left in
         // the narrow pane; the engine adjusts its match offsets as it trims. The preview
-        // keeps the true indentation (specs/search.md).
+        // keeps the true indentation.
         for m in &mut grep.matches {
             m.trim_leading_whitespace();
         }

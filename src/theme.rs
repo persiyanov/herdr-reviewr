@@ -1,6 +1,6 @@
 //! The color model: named palettes, derivation from anchors, and selection.
 //!
-//! See `specs/theme.md`. A theme is a few anchor colors plus a paired syntax theme;
+//! A theme is a few anchor colors plus a paired syntax theme;
 //! every other slot is derived from the anchors. One theme — `catppuccin` — instead
 //! pins its whole palette as a literal, to stay byte-identical to the pre-theming
 //! colors. One selection sets both the chrome `Palette` and the syntax theme, so they
@@ -49,16 +49,16 @@ pub struct Palette {
     pub surface0: Color,
     pub surface1: Color,
     pub surface2: Color,
-    pub overlay0: Color,
-    pub overlay1: Color,
-    pub subtext0: Color,
+    pub dim2: Color,
+    pub dim1: Color,
+    pub dim0: Color,
     pub text: Color,
     pub red: Color,
     pub green: Color,
     pub yellow: Color,
-    pub peach: Color,
-    pub mauve: Color,
-    pub lavender: Color,
+    pub orange: Color,
+    pub purple: Color,
+    pub blue: Color,
     pub del_bg: Color,
     pub ins_bg: Color,
     pub emph_del_bg: Color,
@@ -66,6 +66,9 @@ pub struct Palette {
     /// The search match highlight: a warm fill behind a matched substring, legible over a
     /// plain row, a syntax-colored row, and the preview's banded hit line alike.
     pub match_hl: Color,
+    /// The text-selection highlight, live and settled: a cool fill distinct by hue from the
+    /// `surface1`/`surface2` row fills, so a selection reads inside a cursor row in any pane
+    pub sel_bg: Color,
 }
 
 impl Palette {
@@ -76,17 +79,17 @@ impl Palette {
         if focused { self.surface2 } else { self.surface1 }
     }
 
-    /// Lift a painted color onto a selection fill. The dim role (`overlay0`) sits one surface
-    /// step above the fill and all but vanishes on it, so it rises to `subtext0` and the
-    /// secondary parts of a selected row stay readable (`specs/theme.md`). Every other color
+    /// Lift a painted color onto a selection fill. The dim role (`dim2`) sits one surface
+    /// step above the fill and all but vanishes on it, so it rises to `dim0` and the
+    /// secondary parts of a selected row stay readable. Every other color
     /// already reads there and passes through. Each theme names both ends, so the mapping means
     /// the same thing in all of them.
     pub fn on_fill(&self, color: Color) -> Color {
-        if color == self.overlay0 { self.subtext0 } else { color }
+        if color == self.dim2 { self.dim0 } else { color }
     }
 
     /// Recede a painted color behind an open modal: halfway to `base`, so the modal owns the
-    /// eye while the page behind stays recognizable (`specs/tui.md`). Non-RGB colors are the
+    /// eye while the page behind stays recognizable. Non-RGB colors are the
     /// terminal's own defaults, which have no known distance to `base`; they pass through.
     pub fn scrim(&self, color: Color) -> Color {
         match color {
@@ -109,7 +112,7 @@ pub fn resolve(name: Option<&str>) -> Theme {
 }
 
 /// Whether `name` selects a complete built-in theme. Plugin configuration validates against
-/// this same catalog before a snapshot is applied (`specs/config.md`).
+/// this same catalog before a snapshot is applied.
 pub fn is_known(name: &str) -> bool {
     build(name).is_some()
 }
@@ -164,9 +167,9 @@ struct Anchors {
     red: Color,
     green: Color,
     yellow: Color,
-    peach: Color,
-    mauve: Color,
-    lavender: Color,
+    orange: Color,
+    purple: Color,
+    blue: Color,
 }
 
 /// Catppuccin Mocha: pinned to its canonical values so it renders identically to the
@@ -179,21 +182,22 @@ fn catppuccin() -> Theme {
             surface0: Color::Rgb(0x31, 0x32, 0x44),
             surface1: Color::Rgb(0x45, 0x47, 0x5a),
             surface2: Color::Rgb(0x58, 0x5b, 0x70),
-            overlay0: Color::Rgb(0x6c, 0x70, 0x86),
-            overlay1: Color::Rgb(0x7f, 0x84, 0x9c),
-            subtext0: Color::Rgb(0xa6, 0xad, 0xc8),
+            dim2: Color::Rgb(0x6c, 0x70, 0x86),
+            dim1: Color::Rgb(0x7f, 0x84, 0x9c),
+            dim0: Color::Rgb(0xa6, 0xad, 0xc8),
             text: Color::Rgb(0xcd, 0xd6, 0xf4),
             red: Color::Rgb(0xf3, 0x8b, 0xa8),
             green: Color::Rgb(0xa6, 0xe3, 0xa1),
             yellow: Color::Rgb(0xf9, 0xe2, 0xaf),
-            peach: Color::Rgb(0xfa, 0xb3, 0x87),
-            mauve: Color::Rgb(0xcb, 0xa6, 0xf7),
-            lavender: Color::Rgb(0xb4, 0xbe, 0xfe),
+            orange: Color::Rgb(0xfa, 0xb3, 0x87),
+            purple: Color::Rgb(0xcb, 0xa6, 0xf7),
+            blue: Color::Rgb(0xb4, 0xbe, 0xfe),
             del_bg: Color::Rgb(0x45, 0x23, 0x2f),
             ins_bg: Color::Rgb(0x1f, 0x3a, 0x2a),
             emph_del_bg: Color::Rgb(0x6e, 0x34, 0x46),
             emph_ins_bg: Color::Rgb(0x30, 0x55, 0x3f),
             match_hl: Color::Rgb(0x5c, 0x51, 0x2b),
+            sel_bg: Color::Rgb(0x35, 0x3d, 0x7d),
         },
         syntax: SyntaxChoice::Bundled(MOCHA_TM),
     }
@@ -233,7 +237,7 @@ const CATPPUCCIN_LATTE: Anchors =
     anchors(0xeff1f5, 0x4c4f69, 0xd20f39, 0x40a02b, 0xdf8e1d, 0xfe640b, 0x8839ef, 0x7287fd);
 
 /// Canonical anchors for the derived themes. base, text, then the six accents
-/// (red, green, yellow, peach, mauve, lavender); surfaces and diff fills are derived.
+/// (red, green, yellow, orange, purple, blue); surfaces and diff fills are derived.
 const DRACULA: Anchors =
     anchors(0x282a36, 0xf8f8f2, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xffb86c, 0xbd93f9, 0x8be9fd);
 const NORD: Anchors =
@@ -276,9 +280,9 @@ const fn anchors(
     red: u32,
     green: u32,
     yellow: u32,
-    peach: u32,
-    mauve: u32,
-    lavender: u32,
+    orange: u32,
+    purple: u32,
+    blue: u32,
 ) -> Anchors {
     Anchors {
         base: hex(base),
@@ -286,9 +290,9 @@ const fn anchors(
         red: hex(red),
         green: hex(green),
         yellow: hex(yellow),
-        peach: hex(peach),
-        mauve: hex(mauve),
-        lavender: hex(lavender),
+        orange: hex(orange),
+        purple: hex(purple),
+        blue: hex(blue),
     }
 }
 
@@ -311,21 +315,22 @@ fn derive(a: Anchors, appearance: Appearance) -> Palette {
         surface0: surface(0.045),
         surface1: surface(0.09),
         surface2: surface(0.14),
-        overlay0: surface(0.26),
-        overlay1: surface(0.34),
-        subtext0: blend(a.text, a.base, 0.18),
+        dim2: surface(0.26),
+        dim1: surface(0.34),
+        dim0: blend(a.text, a.base, 0.18),
         text: a.text,
         red: a.red,
         green: a.green,
         yellow: a.yellow,
-        peach: a.peach,
-        mauve: a.mauve,
-        lavender: a.lavender,
+        orange: a.orange,
+        purple: a.purple,
+        blue: a.blue,
         del_bg: readable_tint(a.red, a.base, a.text, appearance, false),
         ins_bg: readable_tint(a.green, a.base, a.text, appearance, false),
         emph_del_bg: readable_tint(a.red, a.base, a.text, appearance, true),
         emph_ins_bg: readable_tint(a.green, a.base, a.text, appearance, true),
         match_hl: readable_tint(a.yellow, a.base, a.text, appearance, true),
+        sel_bg: readable_tint(saturated(a.blue), a.base, a.text, appearance, true),
     }
 }
 
@@ -362,6 +367,22 @@ fn readable_tint(
         t -= 0.02;
     }
     base
+}
+
+/// Halfway between an accent and its colorful core — the shared gray component removed and
+/// the remainder rescaled to full range. A pastel anchor (Catppuccin's periwinkle `blue`)
+/// tints `base` into the same gray family as the surface fills; the saturated version tints
+/// it into an unmistakable hue instead, which is what lets the selection fill read inside a
+/// cursor row. A gray anchor has no hue to amplify and passes through.
+fn saturated(c: Color) -> Color {
+    let (r, g, b) = channels(c);
+    let lo = r.min(g).min(b);
+    let span = r.max(g).max(b) - lo;
+    if span == 0 {
+        return c;
+    }
+    let core = |ch: u8| (f64::from(ch - lo) * 255.0 / f64::from(span)).round() as u8;
+    blend(c, Color::Rgb(core(r), core(g), core(b)), 0.5)
 }
 
 /// Linear per-channel blend: `t` of the way from `from` to `to` (0.0 = `from`, 1.0 = `to`).
@@ -417,6 +438,17 @@ mod tests {
         assert_eq!(p.text, Color::Rgb(0xcd, 0xd6, 0xf4));
         assert_eq!(p.del_bg, Color::Rgb(0x45, 0x23, 0x2f));
         assert_eq!(p.ins_bg, Color::Rgb(0x1f, 0x3a, 0x2a));
+        // The renamed slots keep their Mocha values: orange was peach, purple mauve,
+        // blue lavender, and dim0/1/2 were subtext0/overlay1/overlay0.
+        assert_eq!(p.orange, Color::Rgb(0xfa, 0xb3, 0x87));
+        assert_eq!(p.purple, Color::Rgb(0xcb, 0xa6, 0xf7));
+        assert_eq!(p.blue, Color::Rgb(0xb4, 0xbe, 0xfe));
+        assert_eq!(p.dim0, Color::Rgb(0xa6, 0xad, 0xc8));
+        assert_eq!(p.dim1, Color::Rgb(0x7f, 0x84, 0x9c));
+        assert_eq!(p.dim2, Color::Rgb(0x6c, 0x70, 0x86));
+        // The selection fill: saturated `blue` tinted over `base` at emphasis strength — a
+        // real hue, nothing near the gray `surface1`/`surface2` cursor fills.
+        assert_eq!(p.sel_bg, Color::Rgb(0x35, 0x3d, 0x7d));
     }
 
     #[test]
@@ -487,7 +519,7 @@ mod tests {
     fn every_theme_keeps_diff_fills_legible() {
         for &(name, _) in NAMED {
             let p = resolve(Some(name)).palette;
-            for fill in [p.del_bg, p.ins_bg, p.emph_del_bg, p.emph_ins_bg] {
+            for fill in [p.del_bg, p.ins_bg, p.emph_del_bg, p.emph_ins_bg, p.sel_bg] {
                 assert!(
                     contrast(p.text, fill) >= MIN_FILL_CONTRAST,
                     "{name}: fill {fill:?} drops below the legibility floor",

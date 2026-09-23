@@ -21,6 +21,10 @@ impl Repo {
     pub fn init() -> Self {
         let repo = Self { dir: TempDir::new().expect("tempdir") };
         repo.git(&["init", "-q", "-b", "main"]);
+        // The base chain reads `init.defaultBranch`, and `--get` sees the developer's
+        // global config. Pin it locally to a name no test creates, so the suite never
+        // depends on the machine it runs on.
+        repo.git(&["config", "init.defaultBranch", "no-such-default"]);
         repo
     }
 
@@ -71,14 +75,39 @@ impl Repo {
         ]);
     }
 
-    /// Record `content` as the base-pick blob verbatim, bypassing `write_base_pick` — for
-    /// the values only a foreign writer could put on that shared ref.
-    pub fn write_raw_base_pick(&self, content: &str) {
-        let path = self.path().join("raw-pick");
+    /// Record `content` as a blob and point `git_ref` at it, bypassing `write_base_pick`.
+    fn plant_blob(&self, git_ref: &str, content: &str) {
+        let path = self.path().join("plant-blob");
         std::fs::write(&path, content).unwrap();
         let blob = self.git(&["hash-object", "-w", path.to_str().unwrap()]).trim().to_string();
-        self.git(&["update-ref", "refs/reviewr/base-pick", &blob]);
+        self.git(&["update-ref", git_ref, &blob]);
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// Record `content` as the base-pick blob verbatim, bypassing `write_base_pick` — for
+    /// the values only a foreign writer could put on this worktree's pick ref.
+    pub fn write_raw_base_pick(&self, content: &str) {
+        self.plant_blob("refs/worktree/reviewr/base-pick", content);
+    }
+
+    /// A leftover clone-wide pick from before the worktree-private cutover.
+    pub fn plant_legacy_base_pick(&self, content: &str) {
+        self.plant_blob("refs/reviewr/base-pick", content);
+    }
+
+    /// A leftover path-hashed last-turn ref from before the worktree-private cutover,
+    /// using the FNV-1a key the old binary wrote.
+    pub fn plant_legacy_turn_base(&self, sha: &str) {
+        let key = legacy_worktree_key(self.path());
+        self.git(&["update-ref", &format!("refs/reviewr/turn-base/{key}"), sha]);
+    }
+
+    /// A linked worktree of this clone on a new branch. Lives as long as the returned value.
+    pub fn add_worktree(&self, branch: &str) -> LinkedWorktree {
+        let keep = TempDir::new().expect("tempdir");
+        let path = keep.path().join("wt");
+        self.git(&["worktree", "add", "-q", "-b", branch, path.to_str().unwrap()]);
+        LinkedWorktree { _keep: keep, path }
     }
 
     pub fn write(&self, rel: &str, contents: &str) {
@@ -98,6 +127,27 @@ impl Repo {
         self.git(&["add", "-A"]);
         self.git(&["commit", "-q", "-m", message]);
     }
+}
+
+/// A linked worktree created by [`Repo::add_worktree`]. The directory is deleted when dropped.
+pub struct LinkedWorktree {
+    _keep: TempDir,
+    path: PathBuf,
+}
+
+impl LinkedWorktree {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn legacy_worktree_key(repo: &Path) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in repo.to_string_lossy().bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 pub fn app_on(repo: &Repo) -> App {
@@ -132,7 +182,8 @@ pub fn pr_snapshot() -> herdr_reviewr::forge::PrSnapshot {
         sync: Sync::InSync,
         checks: Vec::new(),
         comments: Vec::new(),
-        truncated: false,
+        comments_truncated: false,
+        checks_truncated: false,
     }
 }
 
@@ -151,7 +202,7 @@ pub fn comment() -> herdr_reviewr::forge::Comment {
         created_at: "2026-06-27T10:00:00Z".into(),
         is_resolved: false,
         is_outdated: false,
-        reply_count: 0,
+        replies: Vec::new(),
     }
 }
 

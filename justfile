@@ -47,6 +47,11 @@ qa-restore:
     ./scripts/swap-binary.sh "$bin.release-backup" "$bin"
     echo "restored release binary at $bin"
 
+# PTY smoke test of the editor path against a real release binary
+smoke-edit:
+    cargo build --release
+    python3 scripts/smoke_edit_file.py --binary target/release/herdr-reviewr
+
 # everything CI runs, locally
 ci: fmt-check lint test
     cargo build --release

@@ -1,6 +1,6 @@
 id = "persiyanov.reviewr"
 name = "reviewr"
-version = "0.32.0"
+version = "0.38.1"
 # Turn tracking resolves each agent's `cwd` from `herdr agent list` to decide worktree
 # membership, and `cwd` is only verified present from 0.7.5 (docs/herdr-api-notes.md). On an
 # older herdr every agent would parse with no `cwd`, and `last turn` would never track.
@@ -41,7 +41,11 @@ title = "reviewr: close pane"
 contexts = ["pane", "workspace"]
 command = ["bash", "herdr/pane.sh", "close"]
 
-# Auto-open a reviewr pane for a freshly created worktree (gated by auto_open; see herdr/pane.sh).
+# Auto-open a reviewr pane when a worktree workspace is born (gated by auto_open; see herdr/pane.sh).
 [[events]]
 on = "worktree.created"
+command = ["bash", "herdr/pane.sh", "auto-open"]
+
+[[events]]
+on = "worktree.opened"
 command = ["bash", "herdr/pane.sh", "auto-open"]

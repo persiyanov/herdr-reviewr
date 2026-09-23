@@ -7,12 +7,119 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
-- **`.gitattributes` is respected in the diff.** A file marked `-diff` or `binary` there — a
-  lockfile, a generated bundle, a snapshot fixture — used to open as a full text diff even
-  though git itself refuses to diff it. It now reads `binary — no line comments`, the same as
-  any other binary, and reviewr no longer reads either side of it. This holds for a file the
-  agent has only just written, before it is tracked. `All files` still shows the file's
-  content, since the attribute governs diffing, not reading.
+- **Files `.gitattributes` marks `-diff` or `binary` show the binary notice**, like `git diff`.
+  Thanks [@timharek](https://github.com/timharek) ([#72](https://github.com/persiyanov/herdr-reviewr/pull/72)).
+
+## [0.38.1] — 2026-09-23
+
+### Fixed
+- **A checked-out fork PR shows on the PR tab**, from `gh pr checkout` or `glab mr checkout`.
+  Thanks [@tombeckenham](https://github.com/tombeckenham) ([#108](https://github.com/persiyanov/herdr-reviewr/pull/108)).
+
+## [0.38.0] — 2026-09-16
+
+### Changed
+- **PR comments paint as comments.** Badge images become P1/P2/P3 chips, mermaid fences become
+  a `⧉ mermaid` placeholder, HTML headings match markdown headings, `<details>` starts collapsed,
+  and HTML tags no longer leak as source. The same renderer drives the All-files preview.
+- **A review thread shows every reply in the read pane.** GitHub, GitLab, and Azure DevOps.
+  The `↳ N replies — open on GitHub` line is gone. Click a `<details>` summary to toggle it;
+  on the PR tab `→`/`←` expand/collapse every details in the open thread.
+- **A capped list says so in the pane** (`newest 100 comments` / `newest 100 checks`) instead of
+  sending you to the forge.
+
+## [0.37.1] — 2026-09-13
+
+### Changed
+- **Base picker.** Every branch is a row with its age and role (`pr base`, `default`, `current`),
+  the filter is fuzzy, and a typed revision is one more row. Picking the default clears the pick.
+- **A repo with no remote has a base.** `init.defaultBranch`, `main`, or `master` stands in for `origin/HEAD`.
+
+## [0.37.0] — 2026-09-13
+
+### Added
+- **A collapsed `All files` folder with a changed file under it shows a dot.** A collapsed tree
+  tells you which folders to open.
+
+## [0.36.2] — 2026-08-29
+
+### Fixed
+- **`auto_open` also opens reviewr when an existing checkout gets a new herdr workspace.** Opening
+  a checkout whose workspace is already live remains a no-op, so it does not resurrect a reviewr
+  pane the user closed there. Layout and session plugins that own reviewr placement still opt out
+  with `auto_open = false`. ([#82](https://github.com/persiyanov/herdr-reviewr/issues/82))
+
+## [0.36.1] — 2026-08-28
+
+### Changed
+- **Base pick and last-turn are per worktree.** Stacked herdr panes on one clone no longer
+  share a base. Picking the default branch records that name instead of clearing.
+
+## [0.36.0] — 2026-08-23
+
+### Added
+- **`commits` scope.** `G` picks one commit or a run, the `Changes` tab shows just that diff, and
+  comments made there stay on their commit. `g` switches back to the pick.
+
+### Changed
+- **Breaking: `g` and `G` are new default keys.** A `[keybindings]` config that already uses either
+  now collides and must move it.
+- **Footer vocabulary.** One word per meaning everywhere: `move`, `open`, `select`. `B` now
+  works in every scope and opens the base picker, like `G`.
+
+## [0.35.0] — 2026-08-23
+
+### Added
+- **`e` opens the file at the line you're on, in your editor.** Set `$EDITOR` and it works, or
+  set the new `editor` key to spell out the command yourself.
+  Shaped by @trsxxii (#33) and @jorgerojas26 (#79).
+
+## [0.34.1] — 2026-08-22
+
+### Fixed
+- **Opened directories nest their children.** Expanding a folder in the file navigator
+  lined child names up with the folder name: an unchanged file has no change marker, and
+  the indent was exactly the chevron's width. Those rows now keep the chevron's two
+  columns empty so names sit under the parent.
+
+## [0.34.0] — 2026-08-20
+
+### Added
+- **Mouse text selection.** Drag over any text — a diff line, a filename, PR comment text, the
+  markdown preview — to select it character by character. Releasing copies the source text to
+  the clipboard, and the selection stays highlighted until your next action. A drag released
+  past the pane border still copies what was highlighted. A double-click copies the word
+  under the pointer, and a triple-click copies the whole line. In the file tree, a drag
+  copies the spanned rows' full paths, directories included, and a double-click copies
+  one row's.
+  ([#62](https://github.com/persiyanov/herdr-reviewr/issues/62))
+- **Gutter commenting.** Hovering a line shows a `[+]` over its line number. Click the gutter
+  to comment that line, or drag along it to comment a range — the composer opens on release.
+
+### Changed
+- **Dragging over diff text no longer selects a line range.** Range selection by mouse moved
+  to the gutter. The keyboard `v` selection is unchanged.
+
+## [0.33.0] — 2026-08-19
+
+### Added
+- **Typed base revisions.** The pick-base menu (`B`) takes any git revision, not only named
+  branches: `HEAD~1`, a tag, a unique SHA prefix
+  ([#75](https://github.com/persiyanov/herdr-reviewr/issues/75)). Named spellings re-resolve
+  like git, so a later commit still diffs one back; the header reads `vs HEAD~1 (a1b2c3d)`.
+  Type a SHA to freeze that commit; the header shows the abbrev once.
+
+### Changed
+- A unique SHA prefix shorter than seven characters completes to the abbreviated object id.
+  A pasted 40-hex stays a pin.
+
+## [0.32.1] — 2026-08-18
+
+### Fixed
+- **Brew-installed host tools resolve from any launch.** herdr starts plugin panes with a
+  PATH that omits Homebrew, so the PR tab reported `gh` as missing. Reviewr now looks up
+  and spawns host tools against the usual bin dirs plus the inherited PATH, so
+  `gh`/`glab`/`az` resolve however the pane was opened.
 
 ## [0.32.0] — 2026-08-17
 
@@ -446,7 +553,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   open --plugin persiyanov.reviewr` opens the sidebar and does nothing when one is already
   open. `close` removes it, including a sidebar herdr's plugin registry forgot after a restart.
   `toggle` keeps its key. `open` ignores `auto_open`, so a layout that opts out of auto-open
-  can still place reviewr deliberately. See `specs/herdr-host.md` and the README's layout
+  can still place reviewr deliberately. See the README's layout
   recipe. (#9)
 
 ### Changed
@@ -467,7 +574,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   derives every branch name the worktree's work could be published under — the recorded
   upstream, remote branches that carry the worktree's commits, and the local name — and asks
   GitHub about all of them in one call. GitHub decides which name holds the PR, so a stale
-  upstream or a checkpoint push can never hide it. See `specs/forge-host.md`. (#10)
+  upstream or a checkpoint push can never hide it. (#10)
 - **A git hiccup no longer reads as "no PR".** A failing git command during the fetch (a lock
   held by `git gc`, a ref pruned mid-read) now freezes the last good view with the retry marker
   instead of blanking the tab or showing a wrong empty state. Git errors are also read with a
@@ -489,7 +596,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   worktree's git dir, and every refresh after that failed with `refresh failed: git ["add", "-A"]
   failed: fatal: Unable to create … File exists` until the lock was deleted by hand. The snapshot
   now clears any leftover temp index and its lock — both private to reviewr — before running and
-  on every exit path. See `specs/herdr-host.md`.
+  on every exit path.
 - **`herdr plugin install` now delivers the current release again.** v0.8.1 shipped with
   `herdr-plugin.toml` still saying `0.8.0`, and `install.sh` reads the manifest to pick the
   download tag, so installs were silently getting the v0.8.0 binary — without the Send resolver
@@ -504,7 +611,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   plus any number of non-agent panes resolves cleanly. Turn tracking uses the same resolver, so
   `last-turn` no longer pauses in these layouts. A refused send now also says why — no agent
   here, or several — and points at `y` to copy to the clipboard instead. Thanks @worldnine for
-  the diagnosis and reproduction. See `specs/herdr-host.md`.
+  the diagnosis and reproduction.
 
 ## [0.8.0] — 2026-07-08
 
@@ -512,7 +619,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`auto_open` config key** — `auto_open = false` in reviewr's `config.toml` turns off the
   `worktree.created` auto-open, so a layout plugin like herdr-plus can furnish a fresh worktree
   undisturbed and reviewr opens only on the toggle key, in any placement. Defaults to `true`
-  (today's behavior); an unknown value falls back to the default. See `specs/herdr-host.md`. (#5)
+  (today's behavior); an unknown value falls back to the default. (#5)
 
 ### Changed
 - README now spells out where reviewr's config file lives on disk
@@ -526,7 +633,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (#4).** reviewr now initializes the terminal and paints before running any `git`, so a startup
   scan error shows `load failed: …` in the status line and a hung `git` shows a frozen-but-visible
   sidebar — never the blank pane herdr leaves for a process that blocks or exits before it renders.
-  See `specs/herdr-host.md`.
 
 ## [0.7.0] — 2026-07-08
 
@@ -535,7 +641,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   candidate list for the `branch` scope, re-read on refresh. reviewr uses the first entry that
   exists in the repo (default `origin/main` → `origin/master` → `main` → `master`), so one setting
   works across repos with different trunks and the base is reachable inside herdr, where no CLI
-  flag is. `--base` still overrides. See `specs/review-model.md`. (#3)
+  flag is. `--base` still overrides. (#3)
 
 ## [0.6.0] — 2026-07-02
 
@@ -544,7 +650,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   default `split`) and `toggle_direction` (`right` | `down`, split only, default `right`) in
   reviewr's `config.toml` set how the toggle opens the sidebar. The `worktree.created` auto-open
   stays a `split`/`tab` (the covering placements open only on a manual toggle). An unknown value
-  falls back to its default. See `specs/herdr-host.md`. (#2)
+  falls back to its default. (#2)
 
 ## [0.5.0] — 2026-06-29
 
@@ -554,7 +660,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Tokyo Night day/night, Rosé Pine / Dawn), set via `theme = "<name>"` in reviewr's
   `config.toml` (re-read on refresh) or `--theme` for a dev run; default `catppuccin`. One theme
   colors the whole UI — chrome and syntax together — replacing the hardcoded Catppuccin Mocha.
-  An unknown name falls back to the default. See `specs/theme.md`.
+  An unknown name falls back to the default.
 
 ### Changed
 - **`--theme` now selects the whole theme** (chrome + syntax), not just the syntect syntax theme.

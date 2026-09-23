@@ -1,6 +1,6 @@
 //! Turn tracking for the `last-turn` scope.
 //!
-//! See `specs/herdr-host.md`. A turn belongs to the worktree, never to one agent
+//! A turn belongs to the worktree, never to one agent
 //! (HH-TURN-PER-WORKTREE): [`WorktreeState`] folds every agent in the worktree into one
 //! work state, and a turn is that fold's rest→work edge. On a turn start the host captures
 //! a candidate worktree snapshot; it promotes the candidate to the live baseline once the
@@ -91,7 +91,7 @@ pub struct TurnTracker {
     /// Deliberately not the same reading of the past as `prev_resting`, which `Neither` clears:
     /// the start edge stays conservative and the end edge liberal, because a missed start
     /// only widens the diff while a missed end strands the `PR` tab's refetch
-    /// (`specs/herdr-host.md` Turn tracking). Collapsing the two — leaving `prev_resting` set
+    /// Collapsing the two — leaving `prev_resting` set
     /// on `Neither` and dropping this field — makes `Resting → Neither → Working` start a turn
     /// and anchor its baseline after edits the agent already made, which shows less than the
     /// turn wrote. Failure semantics forbids that.
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn from_wire_reads_herdrs_four_spellings_and_folds_the_rest_to_unknown() {
         // The spellings are herdr's, so they are pinned literally rather than derived from
-        // anything reviewr owns (`specs/herdr-host.md`).
+        // anything reviewr owns.
         assert_eq!(Status::from_wire("idle"), Status::Idle);
         assert_eq!(Status::from_wire("working"), Status::Working);
         assert_eq!(Status::from_wire("blocked"), Status::Blocked);
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn an_empty_worktree_rests_so_its_first_working_agent_starts_a_turn() {
         // The fold that makes a freshly opened reviewr pane track the next turn it sees, rather
-        // than waiting for an agent that was already there (`specs/herdr-host.md`).
+        // than waiting for an agent that was already there.
         assert_eq!(WorktreeState::fold([]), WorktreeState::Resting);
         let mut t = TurnTracker::default();
         t.observe(WorktreeState::fold([]));

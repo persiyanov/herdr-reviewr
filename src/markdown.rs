@@ -1,9 +1,10 @@
 //! Markdown rendering: one renderer behind the PR tab's bodies and the File view's preview.
 //!
-//! See `specs/markdown.md`. Parses with `pulldown-cmark` and emits theme-styled,
+//! Parses with `pulldown-cmark` and emits theme-styled,
 //! pre-wrapped `ratatui` lines. Fenced code goes through the shared [`Highlighter`], so
 //! code in a comment matches the diff panes.
 
+use std::collections::HashSet;
 use std::ops::Range;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -22,12 +23,12 @@ const MAX_NEST: usize = 8;
 const CODE_INDENT: &str = "  ";
 
 /// A shrunk table column never drops below this width (or its natural width, when
-/// smaller), so wrapped cells stay readable (`specs/markdown.md`).
+/// smaller), so wrapped cells stay readable.
 const COL_FLOOR: usize = 8;
 
 /// Rendered markdown: the styled lines, one metadata entry per line in lockstep, and
 /// the document's heading anchors — the position mapping and link hit-testing the
-/// surfaces consume (`specs/diff-view.md`, `specs/markdown.md`).
+/// surfaces consume.
 #[derive(Clone, Debug, Default)]
 pub struct Rendered {
     pub lines: Vec<Line<'static>>,
@@ -42,6 +43,17 @@ pub struct Rendered {
 pub struct LineMeta {
     pub source_line: usize,
     pub links: Vec<LinkSpan>,
+    /// A `<details>` summary on this line, when the line is that disclosure.
+    pub details: Option<DetailsHit>,
+}
+
+/// Click target for a `<details>` summary: display columns and the summary text the
+/// expand state keys on.
+#[derive(Clone, Debug)]
+pub struct DetailsHit {
+    pub start: usize,
+    pub end: usize,
+    pub summary: std::sync::Arc<str>,
 }
 
 /// A clickable span on one rendered line: `start..end` display columns and where it
@@ -54,14 +66,26 @@ pub struct LinkSpan {
     pub url: std::sync::Arc<str>,
 }
 
-/// Render `text` as styled lines wrapped to `width` columns.
+/// Render `text` as styled lines wrapped to `width` columns. All details start collapsed.
 pub fn render(text: &str, width: usize, hl: &Highlighter, p: &Palette) -> Rendered {
+    render_expanded(text, width, hl, p, &HashSet::new())
+}
+
+/// Like [`render`], with the `<details>` summaries in `expanded` opened.
+pub fn render_expanded<S: std::hash::BuildHasher>(
+    text: &str,
+    width: usize,
+    hl: &Highlighter,
+    p: &Palette,
+    expanded: &HashSet<String, S>,
+) -> Rendered {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
     let mut line_starts = vec![0usize];
     line_starts.extend(text.char_indices().filter(|(_, c)| *c == '\n').map(|(i, _)| i + 1));
+    let expanded: HashSet<String> = expanded.iter().cloned().collect();
     let mut r = Renderer {
         hl,
         p,
@@ -83,7 +107,11 @@ pub fn render(text: &str, width: usize, hl: &Highlighter, p: &Palette) -> Render
         table: None,
         needs_blank: false,
         pending_anchor: None,
+        pending_details: None,
         slug_counts: std::collections::HashMap::new(),
+        expanded: &expanded,
+        details: Vec::new(),
+        skip_relative: false,
     };
     for (event, range) in Parser::new_ext(text, opts).into_offset_iter() {
         r.event(event, range);
@@ -92,27 +120,63 @@ pub fn render(text: &str, width: usize, hl: &Highlighter, p: &Palette) -> Render
     r.out
 }
 
-/// A single-slot render memo: the last `(text, width)` and its lines. One input is on
-/// screen at a time per surface, so one slot absorbs the per-frame recompute
-/// (`specs/markdown.md`). Cleared on a theme switch, which changes every color.
+/// A render memo keyed by `(text, width, expanded summaries)`. Several bodies can sit
+/// on one PR thread, so it keeps the last few. Cleared on a theme switch.
 #[derive(Debug, Default)]
 pub struct RenderCache {
-    key: Option<(String, usize)>,
+    slots: Vec<CacheSlot>,
+}
+
+#[derive(Debug)]
+struct CacheSlot {
+    text: String,
+    width: usize,
+    expanded: Vec<String>,
     rendered: Rendered,
 }
 
+const CACHE_SLOTS: usize = 16;
+
 impl RenderCache {
     pub fn get(&mut self, text: &str, width: usize, hl: &Highlighter, p: &Palette) -> Rendered {
-        if !self.key.as_ref().is_some_and(|(t, w)| t == text && *w == width) {
-            self.rendered = render(text, width, hl, p);
-            self.key = Some((text.to_string(), width));
+        self.get_expanded(text, width, hl, p, &HashSet::new())
+    }
+
+    pub fn get_expanded<S: std::hash::BuildHasher>(
+        &mut self,
+        text: &str,
+        width: usize,
+        hl: &Highlighter,
+        p: &Palette,
+        expanded: &HashSet<String, S>,
+    ) -> Rendered {
+        let mut expanded_key: Vec<String> = expanded.iter().cloned().collect();
+        expanded_key.sort();
+        if let Some(i) = self
+            .slots
+            .iter()
+            .position(|s| s.text == text && s.width == width && s.expanded == expanded_key)
+        {
+            let slot = self.slots.remove(i);
+            let rendered = slot.rendered.clone();
+            self.slots.push(slot);
+            return rendered;
         }
-        self.rendered.clone()
+        let rendered = render_expanded(text, width, hl, p, expanded);
+        self.slots.push(CacheSlot {
+            text: text.to_string(),
+            width,
+            expanded: expanded_key,
+            rendered: rendered.clone(),
+        });
+        if self.slots.len() > CACHE_SLOTS {
+            self.slots.remove(0);
+        }
+        rendered
     }
 
     pub fn clear(&mut self) {
-        self.key = None;
-        self.rendered = Rendered::default();
+        self.slots.clear();
     }
 }
 
@@ -166,88 +230,106 @@ struct Renderer<'a> {
     /// The heading text being collected for its slug — prose only, never a link's
     /// appended destination, so `## See [docs](url)` slugs as GitHub does.
     heading_text: Option<String>,
-    /// Open images: the chunk index where the alt text starts, and the heading-text
-    /// length to roll back to — alt text stays out of a heading's slug, as on GitHub.
-    images: Vec<(usize, usize)>,
+    /// Open images: the chunk index where the alt text starts, the heading-text
+    /// length to roll back to — alt text stays out of a heading's slug, as on GitHub —
+    /// and the image destination, so a non-badge image is a link to its url.
+    images: Vec<(usize, usize, String)>,
     code: Option<CodeBlock>,
     table: Option<Table>,
     needs_blank: bool,
     /// The slug the next flushed line carries as its heading anchor.
     pending_anchor: Option<String>,
+    /// A details summary the next flushed line carries as its click target.
+    pending_details: Option<DetailsHit>,
     /// Slugs seen so far, so duplicate headings number like GitHub's.
     slug_counts: std::collections::HashMap<String, usize>,
+    expanded: &'a HashSet<String>,
+    details: Vec<DetailsFrame>,
+    skip_relative: bool,
+}
+
+/// An open `<details>`: its summary (while collecting), and whether its body is silent.
+struct DetailsFrame {
+    summary: String,
+    collecting_summary: bool,
+    skip: bool,
 }
 
 impl Renderer<'_> {
+    fn emitting(&self) -> bool {
+        !self.details.iter().any(|d| d.skip) && !self.skip_relative
+    }
+
+    fn collecting_summary(&self) -> bool {
+        self.details.last().is_some_and(|d| d.collecting_summary)
+    }
+
+    fn append_summary(&mut self, text: &str) {
+        if let Some(d) = self.details.last_mut() {
+            d.summary.push_str(text);
+        }
+    }
+
     fn event(&mut self, event: Event<'_>, range: Range<usize>) {
         match event {
-            Event::Start(tag) => self.start(tag, range),
-            Event::End(tag) => self.end(tag),
+            Event::InlineHtml(t) => self.handle_html(&t, true),
+            Event::Html(t) => {
+                self.block_src = self.src_line(range.start);
+                if self.emitting() && !self.collecting_summary() {
+                    // A tight list item's text can still be pending: it emits first,
+                    // with its marker, so the HTML block never jumps ahead of it.
+                    self.flush_block(true);
+                }
+                self.handle_html(&t, false);
+            }
+            Event::Start(tag) if self.emitting() && !self.collecting_summary() => {
+                self.start(tag, range);
+            }
+            Event::End(tag) if self.emitting() && !self.collecting_summary() => self.end(tag),
             Event::Text(t) => {
-                if let Some(code) = &mut self.code {
+                if self.collecting_summary() {
+                    self.append_summary(&t);
+                } else if !self.emitting() {
+                } else if let Some(code) = &mut self.code {
                     code.content.push_str(&t);
                 } else {
                     self.push_text(&t, self.current_style());
                 }
             }
-            Event::Code(t) => {
-                let style = self.current_style().fg(self.p.peach);
+            Event::Code(t) if self.emitting() && !self.collecting_summary() => {
+                let style = self.current_style().fg(self.p.orange);
                 self.push_text(&t, style);
             }
-            Event::SoftBreak => self.push_text(" ", self.current_style()),
-            Event::HardBreak => {
+            Event::SoftBreak if self.collecting_summary() => self.append_summary(" "),
+            Event::SoftBreak if self.emitting() => self.push_text(" ", self.current_style()),
+            Event::HardBreak if self.emitting() && !self.collecting_summary() => {
                 let style = self.current_style();
                 let link = self.current_link();
                 self.push_chunk("\n".into(), style, link);
             }
-            Event::Rule => {
+            Event::Rule if self.emitting() => {
                 self.flush_block(true);
                 self.block_src = self.src_line(range.start);
                 self.blank_before_block();
                 let budget = self.budget(self.prefix(None).0.width());
                 let line = Line::from(vec![
                     self.prefix(None).0,
-                    Span::styled("─".repeat(budget), Style::default().fg(self.p.overlay0)),
+                    Span::styled("─".repeat(budget), Style::default().fg(self.p.dim2)),
                 ]);
                 self.push_plain_line(line);
                 self.needs_blank = true;
             }
-            // Raw HTML shows as its dim source text: the parser's own classification
-            // decides — an inline tag stays inline (`## <a name="x"></a>Title` is one
-            // heading), a block becomes its own dim lines (`specs/markdown.md`).
-            Event::InlineHtml(t) => {
-                let style = Style::default().fg(self.p.overlay0);
-                let link = self.current_link();
-                // Straight to the chunks: tag text never enters a heading's slug.
-                self.push_chunk(sanitize(&t), style, link);
-            }
-            Event::Html(t) => {
-                let style = Style::default().fg(self.p.overlay0);
-                if self.table.is_some() {
-                    self.push_chunk(sanitize(&t), style, None);
-                } else {
-                    // A tight list item's text can still be pending: it emits first,
-                    // with its marker, so the HTML block never jumps ahead of it.
-                    self.flush_block(true);
-                    self.block_src = self.src_line(range.start);
-                    self.blank_before_block();
-                    for html_line in t.trim_end_matches('\n').split('\n') {
-                        self.emit_fragments(vec![(sanitize(html_line), style)], "");
-                    }
-                    self.needs_blank = true;
-                }
-            }
-            Event::TaskListMarker(done) => {
+            Event::TaskListMarker(done) if self.emitting() => {
                 self.marker = Some(if done { "☑ ".into() } else { "☐ ".into() });
             }
-            // Footnotes and math are not enabled; their syntax arrives as literal text.
+            // Footnotes, math, and events inside a collapsed details body are silent.
             _ => {}
         }
     }
 
     fn start(&mut self, tag: Tag<'_>, range: Range<usize>) {
         // A block-level tag stamps the source line every rendered line of the block maps
-        // back to (`specs/diff-view.md` position mapping).
+        // back to.
         if matches!(
             tag,
             Tag::Paragraph | Tag::Heading { .. } | Tag::Item | Tag::CodeBlock(_) | Tag::Table(_)
@@ -296,13 +378,13 @@ impl Renderer<'_> {
                 let at = self.chunk_len();
                 self.urls.push(std::sync::Arc::from(dest_url.as_ref()));
                 self.links.push((self.urls.len() - 1, at));
-                let lavender = self.p.lavender;
-                self.push_style(|s| s.fg(lavender).add_modifier(Modifier::UNDERLINED));
+                let blue = self.p.blue;
+                self.push_style(|s| s.fg(blue).add_modifier(Modifier::UNDERLINED));
             }
-            Tag::Image { .. } => {
+            Tag::Image { dest_url, .. } => {
                 let at = self.chunk_len();
                 let heading_len = self.heading_text.as_ref().map_or(0, String::len);
-                self.images.push((at, heading_len));
+                self.images.push((at, heading_len, dest_url.as_ref().to_string()));
             }
             Tag::Table(_) => {
                 self.flush_block(true);
@@ -326,15 +408,7 @@ impl Renderer<'_> {
     fn end(&mut self, tag: TagEnd) {
         match tag {
             TagEnd::Paragraph => self.flush_block(true),
-            TagEnd::Heading(_) => {
-                let text = self.heading_text.take().unwrap_or_default();
-                let slug = self.slugify(&text);
-                if !slug.is_empty() {
-                    self.pending_anchor = Some(slug);
-                }
-                self.flush_block(true);
-                self.styles.pop();
-            }
+            TagEnd::Heading(_) => self.end_heading(),
             TagEnd::BlockQuote(_) => {
                 self.flush_block(true);
                 self.quote = self.quote.saturating_sub(1);
@@ -404,18 +478,18 @@ impl Renderer<'_> {
         self.styles.last().copied().unwrap_or_else(|| Style::default().fg(self.p.text))
     }
 
-    /// Heading style: bold in an accent, deeper levels dimmer (`specs/markdown.md`).
+    /// Heading style: bold in an accent, deeper levels dimmer.
     fn heading_style(&self, level: HeadingLevel) -> Style {
         let fg = match level {
-            HeadingLevel::H1 | HeadingLevel::H2 => self.p.mauve,
-            HeadingLevel::H3 => self.p.lavender,
-            _ => self.p.subtext0,
+            HeadingLevel::H1 | HeadingLevel::H2 => self.p.purple,
+            HeadingLevel::H3 => self.p.blue,
+            _ => self.p.dim0,
         };
         Style::default().fg(fg).add_modifier(Modifier::BOLD)
     }
 
     /// Close a link: when its visible text differs from the destination, append the
-    /// destination dim (`specs/markdown.md`).
+    /// destination dim.
     fn end_link(&mut self) {
         self.styles.pop();
         let Some((id, start)) = self.links.pop() else {
@@ -424,29 +498,177 @@ impl Renderer<'_> {
         let dest = self.urls[id].clone();
         let text: String = self.chunks_mut()[start..].iter().map(|c| c.text.as_str()).collect();
         if !dest.is_empty() && text != *dest {
-            let style = Style::default().fg(self.p.overlay0);
-            // The dim destination shares the click target with the text (`specs/markdown.md`).
+            let style = Style::default().fg(self.p.dim2);
+            // The dim destination shares the click target with the text.
             self.push_chunk(format!(" ({})", sanitize(&dest)), style, Some(id));
         }
     }
 
-    /// Collapse an image to its dim `⧉ alt-text` placeholder.
+    /// Collapse an image to a severity chip or a dim `⧉ alt-text` link to its url.
     fn end_image(&mut self) {
-        let Some((start, heading_len)) = self.images.pop() else {
+        let Some((start, heading_len, dest)) = self.images.pop() else {
             return;
         };
         if let Some(h) = &mut self.heading_text {
             h.truncate(heading_len);
         }
-        let style = Style::default().fg(self.p.overlay0);
         let chunks = self.chunks_mut();
         let alt: String = chunks[start..].iter().map(|c| c.text.as_str()).collect();
         chunks.truncate(start);
-        let alt = alt.trim();
+        self.emit_image(alt.trim(), &dest);
+    }
+
+    fn emit_image(&mut self, alt: &str, dest: &str) {
+        if let Some(label) = badge_label(alt) {
+            let fg = match label {
+                "P1" => self.p.orange,
+                "P2" => self.p.yellow,
+                _ => self.p.dim0,
+            };
+            let style = Style::default().fg(fg).add_modifier(Modifier::BOLD);
+            self.push_chunk(label.to_string(), style, self.current_link());
+            return;
+        }
+        let alt = sanitize(alt);
+        let dest = sanitize(dest);
         let text = if alt.is_empty() { "⧉ image".to_string() } else { format!("⧉ {alt}") };
-        // An image inside a link stays part of that link's click target.
-        let link = self.current_link();
+        let style = Style::default().fg(self.p.dim2);
+        let link = if dest.is_empty() {
+            self.current_link()
+        } else {
+            self.urls.push(std::sync::Arc::from(dest));
+            Some(self.urls.len() - 1)
+        };
         self.push_chunk(text, style, link);
+    }
+
+    fn handle_html(&mut self, html: &str, inline: bool) {
+        let produced = self.inline.len();
+        for tok in html_tokens(html) {
+            match tok {
+                HtmlTok::Comment => {}
+                HtmlTok::Text(t) => {
+                    if self.collecting_summary() {
+                        self.append_summary(t);
+                    } else if self.emitting() && !t.trim().is_empty() {
+                        self.push_text(t, self.current_style());
+                    }
+                }
+                HtmlTok::Tag { name, closing, self_closing, raw } => {
+                    self.handle_html_tag(name, closing, self_closing, raw);
+                }
+            }
+        }
+        if !inline && self.inline.len() > produced && self.emitting() && !self.collecting_summary()
+        {
+            self.flush_block(true);
+        }
+    }
+
+    fn handle_html_tag(&mut self, name: &str, closing: bool, self_closing: bool, raw: &str) {
+        let name = html_tag_name(name);
+        match (name.as_str(), closing, self_closing) {
+            ("details", false, false) => {
+                if self.emitting() {
+                    self.flush_block(true);
+                }
+                self.details.push(DetailsFrame {
+                    summary: String::new(),
+                    collecting_summary: false,
+                    skip: true,
+                });
+            }
+            ("details", true, _) => {
+                if self.emitting() {
+                    self.flush_block(true);
+                }
+                self.details.pop();
+            }
+            ("summary", false, _) => {
+                if let Some(d) = self.details.last_mut() {
+                    d.collecting_summary = true;
+                    d.summary.clear();
+                }
+            }
+            ("summary", true, _) => self.finish_summary(),
+            ("br", _, _) if self.emitting() && !self.collecting_summary() => {
+                let style = self.current_style();
+                let link = self.current_link();
+                self.push_chunk("\n".into(), style, link);
+            }
+            ("relative-time", false, false) => self.skip_relative = true,
+            ("relative-time", true, _) | ("relative-time", false, true) => {
+                self.skip_relative = false;
+            }
+            ("img", _, _) if self.emitting() && !self.collecting_summary() => {
+                let alt = html_attr(raw, "alt").unwrap_or_default();
+                let src = html_attr(raw, "src").unwrap_or_default();
+                self.emit_image(&alt, &src);
+            }
+            (h @ ("h1" | "h2" | "h3" | "h4" | "h5" | "h6"), false, false)
+                if self.emitting() && !self.collecting_summary() =>
+            {
+                self.flush_block(true);
+                self.heading_text = Some(String::new());
+                self.styles.push(self.heading_style(html_heading_level(h)));
+            }
+            ("h1" | "h2" | "h3" | "h4" | "h5" | "h6", true, _) => self.end_heading(),
+            _ => {}
+        }
+    }
+
+    fn end_heading(&mut self) {
+        let Some(text) = self.heading_text.take() else {
+            return;
+        };
+        let slug = self.slugify(&text);
+        if !slug.is_empty() {
+            self.pending_anchor = Some(slug);
+        }
+        self.flush_block(true);
+        self.styles.pop();
+    }
+
+    fn finish_summary(&mut self) {
+        let Some(d) = self.details.last_mut() else {
+            return;
+        };
+        d.collecting_summary = false;
+        let summary = d.summary.split_whitespace().collect::<Vec<_>>().join(" ");
+        let summary = sanitize(&summary);
+        d.summary.clone_from(&summary);
+        let open = self.expanded.contains(&summary);
+        if let Some(d) = self.details.last_mut() {
+            d.skip = !open;
+        }
+        if !self.details.iter().rev().skip(1).any(|d| d.skip) {
+            self.emit_details_summary(&summary, open);
+        }
+    }
+
+    fn emit_details_summary(&mut self, summary: &str, open: bool) {
+        self.flush_block(true);
+        self.blank_before_block();
+        let glyph = if open { "▾ " } else { "▸ " };
+        let (first, _) = self.prefix(None);
+        let off = first.width();
+        let glyph_style = Style::default().fg(self.p.dim2);
+        let text_style = Style::default().fg(self.p.text);
+        let summary_w = summary.width();
+        self.pending_details = Some(DetailsHit {
+            start: off,
+            end: off + glyph.width() + summary_w,
+            summary: std::sync::Arc::from(summary),
+        });
+        self.push_line(
+            Line::from(vec![
+                first,
+                Span::styled(glyph, glyph_style),
+                Span::styled(summary.to_string(), text_style),
+            ]),
+            Vec::new(),
+        );
+        self.needs_blank = open;
     }
 
     // ---- block emission ------------------------------------------------------------------
@@ -460,7 +682,7 @@ impl Renderer<'_> {
         let marker = marker.unwrap_or("");
         let first = format!("{bars}{gap}{indent}{marker}");
         let cont = format!("{bars}{gap}{indent}{}", " ".repeat(marker.width()));
-        let style = Style::default().fg(self.p.overlay0);
+        let style = Style::default().fg(self.p.dim2);
         (Span::styled(first, style), Span::styled(cont, style))
     }
 
@@ -480,7 +702,11 @@ impl Renderer<'_> {
         if let Some(slug) = self.pending_anchor.take() {
             self.out.anchors.push((slug, self.out.lines.len()));
         }
-        self.out.meta.push(LineMeta { source_line: self.block_src, links });
+        self.out.meta.push(LineMeta {
+            source_line: self.block_src,
+            links,
+            details: self.pending_details.take(),
+        });
         self.out.lines.push(line);
     }
 
@@ -494,11 +720,15 @@ impl Renderer<'_> {
     fn blank_before_block(&mut self) {
         if self.needs_blank && !self.out.lines.is_empty() {
             let bars = "▎".repeat(self.quote.min(MAX_NEST));
-            self.out.meta.push(LineMeta { source_line: self.block_src, links: Vec::new() });
+            self.out.meta.push(LineMeta {
+                source_line: self.block_src,
+                links: Vec::new(),
+                details: None,
+            });
             self.out.lines.push(if bars.is_empty() {
                 Line::default()
             } else {
-                Line::from(Span::styled(bars, Style::default().fg(self.p.overlay0)))
+                Line::from(Span::styled(bars, Style::default().fg(self.p.dim2)))
             });
         }
         self.needs_blank = false;
@@ -549,7 +779,7 @@ impl Renderer<'_> {
     fn emit_fragments(&mut self, fragments: Vec<(String, Style)>, extra_indent: &str) {
         let marker = self.marker.take();
         let (first, cont) = self.prefix(marker.as_deref());
-        let style = Style::default().fg(self.p.overlay0);
+        let style = Style::default().fg(self.p.dim2);
         let first = Span::styled(format!("{}{extra_indent}", first.content), style);
         let cont = Span::styled(format!("{}{extra_indent}", cont.content), style);
         let budget = self.budget(cont.width());
@@ -573,6 +803,11 @@ impl Renderer<'_> {
             return;
         };
         self.blank_before_block();
+        if lang.as_deref().is_some_and(|l| l.eq_ignore_ascii_case("mermaid")) {
+            self.emit_mermaid_placeholder(&content);
+            self.needs_blank = true;
+            return;
+        }
         let content = content.replace('\t', "    ");
         let highlighted = self.hl.highlight(&content, lang.as_deref());
         // Code maps line-accurately: a fence line precedes fenced content in the source.
@@ -588,9 +823,19 @@ impl Renderer<'_> {
         self.needs_blank = true;
     }
 
+    fn emit_mermaid_placeholder(&mut self, content: &str) {
+        let kind = mermaid_kind(content);
+        let text = match kind {
+            Some(k) => format!("⧉ mermaid {k}"),
+            None => "⧉ mermaid".to_string(),
+        };
+        let style = Style::default().fg(self.p.dim2);
+        self.emit_fragments(vec![(text, style)], "");
+    }
+
     /// Close a table: aligned columns with a bold header, an over-wide table shrinking
     /// its widest column and wrapping that column's cells, and dim source text only when
-    /// the column floors still overflow the pane (`specs/markdown.md`).
+    /// the column floors still overflow the pane.
     fn end_table(&mut self) {
         let Some(table) = self.table.take() else {
             return;
@@ -615,7 +860,7 @@ impl Renderer<'_> {
         // pass levels every widest column down toward the next-highest width or its
         // floor, whichever is larger, so cost is bounded by the column count, not by
         // how over-wide a cell's content is. Tied widest columns shrink together, as
-        // the reference renderers do (`specs/markdown.md`).
+        // the reference renderers do.
         let floors: Vec<usize> = widths.iter().map(|w| (*w).min(COL_FLOOR)).collect();
         let sep_total = 3 * cols.saturating_sub(1);
         let mut deficit = (widths.iter().sum::<usize>() + sep_total).saturating_sub(budget);
@@ -652,7 +897,7 @@ impl Renderer<'_> {
 
         if deficit > 0 {
             // Over-wide at every floor: the table renders as its source text instead.
-            let style = Style::default().fg(self.p.overlay0);
+            let style = Style::default().fg(self.p.dim2);
             let src = self.source.get(table.range.clone()).unwrap_or("");
             for src_line in src.trim_end_matches('\n').split('\n') {
                 self.emit_fragments(vec![(sanitize(src_line), style)], "");
@@ -661,13 +906,13 @@ impl Renderer<'_> {
             return;
         }
 
-        let dim = Style::default().fg(self.p.overlay0);
+        let dim = Style::default().fg(self.p.dim2);
         for (r, row) in table.rows.iter().enumerate() {
             let head = r < table.head_rows;
             let style_of =
                 |c: &Chunk| if head { c.style.add_modifier(Modifier::BOLD) } else { c.style };
             // A cell that fits its column emits verbatim, spaces and all; only a cell
-            // wider than its shrunk column wraps inside it (`specs/markdown.md`). The
+            // wider than its shrunk column wraps inside it. The
             // row is as tall as its tallest cell.
             let cells: Vec<Vec<WrappedLine>> = (0..cols)
                 .map(|i| {
@@ -752,7 +997,7 @@ impl Renderer<'_> {
 
 /// GitHub's slug normalization: lowercase, spaces to hyphens, everything but letters,
 /// digits, hyphens, and underscores dropped. The click side runs a fragment through the
-/// same transform, so `#Set-Up!` finds the `set-up` heading (`specs/markdown.md`).
+/// same transform, so `#Set-Up!` finds the `set-up` heading.
 pub(crate) fn slug_text(text: &str) -> String {
     let mut slug = String::new();
     for c in text.trim().to_lowercase().chars() {
@@ -768,14 +1013,113 @@ pub(crate) fn slug_text(text: &str) -> String {
 /// A character the terminal must never receive raw: a control character or an explicit
 /// bidirectional override. One predicate serves the display ([`sanitize`]) and the link
 /// opener (`browser::openable_url`), so what the display would neutralize can never
-/// open as different bytes (`specs/markdown.md`).
+/// open as different bytes.
 pub(crate) fn hostile_char(c: char) -> bool {
     c.is_control()
         || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}')
 }
 
+fn mermaid_kind(content: &str) -> Option<&str> {
+    for line in content.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("%%") {
+            continue;
+        }
+        let word = t.split(|c: char| c.is_whitespace() || c == '{' || c == '-').next()?;
+        if word.is_empty() {
+            continue;
+        }
+        return Some(word);
+    }
+    None
+}
+
+fn html_heading_level(name: &str) -> HeadingLevel {
+    match name {
+        "h1" => HeadingLevel::H1,
+        "h2" => HeadingLevel::H2,
+        "h3" => HeadingLevel::H3,
+        "h4" => HeadingLevel::H4,
+        "h5" => HeadingLevel::H5,
+        _ => HeadingLevel::H6,
+    }
+}
+
+/// A severity badge encoded as an image alt: `P1` / `P2` / `P3`, optional ` Badge`.
+fn badge_label(alt: &str) -> Option<&'static str> {
+    match alt.trim().to_ascii_uppercase().as_str() {
+        "P1" | "P1 BADGE" => Some("P1"),
+        "P2" | "P2 BADGE" => Some("P2"),
+        "P3" | "P3 BADGE" => Some("P3"),
+        _ => None,
+    }
+}
+
+enum HtmlTok<'a> {
+    Tag { name: &'a str, closing: bool, self_closing: bool, raw: &'a str },
+    Text(&'a str),
+    Comment,
+}
+
+fn html_tokens(s: &str) -> Vec<HtmlTok<'_>> {
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < s.len() {
+        if s[i..].starts_with("<!--") {
+            let end = s[i + 4..].find("-->").map_or(s.len(), |n| i + 4 + n + 3);
+            out.push(HtmlTok::Comment);
+            i = end;
+            continue;
+        }
+        if bytes[i] == b'<' {
+            let end = s[i + 1..].find('>').map_or(s.len(), |n| i + 1 + n + 1);
+            let raw = &s[i..end];
+            let inner = raw.trim_start_matches('<').trim_end_matches('>');
+            let closing = inner.starts_with('/');
+            let self_closing = !closing && inner.trim_end().ends_with('/');
+            let name_src = inner.trim_start_matches('/').trim_end_matches('/').trim();
+            let name_end =
+                name_src.find(|c: char| c.is_whitespace() || c == '/').unwrap_or(name_src.len());
+            let name = &name_src[..name_end];
+            out.push(HtmlTok::Tag { name, closing, self_closing, raw });
+            i = end;
+            continue;
+        }
+        let next = s[i..].find('<').map_or(s.len(), |n| i + n);
+        if next > i {
+            out.push(HtmlTok::Text(&s[i..next]));
+        }
+        i = next;
+    }
+    out
+}
+
+fn html_tag_name(name: &str) -> String {
+    name.trim().to_ascii_lowercase()
+}
+
+fn html_attr(tag: &str, key: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let needle = format!("{key}=");
+    let at = lower.find(&needle)?;
+    let rest = tag.get(at + needle.len()..)?;
+    let rest = rest.trim_start();
+    let bytes = rest.as_bytes();
+    if bytes.first().copied() == Some(b'"') {
+        let end = rest[1..].find('"')?;
+        return Some(rest[1..=end].to_string());
+    }
+    if bytes.first().copied() == Some(b'\'') {
+        let end = rest[1..].find('\'')?;
+        return Some(rest[1..=end].to_string());
+    }
+    let end = rest.find(|c: char| c.is_whitespace() || c == '/' || c == '>').unwrap_or(rest.len());
+    Some(rest[..end].to_string())
+}
+
 /// Neutralize text the terminal must never interpret: hostile characters render as a
-/// visible placeholder; tabs widen to spaces (`specs/markdown.md`).
+/// visible placeholder; tabs widen to spaces.
 fn sanitize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -908,7 +1252,7 @@ impl Wrapper {
             };
             // The link id follows its own rule: both sides in one link keep the gap
             // clickable — the plain-styled space between link text and its dim
-            // destination is still part of the click target (specs/markdown.md).
+            // destination is still part of the click target.
             let next_link = self.word[0].2;
             let prev_link = self
                 .line_links
@@ -933,11 +1277,12 @@ fn char_width(c: char) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{LinkSpan, RenderCache, Rendered, render};
+    use super::{LinkSpan, RenderCache, Rendered, render, render_expanded};
     use crate::highlight::Highlighter;
     use crate::theme::{self, Palette};
     use ratatui::style::Modifier;
     use ratatui::text::Line;
+    use std::collections::HashSet;
 
     fn setup() -> (Highlighter, Palette) {
         let t = theme::resolve(Some("catppuccin"));
@@ -960,20 +1305,39 @@ mod tests {
     }
 
     #[test]
+    fn html_headings_match_markdown_headings() {
+        let (hl, p) = setup();
+        let md = "<h3>Greptile Summary</h3>\n\nMoves action admission.\n\n<h3>Confidence Score: 4/5</h3>\n";
+        let lines = render_lines(md, 80, &hl, &p);
+        let t = texts(&lines);
+        let i = t
+            .iter()
+            .position(|l| l.contains("Greptile Summary"))
+            .unwrap_or_else(|| panic!("{t:?}"));
+        assert!(!t[i].contains("<h3>"), "{t:?}");
+        let span = lines[i].spans.iter().find(|s| s.content.contains("Greptile")).unwrap();
+        assert_eq!(span.style.fg, Some(p.blue), "h3 uses the H3 accent");
+        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+        let j = t.iter().position(|l| l.contains("Confidence Score")).unwrap();
+        let span = lines[j].spans.iter().find(|s| s.content.contains("Confidence")).unwrap();
+        assert_eq!(span.style.fg, Some(p.blue));
+    }
+
+    #[test]
     fn heading_is_bold_accent_without_markers() {
         let (hl, p) = setup();
         let lines = render_lines("## Install", 80, &hl, &p);
         assert_eq!(texts(&lines), vec!["Install"]);
         let span = &lines[0].spans[1]; // [0] is the (empty) prefix
         assert!(span.style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(span.style.fg, Some(p.mauve));
+        assert_eq!(span.style.fg, Some(p.purple));
     }
 
     #[test]
     fn deeper_headings_dim() {
         let (hl, p) = setup();
         let h4 = render_lines("#### Notes", 80, &hl, &p);
-        assert_eq!(h4[0].spans[1].style.fg, Some(p.subtext0));
+        assert_eq!(h4[0].spans[1].style.fg, Some(p.dim0));
     }
 
     #[test]
@@ -992,7 +1356,16 @@ mod tests {
         let (hl, p) = setup();
         let lines = render_lines("run `cargo test` now", 80, &hl, &p);
         let code = lines[0].spans.iter().find(|s| s.content.contains("cargo test")).unwrap();
-        assert_eq!(code.style.fg, Some(p.peach));
+        assert_eq!(code.style.fg, Some(p.orange));
+    }
+
+    #[test]
+    fn a_mermaid_fence_collapses_to_a_placeholder() {
+        let (hl, p) = setup();
+        let md = "```mermaid\n%%{init: {'theme': 'neutral'}}%%\nflowchart TD\n  A[Submit] --> B[Validate]\n```\n";
+        let t = texts(&render_lines(md, 80, &hl, &p));
+        assert!(t.iter().any(|l| l.contains("⧉ mermaid flowchart")), "{t:?}");
+        assert!(t.iter().all(|l| !l.contains("Submit") && !l.contains("-->")), "{t:?}");
     }
 
     #[test]
@@ -1023,7 +1396,7 @@ mod tests {
         let text = text_of(&lines[0]);
         assert_eq!(text, "see the run (https://ci.example/1)");
         let dest = lines[0].spans.iter().find(|s| s.content.contains("ci.example")).unwrap();
-        assert_eq!(dest.style.fg, Some(p.overlay0));
+        assert_eq!(dest.style.fg, Some(p.dim2));
         let label = lines[0].spans.iter().find(|s| s.content.contains("the run")).unwrap();
         assert!(label.style.add_modifier.contains(Modifier::UNDERLINED));
 
@@ -1057,8 +1430,9 @@ mod tests {
     #[test]
     fn image_collapses_to_an_alt_placeholder() {
         let (hl, p) = setup();
-        let lines = render_lines("![build badge](https://img.example/b.svg)", 80, &hl, &p);
-        assert_eq!(text_of(&lines[0]), "⧉ build badge");
+        let r = render("![build badge](https://img.example/b.svg)", 80, &hl, &p);
+        assert_eq!(text_of(&r.lines[0]), "⧉ build badge");
+        assert_eq!(&*r.meta[0].links[0].url, "https://img.example/b.svg");
     }
 
     #[test]
@@ -1241,13 +1615,14 @@ mod tests {
     }
 
     #[test]
-    fn raw_html_shows_dim_source() {
+    fn details_collapse_to_a_summary_line() {
         let (hl, p) = setup();
-        let lines = render_lines("<details>\n<summary>hi</summary>\n</details>", 80, &hl, &p);
-        let t = texts(&lines);
-        assert!(t.iter().any(|l| l.contains("<details>")), "{t:?}");
-        let span = lines[0].spans.iter().find(|s| s.content.contains("<details>")).unwrap();
-        assert_eq!(span.style.fg, Some(p.overlay0));
+        let r = render("<details>\n<summary>hi</summary>\nchrome\n</details>", 80, &hl, &p);
+        let t = texts(&r.lines);
+        assert!(t.iter().any(|l| l.contains("▸ hi")), "{t:?}");
+        assert!(t.iter().all(|l| !l.contains("chrome") && !l.contains("<details>")), "{t:?}");
+        let hit = r.meta.iter().find_map(|m| m.details.as_ref()).expect("summary hit");
+        assert_eq!(&*hit.summary, "hi");
     }
 
     #[test]
@@ -1267,10 +1642,8 @@ mod tests {
             &hl,
             &p,
         );
-        let named = [
-            p.text, p.subtext0, p.overlay0, p.overlay1, p.mauve, p.lavender, p.peach, p.red,
-            p.green, p.yellow,
-        ];
+        let named =
+            [p.text, p.dim0, p.dim2, p.dim1, p.purple, p.blue, p.orange, p.red, p.green, p.yellow];
         for line in &lines {
             for span in &line.spans {
                 if let Some(fg) = span.style.fg {
@@ -1402,8 +1775,9 @@ mod tests {
         let (hl, p) = setup();
         let t = texts(&render_lines("- foo\n  <div>bar</div>", 80, &hl, &p));
         let foo = t.iter().position(|l| l.contains("foo")).unwrap();
-        let div = t.iter().position(|l| l.contains("<div>")).unwrap();
-        assert!(foo < div, "the item's text keeps its order: {t:?}");
+        let bar = t.iter().position(|l| l.contains("bar")).unwrap();
+        assert!(foo < bar, "the item's text keeps its order: {t:?}");
+        assert!(t.iter().all(|l| !l.contains("<div>")), "unknown tags drop: {t:?}");
         assert!(t[foo].starts_with("• "), "and its bullet: {t:?}");
     }
 
@@ -1442,5 +1816,91 @@ mod tests {
         );
         cache.clear();
         assert_eq!(cache.get("**hi**", 80, &hl, &p).lines, first.lines);
+    }
+
+    #[test]
+    fn a_codex_badge_paints_as_a_chip() {
+        let (hl, p) = setup();
+        let md = "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Serialize the first write**";
+        let lines = render_lines(md, 80, &hl, &p);
+        let t = text_of(&lines[0]);
+        assert!(t.contains("P2"), "{t}");
+        assert!(t.contains("Serialize the first write"), "{t}");
+        assert!(!t.contains("<sub>"), "{t}");
+        assert!(!t.contains("⧉"), "{t}");
+        let chip = lines[0].spans.iter().find(|s| s.content == "P2").unwrap();
+        assert_eq!(chip.style.fg, Some(p.yellow));
+        assert!(chip.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn a_greptile_html_img_paints_as_a_chip() {
+        let (hl, p) = setup();
+        let md = "<a href=\"#\"><img alt=\"P1\" src=\"https://example.com/p1.svg\"></a> **Backfill misses live updates**";
+        let lines = render_lines(md, 80, &hl, &p);
+        let t = text_of(&lines[0]);
+        assert!(t.contains("P1"), "{t}");
+        assert!(t.contains("Backfill misses live updates"), "{t}");
+        assert!(!t.contains("<img"), "{t}");
+        let chip = lines[0].spans.iter().find(|s| s.content == "P1").unwrap();
+        assert_eq!(chip.style.fg, Some(p.orange));
+    }
+
+    #[test]
+    fn an_opened_details_body_is_markdown() {
+        let (hl, p) = setup();
+        let md = "<details> <summary>About Codex</summary>\n\n- one\n\n</details>";
+        let mut open = HashSet::new();
+        open.insert("About Codex".into());
+        let r = render_expanded(md, 80, &hl, &p, &open);
+        let t = texts(&r.lines);
+        assert!(t.iter().any(|l| l.contains("▾ About Codex")), "{t:?}");
+        assert!(t.iter().any(|l| l.contains("• one")), "{t:?}");
+    }
+
+    #[test]
+    fn a_details_without_a_summary_stays_hidden() {
+        let (hl, p) = setup();
+        let t = texts(&render_lines("<details>\nchrome lives here\n</details>", 80, &hl, &p));
+        assert!(t.iter().all(|l| !l.contains("chrome lives here")), "{t:?}");
+    }
+
+    #[test]
+    fn a_self_closing_details_does_not_eat_the_rest() {
+        let (hl, p) = setup();
+        let t = texts(&render_lines("before <details/> after", 80, &hl, &p));
+        let joined = t.join(" ");
+        assert!(joined.contains("before"), "{t:?}");
+        assert!(joined.contains("after"), "{t:?}");
+    }
+
+    #[test]
+    fn a_self_closing_relative_time_does_not_eat_the_rest() {
+        let (hl, p) = setup();
+        let t = texts(&render_lines(
+            "before <relative-time datetime=\"2026-09-16T13:42:37Z\"/> after",
+            80,
+            &hl,
+            &p,
+        ));
+        let joined = t.join(" ");
+        assert!(joined.contains("before"), "{t:?}");
+        assert!(joined.contains("after"), "{t:?}");
+    }
+
+    #[test]
+    fn relative_time_contributes_no_text() {
+        let (hl, p) = setup();
+        let t = texts(&render_lines(
+            "Completed <relative-time datetime=\"2026-09-16T13:42:37Z\">2026-09-16</relative-time> ok",
+            80,
+            &hl,
+            &p,
+        ));
+        let joined = t.join(" ");
+        assert!(joined.contains("Completed"), "{t:?}");
+        assert!(joined.contains("ok"), "{t:?}");
+        assert!(!joined.contains("2026-09-16"), "{t:?}");
+        assert!(!joined.contains("relative-time"), "{t:?}");
     }
 }

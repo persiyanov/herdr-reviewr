@@ -1,10 +1,9 @@
 //! The rebindable action keymap: action names, default keys, resolution of `[keybindings]`
 //! overrides, and the key → action lookup the dispatcher and the hint renderers share
-//! (`specs/input.md`, `specs/config.md` Keybindings).
 
 use std::sync::LazyLock;
 
-/// One rebindable action from the keymap table in `specs/input.md`.
+/// One rebindable action from the keymap table in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Down,
@@ -22,7 +21,9 @@ pub enum Action {
     ScopeUncommitted,
     ScopeBranch,
     ScopeLastTurn,
+    ScopeCommits,
     BasePick,
+    CommitPick,
     TabChanges,
     TabAllFiles,
     TabPr,
@@ -50,7 +51,7 @@ pub enum Action {
 }
 
 /// A key's base: a printable character, or one of the named keys from the `[keybindings]`
-/// grammar (`specs/config.md` Keybindings).
+/// grammar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyCode {
     Char(char),
@@ -69,7 +70,6 @@ impl KeyCode {
         [Self::Left, Self::Right, Self::Up, Self::Down, Self::PageUp, Self::PageDown];
 
     /// The config spelling: the bare character, or the named key's lowercase name
-    /// (`specs/config.md` Keybindings).
     fn name(self) -> String {
         match self {
             Self::Char(ch) => ch.to_string(),
@@ -83,7 +83,6 @@ impl KeyCode {
     }
 
     /// The screen label a hint paints: the character, or the named key's glyph
-    /// (`specs/input.md`).
     fn label(self) -> String {
         match self {
             Self::Char(ch) => ch.to_string(),
@@ -109,7 +108,6 @@ impl KeyCode {
 
 /// One bound key: a base [`KeyCode`], alone or under a `ctrl`/`alt` modifier. A modifier-less
 /// `Key` is the bare character the keymap answered before chords existed
-/// (`specs/config.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Key {
     pub ctrl: bool,
@@ -143,14 +141,14 @@ impl Key {
     }
 
     /// The spelling `[keybindings]` and `--resolve-plugin-config` round-trip: `ctrl+f`,
-    /// `alt+x`, the bare character, or a named key's lowercase name (`specs/config.md`).
+    /// `alt+x`, the bare character, or a named key's lowercase name.
     /// There is deliberately no `Display` impl: a call site must pick this or [`Self::label`].
     pub fn config_str(self) -> String {
         self.prefixed(self.code.name())
     }
 
     /// The hint the footer and header paint: the config spelling, except a named key shows
-    /// its screen label — `→`, `PageUp` (`specs/input.md`).
+    /// its screen label — `→`, `PageUp`.
     pub fn label(self) -> String {
         self.prefixed(self.code.label())
     }
@@ -158,7 +156,7 @@ impl Key {
 
 /// Every action with its config name and default keys — the single source the default keymap,
 /// the name lookup, and the config error message are built from.
-const ACTIONS: [(Action, &str, &[Key]); 40] = [
+const ACTIONS: [(Action, &str, &[Key]); 42] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -174,7 +172,9 @@ const ACTIONS: [(Action, &str, &[Key]); 40] = [
     (Action::ScopeUncommitted, "scope-uncommitted", &[Key::plain('u')]),
     (Action::ScopeBranch, "scope-branch", &[Key::plain('b')]),
     (Action::ScopeLastTurn, "scope-last-turn", &[Key::plain('t')]),
+    (Action::ScopeCommits, "scope-commits", &[Key::plain('g')]),
     (Action::BasePick, "base-pick", &[Key::plain('B')]),
+    (Action::CommitPick, "commit-pick", &[Key::plain('G')]),
     (Action::TabChanges, "tab-changes", &[Key::plain('1')]),
     (Action::TabAllFiles, "tab-all-files", &[Key::plain('2')]),
     (Action::TabPr, "tab-pr", &[Key::plain('3')]),
@@ -254,7 +254,7 @@ pub fn default_keymap() -> &'static Keymap {
 impl Keymap {
     /// Apply `[keybindings]` overrides to the defaults. An overridden action answers exactly its
     /// configured keys; every other action keeps its defaults. A key bound twice anywhere is a
-    /// collision (`specs/config.md`); the error detail names each action involved.
+    /// collision; the error detail names each action involved.
     pub fn resolve(overrides: &[(Action, Vec<Key>)]) -> Result<Self, String> {
         let mut keymap = Self::default();
         for (action, keys) in overrides {
@@ -306,7 +306,7 @@ impl Keymap {
         self.bindings.iter().find(|(_, keys)| keys.contains(&key)).map(|(action, _)| *action)
     }
 
-    /// The action's hint key: the first bound key (`specs/input.md`).
+    /// The action's hint key: the first bound key.
     #[must_use]
     pub fn hint(&self, action: Action) -> Key {
         self.bindings
@@ -330,6 +330,8 @@ mod tests {
         assert_eq!(keymap.action_for(Key::plain('p')), Some(Action::NavigatorPosition));
         assert_eq!(keymap.action_for(Key::plain('z')), Some(Action::NavigatorHide));
         assert_eq!(keymap.action_for(Key::plain('x')), None);
+        assert_eq!(keymap.action_for(Key::plain('g')), Some(Action::ScopeCommits));
+        assert_eq!(keymap.action_for(Key::plain('G')), Some(Action::CommitPick));
         assert_eq!(keymap.action_for(Key::plain('?')), Some(Action::Keys));
         assert_eq!(keymap.hint(Action::Send), Key::plain('s'));
         assert_eq!(keymap.hint(Action::TabPr), Key::plain('3'));

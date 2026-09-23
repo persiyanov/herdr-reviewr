@@ -133,6 +133,21 @@ fn run_with_context(mode: &str, config_dir: &Path, herdr: &Path, context: &str) 
         .unwrap()
 }
 
+fn run_auto_open(config_dir: &Path, herdr: &Path, event: &str, context: Option<&str>) -> Output {
+    let mut command = Command::new("bash");
+    command
+        .arg("herdr/pane.sh")
+        .arg("auto-open")
+        .env("HERDR_REVIEWR_BIN", reviewr_bin())
+        .env("HERDR_PLUGIN_CONFIG_DIR", config_dir)
+        .env("HERDR_BIN_PATH", herdr)
+        .env("HERDR_PLUGIN_EVENT_JSON", event);
+    if let Some(context) = context {
+        command.env("HERDR_PLUGIN_CONTEXT_JSON", context);
+    }
+    command.output().unwrap()
+}
+
 #[test]
 fn invalid_config_refuses_manual_action_before_herdr_side_effects() {
     let dir = tempfile::tempdir().unwrap();
@@ -217,14 +232,67 @@ fn valid_auto_open_runtime_refusal_remains_silent() {
     assert!(!log.exists());
 }
 
-// --- Pane identity (specs/herdr-host.md): the foreground process decides, never the label.
+#[test]
+fn auto_open_opened_live_exits_before_herdr_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let (herdr, log) = fake_herdr(dir.path());
+    let event = serde_json::json!({
+        "event": "worktree_opened",
+        "data": {
+            "type": "worktree_opened",
+            "workspace": {
+                "workspace_id": "workspace-9",
+                "worktree": {"checkout_path": env!("CARGO_MANIFEST_DIR")},
+            },
+            "worktree": {
+                "path": env!("CARGO_MANIFEST_DIR"),
+                "open_workspace_id": "workspace-9",
+            },
+            "already_open": true,
+        },
+    })
+    .to_string();
+
+    let output = run_auto_open(dir.path(), &herdr, &event, None);
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert!(!log.exists(), "opened-live inspected herdr before exiting");
+}
+
+#[test]
+fn manifest_auto_open_hooks_created_and_opened() {
+    let manifest: toml::Table =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("herdr-plugin.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+    let events = manifest.get("events").and_then(toml::Value::as_array).expect("manifest events");
+    let mut auto_open_events = events
+        .iter()
+        .filter_map(|event| {
+            let table = event.as_table()?;
+            let command = table.get("command")?.as_array()?;
+            let command = command.iter().map(toml::Value::as_str).collect::<Option<Vec<_>>>()?;
+            (command == ["bash", "herdr/pane.sh", "auto-open"])
+                .then(|| table.get("on")?.as_str())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    auto_open_events.sort_unstable();
+
+    assert_eq!(auto_open_events, ["worktree.created", "worktree.opened"]);
+}
+
+// --- Pane identity: the foreground process decides, never the label.
 
 #[test]
 fn a_pane_running_the_review_ui_counts_however_it_was_launched() {
     let dir = tempfile::tempdir().unwrap();
     let (herdr, log) = fake_herdr(dir.path());
     // A wrapped launch: `cargo run` holds the group, its child is the review UI, and the
-    // pane carries no `reviewr` label at all (HH-LAUNCHER-BLIND).
+    // pane carries no `reviewr` label at all.
     procinfo(
         dir.path(),
         "w1:p1",
@@ -260,7 +328,7 @@ fn close_sweeps_every_reviewr_pane_and_a_close_that_lost_the_race_still_converge
     let dir = tempfile::tempdir().unwrap();
     let (herdr, log) = fake_herdr(dir.path());
     // w1:p2 is a plain shell wearing a stale `reviewr` label — a crashed binary's leftover.
-    // The label is display only and never read (specs/herdr-host.md, Pane identity), so the
+    // The label is display only and never read, so the
     // sweep below must not touch it.
     fs::write(
         dir.path().join("panes.json"),
@@ -271,8 +339,7 @@ fn close_sweeps_every_reviewr_pane_and_a_close_that_lost_the_race_still_converge
     procinfo(dir.path(), "w1:p1", ui);
     procinfo(dir.path(), "w1:p3", ui);
     // w1:p3's close fails with the pane gone: it exited between the read and the close.
-    // The sweep still exits 0 — the end state is the same (specs/herdr-host.md, Failure
-    // semantics).
+    // The sweep still exits 0 — the end state is the same.
     fs::write(
         dir.path().join("closefail-w1:p3"),
         r#"{"error":{"code":"pane_not_found","message":"pane w1:p3 not found"},"id":"cli:request"}"#,
@@ -289,7 +356,7 @@ fn close_sweeps_every_reviewr_pane_and_a_close_that_lost_the_race_still_converge
     );
     let calls = fs::read_to_string(&log).unwrap();
     // Whole log lines, so a `plugin pane close` could not satisfy the plain-`pane close`
-    // contract these assert (specs/herdr-host.md, Failure semantics).
+    // contract these assert.
     assert!(calls.lines().any(|l| l == "pane close w1:p1"), "{calls}");
     assert!(calls.lines().any(|l| l == "pane close w1:p3"), "{calls}");
     assert!(
@@ -312,7 +379,7 @@ fn a_close_that_fails_for_a_live_pane_sweeps_the_rest_then_refuses() {
     procinfo(dir.path(), "w1:p3", ui);
     // w1:p1's close fails with the pane still there — a wedged herdr, not the benign
     // exited-between-read-and-close race. Reporting it closed would leave a running pane
-    // the user believes gone, so the sweep refuses (specs/herdr-host.md, Failure semantics).
+    // the user believes gone, so the sweep refuses.
     fs::write(
         dir.path().join("closefail-w1:p1"),
         r#"{"error":{"code":"internal","message":"boom"},"id":"cli:request"}"#,
@@ -345,7 +412,7 @@ fn a_gone_pane_skips_and_an_unreadable_read_refuses() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("close: nothing open"));
 
     // Any other read failure refuses, never reads as "no reviewr pane": an open would
-    // stack a duplicate and a close would false-succeed (specs/herdr-host.md).
+    // stack a duplicate and a close would false-succeed.
     fs::write(
         dir.path().join("procfail-w1:p1.json"),
         r#"{"error":{"code":"internal","message":"boom"},"id":"cli:request"}"#,
@@ -368,7 +435,7 @@ fn an_action_repoints_the_stable_launch_paths_at_the_live_plugin_root() {
     let (herdr, _log) = fake_herdr(dir.path());
     // The install's build step runs in a staging checkout herdr renames afterwards, so the
     // actions own the stable links: every valid invocation re-points them at the runtime
-    // root (specs/herdr-host.md, Install paths). `~/.local/bin` only when it exists.
+    // root. `~/.local/bin` only when it exists.
     let home = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     fs::create_dir_all(root.path().join("bin")).unwrap();
@@ -456,7 +523,7 @@ fn a_failed_pane_list_refuses_rather_than_reading_as_no_pane() {
 
 #[test]
 fn the_cli_fallback_resolves_the_config_dir_when_the_env_names_none() {
-    // The launcher-blind half of config resolution (specs/config.md): with no
+    // The launcher-blind half of config resolution: with no
     // `HERDR_PLUGIN_CONFIG_DIR`, the binary asks `herdr plugin config-dir` and reads the
     // directory it names. This is the one test that exercises the real herdr-CLI path —
     // the unit tests drive the resolver with an injected closure.
@@ -479,7 +546,7 @@ fn the_cli_fallback_resolves_the_config_dir_when_the_env_names_none() {
 #[test]
 fn a_wedged_config_dir_lookup_degrades_to_the_defaults_inside_the_bound() {
     // A herdr that does not answer resolves no directory, the missing-file outcome
-    // (specs/config.md, Failure semantics). The fake hangs 5s, well past the binary's
+    // The fake hangs 5s, well past the binary's
     // bound, so a success here can only come from giving the lookup up.
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
@@ -524,7 +591,7 @@ fn the_flag_dispatch_matches_the_actions_anywhere_in_argv() {
     // The other half of the flag-run contract, pinned in the binary itself: `pane.sh`
     // excludes `--resolve-plugin-config` wherever it sits in argv, so `main.rs` must
     // recognize it there too — or a flag run would start the review UI while the actions
-    // refuse to count it (specs/herdr-host.md, Pane identity).
+    // refuse to count it.
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
 
@@ -667,8 +734,7 @@ fn a_toggle_open_falls_back_when_the_live_cwd_is_not_a_repo() {
     let (herdr, log) = fake_herdr(dir.path());
     // The live foreground cwd sits outside any git repo — a shell that wandered off. The
     // live cwd wins only inside a repo; here it yields to the context cwd rather than
-    // refusing an open the context alone could place (specs/herdr-host.md, Repo
-    // discovery). Run as a toggle, so the opening toggle exercises the same block.
+    // refusing an open the context alone could place. Run as a toggle, so the opening toggle exercises the same block.
     let context = serde_json::json!({
         "focused_pane_id": "w1:p1",
         "focused_pane_cwd": env!("CARGO_MANIFEST_DIR"),
@@ -741,44 +807,64 @@ fn a_refusal_names_the_rejected_live_cwd_too() {
 }
 
 #[test]
-fn auto_open_takes_the_event_payload_cwd_over_the_live_one() {
+fn auto_open_birth_events_follow_shared_policy() {
     let dir = tempfile::tempdir().unwrap();
     let (herdr, log) = fake_herdr(dir.path());
-    // The focused pane's live cwd is a real git repo, so only the mode guard keeps it
-    // from winning: the event open takes its directory from the payload alone
-    // (specs/herdr-host.md, Repo discovery).
     let live_repo = init_repo(dir.path(), "live-repo");
     pane_with_cwd(dir.path(), "w1:p1", &live_repo);
     let context = serde_json::json!({
         "focused_pane_id": "w1:p1",
-        "focused_pane_cwd": dir.path().to_str().unwrap(),
-    })
-    .to_string();
-    let event = serde_json::json!({
-        "data": {"workspace": {
-            "workspace_id": "workspace-9",
-            "worktree": {"checkout_path": env!("CARGO_MANIFEST_DIR")},
-        }},
+        "focused_pane_cwd": live_repo,
     })
     .to_string();
 
-    let output = Command::new("bash")
-        .arg("herdr/pane.sh")
-        .arg("auto-open")
-        .env("HERDR_REVIEWR_BIN", reviewr_bin())
-        .env("HERDR_PLUGIN_CONFIG_DIR", dir.path())
-        .env("HERDR_BIN_PATH", &herdr)
-        .env("HERDR_PLUGIN_CONTEXT_JSON", &context)
-        .env("HERDR_PLUGIN_EVENT_JSON", &event)
-        .output()
-        .unwrap();
+    for (event_name, already_open) in [("worktree_created", None), ("worktree_opened", Some(false))]
+    {
+        for placement in ["split", "tab"] {
+            fs::write(
+                dir.path().join("config.toml"),
+                format!("toggle_placement = \"{placement}\"\n"),
+            )
+            .unwrap();
+            let _ = fs::remove_file(&log);
+            let workspace = format!("workspace-{event_name}-{placement}");
+            let mut data = serde_json::json!({
+                "type": event_name,
+                "workspace": {
+                    "workspace_id": workspace,
+                    "worktree": {"checkout_path": env!("CARGO_MANIFEST_DIR")},
+                },
+                "worktree": {
+                    "path": env!("CARGO_MANIFEST_DIR"),
+                    "open_workspace_id": workspace,
+                },
+            });
+            if let Some(already_open) = already_open {
+                data["already_open"] = serde_json::json!(already_open);
+            }
+            let event = serde_json::json!({"event": event_name, "data": data}).to_string();
 
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let calls = fs::read_to_string(&log).unwrap();
-    assert!(
-        calls.contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))),
-        "the event open must use the payload cwd: {calls}"
-    );
+            let output = run_auto_open(dir.path(), &herdr, &event, Some(&context));
+
+            assert!(
+                output.status.success(),
+                "{event_name}/{placement}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let calls = fs::read_to_string(&log).unwrap();
+            assert!(calls.contains(&format!("pane list --workspace {workspace}")), "{calls}");
+            let open = calls
+                .lines()
+                .find(|line| line.starts_with("plugin pane open"))
+                .expect("plugin pane open call");
+            let tokens = open.split_whitespace().collect::<Vec<_>>();
+            assert!(tokens.contains(&"--no-focus"), "{open}");
+            assert!(!tokens.contains(&"--focus"), "{open}");
+            assert!(open.contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))), "{open}");
+            assert!(open.contains(&format!("--placement {placement}")), "{open}");
+            assert!(!open.contains(live_repo.to_str().unwrap()), "{open}");
+        }
+    }
 }
 
 #[test]
@@ -796,35 +882,6 @@ fn a_manual_open_passes_focus() {
         assert!(tokens.contains(&"--focus"), "{mode} must pass --focus: {calls}");
         assert!(!tokens.contains(&"--no-focus"), "{mode} must not pass --no-focus: {calls}");
     }
-}
-
-#[test]
-fn auto_open_passes_no_focus() {
-    let dir = tempfile::tempdir().unwrap();
-    let (herdr, log) = fake_herdr(dir.path());
-    let event = serde_json::json!({
-        "data": {"workspace": {
-            "workspace_id": "workspace-9",
-            "worktree": {"checkout_path": env!("CARGO_MANIFEST_DIR")},
-        }},
-    })
-    .to_string();
-
-    let output = Command::new("bash")
-        .arg("herdr/pane.sh")
-        .arg("auto-open")
-        .env("HERDR_REVIEWR_BIN", reviewr_bin())
-        .env("HERDR_PLUGIN_CONFIG_DIR", dir.path())
-        .env("HERDR_BIN_PATH", &herdr)
-        .env("HERDR_PLUGIN_EVENT_JSON", &event)
-        .output()
-        .unwrap();
-
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let calls = fs::read_to_string(&log).unwrap();
-    let tokens: Vec<&str> = calls.split_whitespace().collect();
-    assert!(tokens.contains(&"--no-focus"), "auto-open must pass --no-focus: {calls}");
-    assert!(!tokens.contains(&"--focus"), "auto-open must not pass --focus: {calls}");
 }
 
 #[test]

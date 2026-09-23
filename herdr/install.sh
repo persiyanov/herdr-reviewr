@@ -67,7 +67,7 @@ tar -xzf "$tmp/$archive" -C "$tmp"
 install -m 0755 "$tmp/$NAME" "$BIN_DIR/$NAME"
 echo "$NAME: installed $BIN_DIR/$NAME"
 
-# Stable launch paths (specs/herdr-host.md, Install paths): symlinks into the installed
+# Stable launch paths: symlinks into the installed
 # plugin, never copies, so a launch after an uninstall fails loudly instead of running a
 # stale build. An existing symlink re-points on every install — the hash-suffixed plugin
 # root moves — but anything else at the path is left alone: a user's own binary there

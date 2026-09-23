@@ -1,20 +1,20 @@
 //! Read-only Azure DevOps access: the pull request's identity, state, policies, and threads.
 //!
-//! The Azure DevOps provider behind `src/forge.rs` (`specs/forge-providers.md`). It follows
-//! the neutral resolution contract in `specs/forge-host.md` — the branch's forge names
-//! filter an enumeration by `sourceRefName` — through the `az` CLI with the `azure-devops`
+//! The Azure DevOps provider behind `src/forge.rs`. It follows
+//! the neutral resolution contract — the branch's published heads
+//! filter an enumeration by source repository and branch — through the `az` CLI with the `azure-devops`
 //! extension, and fills the same normalized [`PrSnapshot`] the other providers do. It never
 //! writes to Azure DevOps.
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
 use serde_json::Value;
 
 use crate::forge::{
     AssocPr, Association, Check, CheckStatus, Comment, CommentKind, Merge, PrFetchInput,
-    PrSnapshot, PrState, PrView, Sync, finish_comments, prose_row, push_unique, upsert_latest,
+    PrSnapshot, PrState, PrView, Reply, Sync, finish_comments, prose_row, push_unique,
+    upsert_latest,
 };
 
 /// Read Azure DevOps for one already-derived input. Degradation stays in-band for the PR tab.
@@ -63,7 +63,7 @@ fn died(surface: &str) -> AzError {
 }
 
 /// Fold an unreadable optional surface into an empty one: it contributes nothing to the
-/// snapshot, never fails the whole fetch (`specs/forge-providers.md`).
+/// snapshot, never fails the whole fetch.
 fn optional_surface(result: Result<Value, AzError>) -> Result<Value, AzError> {
     match result {
         Err(AzError::Unavailable(_)) => Ok(Value::Null),
@@ -72,7 +72,7 @@ fn optional_surface(result: Result<Value, AzError>) -> Result<Value, AzError> {
 }
 
 /// The organization URL every `az` call pins with `--organization`, so an inherited
-/// `AZURE_DEVOPS_*` default can never redirect the fetch (`specs/forge-host.md`). A legacy
+/// `AZURE_DEVOPS_*` default can never redirect the fetch. A legacy
 /// `{org}.visualstudio.com` host is its own organization URL; every other host scopes by the
 /// organization path segment.
 fn organization_url(target: &crate::git::RepoTarget) -> String {
@@ -92,7 +92,7 @@ fn az_json(
     args: &[&str],
     cancelled: &AtomicBool,
 ) -> Result<Value, AzError> {
-    let mut cmd = Command::new("az");
+    let mut cmd = crate::proc::command("az");
     cmd.current_dir(repo).args(args).args(["--organization", org_url, "--output", "json"]);
     let stdout = crate::forge::run_provider(
         &mut cmd,
@@ -128,7 +128,7 @@ fn classify_failure(stderr: &str) -> AzError {
         || crate::forge::reports_status(&s, 404)
         // TF401180: pull request not found. TF401019: repository not found. TF200016:
         // project not found. Unknown objects prove nothing; each call site decides whether
-        // its surface is optional (`specs/forge-providers.md` — Query).
+        // its surface is optional.
         || s.contains("tf401180")
         || s.contains("tf401019")
         || s.contains("tf200016")
@@ -150,8 +150,7 @@ fn fetch_inner(
     let repo_name = target.name();
 
     let head = input.local.head_oid.as_deref();
-    let (mut assoc, project_guid) =
-        associate_by_branch(repo, &org_url, project, repo_name, input, cancelled)?;
+    let (mut assoc, project_guid) = associate_by_branch(repo, &org_url, target, input, cancelled)?;
     let Some(id) = crate::forge::resolve_pick(repo, &assoc, head)
         .map_err(|error| AzError::LocalGit(error.0))?
     else {
@@ -195,7 +194,7 @@ fn fetch_inner(
             // Every association node that can yield a pick carries the project id, so a
             // pick without one is a malformed payload. A policy surface the reader cannot
             // address contributes no checks and no merge blocker instead of failing the
-            // view (`specs/forge-providers.md`).
+            // view.
             match &project_guid {
                 Some(guid) => fetch_evaluations(repo, &org_url, project, guid, id, cancelled),
                 None => Ok(Value::Null),
@@ -250,7 +249,7 @@ fn fetch_inner(
 
     let (rows, threads_capped) = newest_comment_threads(&threads);
     // A full checks page can hide older rows past it, exactly as a further thread page
-    // does; either caps the surface (`specs/forge-host.md`).
+    // does; either caps the surface.
     let checks_capped = one_page_capped(&evaluations) || one_page_capped(&statuses);
     let checks = build_checks(&evaluations, &statuses);
     Ok(PrView::Pr(Box::new(build_snapshot(
@@ -261,13 +260,13 @@ fn fetch_inner(
         checks,
         &rows,
         &evaluations,
-        threads_capped || checks_capped,
+        threads_capped,
+        checks_capped,
     ))))
 }
 
 /// One policy-evaluations read for a pull request, keyed by the project GUID inside the
 /// artifact id. An unreadable policy surface contributes no checks and no merge blocker
-/// (`specs/forge-providers.md`).
 fn fetch_evaluations(
     repo: &Path,
     org_url: &str,
@@ -289,8 +288,7 @@ fn fetch_evaluations(
             "evaluations",
             "--route-parameters",
             &format!("project={project}"),
-            // The surface's one page (`specs/forge-host.md`: each surface reads its
-            // newest 100 rows); `one_page_capped` reports the overflow.
+            // The surface's one page (each surface reads its newest 100 rows); `one_page_capped` reports the overflow.
             "--query-parameters",
             &artifact,
             "$top=100",
@@ -304,22 +302,23 @@ fn fetch_evaluations(
 }
 
 /// Ask Azure DevOps for the branch's pull requests: the newest 100 active and newest 100
-/// completed enumerate in one concurrent wave, and a node joins when its source branch is
-/// one of the names (`specs/forge-providers.md`). A fork node has no provable source
-/// repository in the enumeration, so it joins only when the pinned `HEAD` contains its
-/// source tip. Also returns the target's project GUID as the enumeration nodes report it,
-/// so the policy read need not wait for anything else.
+/// completed enumerate in one concurrent wave, and a node joins when its source (repository,
+/// branch) is one of the branch's heads (`branch_admitted`). Also returns the target's
+/// project GUID as the enumeration nodes report it, so the policy read need not wait for
+/// anything else.
 fn associate_by_branch(
     repo: &Path,
     org_url: &str,
-    project: &str,
-    repo_name: &str,
+    target: &crate::git::RepoTarget,
     input: &PrFetchInput,
     cancelled: &AtomicBool,
 ) -> Result<(Association, Option<String>), AzError> {
-    let names = &input.local.names;
-    let head = input.local.head_oid.as_deref();
+    let (project, repo_name) = (target.project(), target.name());
+    let heads = &input.local.heads;
     let mut assoc = Association::default();
+    if heads.is_empty() {
+        return Ok((assoc, None));
+    }
 
     let enumerate = |status: &'static str| {
         az_json(
@@ -360,51 +359,51 @@ fn associate_by_branch(
     };
     for node in active.as_array().into_iter().flatten() {
         note_guid(node);
-        if let Some(pr) = branch_admitted(repo, node, names, head)? {
+        if let Some(pr) = branch_admitted(node, heads, target) {
             push_unique(&mut assoc.open, pr);
         }
     }
     for node in completed.as_array().into_iter().flatten() {
         note_guid(node);
-        if let Some(pr) = branch_admitted(repo, node, names, head)? {
+        if let Some(pr) = branch_admitted(node, heads, target) {
             push_unique(&mut assoc.history, pr);
         }
     }
     Ok((assoc, project_guid))
 }
 
-/// The enumeration node's pick fields when its source branch is one of the names. A fork
-/// node's source branch lives in an unnamed repository, so it is admitted only when the
-/// pinned `HEAD` contains its source tip (`specs/forge-providers.md`).
+/// The enumeration node's pick fields when its source (repository, branch) is one of the
+/// branch's heads. A node with no `forkSource` lives in the target itself; a fork node names
+/// its repository by project and name within the target's organization, which must be the
+/// head's.
 fn branch_admitted(
-    repo: &Path,
     node: &Value,
-    names: &[String],
-    head: Option<&str>,
-) -> Result<Option<AssocPr>, AzError> {
-    let Some(mut pr) = assoc_pr(node) else { return Ok(None) };
-    if !names.contains(&pr.head_ref) {
-        return Ok(None);
-    }
-    // This containment check answers a different question than the shared history
-    // guard: whether a fork node — open ones included — is this clone's at all, since
-    // the enumeration cannot name the fork repository.
-    if !node["forkSource"].is_null() {
-        let contained = match head {
-            Some(head) if !pr.head_oid.is_empty() => {
-                crate::git::contains_commit(repo, head, &pr.head_oid)
-                    .map_err(|error| AzError::LocalGit(error.0))?
-            }
-            _ => false,
-        };
-        if !contained {
-            return Ok(None);
-        }
+    heads: &[crate::git::Head],
+    target: &crate::git::RepoTarget,
+) -> Option<AssocPr> {
+    let mut pr = assoc_pr(node)?;
+    let fork = &node["forkSource"]["repository"];
+    // A fork shares the target's organization and host; the node names its project and name.
+    let fork_repo = match (fork["project"]["name"].as_str(), fork["name"].as_str()) {
+        (Some(project), Some(name)) => crate::git::RepoTarget::with_path(
+            crate::git::Forge::AzureDevOps,
+            target.host(),
+            &[target.owner(), project, name],
+        ),
+        _ => None,
+    };
+    let head_repo = if node["forkSource"].is_null() {
+        crate::forge::HeadRepo::Queried
+    } else {
+        crate::forge::HeadRepo::Other(fork_repo.iter().collect())
+    };
+    if !crate::forge::admits(heads, target, &pr.head_ref, &head_repo) {
+        return None;
     }
     // An enumeration node is the complete pull request, so the pick it becomes needs no
     // detail read; the payload travels with the admission that proved it.
     pr.raw = Some(node.clone());
-    Ok(Some(pr))
+    Some(pr)
 }
 
 /// The project GUID one enumeration node reports on its repository's project.
@@ -459,7 +458,8 @@ fn build_snapshot(
     checks: Vec<Check>,
     rows: &[&Value],
     evaluations: &Value,
-    truncated: bool,
+    comments_truncated: bool,
+    checks_truncated: bool,
 ) -> PrSnapshot {
     let id = pr["pullRequestId"].as_u64().unwrap_or_default();
     PrSnapshot {
@@ -472,7 +472,7 @@ fn build_snapshot(
         ),
         body: pr["description"].as_str().unwrap_or_default().to_string(),
         // A missing status must not read as reviewable: the empty string falls through
-        // `parse_state` to the closed arm — stale, never wrong (`specs/overview.md`).
+        // `parse_state` to the closed arm — stale, never wrong.
         state: parse_state(pr["status"].as_str().unwrap_or_default()),
         is_draft: pr["isDraft"].as_bool().unwrap_or(false),
         head_ref: head_ref_of(pr),
@@ -483,12 +483,13 @@ fn build_snapshot(
         sync,
         checks,
         comments: merge_comments(rows, pr),
-        truncated,
+        comments_truncated,
+        checks_truncated,
     }
 }
 
 /// Only `active` and `completed` are ever picked; every other status, a missing one
-/// included, is non-reviewable and reads as closed (`specs/forge-providers.md`).
+/// included, is non-reviewable and reads as closed.
 fn parse_state(status: &str) -> PrState {
     match status {
         "active" => PrState::Open,
@@ -499,7 +500,7 @@ fn parse_state(status: &str) -> PrState {
 
 /// Fold Azure DevOps' merge state to the blockers worth surfacing: a conflict is
 /// `conflicting`, a rejected required policy is `blocked`, and everything else — including a
-/// still-queued merge check — is `clean` (`specs/forge-providers.md`).
+/// still-queued merge check — is `clean`.
 fn derive_merge(pr: &Value, evaluations: &Value) -> Merge {
     if pr["mergeStatus"].as_str() == Some("conflicts") {
         return Merge::Conflicting;
@@ -517,7 +518,7 @@ fn derive_merge(pr: &Value, evaluations: &Value) -> Merge {
 }
 
 /// The checks list: policy evaluations and commit statuses normalized into one
-/// (`specs/forge-providers.md`). A policy allowed to fail — one that is not blocking —
+/// A policy allowed to fail — one that is not blocking —
 /// contributes a skipped check, never a failing one.
 fn build_checks(evaluations: &Value, statuses: &Value) -> Vec<Check> {
     let mut checks: Vec<Check> = Vec::new();
@@ -545,7 +546,6 @@ fn build_checks(evaluations: &Value, statuses: &Value) -> Vec<Check> {
 
 /// Normalise one policy evaluation status to a [`CheckStatus`]. A non-blocking policy's
 /// failure leaves the pull request completable, so it is a warning, never a failing check
-/// (`specs/forge-providers.md`).
 fn policy_status(status: &str, blocking: bool) -> CheckStatus {
     match status {
         "approved" => CheckStatus::Success,
@@ -583,7 +583,7 @@ fn one_page_capped(response: &Value) -> bool {
 
 /// The newest 100 comment threads from a threads response, oldest-first, and whether any were
 /// dropped. Azure DevOps returns every thread in one page, published order, so the cap is
-/// client-side (`specs/forge-host.md`: each surface reads its newest 100 rows). System-only
+/// client-side (each surface reads its newest 100 rows). System-only
 /// and empty threads drop first, so status churn never spends the surface's slots.
 fn newest_comment_threads(threads: &Value) -> (Vec<&Value>, bool) {
     let rows: Vec<&Value> = threads["value"]
@@ -604,19 +604,34 @@ fn comment_root(thread: &Value) -> Option<&Value> {
 }
 
 /// A comment that renders: human-authored, not deleted, and carrying content. The one
-/// predicate behind the root pick and the reply count, so the two can never disagree.
+/// predicate behind the root pick and `replies`, so the two can never disagree.
 fn is_comment(comment: &Value) -> bool {
     comment["commentType"].as_str() != Some("system")
         && !comment["isDeleted"].as_bool().unwrap_or(false)
         && !comment["content"].as_str().unwrap_or("").trim().is_empty()
 }
 
-/// Replies beyond the root: the rendering comments on the thread, less one.
-fn reply_count(thread: &Value) -> u32 {
-    let comments = thread["comments"]
-        .as_array()
-        .map_or(0, |comments| comments.iter().filter(|comment| is_comment(comment)).count());
-    comments.saturating_sub(1) as u32
+/// Replies beyond the root: every later rendering comment.
+fn replies_from_thread(thread: &Value) -> Vec<Reply> {
+    let Some(comments) = thread["comments"].as_array() else {
+        return Vec::new();
+    };
+    let Some(root_i) = comments.iter().position(is_comment) else {
+        return Vec::new();
+    };
+    comments[root_i + 1..]
+        .iter()
+        .filter(|comment| is_comment(comment))
+        .map(|comment| {
+            let author = comment["author"]["displayName"].as_str().unwrap_or("").to_string();
+            Reply {
+                author_is_bot: is_azure_bot(&comment["author"]),
+                author,
+                body: comment["content"].as_str().unwrap_or("").trim().to_string(),
+                created_at: comment["publishedDate"].as_str().unwrap_or("").to_string(),
+            }
+        })
+        .collect()
 }
 
 fn thread_line_range(context: &Value) -> (Option<u64>, Option<u64>) {
@@ -632,7 +647,7 @@ fn thread_line_range(context: &Value) -> (Option<u64>, Option<u64>) {
 
 /// Merge the threads and reviewer votes into one newest-first comment list: PR-level threads
 /// are `comment` rows, file-position threads are `finding` rows with the thread's resolved
-/// status, and a reviewer vote is a `review` row (`specs/forge-providers.md`). A thread
+/// status, and a reviewer vote is a `review` row. A thread
 /// carries no code context, so a finding has no snippet.
 fn merge_comments(threads: &[&Value], pr: &Value) -> Vec<Comment> {
     let mut out: Vec<Comment> = Vec::new();
@@ -674,7 +689,7 @@ fn merge_comments(threads: &[&Value], pr: &Value) -> Vec<Comment> {
             created_at: root["publishedDate"].as_str().unwrap_or("").to_string(),
             is_resolved,
             is_outdated: false,
-            reply_count: reply_count(thread),
+            replies: replies_from_thread(thread),
         });
     }
     for reviewer in pr["reviewers"].as_array().into_iter().flatten() {
@@ -733,7 +748,7 @@ mod tests {
              "author": {"displayName": "Author"}}
         ]});
         assert_eq!(comment_root(&thread).unwrap()["content"], "The real comment.");
-        assert_eq!(reply_count(&thread), 0);
+        assert!(replies_from_thread(&thread).is_empty());
     }
 
     #[test]
@@ -741,7 +756,7 @@ mod tests {
         assert_eq!(parse_state("active"), PrState::Open);
         assert_eq!(parse_state("completed"), PrState::Merged);
         // Only active and completed are ever picked, so a missing status is the one
-        // reachable fallback, and it must not read as reviewable (`specs/overview.md`).
+        // reachable fallback, and it must not read as reviewable.
         assert_eq!(parse_state(""), PrState::Closed);
     }
 
@@ -758,7 +773,7 @@ mod tests {
         let pr = json!({"mergeStatus": "succeeded"});
         assert_eq!(derive_merge(&pr, &rejected(true)), Merge::Blocked);
         assert_eq!(derive_merge(&pr, &rejected(false)), Merge::Clean);
-        // A still-queued merge check folds to clean (`specs/forge-providers.md`).
+        // A still-queued merge check folds to clean.
         assert_eq!(derive_merge(&json!({"mergeStatus": "queued"}), &none), Merge::Clean);
     }
 
@@ -866,7 +881,8 @@ mod tests {
         assert!(finding.snippet.is_none(), "a thread carries no code context");
         let comment = comments.iter().find(|c| c.kind == CommentKind::Comment).unwrap();
         assert_eq!(comment.author, "Mark Wilkie");
-        assert_eq!(comment.reply_count, 1);
+        assert_eq!(comment.replies.len(), 1);
+        assert_eq!(comment.replies[0].body, "Agreed.");
         let votes: Vec<&Comment> =
             comments.iter().filter(|c| c.kind == CommentKind::Review).collect();
         assert_eq!(votes.len(), 2, "a zero vote and a container render nothing");
@@ -875,30 +891,77 @@ mod tests {
     }
 
     #[test]
-    fn an_enumeration_node_admits_by_source_branch_name() {
-        let node = json!({
-            "pullRequestId": 5,
-            "status": "completed",
-            "sourceRefName": "refs/heads/feature",
-            "lastMergeSourceCommit": {"commitId": "3aae318f"},
-            "lastMergeCommit": {"commitId": "af56d96f"},
-        });
-        let names = vec!["feature".to_string()];
-        let admitted = branch_admitted(Path::new("."), &node, &names, None).unwrap();
-        assert_eq!(admitted.unwrap().number, 5);
-        // A different branch name proves nothing.
-        let other = vec!["other".to_string()];
-        assert!(branch_admitted(Path::new("."), &node, &other, None).unwrap().is_none());
-        // A fork node has no provable source repository, so with no pinned HEAD to
-        // contain its tip it never admits.
-        let fork = json!({
-            "pullRequestId": 7,
-            "status": "active",
-            "sourceRefName": "refs/pull/7/source",
-            "lastMergeSourceCommit": {"commitId": "3aae318f"},
-            "forkSource": {"name": "refs/heads/feature", "repository": {"id": "b0bf"}},
-        });
-        assert!(branch_admitted(Path::new("."), &fork, &names, None).unwrap().is_none());
+    fn an_enumeration_node_admits_only_when_its_source_is_one_of_the_branchs_heads() {
+        let ado = |project: &str, name: &str| {
+            crate::git::RepoTarget::with_path(
+                crate::git::Forge::AzureDevOps,
+                "dev.azure.com",
+                &["org", project, name],
+            )
+            .unwrap()
+        };
+        let target = ado("Proj", "app");
+        let fork = ado("Proj", "app-fork");
+        let head = |repo: &crate::git::RepoTarget, name: &str| crate::git::Head {
+            repo: repo.clone(),
+            name: name.to_string(),
+        };
+        let own = |branch: &str| {
+            json!({"pullRequestId": 5, "status": "completed",
+                "sourceRefName": format!("refs/heads/{branch}"),
+                "lastMergeSourceCommit": {"commitId": "3aae318f"}})
+        };
+        let forked = |branch: &str, project: &str, name: &str| {
+            json!({"pullRequestId": 7, "status": "completed",
+                "sourceRefName": "refs/pull/7/source",
+                "lastMergeSourceCommit": {"commitId": "3aae318f"},
+                "forkSource": {"name": format!("refs/heads/{branch}"),
+                    "repository": {"id": "b0bf", "name": name, "project": {"name": project}}}})
+        };
+        let on_main = [head(&target, "main")];
+        let checkout = [head(&fork, "fix")];
+        let cases: &[(&str, &[crate::git::Head], Value, bool)] = &[
+            ("own same-repo main", &on_main, own("main"), true),
+            ("another branch", &on_main, own("other"), false),
+            // The hole Azure had: a completed fork PR from a fork's `main` on upstream `main`.
+            ("stranger fork main on main", &on_main, forked("main", "Proj", "stranger"), false),
+            ("checked-out fork PR", &checkout, forked("fix", "proj", "APP-FORK"), true),
+            ("same name, another fork", &checkout, forked("fix", "Proj", "stranger"), false),
+            // A fork clone's head: the target's own same-named branch is a stranger's.
+            ("target's own fix, fork head", &checkout, own("fix"), false),
+            (
+                "fork missing its identity",
+                &checkout,
+                json!({"pullRequestId": 7, "forkSource": {"name": "refs/heads/fix",
+                    "repository": {"id": "b0bf"}}}),
+                false,
+            ),
+        ];
+        for (label, heads, node, expected) in cases {
+            assert_eq!(branch_admitted(node, heads, &target).is_some(), *expected, "{label}");
+        }
+        // The fork lives in the target's organization; a same-named fork elsewhere is another.
+        let elsewhere = crate::git::RepoTarget::with_path(
+            crate::git::Forge::AzureDevOps,
+            "dev.azure.com",
+            &["org2", "Proj", "app-fork"],
+        )
+        .unwrap();
+        let heads = [head(&elsewhere, "fix")];
+        assert!(branch_admitted(&forked("fix", "Proj", "app-fork"), &heads, &target).is_none());
+        // A same-path fork on a server host is another namespace; the legacy cloud host is not.
+        let host = |host: &str| {
+            crate::git::RepoTarget::with_path(
+                crate::git::Forge::AzureDevOps,
+                host,
+                &["org", "Proj", "app-fork"],
+            )
+            .unwrap()
+        };
+        let server = [head(&host("ado.corp.test"), "fix")];
+        assert!(branch_admitted(&forked("fix", "Proj", "app-fork"), &server, &target).is_none());
+        let legacy = [head(&host("org.visualstudio.com"), "fix")];
+        assert!(branch_admitted(&forked("fix", "Proj", "app-fork"), &legacy, &target).is_some());
     }
 
     #[test]

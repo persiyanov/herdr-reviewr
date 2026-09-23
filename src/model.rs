@@ -1,6 +1,6 @@
 //! In-memory review model: scopes, changed files, and comments.
 //!
-//! See `specs/review-model.md`. Comments live only for the session and are
+//! Comments live only for the session and are
 //! removed by export or delete — never by a refresh.
 
 /// Which set of changes the Changes view shows.
@@ -9,6 +9,8 @@ pub enum Scope {
     Uncommitted,
     Branch,
     LastTurn,
+    /// A picked run of commits, diffed `A^` against `B`.
+    Commits,
 }
 
 impl Scope {
@@ -17,6 +19,7 @@ impl Scope {
             Scope::Uncommitted => "uncommitted",
             Scope::Branch => "branch",
             Scope::LastTurn => "last turn",
+            Scope::Commits => "commits",
         }
     }
 
@@ -27,18 +30,48 @@ impl Scope {
             Scope::Uncommitted => "uncommitted",
             Scope::Branch => "branch",
             Scope::LastTurn => "last-turn",
+            Scope::Commits => "commits",
         }
     }
 
-    /// Cycle to the next scope, for the header chip click: uncommitted → branch → last turn.
+    /// Cycle to the next scope, for the header chip click: uncommitted → branch → last turn →
+    /// commits.
     #[must_use]
     pub fn cycle(self) -> Self {
         match self {
             Scope::Uncommitted => Scope::Branch,
             Scope::Branch => Scope::LastTurn,
-            Scope::LastTurn => Scope::Uncommitted,
+            Scope::LastTurn => Scope::Commits,
+            Scope::Commits => Scope::Uncommitted,
         }
     }
+}
+
+/// The `commits` scope's pick: a contiguous run from `oldest` to `newest`, both full commit
+/// ids, equal for a run of one.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CommitPick {
+    pub oldest: String,
+    pub newest: String,
+}
+
+impl CommitPick {
+    pub fn single(sha: &str) -> Self {
+        Self { oldest: sha.to_string(), newest: sha.to_string() }
+    }
+
+    pub fn is_single(&self) -> bool {
+        self.oldest == self.newest
+    }
+}
+
+/// Where a comment's diff was read: the worktree, or the picked run it came from. A diff
+/// comment renders only while the active scope reads the same diff, both sides: a run and
+/// its newest commit alone share a new side but not an old one.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Rev {
+    Worktree,
+    Commit(CommitPick),
 }
 
 /// How a file changed within a scope.
@@ -75,7 +108,7 @@ pub struct ChangedFile {
     pub previous_path: Option<String>,
     /// Git's own no-text-diff verdict for this change: binary content, or a path whose
     /// `diff` attribute `.gitattributes` unsets. The pane reads it as the `binary` notice
-    /// without reading either side (`specs/review-model.md`).
+    /// without reading either side.
     pub binary: bool,
 }
 
@@ -97,8 +130,10 @@ pub struct Comment {
     pub lines: String,
     pub text: String,
     /// True when anchored to a diff (the `Changes` tab); false for a File-view content comment
-    /// (the `All files` tab). Selects how staleness is judged (specs/review-model.md).
+    /// (the `All files` tab). Selects how staleness is judged.
     pub diff_anchored: bool,
+    /// Where the new side was read.
+    pub rev: Rev,
 }
 
 impl Comment {
@@ -172,7 +207,7 @@ impl CommentStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{Comment, CommentStore, Scope, Side};
+    use super::{Comment, CommentStore, Rev, Scope, Side};
 
     fn comment(file: &str, start: u32, end: u32, text: &str) -> Comment {
         Comment {
@@ -183,17 +218,28 @@ mod tests {
             lines: "+x".into(),
             text: text.into(),
             diff_anchored: true,
+            rev: Rev::Worktree,
         }
     }
 
     #[test]
     fn scope_cycles_and_labels() {
-        // The chip click cycles through all three scopes and wraps.
+        // The chip click cycles through all four scopes and wraps.
         assert_eq!(Scope::Uncommitted.cycle(), Scope::Branch);
         assert_eq!(Scope::Branch.cycle(), Scope::LastTurn);
-        assert_eq!(Scope::LastTurn.cycle(), Scope::Uncommitted);
+        assert_eq!(Scope::LastTurn.cycle(), Scope::Commits);
+        assert_eq!(Scope::Commits.cycle(), Scope::Uncommitted);
         assert_eq!(Scope::Uncommitted.label(), "uncommitted");
         assert_eq!(Scope::LastTurn.label(), "last turn");
+        assert_eq!(Scope::Commits.label(), "commits");
+        assert_eq!(Scope::Commits.name(), "commits");
+    }
+
+    #[test]
+    fn a_pick_of_one_is_single() {
+        let pick = super::CommitPick::single("abc");
+        assert!(pick.is_single());
+        assert!(!super::CommitPick { oldest: "a".into(), newest: "b".into() }.is_single());
     }
 
     #[test]
