@@ -1,7 +1,7 @@
 //! Read-only GitLab access: the merge request's identity, state, pipelines, and discussions.
 //!
 //! The GitLab provider behind `src/forge.rs`. It follows the
-//! neutral resolution contract in — the branch's published heads list
+//! neutral resolution contract — the branch's published heads list
 //! merge requests by `source_branch` — through `glab api` REST calls, and fills the
 //! same normalized [`PrSnapshot`] the GitHub provider does. It never writes to GitLab.
 
@@ -186,25 +186,11 @@ fn fetch_inner(
     cancelled: &AtomicBool,
 ) -> Result<PrView, GlabError> {
     let host = target.host();
-    let target_path = crate::forge::urlencode(&target.full_path());
 
-    let head = input.local.head_oid.as_deref();
-    // A fork clone: `origin` is the fork, the target is upstream. Both projects are
-    // asked, and upstream's pick outranks the fork's own.
-    let fork_path = crate::forge::fork_repository(input.origin_repository.as_ref(), target)
-        .map(|origin| crate::forge::urlencode(&origin.full_path()));
-    let Some((iid, project_path)) = associate_by_branch(
-        repo,
-        host,
-        &target_path,
-        fork_path.as_deref(),
-        &input.local.head_names(),
-        head,
-        cancelled,
-    )?
-    else {
+    let Some((iid, project)) = associate_by_branch(repo, input, target, cancelled)? else {
         return Ok(PrView::NoPr);
     };
+    let project_path = crate::forge::urlencode(&project.full_path());
 
     let mr =
         glab_api(repo, host, &format!("projects/{project_path}/merge_requests/{iid}"), cancelled)?;
@@ -322,67 +308,124 @@ fn assemble_discussions(page1: Vec<Value>, total: u64, later: Vec<Value>) -> (Ve
     (crate::forge::newest_capped(pool), truncated)
 }
 
-/// Ask GitLab for the branch's merge requests: one `source_branch` listing per name
+/// Ask GitLab for the branch's merge requests: the `source_branch` listings per head name
 /// against the target project — and the fork project on a fork clone — with the project
-/// lookups that prove each MR's source, all in one concurrent wave
-/// Returns the picked MR and the project path it lives in;
-/// the target's pick outranks the fork's.
-fn associate_by_branch(
+/// lookups that name each head's project id, all in one concurrent wave. An MR joins only
+/// when its source (project, branch) is one of the branch's heads (`forge::admits`).
+/// Returns the picked MR and the project it lives in; the target's pick outranks the fork's.
+fn associate_by_branch<'a>(
     repo: &Path,
-    host: &str,
-    target_path: &str,
-    fork_path: Option<&str>,
-    names: &[String],
-    head: Option<&str>,
+    input: &'a PrFetchInput,
+    target: &'a crate::git::RepoTarget,
     cancelled: &AtomicBool,
-) -> Result<Option<(u64, String)>, GlabError> {
-    let mut endpoints: Vec<String> = vec![format!("projects/{target_path}")];
-    if let Some(fork) = fork_path {
-        endpoints.push(format!("projects/{fork}"));
+) -> Result<Option<(u64, &'a crate::git::RepoTarget)>, GlabError> {
+    let heads = &input.local.heads;
+    let names = input.local.head_names();
+    if names.is_empty() {
+        return Ok(None);
     }
-    endpoints.extend(branch_listings(target_path, names));
-    if let Some(fork) = fork_path {
-        endpoints.extend(branch_listings(fork, names));
+    let head = input.local.head_oid.as_deref();
+    // A fork clone: `origin` is the fork, the target is upstream. Both projects are
+    // asked, and upstream's pick outranks the fork's own.
+    let fork = crate::forge::fork_repository(input.origin_repository.as_ref(), target);
+    let projects = id_projects(target, fork, heads);
+    let path = |project: &crate::git::RepoTarget| crate::forge::urlencode(&project.full_path());
+    let mut endpoints: Vec<String> =
+        projects.iter().map(|project| format!("projects/{}", path(project))).collect();
+    endpoints.extend(branch_listings(&path(target), &names));
+    if let Some(fork) = fork {
+        endpoints.extend(branch_listings(&path(fork), &names));
     }
-    let mut responses = glab_api_fan_out(repo, host, &endpoints, cancelled).into_iter();
-    // The target project's numeric id — the source filter every listed MR must match
-    // (a stranger's same-named fork branch never attaches).
-    let project = responses.next().transpose()?.unwrap_or(Value::Null);
-    let Some(target_id) = project["id"].as_u64() else {
-        return Err(GlabError::Other("project lookup returned no id".to_string()));
-    };
-    let fork_id = match fork_path {
-        // An unreadable fork project proves nothing and never fails the fetch: the
-        // upstream lookup still runs, it just cannot admit anything fork-sourced.
-        Some(_) => match responses.next() {
-            Some(Ok(project)) => project["id"].as_u64(),
-            Some(Err(GlabError::Unavailable(_))) | None => None,
-            Some(Err(error)) => return Err(error),
-        },
-        None => None,
-    };
+    let mut responses = glab_api_fan_out(repo, target.host(), &endpoints, cancelled).into_iter();
+    let ids = read_ids(&projects, &mut responses)?;
     let target_rows: Vec<_> = responses.by_ref().take(2 * names.len()).collect();
-    // On a fork clone the upstream lookup keeps only fork-sourced MRs — upstream's own
-    // same-named branch is a stranger's.
-    let assoc = collect_assoc(target_rows, |source| match fork_path {
-        Some(_) => fork_id.is_some() && source == fork_id,
-        None => source == Some(target_id),
-    })?;
-    let pick = crate::forge::resolve_pick(repo, &assoc, head)
-        .map_err(|error| GlabError::LocalGit(error.0))?;
-    if let Some(iid) = pick {
-        return Ok(Some((iid, target_path.to_string())));
+    let assoc = collect_assoc(target_rows, |node| mr_admitted(node, target, &ids, heads))?;
+    if let Some(iid) = crate::forge::resolve_pick(repo, &assoc, head)
+        .map_err(|error| GlabError::LocalGit(error.0))?
+    {
+        return Ok(Some((iid, target)));
     }
-    if let Some(fork) = fork_path {
+    if let Some(fork) = fork {
         let assoc =
-            collect_assoc(responses.collect(), |source| fork_id.is_some() && source == fork_id)?;
-        let pick = crate::forge::resolve_pick(repo, &assoc, head)
-            .map_err(|error| GlabError::LocalGit(error.0))?;
-        if let Some(iid) = pick {
-            return Ok(Some((iid, fork.to_string())));
+            collect_assoc(responses.collect(), |node| mr_admitted(node, fork, &ids, heads))?;
+        if let Some(iid) = crate::forge::resolve_pick(repo, &assoc, head)
+            .map_err(|error| GlabError::LocalGit(error.0))?
+        {
+            return Ok(Some((iid, fork)));
         }
     }
     Ok(None)
+}
+
+/// Consume the wave's leading project lookups, one per project, target first. Every listed
+/// MR names its source by numeric project id. The target's id must read. Another project the
+/// reader cannot see (403/404) proves nothing and admits nothing sourced there; any other
+/// failure fails the fetch, like a failed listing in the same wave. The listings follow in
+/// the same iterator.
+fn read_ids<'a>(
+    projects: &[&'a crate::git::RepoTarget],
+    responses: &mut impl Iterator<Item = Result<Value, GlabError>>,
+) -> Result<Vec<(&'a crate::git::RepoTarget, Option<u64>)>, GlabError> {
+    let mut ids = Vec::with_capacity(projects.len());
+    for (i, project) in projects.iter().enumerate() {
+        let id = match responses.next() {
+            Some(Ok(v)) => v["id"].as_u64(),
+            Some(Err(GlabError::Unavailable(_))) if i > 0 => None,
+            Some(Err(error)) => return Err(error),
+            None => None,
+        };
+        if i == 0 && id.is_none() {
+            return Err(GlabError::Other("project lookup returned no id".to_string()));
+        }
+        ids.push((*project, id));
+    }
+    Ok(ids)
+}
+
+/// A project's id as the association's lookups read it.
+fn project_id(
+    ids: &[(&crate::git::RepoTarget, Option<u64>)],
+    project: &crate::git::RepoTarget,
+) -> Option<u64> {
+    ids.iter().find(|(have, _)| have.is(project)).and_then(|(_, id)| *id)
+}
+
+/// Whether a listed MR in `queried` is the branch's: its source (project id, branch) must be
+/// one of the heads. A source in `queried` itself matches by id; any other by the head
+/// project's looked-up id.
+fn mr_admitted(
+    node: &Value,
+    queried: &crate::git::RepoTarget,
+    ids: &[(&crate::git::RepoTarget, Option<u64>)],
+    heads: &[crate::git::Head],
+) -> bool {
+    let source = node["source_project_id"].as_u64();
+    let head_ref = node["source_branch"].as_str().unwrap_or_default();
+    let same_repo = source.is_some() && source == project_id(ids, queried);
+    crate::forge::admits(heads, queried, head_ref, same_repo, |repo| {
+        source.is_some() && project_id(ids, repo) == source
+    })
+}
+
+/// The projects whose numeric id the association reads, target first: the target, the fork
+/// clone's origin, and every other head project on the target's host (a head elsewhere can
+/// never be an MR source here). One id lookup each, in the same wave as the listings.
+fn id_projects<'a>(
+    target: &'a crate::git::RepoTarget,
+    fork: Option<&'a crate::git::RepoTarget>,
+    heads: &'a [crate::git::Head],
+) -> Vec<&'a crate::git::RepoTarget> {
+    let mut projects = vec![target];
+    let candidates = fork.into_iter().chain(heads.iter().map(|head| &head.repo));
+    for project in candidates {
+        if project.forge() == target.forge()
+            && project.host() == target.host()
+            && !projects.iter().any(|have| have.is(project))
+        {
+            projects.push(project);
+        }
+    }
+    projects
 }
 
 /// The per-name merge-request listings against `project`: an opened page apart from the
@@ -405,11 +448,11 @@ fn branch_listings(project: &str, names: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Fold one project's listings into an association, keeping only MRs whose source project
-/// `allowed` admits. A 404 listing proves nothing and never fails the fetch
+/// Fold one project's listings into an association, keeping only MRs `allowed` admits. A
+/// 404 listing proves nothing and never fails the fetch
 fn collect_assoc(
     rows: Vec<Result<Value, GlabError>>,
-    allowed: impl Fn(Option<u64>) -> bool,
+    allowed: impl Fn(&Value) -> bool,
 ) -> Result<Association, GlabError> {
     let mut assoc = Association::default();
     for result in rows {
@@ -419,7 +462,7 @@ fn collect_assoc(
             Err(error) => return Err(error),
         };
         for node in v.as_array().into_iter().flatten() {
-            if !allowed(node["source_project_id"].as_u64()) {
+            if !allowed(node) {
                 continue;
             }
             let Some(mr) = assoc_mr(node) else { continue };
@@ -824,6 +867,90 @@ mod tests {
         }
     }
 
+    fn gl(path: &[&str]) -> crate::git::RepoTarget {
+        crate::git::RepoTarget::with_path(crate::git::Forge::GitLab, "gitlab.com", path).unwrap()
+    }
+
+    #[test]
+    fn a_merge_request_attaches_only_when_its_source_is_one_of_the_branchs_heads() {
+        let upstream = gl(&["acme", "widgets"]);
+        let fork = gl(&["contributor", "widgets"]);
+        let head = |repo: &crate::git::RepoTarget, name: &str| crate::git::Head {
+            repo: repo.clone(),
+            name: name.to_string(),
+        };
+        let mr = |branch: &str, source: u64| json!({"source_branch": branch, "source_project_id": source});
+        // Ids as the lookups read them: upstream 7, the fork 9. An unreadable project is None.
+        let ids = [(&upstream, Some(7)), (&fork, Some(9))];
+        let on_main = [head(&upstream, "main")];
+        let fork_fix = [head(&fork, "fix")];
+        let cases: &[(&str, &crate::git::RepoTarget, &[crate::git::Head], Value, bool)] = &[
+            ("stranger fork main on main", &upstream, &on_main, mr("main", 42), false),
+            ("own same-project main", &upstream, &on_main, mr("main", 7), true),
+            ("fork clone, its own fix", &upstream, &fork_fix, mr("fix", 9), true),
+            // A fork clone's branch that only tracks upstream: upstream's own `fix` is a stranger's.
+            ("fork clone, upstream's own fix", &upstream, &fork_fix, mr("fix", 7), false),
+            ("fork's internal MR, fork queried", &fork, &fork_fix, mr("fix", 9), true),
+            ("upstream-sourced MR, fork queried", &fork, &fork_fix, mr("fix", 7), false),
+            ("no source id", &upstream, &on_main, json!({"source_branch": "main"}), false),
+        ];
+        for (label, queried, heads, node, expected) in cases {
+            assert_eq!(mr_admitted(node, queried, &ids, heads), *expected, "{label}");
+        }
+        // An unreadable fork project admits nothing sourced there.
+        let unreadable = [(&upstream, Some(7)), (&fork, None)];
+        assert!(!mr_admitted(&mr("fix", 9), &upstream, &unreadable, &fork_fix));
+    }
+
+    #[test]
+    fn project_ids_fail_only_on_the_target_and_leave_the_listings_aligned() {
+        let (upstream, fork, other) =
+            (gl(&["acme", "w"]), gl(&["contributor", "w"]), gl(&["x", "w"]));
+        let projects = [&upstream, &fork, &other];
+        let listing = json!(["listing"]);
+        let mut wave = vec![
+            Ok(json!({"id": 7})),
+            Err(GlabError::Unavailable("403".into())),
+            Err(GlabError::Unavailable("404".into())),
+            Ok(listing.clone()),
+        ]
+        .into_iter();
+        let ids = read_ids(&projects, &mut wave).unwrap();
+        assert_eq!(ids.iter().map(|(_, id)| *id).collect::<Vec<_>>(), [Some(7), None, None]);
+        assert_eq!(wave.next().unwrap().unwrap(), listing, "the listings start right after");
+        // The target's own failure surfaces verbatim.
+        let mut wave =
+            vec![Err(GlabError::Unavailable("404 Project Not Found".into()))].into_iter();
+        assert!(matches!(read_ids(&projects, &mut wave),
+            Err(GlabError::Unavailable(m)) if m.contains("Not Found")));
+        let mut wave = vec![Ok(json!({}))].into_iter();
+        assert!(read_ids(&projects, &mut wave).is_err(), "a target with no id cannot filter");
+        // A transient failure on another project fails the fetch, never reads as "no MR".
+        let mut wave = vec![Ok(json!({"id": 7})), Err(GlabError::Other("502".into()))].into_iter();
+        assert!(matches!(read_ids(&projects, &mut wave), Err(GlabError::Other(_))));
+    }
+
+    #[test]
+    fn head_projects_ride_the_first_wave_once_each() {
+        let upstream = gl(&["acme", "widgets"]);
+        let fork = gl(&["contributor", "widgets"]);
+        let other_host = crate::git::RepoTarget::with_path(
+            crate::git::Forge::GitLab,
+            "gitlab.corp",
+            &["x", "y"],
+        )
+        .unwrap();
+        let heads = [
+            crate::git::Head { repo: fork.clone(), name: "a".into() },
+            crate::git::Head { repo: gl(&["Contributor", "Widgets"]), name: "b".into() },
+            crate::git::Head { repo: upstream.clone(), name: "c".into() },
+            crate::git::Head { repo: other_host, name: "d".into() },
+        ];
+        let got: Vec<String> =
+            id_projects(&upstream, Some(&fork), &heads).iter().map(|p| p.full_path()).collect();
+        assert_eq!(got, ["acme/widgets", "contributor/widgets"]);
+    }
+
     #[test]
     fn collect_assoc_filters_by_source_project_and_skips_unavailable_listings() {
         let node = |iid: u64, state: &str, source: u64| {
@@ -836,7 +963,7 @@ mod tests {
             // An unavailable listing proves nothing and never fails the fold.
             Err(GlabError::Unavailable("404".to_string())),
         ];
-        let assoc = collect_assoc(rows, |source| source == Some(7)).unwrap();
+        let assoc = collect_assoc(rows, |node| node["source_project_id"] == 7).unwrap();
         assert_eq!(assoc.open.iter().map(|mr| mr.number).collect::<Vec<_>>(), [1]);
         assert_eq!(assoc.history.iter().map(|mr| mr.number).collect::<Vec<_>>(), [2]);
         // A hard error still fails.

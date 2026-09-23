@@ -233,10 +233,18 @@ impl RepoTarget {
     }
 
     /// Whether `other` names the same repository. Forge paths and hosts compare
-    /// case-insensitively, as every supported forge resolves them.
+    /// case-insensitively, as every supported forge resolves them. Azure DevOps cloud
+    /// serves one organization under two hosts (`dev.azure.com` and the legacy
+    /// `{org}.visualstudio.com`); the organization is in the path either way.
     pub fn is(&self, other: &Self) -> bool {
+        let azure_cloud =
+            |host: &str| host == "dev.azure.com" || host.ends_with(".visualstudio.com");
+        let same_host = self.host == other.host
+            || (self.forge == Forge::AzureDevOps
+                && azure_cloud(&self.host)
+                && azure_cloud(&other.host));
         self.forge == other.forge
-            && self.host == other.host
+            && same_host
             && self.path.len() == other.path.len()
             && self.path.iter().zip(&other.path).all(|(a, b)| a.eq_ignore_ascii_case(b))
     }
@@ -1861,6 +1869,11 @@ mod tests {
         assert!(
             !gl("gitlab.com", &["group", "sub", "repo"]).is(&gl("gitlab.com", &["group", "sub"]))
         );
+        let ado = |host: &str| {
+            RepoTarget::with_path(Forge::AzureDevOps, host, &["org", "proj", "app"]).unwrap()
+        };
+        assert!(ado("org.visualstudio.com").is(&ado("dev.azure.com")), "one cloud org, two hosts");
+        assert!(!ado("ado.corp.test").is(&ado("dev.azure.com")), "a server is its own namespace");
     }
 
     fn github(host: &str) -> ForgeHosts<'_> {
