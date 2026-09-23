@@ -3248,9 +3248,33 @@ fn a_diff_unset_file_reads_as_the_binary_notice_not_a_text_diff() {
 }
 
 #[test]
+fn a_file_crossing_steps_over_a_diff_unset_file() {
+    let r = Repo::init();
+    r.write(".gitattributes", "b.lock -diff\n");
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    r.write("a.rs", "ONE\n");
+    r.write("b.lock", "one\ntwo\nthree\n");
+    r.write("c.rs", "fn c() {}\n");
+
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    let row = file_row_of(&app, "a.rs").expect("a.rs listed");
+    app.select_file(row).unwrap();
+    app.focus = Focus::Diff;
+    for _ in 0..4 {
+        press(&mut app, &keymap, KeyCode::Char(']'));
+        if app.diff_path.as_deref() != Some("a.rs") {
+            break;
+        }
+    }
+    assert_eq!(app.diff_path.as_deref(), Some("c.rs"), "a crossing always lands on a change");
+}
+
+#[test]
 fn a_diff_unset_file_in_all_files_still_reads_its_content() {
     // The attribute governs diffing, not reading. `All files` shows the file itself, so a
-    // `-diff` text file stays readable there (`specs/diff-view.md` File view).
+    // `-diff` text file stays readable there.
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::diff::{FileState, View};
     let r = Repo::init();

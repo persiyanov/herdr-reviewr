@@ -93,6 +93,7 @@ fn an_untracked_file_the_diff_attribute_unsets_carries_the_verdict_too() {
 
     assert_eq!(files["flake.lock"].kind, ChangeKind::Untracked);
     assert!(files["flake.lock"].binary, "-diff holds for an untracked path");
+    assert_eq!(files["flake.lock"].additions, 0, "no countable lines, as when tracked");
     assert!(!files["notes.txt"].binary, "an ordinary untracked file still diffs");
     assert_eq!(files["notes.txt"].additions, 2);
 }

@@ -1822,14 +1822,21 @@ fn assemble(
         let others = git(repo, &["ls-files", "--others", "--exclude-standard", "-z"])?;
         let new_paths: Vec<&str> =
             others.split('\0').filter(|p| !p.is_empty() && !seen.contains(*p)).collect();
-        let undiffable = diff_unset(repo, &new_paths)?;
+        // A failed attribute read costs the verdict, never the whole changeset.
+        let undiffable = diff_unset(repo, &new_paths).unwrap_or_default();
         for path in new_paths {
             let path = path.to_string();
             if !seen.insert(path.clone()) {
                 continue;
             }
-            let additions = untracked_additions(repo, &path);
-            let binary = additions.is_none() || undiffable.contains(path.as_str());
+            // An unset `diff` attribute is git's no-text-diff verdict before any content read:
+            // no lines to count, as a tracked `-diff` path shows none.
+            let additions = if undiffable.contains(path.as_str()) {
+                None
+            } else {
+                untracked_additions(repo, &path)
+            };
+            let binary = additions.is_none();
             files.push(ChangedFile {
                 path,
                 kind: ChangeKind::Untracked,
@@ -1846,8 +1853,9 @@ fn assemble(
 }
 
 /// Of `paths`, those whose `diff` attribute git reports as unset — `-diff`, or the `binary`
-/// macro that implies it. Empty when `paths` is, so a repository
-/// with nothing untracked pays nothing.
+/// macro that implies it. Empty when `paths` is, so a repository with nothing untracked pays
+/// nothing. A `diff=<driver>` whose driver sets `binary` counts only once the path is tracked,
+/// where `--numstat` reports it.
 ///
 /// One `check-attr` for the whole set, never one per path — the same rule
 /// [`untracked_additions`] follows, and for the same reason. Only untracked paths come here:
@@ -1889,8 +1897,9 @@ fn diff_unset(repo: &Path, paths: &[&str]) -> Result<HashSet<String>> {
 ///.
 fn untracked_additions(repo: &Path, path: &str) -> Option<u32> {
     let Ok(bytes) = std::fs::read(repo.join(path)) else { return Some(0) };
-    if bytes.contains(&0) {
-        return None; // binary (a NUL byte) — git reports no line additions
+    // git's own sniff: a NUL within the first 8000 bytes.
+    if bytes[..bytes.len().min(8000)].contains(&0) {
+        return None; // binary — git reports no line additions
     }
     if bytes.is_empty() {
         return Some(0);
