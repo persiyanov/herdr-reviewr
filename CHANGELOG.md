@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Support older curl command when installing**
+
 ## [0.39.0] — 2026-09-23
 
 ### Added
