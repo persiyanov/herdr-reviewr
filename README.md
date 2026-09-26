@@ -244,7 +244,7 @@ theme = "tokyo-night"
 
 `--theme` overrides the file. Match your terminal's light or dark background. Available:
 
-- **Dark:** `catppuccin`, `catppuccin-frappe`, `catppuccin-macchiato`, `dracula`, `nord`,
+- **Dark:** `catppuccin`, `catppuccin-frappe`, `catppuccin-macchiato`, `dracula`, `ayu`, `nord`,
   `gruvbox`, `one-dark`, `solarized`, `monokai`, `tokyo-night`, `rose-pine`.
 - **Light:** `catppuccin-latte`, `gruvbox-light`, `one-light`, `solarized-light`,
   `github-light`, `tokyo-night-day`, `rose-pine-dawn`.
@@ -508,7 +508,7 @@ herdr plugin link .
 
 Structured (JSON) export, a side-by-side split view, mark-file-reviewed,
 named-key notation for keybindings, OSC light/dark theme autodetect, more themes
-(`kanagawa`, `vesper`, `everforest`, `ayu`, a dark `github`), a `terminal`-following palette,
+(`kanagawa`, `vesper`, `everforest`, a dark `github`), a `terminal`-following palette,
 and OSC 52 clipboard.
 
 ## Sponsors
@@ -528,3 +528,4 @@ Bundled `.tmTheme` syntax files in `assets/`, each under its own license:
 - [Catppuccin Mocha](https://github.com/catppuccin/bat) — MIT.
 - [Tokyo Night](https://github.com/folke/tokyonight.nvim) (`tokyo-night`, `tokyo-night-day`) — Apache-2.0.
 - [Rosé Pine](https://github.com/rose-pine/tm-theme) (`rose-pine`, `rose-pine-dawn`) — MIT.
+- [Ayu](https://github.com/ayu-theme/ayu-vim) (`ayu`) — MIT palette; bundled syntax rules adapt its colors.

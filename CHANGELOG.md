@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Ayu Dark is available as the `ayu` theme**, including matching syntax highlighting.
+
 ## [0.40.1] — 2026-10-02
 
 ### Fixed

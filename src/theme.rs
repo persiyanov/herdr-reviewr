@@ -151,6 +151,7 @@ fn build(name: &str) -> Option<Theme> {
         "catppuccin" => catppuccin(),
         "catppuccin-latte" => catppuccin_latte(),
         "dracula" => derived("dracula", Dark, E::Dracula, DRACULA),
+        "ayu" => bundled("ayu", Dark, AYU_TM, AYU),
         "nord" => derived("nord", Dark, E::Nord, NORD),
         "gruvbox" => derived("gruvbox", Dark, E::GruvboxDark, GRUVBOX),
         "gruvbox-light" => derived("gruvbox-light", Light, E::GruvboxLight, GRUVBOX_LIGHT),
@@ -242,6 +243,7 @@ fn bundled(
 /// kept as the byte-identical source of today's highlighting). Licenses listed in the
 /// README's License section.
 const MOCHA_TM: &[u8] = include_bytes!("../assets/Catppuccin Mocha.tmTheme");
+const AYU_TM: &[u8] = include_bytes!("../assets/ayu-dark.tmTheme");
 const TOKYO_NIGHT_TM: &[u8] = include_bytes!("../assets/tokyo-night.tmTheme");
 const TOKYO_NIGHT_DAY_TM: &[u8] = include_bytes!("../assets/tokyo-night-day.tmTheme");
 const ROSE_PINE_TM: &[u8] = include_bytes!("../assets/rose-pine.tmTheme");
@@ -265,6 +267,8 @@ const CATPPUCCIN_LATTE: Anchors =
 /// (red, green, yellow, orange, purple, blue); surfaces and diff fills are derived.
 const DRACULA: Anchors =
     anchors(0x282a36, 0xf8f8f2, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xffb86c, 0xbd93f9, 0x8be9fd);
+const AYU: Anchors =
+    anchors(0x0a0e14, 0xb3b1ad, 0xf07178, 0xc2d94c, 0xffb454, 0xff8f40, 0xd2a6ff, 0x59c2ff);
 const NORD: Anchors =
     anchors(0x2e3440, 0xd8dee9, 0xbf616a, 0xa3be8c, 0xebcb8b, 0xd08770, 0xb48ead, 0x81a1c1);
 const GRUVBOX: Anchors =
@@ -616,6 +620,7 @@ mod tests {
         ("catppuccin", false),
         ("catppuccin-latte", true),
         ("dracula", false),
+        ("ayu", false),
         ("nord", false),
         ("gruvbox", false),
         ("gruvbox-light", true),

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>name</key>
+	<string>Ayu Dark</string>
+	<key>settings</key>
+	<array>
+		<dict>
+			<key>settings</key>
+			<dict>
+				<key>background</key>
+				<string>#0A0E14</string>
+				<key>foreground</key>
+				<string>#B3B1AD</string>
+				<key>caret</key>
+				<string>#E6B450</string>
+				<key>selection</key>
+				<string>#253340</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key><string>comment</string>
+			<key>settings</key><dict><key>foreground</key><string>#5C6773</string></dict>
+		</dict>
+		<dict>
+			<key>scope</key><string>string, constant.character, markup.raw</string>
+			<key>settings</key><dict><key>foreground</key><string>#C2D94C</string></dict>
+		</dict>
+		<dict>
+			<key>scope</key><string>constant.numeric, constant.language, variable.other.constant</string>
+			<key>settings</key><dict><key>foreground</key><string>#FFB454</string></dict>
+		</dict>
+		<dict>
+			<key>scope</key><string>keyword, storage, support.type, entity.name.type</string>
+			<key>settings</key><dict><key>foreground</key><string>#FF8F40</string></dict>
+		</dict>
+		<dict>
+			<key>scope</key><string>entity.name.function, support.function</string>
+			<key>settings</key><dict><key>foreground</key><string>#FFB454</string></dict>
+		</dict>
+		<dict>
+			<key>scope</key><string>variable, entity.name.variable, support.variable</string>
+			<key>settings</key><dict><key>foreground</key><string>#39BAE6</string></dict>
+		</dict>
+		<dict>
+			<key>scope</key><string>entity.name.tag, entity.name.class, entity.name.section</string>
+			<key>settings</key><dict><key>foreground</key><string>#59C2FF</string></dict>
+		</dict>
+		<dict>
+			<key>scope</key><string>entity.name.type, support.type</string>
+			<key>settings</key><dict><key>foreground</key><string>#FFA759</string></dict>
+		</dict>
+		<dict>
+			<key>scope</key><string>constant.language.boolean, constant.language.null</string>
+			<key>settings</key><dict><key>foreground</key><string>#D2A6FF</string></dict>
+		</dict>
+		<dict>
+			<key>scope</key><string>invalid, invalid.illegal</string>
+			<key>settings</key><dict><key>foreground</key><string>#F07178</string></dict>
+		</dict>
+	</array>
+</dict>
+</plist>
