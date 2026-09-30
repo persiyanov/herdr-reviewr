@@ -923,7 +923,7 @@ struct PaintedDetails {
 
 #[derive(Debug)]
 enum PluginConfigState {
-    Ready(crate::config::PluginConfig),
+    Ready(Box<crate::config::PluginConfig>),
     Blocked { error: String },
 }
 
@@ -1043,7 +1043,7 @@ impl App {
             palette: theme.palette,
             theme_name: theme.name,
             cli_theme_name: None,
-            config: PluginConfigState::Ready(crate::config::PluginConfig::default()),
+            config: PluginConfigState::Ready(Box::default()),
             requested_theme_name: None,
             cache: DiffCache::new(),
             markdown_cache: std::cell::RefCell::new(crate::markdown::RenderCache::default()),
@@ -1081,7 +1081,7 @@ impl App {
         let previous_position =
             self.plugin_config().map(crate::config::PluginConfig::navigator_position);
         let next_position = config.navigator_position();
-        self.config = PluginConfigState::Ready(config);
+        self.config = PluginConfigState::Ready(Box::new(config));
         if previous_position != Some(next_position) {
             self.cancel_divider_drag();
             self.navigator_position = next_position;
@@ -1092,7 +1092,7 @@ impl App {
     /// The validated plugin configuration snapshot normal work currently uses.
     pub fn plugin_config(&self) -> Option<&crate::config::PluginConfig> {
         match &self.config {
-            PluginConfigState::Ready(config) => Some(config),
+            PluginConfigState::Ready(config) => Some(config.as_ref()),
             PluginConfigState::Blocked { .. } => None,
         }
     }
