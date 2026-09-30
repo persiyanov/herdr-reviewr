@@ -40,7 +40,7 @@ One persistent pane, pointed at a git worktree:
 - **Themes** — 20 palettes in dark and light.
 
 It never edits your worktree and sends nothing on its own. The **PR** tab reads GitHub,
-GitLab, or Azure DevOps and never posts.
+GitLab, Azure DevOps, or Gitea and never posts.
 
 ## Requirements
 
@@ -48,7 +48,7 @@ GitLab, or Azure DevOps and never posts.
 - **git** on `PATH`.
 - A **truecolor** terminal with Unicode box-drawing.
 - **macOS, Linux, or Windows.**
-- **`gh`** (GitHub), **`glab`** (GitLab), or **`az`** (Azure DevOps, with the `azure-devops` extension), authenticated. Only the **PR** tab needs one.
+- **`gh`** (GitHub), **`glab`** (GitLab), **`az`** (Azure DevOps, with the `azure-devops` extension), or **`tea`** (Gitea), authenticated. Only the **PR** tab needs one.
 
 ## Install
 
@@ -184,9 +184,9 @@ links, and scroll with the wheel.
 - **Changes** — the active scope's changed files with `+/-` stats and totals in the header.
 - **All files** — any file's current content from the whole worktree, comments too. A collapsed
   folder with a changed file under it shows a dot. Ignored paths show dimmed.
-- **PR** — a read-only mirror of the branch's pull request (GitHub, Azure DevOps) or merge
-  request (GitLab): state, checks, description, and comments, rendered as markdown. reviewr
-  never writes to the forge.
+- **PR** — a read-only mirror of the branch's pull request (GitHub, Azure DevOps, Gitea) or
+  merge request (GitLab): state, checks, description, and comments, rendered as markdown.
+  reviewr never writes to the forge.
 
 ## Diff scopes
 
@@ -393,19 +393,22 @@ The PR tab reads `upstream` when you have one, otherwise `origin`. A standard fo
 without setup. Checking out a contributor PR (`gh pr checkout`, `glab mr checkout`) in an
 upstream clone attaches it too.
 
-GitHub.com, GitLab.com, dev.azure.com, and the `*.visualstudio.com` organization hosts work
-without configuration. For one self-hosted instance per forge, set its bare hostname:
+GitHub.com, GitLab.com, dev.azure.com, the `*.visualstudio.com` organization hosts, and
+gitea.com work without configuration. For one self-hosted instance per forge, set its bare
+hostname:
 
 ```toml
 github_host = "github.example.com"
 gitlab_host = "git.corp.example"
 azure_devops_host = "tfs.corp.example"
+gitea_host = "code.corp.example"
 ```
 
 Matching is exact. reviewr does not infer SSH aliases like `github.com-work` — use a
 canonical-host remote or an `insteadOf` rewrite. Authenticate with
 `gh auth login --hostname github.example.com`, `glab auth login --hostname git.corp.example`,
-or `az login`.
+`az login`, or `tea login add`. On Gitea, reviewr reads through the `tea` login whose URL — or
+SSH host — is the remote's host, never tea's default login.
 
 ### Pane placement
 
@@ -487,8 +490,8 @@ The known constraints:
   poll is missed, and the scope shows everything since the last *observed* turn start, your
   own edits included.
 
-**PR tab (GitHub, GitLab, and Azure DevOps)**
-- **Read-only** — needs the forge's authenticated CLI (`gh`, `glab`, or `az`) and a
+**PR tab (GitHub, GitLab, Azure DevOps, and Gitea)**
+- **Read-only** — needs the forge's authenticated CLI (`gh`, `glab`, `az`, or `tea`) and a
   recognized `upstream` or `origin`. Without either it tells you what to fix, and the other
   tabs keep working. Other forges are not supported.
 - **One repository, never a cross-repository search** — a readable, recognized `upstream` is
@@ -497,6 +500,11 @@ The known constraints:
 - **Mirrors the branch's *open* PR or MR** — merged or closed shows as history. Each comment
   surface caps at its newest 100 rows, with a `+more` marker naming the forge when there is
   more.
+- **Gitea shows less of a PR's merge state** — its API has no branch-protection verdict, so a
+  PR is never shown as blocked, and none of its comments as outdated. A PR shows conflicts
+  whenever Gitea can't merge it, including the few seconds its conflict check runs after a push.
+  Gitea's pull-request listing takes no branch filter, so reviewr finds the branch's PR among
+  the newest 100 open and 100 closed ones.
 
 **Review model**
 - **Comments are in-memory and single-session** — closing the pane loses any you haven't sent

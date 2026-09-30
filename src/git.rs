@@ -128,6 +128,7 @@ pub enum Forge {
     GitHub,
     GitLab,
     AzureDevOps,
+    Gitea,
 }
 
 /// The per-forge display vocabulary — the CLI, noun, and reference table in
@@ -138,13 +139,14 @@ impl Forge {
             Self::GitHub => "GitHub",
             Self::GitLab => "GitLab",
             Self::AzureDevOps => "Azure DevOps",
+            Self::Gitea => "Gitea",
         }
     }
 
     /// The forge's full noun: the word its users say.
     pub fn noun(self) -> &'static str {
         match self {
-            Self::GitHub | Self::AzureDevOps => "pull request",
+            Self::GitHub | Self::AzureDevOps | Self::Gitea => "pull request",
             Self::GitLab => "merge request",
         }
     }
@@ -152,7 +154,7 @@ impl Forge {
     /// The forge's noun abbreviation: `PR` on GitHub, `MR` on GitLab.
     pub fn abbr(self) -> &'static str {
         match self {
-            Self::GitHub | Self::AzureDevOps => "PR",
+            Self::GitHub | Self::AzureDevOps | Self::Gitea => "PR",
             Self::GitLab => "MR",
         }
     }
@@ -160,7 +162,7 @@ impl Forge {
     /// The reference sigil before a number: `#226` on GitHub, `!42` on GitLab.
     pub fn sigil(self) -> char {
         match self {
-            Self::GitHub | Self::AzureDevOps => '#',
+            Self::GitHub | Self::AzureDevOps | Self::Gitea => '#',
             Self::GitLab => '!',
         }
     }
@@ -171,6 +173,7 @@ impl Forge {
             Self::GitHub => "gh",
             Self::GitLab => "glab",
             Self::AzureDevOps => "az",
+            Self::Gitea => "tea",
         }
     }
 }
@@ -181,6 +184,7 @@ pub struct ForgeHosts<'a> {
     pub github: Option<&'a str>,
     pub gitlab: Option<&'a str>,
     pub azure_devops: Option<&'a str>,
+    pub gitea: Option<&'a str>,
 }
 
 /// A canonical forge repository target: the forge, its hostname, and the repository path.
@@ -203,7 +207,7 @@ impl RepoTarget {
     pub(crate) fn with_path(forge: Forge, host: &str, segments: &[&str]) -> Option<Self> {
         let host = host.to_ascii_lowercase();
         let valid_len = match forge {
-            Forge::GitHub => segments.len() == 2,
+            Forge::GitHub | Forge::Gitea => segments.len() == 2,
             // A `-` segment means a pasted browse link, not a deep namespace.
             Forge::GitLab => segments.len() >= 2 && !segments.contains(&"-"),
             // Always `[organization, project, repository]`, shaped by `ado_canonicalize`.
@@ -232,12 +236,12 @@ impl RepoTarget {
         &self.host
     }
 
-    /// The first path segment: GitHub's owner, Azure DevOps' organization.
+    /// The first path segment: GitHub's and Gitea's owner, Azure DevOps' organization.
     pub fn owner(&self) -> &str {
         &self.path[0]
     }
 
-    /// The last path segment — the repository name at the GitHub API boundary.
+    /// The last path segment — the repository name at the GitHub and Gitea API boundaries.
     pub fn name(&self) -> &str {
         self.path.last().expect("a target has 2+ segments")
     }
@@ -350,6 +354,9 @@ pub(crate) fn forge_for_host(host: &str, hosts: &ForgeHosts<'_>) -> Option<Forge
         || hosts.azure_devops == Some(host)
     {
         return Some(Forge::AzureDevOps);
+    }
+    if host == "gitea.com" || hosts.gitea == Some(host) {
+        return Some(Forge::Gitea);
     }
     None
 }
@@ -2302,7 +2309,8 @@ mod tests {
         parse_numstat, parse_raw,
     };
 
-    const NONE: ForgeHosts<'_> = ForgeHosts { github: None, gitlab: None, azure_devops: None };
+    const NONE: ForgeHosts<'_> =
+        ForgeHosts { github: None, gitlab: None, azure_devops: None, gitea: None };
 
     #[test]
     fn a_git_error_names_the_subcommand_not_the_argv() {
@@ -2338,6 +2346,10 @@ mod tests {
 
     fn azure_devops(host: &str) -> ForgeHosts<'_> {
         ForgeHosts { azure_devops: Some(host), ..NONE }
+    }
+
+    fn gitea(host: &str) -> ForgeHosts<'_> {
+        ForgeHosts { gitea: Some(host), ..NONE }
     }
 
     #[test]
@@ -2646,6 +2658,61 @@ mod tests {
             classify_remote("https://dev.azure.com/org/--project/_git/repo", &NONE),
             RepositoryIdentity::Malformed("dev.azure.com".to_string())
         );
+    }
+
+    #[test]
+    fn repository_identity_parses_gitea_remote_forms() {
+        let repo = |host: &str, owner: &str, name: &str| {
+            RepositoryIdentity::Repository(
+                RepoTarget::with_path(Forge::Gitea, host, &[owner, name]).unwrap(),
+            )
+        };
+        assert_eq!(
+            classify_remote("https://gitea.com/owner/repo.git", &NONE),
+            repo("gitea.com", "owner", "repo")
+        );
+        assert_eq!(
+            classify_remote("git@code.corp.example:team/repo.git", &gitea("code.corp.example")),
+            repo("code.corp.example", "team", "repo")
+        );
+        assert_eq!(
+            classify_remote(
+                "ssh://git@code.corp.example:2222/team/repo",
+                &gitea("code.corp.example")
+            ),
+            repo("code.corp.example", "team", "repo")
+        );
+        // Unconfigured, the same host is someone else's server.
+        assert_eq!(
+            classify_remote("git@code.corp.example:team/repo.git", &NONE),
+            RepositoryIdentity::Unsupported("code.corp.example".to_string())
+        );
+        // A Gitea path is exactly owner and name, as on GitHub.
+        assert_eq!(
+            classify_remote("https://gitea.com/group/sub/repo.git", &NONE),
+            RepositoryIdentity::Malformed("gitea.com".to_string())
+        );
+        let RepositoryIdentity::Repository(on_gitea) =
+            classify_remote("https://gitea.com/owner/repo", &NONE)
+        else {
+            panic!("expected a repository identity");
+        };
+        let RepositoryIdentity::Repository(on_github) =
+            classify_remote("https://github.com/owner/repo", &NONE)
+        else {
+            panic!("expected a repository identity");
+        };
+        assert!(!on_gitea.is(&on_github), "the same path on another forge is another target");
+        assert_eq!(on_gitea.forge(), Forge::Gitea);
+    }
+
+    #[test]
+    fn gitea_vocabulary_matches_the_provider_contract() {
+        assert_eq!(Forge::Gitea.display_name(), "Gitea");
+        assert_eq!(Forge::Gitea.noun(), "pull request");
+        assert_eq!(Forge::Gitea.abbr(), "PR");
+        assert_eq!(Forge::Gitea.sigil(), '#');
+        assert_eq!(Forge::Gitea.cli(), "tea");
     }
 
     #[test]

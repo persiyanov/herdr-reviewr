@@ -4634,12 +4634,12 @@ fn pr_empty_msg(
             unreachable!("retry failures returned above")
         }
         forge::PrView::NeedsForgeRemote => {
-            "The PR tab needs a GitHub, GitLab, or Azure DevOps remote named upstream or origin."
+            "The PR tab needs a GitHub, GitLab, Azure DevOps, or Gitea remote named upstream or origin."
                 .into()
         }
         forge::PrView::UnsupportedHost(host) => {
             format!(
-                "Unsupported host: {host}. Self-hosted? Set `github_host`, `gitlab_host`, or `azure_devops_host`."
+                "Unsupported host: {host}. Self-hosted? Set `github_host`, `gitlab_host`, `azure_devops_host`, or `gitea_host`."
             )
         }
         forge::PrView::MalformedOrigin(host) => {
