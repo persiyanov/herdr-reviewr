@@ -49,10 +49,21 @@ impl Scope {
 
 /// The `commits` scope's pick: a contiguous run from `oldest` to `newest`, both full commit
 /// ids, equal for a run of one.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct CommitPick {
     pub oldest: String,
     pub newest: String,
+}
+
+/// The semantic namespace in which a human reviews changed files. Resolved commit/tree
+/// endpoints stay in each [`FileIdentity`], so a moving ref invalidates files without turning
+/// the old generation into a separately recoverable review context.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum ReviewContext {
+    Uncommitted,
+    Branch { base: Option<String> },
+    LastTurn { baseline: Option<String> },
+    Commits { pick: Option<CommitPick> },
 }
 
 impl CommitPick {
@@ -75,13 +86,149 @@ pub enum Rev {
 }
 
 /// How a file changed within a scope.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ChangeKind {
     Added,
     Modified,
     Deleted,
     Renamed,
     Untracked,
+}
+
+/// The exact comparison that produced one changed-file row.
+///
+/// Its representation is deliberately private: UI and authored-state code may compare and
+/// retain identities, but Git remains the sole authority for constructing them.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct FileIdentity(std::sync::Arc<FileIdentityParts>);
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct FileIdentityParts {
+    old_endpoint: String,
+    new_endpoint: String,
+    kind: ChangeKind,
+    path: String,
+    previous_path: Option<String>,
+    old_mode: String,
+    new_mode: String,
+    old_content: String,
+    new_content: String,
+    binary: bool,
+    live_new_side: bool,
+}
+
+impl std::fmt::Debug for FileIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FileIdentity(..)")
+    }
+}
+
+/// Inputs kept at the Git boundary while constructing an opaque [`FileIdentity`].
+#[derive(Clone, Copy)]
+pub(crate) struct FileIdentityInput<'a> {
+    pub old_endpoint: &'a str,
+    pub new_endpoint: &'a str,
+    pub kind: ChangeKind,
+    pub path: &'a str,
+    pub previous_path: Option<&'a str>,
+    pub old_mode: &'a str,
+    pub new_mode: &'a str,
+    pub old_content: &'a str,
+    pub new_content: &'a str,
+    pub binary: bool,
+    pub live_new_side: bool,
+}
+
+impl FileIdentity {
+    pub(crate) fn from_git(input: FileIdentityInput<'_>) -> Self {
+        Self(std::sync::Arc::new(FileIdentityParts {
+            old_endpoint: input.old_endpoint.to_string(),
+            new_endpoint: input.new_endpoint.to_string(),
+            kind: input.kind,
+            path: input.path.to_string(),
+            previous_path: input.previous_path.map(str::to_string),
+            old_mode: input.old_mode.to_string(),
+            new_mode: input.new_mode.to_string(),
+            old_content: input.old_content.to_string(),
+            new_content: input.new_content.to_string(),
+            binary: input.binary,
+            live_new_side: input.live_new_side,
+        }))
+    }
+
+    /// Reproduce this comparison identity with the worktree side a reader actually loaded.
+    /// Committed comparisons have no live side, so their identity is already exact.
+    #[cfg(test)]
+    pub(crate) fn with_loaded_worktree(&self, mode: &str, content: &[u8]) -> Self {
+        if !self.uses_live_worktree() {
+            return self.clone();
+        }
+        self.with_loaded_worktree_fingerprint(mode, &content_fingerprint(content))
+    }
+
+    pub(crate) fn with_loaded_worktree_fingerprint(&self, mode: &str, content: &str) -> Self {
+        if !self.uses_live_worktree() {
+            return self.clone();
+        }
+        let mut parts = (*self.0).clone();
+        parts.new_mode = mode.to_string();
+        parts.new_content = content.to_string();
+        Self(std::sync::Arc::new(parts))
+    }
+
+    pub(crate) fn uses_live_worktree(&self) -> bool {
+        self.0.live_new_side
+    }
+
+    pub(crate) fn old_endpoint(&self) -> &str {
+        &self.0.old_endpoint
+    }
+
+    pub(crate) fn new_endpoint(&self) -> &str {
+        &self.0.new_endpoint
+    }
+
+    pub(crate) fn has_old_side(&self) -> bool {
+        self.0.old_mode != "000000"
+    }
+
+    pub(crate) fn has_new_side(&self) -> bool {
+        self.0.new_mode != "000000"
+    }
+
+    pub(crate) fn old_gitlink_oid(&self) -> Option<&str> {
+        (self.0.old_mode == "160000").then_some(self.0.old_content.as_str())
+    }
+
+    pub(crate) fn new_is_gitlink(&self) -> bool {
+        self.0.new_mode == "160000"
+    }
+
+    pub(crate) fn committed_new_gitlink_oid(&self) -> Option<&str> {
+        (self.0.new_mode == "160000" && !self.uses_live_worktree())
+            .then_some(self.0.new_content.as_str())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture() -> Self {
+        Self::from_git(FileIdentityInput {
+            old_endpoint: "fixture-old",
+            new_endpoint: "fixture-new",
+            kind: ChangeKind::Modified,
+            path: "fixture",
+            previous_path: None,
+            old_mode: "100644",
+            new_mode: "100644",
+            old_content: "fixture-old",
+            new_content: "fixture-new",
+            binary: false,
+            live_new_side: false,
+        })
+    }
+}
+
+pub(crate) fn content_fingerprint(content: &[u8]) -> String {
+    blake3::hash(content).to_hex().to_string()
 }
 
 impl ChangeKind {
@@ -110,6 +257,8 @@ pub struct ChangedFile {
     /// `diff` attribute `.gitattributes` unsets. The pane reads it as the `binary` notice
     /// without reading either side.
     pub binary: bool,
+    /// Opaque identity of the exact old/new comparison represented by this row.
+    pub identity: FileIdentity,
 }
 
 /// Which side of the diff a comment's lines live on.

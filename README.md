@@ -20,6 +20,7 @@ One persistent pane, pointed at a git worktree:
 - **Four diff scopes** — uncommitted, branch, last turn, commits.
 - **Last-turn diff** — what the worktree's latest turn changed, on its own.
 - **Line comments** — comment on a line or a range. Then send it to the agent.
+- **Reviewed files** — mark an exact file diff done, without hiding it.
 - **Text selection** — drag over any text to copy it, like an editor.
 - **File viewer** — any file's current content from the whole worktree.
 - **Search** — fuzzy file names and live code grep across the worktree, powered by [fff](https://github.com/dmtrKovalenko/fff).
@@ -82,7 +83,8 @@ Open reviewr next to your agent:
 2. **Focus the diff.** `Tab` switches panes.
 3. **Select lines.** `v`, then `j` / `k` to extend (or click or drag the gutter).
 4. **Comment.** `c`, type, `Enter`.
-5. **Send.** `s` sends every comment to the agent's input.
+5. **Mark reviewed.** `R` marks the current changed file with a `✓`; press it again to undo.
+6. **Send.** `s` sends every comment to the agent's input.
 
 The footer shows the next step. Press `?` for every key that works right now.
 
@@ -132,6 +134,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 
 | Key | Action |
 | --- | --- |
+| `R` | Mark / unmark the current changed file as reviewed |
 | `v` | Select lines |
 | `c` | Comment on line or selection |
 | `e` | Edit the comment under the cursor, or open the file in your editor |
@@ -169,6 +172,7 @@ links, and scroll with the wheel.
 ## The three tabs
 
 - **Changes** — the active scope's changed files with `+/-` stats and totals in the header.
+  Reviewed files carry a green `✓` and dimmed path and stats; they remain in the list.
 - **All files** — any file's current content from the whole worktree, comments too. A collapsed
   folder with a changed file under it shows a dot. Ignored paths show dimmed.
 - **PR** — a read-only mirror of the branch's pull request (GitHub, Azure DevOps) or merge
@@ -188,6 +192,12 @@ links, and scroll with the wheel.
 
 reviewr starts in **uncommitted**. `default_scope` changes that. Switching with `u`/`b`/`t`/`g`
 wins for the rest of the session. `g` without a pick opens the picker.
+
+Reviewed marks live only for the current session and are isolated by review context: each scope,
+base, and commit pick keeps its own marks. When a file's exact diff changes, including staged or
+unstaged content, mode, symlink target, or either comparison endpoint, its green `✓` becomes an
+orange `!` until `R` accepts the new diff. A mark is removed only when the file leaves the
+changeset. reviewr never persists marks or writes them to Git.
 
 Every scope respects `.gitignore`, so build output never clutters **Changes**. To review a file,
 track it. **All files** still browses any ignored path.
@@ -341,6 +351,7 @@ The action names and their defaults:
 | `navigator-position` | `p` |
 | `navigator-hide` | `z` |
 | `navigator-grow` / `navigator-shrink` | `<` / `>` |
+| `toggle-reviewed` | `R` |
 | `select` | `v` |
 | `comment` | `c` |
 | `edit` / `delete` | `e` / `d` |
@@ -463,6 +474,9 @@ The known constraints:
 **Review model**
 - **Comments are in-memory and single-session** — closing the pane loses any you haven't sent
   or copied out.
+- **Reviewed marks are in-memory and comparison-specific** — they stay separate across scopes,
+  bases, and commit picks. A changed diff turns `✓` into `!`; the mark disappears only when the
+  file leaves the changeset.
 - **Sending is all-or-nothing** — Send (or copy) delivers the whole set and clears it. A
   failure leaves everything in place.
 - **No line-number rebasing** — a comment stays locatable by its diff snippet, not its line
@@ -495,7 +509,7 @@ herdr plugin link .
 
 ## Roadmap
 
-Structured (JSON) export, a side-by-side split view, mark-file-reviewed,
+Structured (JSON) export, a side-by-side split view,
 named-key notation for keybindings, OSC light/dark theme autodetect, more themes
 (`kanagawa`, `vesper`, `everforest`, `ayu`, a dark `github`), a `terminal`-following palette,
 and OSC 52 clipboard.

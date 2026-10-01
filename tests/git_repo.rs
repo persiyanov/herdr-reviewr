@@ -4,6 +4,7 @@ mod common;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::Command;
 
 use common::Repo;
 use herdr_reviewr::git::{
@@ -30,6 +31,21 @@ fn changed_files(
 fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
     let winner = resolve_base(repo, base).ok()?.status.winner?;
     merge_base_oid(repo, winner.oid())
+}
+
+fn git_at(repo: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@herdr.test")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@herdr.test")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 #[test]
@@ -140,6 +156,130 @@ fn lists_every_change_kind_with_stats() {
     assert_eq!(files["untracked.rs"].kind, ChangeKind::Untracked);
     assert!(files["edit.rs"].additions >= 1, "additions counted");
     assert!(files["edit.rs"].deletions >= 1, "deletions counted");
+}
+
+#[test]
+fn changed_file_identity_is_stable_and_tracks_bytes_not_numstat() {
+    let r = Repo::init();
+    r.write("same-lines.txt", "old\n");
+    r.commit_all("init");
+
+    r.write("same-lines.txt", "one\n");
+    let first =
+        by_path(&changed_files(r.path(), Scope::Uncommitted, None).unwrap())["same-lines.txt"]
+            .identity
+            .clone();
+    let rebuilt =
+        by_path(&changed_files(r.path(), Scope::Uncommitted, None).unwrap())["same-lines.txt"]
+            .identity
+            .clone();
+    assert_eq!(first, rebuilt, "an unchanged comparison has one stable identity");
+
+    r.write("same-lines.txt", "two\n");
+    let second =
+        by_path(&changed_files(r.path(), Scope::Uncommitted, None).unwrap())["same-lines.txt"]
+            .identity
+            .clone();
+    assert_ne!(first, second, "equal line counts must not hide changed bytes");
+}
+
+#[test]
+fn identities_cover_symlinks_mode_only_changes_and_unusual_paths() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let r = Repo::init();
+    r.git(&["config", "core.fileMode", "true"]);
+    r.write("target-one", "one\n");
+    r.write("script.sh", "#!/bin/sh\nexit 0\n");
+    symlink("target-one", r.path().join("current")).unwrap();
+    r.commit_all("init");
+
+    std::fs::remove_file(r.path().join("current")).unwrap();
+    symlink("target-two", r.path().join("current")).unwrap();
+    let mut permissions = std::fs::metadata(r.path().join("script.sh")).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(r.path().join("script.sh"), permissions).unwrap();
+    let unusual = "line\nbreak\tname.txt";
+    r.write(unusual, "new\n");
+
+    let first = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let second = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let first = by_path(&first);
+    let second = by_path(&second);
+    for path in ["current", "script.sh", unusual] {
+        assert_eq!(first[path].identity, second[path].identity, "stable identity for {path:?}");
+    }
+    assert_eq!(first["current"].kind, ChangeKind::Modified);
+    assert_eq!(first["script.sh"].kind, ChangeKind::Modified);
+    assert_eq!(first[unusual].kind, ChangeKind::Untracked);
+
+    let first_link = first["current"].identity.clone();
+    let first_unusual = first[unusual].identity.clone();
+    std::fs::remove_file(r.path().join("current")).unwrap();
+    symlink("target-three", r.path().join("current")).unwrap();
+    r.write("script.sh", "#!/bin/sh\necho changed\n");
+    let executable =
+        by_path(&changed_files(r.path(), Scope::Uncommitted, None).unwrap())["script.sh"]
+            .identity
+            .clone();
+    let mut permissions = std::fs::metadata(r.path().join("script.sh")).unwrap().permissions();
+    permissions.set_mode(0o644);
+    std::fs::set_permissions(r.path().join("script.sh"), permissions).unwrap();
+    let changed = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let changed = by_path(&changed);
+
+    assert_ne!(first_link, changed["current"].identity, "a new symlink target changes identity");
+    assert_ne!(
+        executable, changed["script.sh"].identity,
+        "changing only the executable bit changes identity"
+    );
+    assert_eq!(
+        first_unusual, changed[unusual].identity,
+        "an unrelated unusual path keeps its identity"
+    );
+}
+
+#[test]
+fn gitlink_identity_covers_checked_out_commit_staging_and_dirty_state() {
+    let source = Repo::init();
+    source.git(&["config", "commit.gpgsign", "false"]);
+    source.write("tracked.txt", "one\n");
+    source.commit_all("submodule base");
+
+    let r = Repo::init();
+    r.git(&["config", "commit.gpgsign", "false"]);
+    r.git(&[
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        source.path().to_str().unwrap(),
+        "dep",
+    ]);
+    let tree = git_at(r.path(), &["write-tree"]).trim().to_string();
+    let commit =
+        git_at(r.path(), &["commit-tree", &tree, "-m", "track submodule"]).trim().to_string();
+    git_at(r.path(), &["update-ref", "HEAD", &commit]);
+
+    let dep = r.path().join("dep");
+    git_at(&dep, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(dep.join("tracked.txt"), "two\n").unwrap();
+    git_at(&dep, &["add", "tracked.txt"]);
+    git_at(&dep, &["commit", "-q", "-m", "advance"]);
+
+    let unstaged = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let unstaged = by_path(&unstaged)["dep"].identity.clone();
+    let rebuilt = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    assert_eq!(unstaged, by_path(&rebuilt)["dep"].identity, "an unchanged gitlink is stable");
+
+    r.git(&["add", "dep"]);
+    let staged = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let staged = by_path(&staged)["dep"].identity.clone();
+    assert_eq!(unstaged, staged, "staging the same live commit does not change the comparison");
+
+    std::fs::write(dep.join("tracked.txt"), "dirty\n").unwrap();
+    let dirty = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    assert_ne!(staged, by_path(&dirty)["dep"].identity, "nested dirtiness changes identity");
 }
 
 #[test]

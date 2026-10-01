@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::model::{ChangeKind, ChangedFile, Scope};
+use crate::model::{ChangeKind, ChangedFile, FileIdentity, FileIdentityInput, Scope};
 
 /// Run `git -C <repo> <args>` and return stdout. Errors on non-zero exit.
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -1300,6 +1300,20 @@ pub fn file_content(repo: &Path, rev: &str, path: &str) -> String {
     git_lenient(repo, &["show", &format!("{rev}:{path}")])
 }
 
+/// Load an identity-declared committed side. An absent side is not queried; every expected
+/// side must resolve successfully so callers never mistake a Git failure for empty content.
+pub(crate) fn exact_file_content(
+    repo: &Path,
+    rev: &str,
+    path: &str,
+    side_present: bool,
+) -> Result<Option<String>> {
+    if !side_present {
+        return Ok(None);
+    }
+    git(repo, &["show", &format!("{rev}:{path}")]).map(Some)
+}
+
 // --- base pick (branch scope) --------------------------------------------------
 //
 // One revision spelling per worktree: a blob under `refs/worktree/reviewr/base-pick`.
@@ -1499,21 +1513,15 @@ pub fn changed_files(
     scope: Scope,
     branch_base: Option<&str>,
 ) -> Result<Vec<ChangedFile>> {
-    let (numstat, name_status) = match scope {
+    let (old_endpoint, numstat, raw) = match scope {
         Scope::Uncommitted => {
             // A repo with no commits has no HEAD; diff against the empty tree so a fresh
             // `git init` lists its files instead of erroring (which would kill the process).
             let base = diff_base(repo);
-            (
-                git(repo, &["diff", &base, "--numstat", "-z"])?,
-                git(repo, &["diff", &base, "--name-status", "-z"])?,
-            )
+            worktree_diff(repo, &base)?
         }
         Scope::Branch => match branch_base.and_then(|b| merge_base(repo, b)) {
-            Some(r) => (
-                git(repo, &["diff", &r, "--numstat", "-z"])?,
-                git(repo, &["diff", &r, "--name-status", "-z"])?,
-            ),
+            Some(r) => worktree_diff(repo, &r)?,
             None => return Ok(Vec::new()),
         },
         // `last-turn` and `commits` diff through their own entry points.
@@ -1522,7 +1530,22 @@ pub fn changed_files(
     // Branch diffs against the worktree, so like uncommitted it carries untracked files
     // that `git diff` never reports.
     let include_untracked = matches!(scope, Scope::Uncommitted | Scope::Branch);
-    assemble(repo, &numstat, &name_status, include_untracked)
+    assemble(repo, &numstat, &raw, include_untracked, &old_endpoint, "worktree", true)
+}
+
+/// Resolve a possibly-moving revision once, then use only that immutable endpoint for both
+/// halves of the worktree diff. The identity endpoint, numstat, and raw metadata therefore
+/// cannot describe different HEADs if an agent commits while this build is running.
+fn worktree_diff(repo: &Path, rev: &str) -> Result<(String, String, String)> {
+    let old_endpoint = resolved_endpoint(repo, rev)?;
+    let (numstat, raw) = worktree_diff_at(repo, &old_endpoint)?;
+    Ok((old_endpoint, numstat, raw))
+}
+
+fn worktree_diff_at(repo: &Path, old_endpoint: &str) -> Result<(String, String)> {
+    let numstat = git(repo, &["diff", old_endpoint, "--numstat", "-z"])?;
+    let raw = git(repo, &["diff", old_endpoint, "--raw", "--full-index", "--abbrev=64", "-z"])?;
+    Ok((numstat, raw))
 }
 
 /// The changed files between the turn baseline `tree` and the live worktree, for
@@ -1534,16 +1557,20 @@ pub fn changed_files(
 pub fn changed_against_tree(repo: &Path, tree: &str) -> Result<Vec<ChangedFile>> {
     let current = snapshot_worktree(repo)?;
     let numstat = git(repo, &["diff", tree, &current, "--numstat", "-z"])?;
-    let name_status = git(repo, &["diff", tree, &current, "--name-status", "-z"])?;
-    assemble(repo, &numstat, &name_status, false)
+    let raw = git(repo, &["diff", tree, &current, "--raw", "--full-index", "--abbrev=64", "-z"])?;
+    assemble(repo, &numstat, &raw, false, tree, "worktree", true)
 }
 
 /// The changed files between two commits, `old` against `new`, for the `commits` scope:
 /// both sides are committed trees, so no untracked pass runs. `old` may be the empty tree for a root commit.
 pub fn changed_between(repo: &Path, old: &str, new: &str) -> Result<Vec<ChangedFile>> {
     let numstat = git(repo, &["diff", old, new, "--numstat", "-z"])?;
-    let name_status = git(repo, &["diff", old, new, "--name-status", "-z"])?;
-    assemble(repo, &numstat, &name_status, false)
+    let raw = git(repo, &["diff", old, new, "--raw", "--full-index", "--abbrev=64", "-z"])?;
+    assemble(repo, &numstat, &raw, false, old, new, false)
+}
+
+fn resolved_endpoint(repo: &Path, rev: &str) -> Result<String> {
+    Ok(git(repo, &["rev-parse", "--verify", &format!("{rev}^{{tree}}")])?.trim().to_string())
 }
 
 /// `sha`'s first parent, or the empty tree when `sha` is a root commit: the old side of a
@@ -1785,18 +1812,28 @@ pub fn list_ignored_dir(repo: &Path, dir: &str) -> Vec<WorktreeEntry> {
     out
 }
 
-/// Build the sorted `ChangedFile` list from `git diff` numstat + name-status output,
+/// Build the sorted `ChangedFile` list from `git diff` numstat + raw output,
 /// optionally appending untracked files (which a `git diff` never reports).
+#[allow(clippy::too_many_arguments)]
 fn assemble(
     repo: &Path,
     numstat: &str,
-    name_status: &str,
+    raw: &str,
     include_untracked: bool,
+    old_endpoint: &str,
+    new_endpoint: &str,
+    live_new_side: bool,
 ) -> Result<Vec<ChangedFile>> {
     let counts = parse_numstat(numstat);
+    let raw = parse_raw_changes(raw)?;
+    let gitlinks =
+        if live_new_side { live_gitlink_fingerprints(repo, &raw)? } else { HashMap::new() };
     let mut seen = HashSet::new();
     let mut files = Vec::new();
-    for (kind, path, previous_path) in parse_name_status(name_status) {
+    for (path, meta) in &raw {
+        let kind = meta.kind;
+        let previous_path = meta.previous_path.clone();
+        let path = path.clone();
         if !seen.insert(path.clone()) {
             continue;
         }
@@ -1804,6 +1841,28 @@ fn assemble(
         // ordinary empty change rather than as git's no-text-diff verdict.
         let verdict = counts.get(&path).copied().unwrap_or(Some((0, 0)));
         let (additions, deletions) = verdict.unwrap_or((0, 0));
+        let (new_mode, new_content) = if kind == ChangeKind::Deleted {
+            ("000000".to_string(), crate::model::content_fingerprint(&[]))
+        } else if let Some(fingerprint) = gitlinks.get(&path) {
+            fingerprint.clone()
+        } else if live_new_side {
+            worktree_fingerprint(repo, &path, false)?
+        } else {
+            (meta.new_mode.clone(), meta.new_oid.clone())
+        };
+        let identity = FileIdentity::from_git(FileIdentityInput {
+            old_endpoint,
+            new_endpoint,
+            kind,
+            path: &path,
+            previous_path: previous_path.as_deref(),
+            old_mode: &meta.old_mode,
+            new_mode: &new_mode,
+            old_content: &meta.old_oid,
+            new_content: &new_content,
+            binary: verdict.is_none(),
+            live_new_side,
+        });
         files.push(ChangedFile {
             path,
             kind,
@@ -1811,6 +1870,7 @@ fn assemble(
             deletions,
             previous_path,
             binary: verdict.is_none(),
+            identity,
         });
     }
 
@@ -1837,6 +1897,20 @@ fn assemble(
                 untracked_additions(repo, &path)
             };
             let binary = additions.is_none();
+            let (new_mode, new_content) = worktree_fingerprint(repo, &path, false)?;
+            let identity = FileIdentity::from_git(FileIdentityInput {
+                old_endpoint,
+                new_endpoint,
+                kind: ChangeKind::Untracked,
+                path: &path,
+                previous_path: None,
+                old_mode: "000000",
+                new_mode: &new_mode,
+                old_content: "absent",
+                new_content: &new_content,
+                binary,
+                live_new_side,
+            });
             files.push(ChangedFile {
                 path,
                 kind: ChangeKind::Untracked,
@@ -1844,12 +1918,279 @@ fn assemble(
                 deletions: 0,
                 previous_path: None,
                 binary,
+                identity,
             });
         }
     }
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
+}
+
+#[derive(Debug)]
+struct RawChange {
+    kind: ChangeKind,
+    previous_path: Option<String>,
+    old_mode: String,
+    new_mode: String,
+    old_oid: String,
+    new_oid: String,
+}
+
+/// Live gitlink identities for the changed set. One porcelain-v2 command reports dirty state
+/// for every changed submodule; checked-out commits come from each submodule's Git metadata
+/// in-process, so the cost never becomes one subprocess per changed path.
+fn live_gitlink_fingerprints(
+    repo: &Path,
+    changes: &HashMap<String, RawChange>,
+) -> Result<HashMap<String, (String, String)>> {
+    let paths: Vec<&str> = changes
+        .iter()
+        .filter_map(|(path, change)| (change.new_mode == "160000").then_some(path.as_str()))
+        .collect();
+    if paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let live = gitlink_live_states(repo, &paths)?;
+    let mut fingerprints = HashMap::with_capacity(paths.len());
+    for path in paths {
+        let change = &changes[path];
+        let checked_out = live.heads[path].clone().unwrap_or_else(|| change.new_oid.clone());
+        let dirty_state = live.dirty.get(path).map_or("..", String::as_str);
+        fingerprints.insert(
+            path.to_string(),
+            ("160000".to_string(), gitlink_token(&checked_out, dirty_state)),
+        );
+    }
+    Ok(fingerprints)
+}
+
+fn gitlink_token(checked_out: &str, dirty_state: &str) -> String {
+    format!("gitlink:{checked_out}:{dirty_state}")
+}
+
+/// Display text and the exact identity token for one selected live gitlink. This is one
+/// batched status call for the loaded target, not a subprocess loop over the changeset.
+pub(crate) fn worktree_gitlink_content_identity(
+    repo: &Path,
+    path: &str,
+) -> Result<(String, String)> {
+    let live = gitlink_live_states(repo, &[path])?;
+    let checked_out = live.heads[path]
+        .clone()
+        .with_context(|| format!("submodule {path:?} is not checked out"))?;
+    let dirty_state = live.dirty.get(path).map_or("..", String::as_str);
+    let suffix = if dirty_state == ".." { "" } else { "-dirty" };
+    Ok((
+        format!("Subproject commit {checked_out}{suffix}\n"),
+        gitlink_token(&checked_out, dirty_state),
+    ))
+}
+
+/// Read each checked-out commit on both sides of the batched status query. A submodule
+/// moving during the query would otherwise combine one commit with another commit's dirty
+/// flags and certify a comparison that never existed.
+struct GitlinkLiveState {
+    heads: HashMap<String, Option<String>>,
+    dirty: HashMap<String, String>,
+}
+
+fn gitlink_live_states(repo: &Path, paths: &[&str]) -> Result<GitlinkLiveState> {
+    let read_heads = || {
+        paths
+            .iter()
+            .map(|path| Ok(((*path).to_string(), submodule_head(repo, path)?)))
+            .collect::<Result<HashMap<_, _>>>()
+    };
+    let before = read_heads()?;
+    let dirty = gitlink_dirty_states(repo, paths)?;
+    let after = read_heads()?;
+    if before != after {
+        bail!("a changed submodule moved while its identity was being read");
+    }
+    Ok(GitlinkLiveState { heads: after, dirty })
+}
+
+/// The nested tracked/untracked dirty flags from one NUL-safe status query over all gitlinks.
+/// The commit-change flag is deliberately excluded: the checked-out commit already carries
+/// that fact, and staging the same commit must not change a worktree comparison identity.
+fn gitlink_dirty_states(repo: &Path, paths: &[&str]) -> Result<HashMap<String, String>> {
+    let mut args = vec![
+        "--no-optional-locks".to_string(),
+        "--literal-pathspecs".to_string(),
+        "status".to_string(),
+        "--porcelain=v2".to_string(),
+        "-z".to_string(),
+        "--untracked-files=all".to_string(),
+        "--ignore-submodules=none".to_string(),
+        "--".to_string(),
+    ];
+    args.extend(paths.iter().map(|path| (*path).to_string()));
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = git(repo, &refs)?;
+
+    let mut states = HashMap::new();
+    let mut records = out.split('\0');
+    while let Some(record) = records.next() {
+        let fields = if record.starts_with("1 ") {
+            record.splitn(9, ' ').collect::<Vec<_>>()
+        } else if record.starts_with("2 ") {
+            let fields = record.splitn(10, ' ').collect::<Vec<_>>();
+            let _original_path = records.next();
+            fields
+        } else if record.starts_with("u ") {
+            record.splitn(11, ' ').collect::<Vec<_>>()
+        } else {
+            continue;
+        };
+        let Some(submodule) = fields.get(2).copied().filter(|field| field.starts_with('S')) else {
+            continue;
+        };
+        let Some(path) = fields.last().copied() else { continue };
+        let mut flags = submodule.chars();
+        let _marker = flags.next();
+        let _commit_changed = flags.next();
+        states.insert(path.to_string(), flags.collect());
+    }
+    Ok(states)
+}
+
+/// Read a checked-out submodule commit without forking Git. An absent `.git` means the
+/// gitlink is uninitialized; its raw/index object remains the best exact token available.
+fn submodule_head(repo: &Path, path: &str) -> Result<Option<String>> {
+    let dot_git = repo.join(path).join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let marker = match std::fs::read_to_string(&dot_git) {
+            Ok(marker) => marker,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("reading submodule metadata for {path:?}"));
+            }
+        };
+        let relative = marker
+            .trim()
+            .strip_prefix("gitdir:")
+            .context("submodule .git file missing gitdir")?
+            .trim();
+        repo.join(path).join(relative)
+    };
+
+    let head = std::fs::read_to_string(git_dir.join("HEAD"))
+        .with_context(|| format!("reading submodule HEAD for {path:?}"))?;
+    let head = head.trim();
+    let Some(reference) = head.strip_prefix("ref: ") else {
+        return Ok(Some(head.to_string()));
+    };
+    let loose = git_dir.join(reference);
+    match std::fs::read_to_string(&loose) {
+        Ok(oid) => return Ok(Some(oid.trim().to_string())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading submodule ref for {path:?}"));
+        }
+    }
+    let packed = std::fs::read_to_string(git_dir.join("packed-refs"))
+        .with_context(|| format!("reading packed submodule refs for {path:?}"))?;
+    packed
+        .lines()
+        .filter(|line| !line.starts_with(['#', '^']))
+        .find_map(|line| line.split_once(' ').filter(|(_, name)| *name == reference))
+        .map(|(oid, _)| Some(oid.to_string()))
+        .context("submodule HEAD ref missing from loose and packed refs")
+}
+
+/// Parse `git diff --raw --full-index -z`, keyed by the new path (or the sole path for a
+/// deletion). The header and paths are separate NUL fields, so tabs and newlines in paths are
+/// never structural.
+fn parse_raw_changes(out: &str) -> Result<HashMap<String, RawChange>> {
+    let mut fields = out.split('\0');
+    let mut changes = HashMap::new();
+    while let Some(header) = fields.next() {
+        if header.is_empty() {
+            continue;
+        }
+        let mut parts = header
+            .strip_prefix(':')
+            .with_context(|| format!("malformed raw diff header {header:?}"))?
+            .split_whitespace();
+        let old_mode = parts.next().context("raw diff missing old mode")?.to_string();
+        let new_mode = parts.next().context("raw diff missing new mode")?.to_string();
+        let old_oid = parts.next().context("raw diff missing old object")?.to_string();
+        let new_oid = parts.next().context("raw diff missing new object")?.to_string();
+        let status = parts.next().context("raw diff missing status")?;
+        let first = fields.next().context("raw diff missing path")?;
+        let status = status.as_bytes().first().copied();
+        let (kind, path, previous_path) = if matches!(status, Some(b'R' | b'C')) {
+            (
+                ChangeKind::Renamed,
+                fields.next().context("raw rename missing destination")?,
+                Some(first.to_string()),
+            )
+        } else {
+            let kind = match status {
+                Some(b'A') => ChangeKind::Added,
+                Some(b'D') => ChangeKind::Deleted,
+                _ => ChangeKind::Modified,
+            };
+            (kind, first, None)
+        };
+        changes.insert(
+            path.to_string(),
+            RawChange { kind, previous_path, old_mode, new_mode, old_oid, new_oid },
+        );
+    }
+    Ok(changes)
+}
+
+/// The current filesystem side as Git sees it: blob bytes (a symlink's target text, not the
+/// referent) and the index mode. This is one in-process pass over all live paths; no path forks
+/// a Git subprocess. A listed non-deletion that cannot be read fails the whole snapshot.
+pub(crate) fn worktree_fingerprint(
+    repo: &Path,
+    path: &str,
+    allow_missing: bool,
+) -> Result<(String, String)> {
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let full = repo.join(path);
+    let metadata = match std::fs::symlink_metadata(&full) {
+        Ok(metadata) => metadata,
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(("000000".to_string(), crate::model::content_fingerprint(&[])));
+        }
+        Err(error) => return Err(error).with_context(|| format!("reading metadata for {path:?}")),
+    };
+    if metadata.file_type().is_symlink() {
+        let target = std::fs::read_link(&full)
+            .with_context(|| format!("reading symlink target for {path:?}"))?;
+        return Ok((
+            "120000".to_string(),
+            crate::model::content_fingerprint(target.as_os_str().as_bytes()),
+        ));
+    }
+    if !metadata.is_file() {
+        bail!("changed path {path:?} is not a regular file or symlink");
+    }
+    let mode = if metadata.permissions().mode() & 0o111 == 0 { "100644" } else { "100755" };
+    let mut file =
+        std::fs::File::open(&full).with_context(|| format!("reading changed file {path:?}"))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read =
+            file.read(&mut buffer).with_context(|| format!("hashing changed file {path:?}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok((mode.to_string(), hasher.finalize().to_hex().to_string()))
 }
 
 /// Of `paths`, those whose `diff` attribute git reports as unset — `-diff`, or the `binary`
@@ -1958,43 +2299,67 @@ fn parse_numstat(out: &str) -> HashMap<String, Option<(u32, u32)>> {
     map
 }
 
-/// `(kind, path, previous_path)` from `git diff --name-status -z`. Under `-z` each record is
-/// `STATUS\0PATH\0`, except a rename/copy is `R<score>\0OLD\0NEW\0` (status, then old and new
-/// as separate fields). A rename or copy takes the new path and carries its old path; every
-/// other kind has `previous_path == None`. Copy folds into `Renamed` — a copy's old content
-/// lives at the old path exactly like a rename, which is what `content_sides` reads.
-fn parse_name_status(out: &str) -> Vec<(ChangeKind, String, Option<String>)> {
-    let mut rows = Vec::new();
-    let mut it = out.split('\0');
-    while let Some(status) = it.next() {
-        let row = match status.chars().next() {
-            Some('A') => it.next().map(|p| (ChangeKind::Added, p.to_string(), None)),
-            Some('D') => it.next().map(|p| (ChangeKind::Deleted, p.to_string(), None)),
-            Some('R' | 'C') => {
-                let old = it.next();
-                it.next().map(|new| (ChangeKind::Renamed, new.to_string(), old.map(str::to_string)))
-            }
-            // Modified, type-changed, etc.; also skips the trailing empty record.
-            Some(_) => it.next().map(|p| (ChangeKind::Modified, p.to_string(), None)),
-            None => None,
-        };
-        if let Some((kind, path, prev)) = row
-            && !path.is_empty()
-        {
-            rows.push((kind, path, prev));
-        }
-    }
-    rows
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         ChangeKind, Forge, ForgeHosts, RepoTarget, RepositoryIdentity, classify_remote,
-        parse_name_status, parse_numstat,
+        parse_numstat, parse_raw_changes, resolved_endpoint, worktree_diff_at,
     };
+    use std::path::Path;
+    use std::process::Command;
 
     const NONE: ForgeHosts<'_> = ForgeHosts { github: None, gitlab: None, azure_devops: None };
+
+    fn test_git(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@herdr.test")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@herdr.test")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn plumbing_commit(repo: &Path, parent: Option<&str>, message: &str) -> String {
+        test_git(repo, &["add", "-A"]);
+        let tree = test_git(repo, &["write-tree"]);
+        let mut args = vec!["commit-tree", tree.as_str()];
+        if let Some(parent) = parent {
+            args.extend(["-p", parent]);
+        }
+        args.extend(["-m", message]);
+        let commit = test_git(repo, &args);
+        test_git(repo, &["update-ref", "HEAD", &commit]);
+        commit
+    }
+
+    #[test]
+    fn resolved_worktree_diff_stays_on_its_endpoint_after_head_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        test_git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.rs"), "one\n").unwrap();
+        let first = plumbing_commit(repo, None, "first");
+        let endpoint = resolved_endpoint(repo, "HEAD").unwrap();
+        let first_blob = test_git(repo, &["rev-parse", &format!("{first}:a.rs")]);
+
+        std::fs::write(repo.join("a.rs"), "two\n").unwrap();
+        let second = plumbing_commit(repo, Some(&first), "second");
+        std::fs::write(repo.join("a.rs"), "three\n").unwrap();
+        let (_numstat, raw) = worktree_diff_at(repo, &endpoint).unwrap();
+        let changes = parse_raw_changes(&raw).unwrap();
+
+        assert_ne!(endpoint, second);
+        assert_eq!(
+            changes["a.rs"].old_oid, first_blob,
+            "raw metadata remains pinned to the resolved endpoint"
+        );
+    }
 
     #[test]
     fn repo_identity_ignores_case_but_not_forge_host_or_depth() {
@@ -2393,26 +2758,25 @@ mod tests {
     }
 
     #[test]
-    fn name_status_kinds_and_rename_target() {
-        let rows =
-            parse_name_status("M\0src/a.rs\0A\0src/b.rs\0D\0src/c.rs\0R100\0old.rs\0new.rs\0");
-        assert_eq!(rows[0], (ChangeKind::Modified, "src/a.rs".to_string(), None));
-        assert_eq!(rows[1], (ChangeKind::Added, "src/b.rs".to_string(), None));
-        assert_eq!(rows[2], (ChangeKind::Deleted, "src/c.rs".to_string(), None));
-        assert_eq!(
-            rows[3],
-            (ChangeKind::Renamed, "new.rs".to_string(), Some("old.rs".to_string()))
-        );
+    fn raw_changes_carry_kinds_and_rename_target() {
+        let raw = parse_raw_changes(
+            ":100644 100644 aaa bbb M\0src/a.rs\0:000000 100644 000 bbb A\0src/b.rs\0\
+             :100644 000000 aaa 000 D\0src/c.rs\0:100644 100644 aaa bbb R100\0old.rs\0new.rs\0",
+        )
+        .unwrap();
+        assert_eq!(raw["src/a.rs"].kind, ChangeKind::Modified);
+        assert_eq!(raw["src/b.rs"].kind, ChangeKind::Added);
+        assert_eq!(raw["src/c.rs"].kind, ChangeKind::Deleted);
+        assert_eq!(raw["new.rs"].kind, ChangeKind::Renamed);
+        assert_eq!(raw["new.rs"].previous_path.as_deref(), Some("old.rs"));
     }
 
     #[test]
-    fn name_status_copy_keeps_the_new_path() {
+    fn raw_copy_keeps_the_new_path() {
         // A copy carries old + new like a rename; it must key under the new path, not collapse
         // to a Modified entry on the source path.
-        let rows = parse_name_status("C75\0orig.rs\0copy.rs\0");
-        assert_eq!(
-            rows[0],
-            (ChangeKind::Renamed, "copy.rs".to_string(), Some("orig.rs".to_string()))
-        );
+        let raw = parse_raw_changes(":100644 100644 aaa bbb C75\0orig.rs\0copy.rs\0").unwrap();
+        assert_eq!(raw["copy.rs"].kind, ChangeKind::Renamed);
+        assert_eq!(raw["copy.rs"].previous_path.as_deref(), Some("orig.rs"));
     }
 }

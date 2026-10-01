@@ -900,6 +900,7 @@ name = "herdr-reviewr"
 version = "0.39.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "dirs 7.0.0",
  "fff-search",
  "neo_frizbee",

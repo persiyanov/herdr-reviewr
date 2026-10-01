@@ -968,6 +968,28 @@ mod tests {
     }
 
     #[test]
+    fn toggle_reviewed_rebinds_and_keeps_collision_validation() {
+        use crate::keymap::{Action, Key};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        std::fs::write(&path, "[keybindings]\ntoggle-reviewed = [\"x\"]\n").unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.keymap().action_for(Key::plain('x')), Some(Action::ToggleReviewed));
+        assert_eq!(config.keymap().action_for(Key::plain('R')), None, "the default is freed");
+        assert_eq!(config.to_json()["keybindings"]["toggle-reviewed"], serde_json::json!(["x"]));
+
+        std::fs::write(&path, "[keybindings]\ntoggle-reviewed = [\"c\"]\n").unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("`toggle-reviewed`")
+                && error.contains("`comment`")
+                && error.contains('c'),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn find_binds_to_a_chord_and_round_trips() {
         use crate::keymap::{Action, Key};
         let dir = tempfile::tempdir().unwrap();

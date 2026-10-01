@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::hash::BuildHasher;
 
-use crate::model::{ChangeKind, ChangedFile};
+use crate::model::{ChangeKind, ChangedFile, FileIdentity};
 
 /// A visible row of the flattened tree: a directory or a file.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -45,13 +45,21 @@ pub struct Annotation {
     /// attribute. Carried for the read pane, not painted here:
     /// such a change has no countable lines, so it already shows no stats.
     pub binary: bool,
+    /// The exact comparison behind this annotation; never interpreted by presentation code.
+    pub identity: FileIdentity,
 }
 
 impl From<&ChangedFile> for Annotation {
     /// The scope annotation a changed file carries — the one mapping, shared by the `Changes`
     /// entry build and `app.rs`'s changeset map so a new field can't be wired in one and missed.
     fn from(f: &ChangedFile) -> Self {
-        Self { change: f.kind, additions: f.additions, deletions: f.deletions, binary: f.binary }
+        Self {
+            change: f.kind,
+            additions: f.additions,
+            deletions: f.deletions,
+            binary: f.binary,
+            identity: f.identity.clone(),
+        }
     }
 }
 
@@ -239,6 +247,7 @@ mod tests {
             deletions: 0,
             previous_path: None,
             binary: false,
+            identity: crate::model::FileIdentity::fixture(),
         }
     }
 

@@ -283,10 +283,10 @@ fn the_fold_hint_names_the_expand_binding() {
     // A rebound `expand` renames the fold row's inline label and the footer hint alike
     // (a hint shows the action's first bound key).
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("config.toml"), "[keybindings]\nexpand = [\"x\"]\n").unwrap();
+    std::fs::write(dir.path().join("config.toml"), "[keybindings]\nexpand = [\"a\"]\n").unwrap();
     app.set_plugin_config(herdr_reviewr::config::plugin_config_in(dir.path()).unwrap());
     let out = render(&app);
-    assert!(out.contains("x expand"), "the rebound key names the hint:\n{out}");
+    assert!(out.contains("a expand"), "the rebound key names the hint:\n{out}");
     assert!(!out.contains("→ expand"), "the freed arrow leaves the hint");
 }
 
@@ -348,6 +348,244 @@ fn an_expanded_directory_nests_its_children() {
     assert_eq!(src, tests, "sibling directories share a name column");
     assert_eq!(src, readme, "a root file name lines up with a root directory");
     assert!(app_rs > src, "a child file sits to the right of its parent: {app_rs} vs {src}");
+}
+
+#[test]
+fn reviewed_changes_rows_mark_and_subdue_file_details_without_losing_selection() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.write("b.rs", "one\n");
+    r.commit_all("init");
+    r.write("a.rs", "one\ntwo\n");
+    r.write("b.rs", "one\ntwo\n");
+    let mut app = app_on(&r);
+    assert!(app.set_file_reviewed("a.rs", true));
+    app.focus = Focus::Files;
+    app.file_cursor = app
+        .file_rows
+        .iter()
+        .position(|row| row.file_index().is_some_and(|i| app.entries[i].path == "b.rs"))
+        .unwrap();
+
+    let buf = render_buffer(&app);
+    let (ay, arow) = files_row_at(&buf, "a.rs");
+    let (by, brow) = files_row_at(&buf, "b.rs");
+    assert!(arow.contains("M ✓ a.rs"), "reviewed rows carry a dedicated check: {arow:?}");
+    assert!(brow.contains("M   b.rs"), "unreviewed rows reserve the same column: {brow:?}");
+    assert!(arow.ends_with("+1"), "review keeps the additions value: {arow:?}");
+
+    let ax = FILES_X0 + row_token_offset(&arow, "a.rs");
+    let astat = FILES_X0 + row_token_offset(&arow, "+1");
+    let amarker = FILES_X0 + row_token_offset(&arow, "M");
+    let acheck = FILES_X0 + row_token_offset(&arow, "✓");
+    let bx = FILES_X0 + row_token_offset(&brow, "b.rs");
+    let bmarker = FILES_X0 + row_token_offset(&brow, "M");
+    assert_eq!(buf.cell((ax, ay)).unwrap().fg, app.palette().dim2);
+    assert_eq!(buf.cell((astat, ay)).unwrap().fg, app.palette().dim2);
+    assert_eq!(buf.cell((acheck, ay)).unwrap().fg, app.palette().green);
+    assert_eq!(
+        buf.cell((amarker, ay)).unwrap().fg,
+        buf.cell((bmarker, by)).unwrap().fg,
+        "review preserves the Git-status hue",
+    );
+    assert_eq!(buf.cell((bx, by)).unwrap().bg, SELECTION_BG);
+    assert_eq!(buf.cell((bx, by)).unwrap().fg, app.palette().text);
+
+    app.file_cursor = app
+        .file_rows
+        .iter()
+        .position(|row| row.file_index().is_some_and(|i| app.entries[i].path == "a.rs"))
+        .unwrap();
+    let selected = render_buffer(&app);
+    let (ay, arow) = files_row_at(&selected, "a.rs");
+    let ax = FILES_X0 + row_token_offset(&arow, "a.rs");
+    let acheck = FILES_X0 + row_token_offset(&arow, "✓");
+    assert_eq!(selected.cell((ax, ay)).unwrap().bg, SELECTION_BG);
+    assert_eq!(
+        selected.cell((ax, ay)).unwrap().fg,
+        app.palette().dim0,
+        "selected reviewed text lifts the subdued palette role for contrast",
+    );
+    assert_eq!(selected.cell((acheck, ay)).unwrap().fg, app.palette().green);
+}
+
+#[test]
+fn reviewed_but_changed_rows_warn_without_subduing_file_details() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    r.write("a.rs", "one\ntwo\n");
+    let mut app = app_on(&r);
+    assert!(app.set_file_reviewed("a.rs", true));
+    r.write("a.rs", "one\ntwo\nthree\n");
+    app.reload().unwrap();
+
+    let buf = render_buffer(&app);
+    let (y, row) = files_row_at(&buf, "a.rs");
+    assert!(row.contains("M ! a.rs"), "changed reviews carry a warning: {row:?}");
+    let marker_x = FILES_X0 + row_token_offset(&row, "!");
+    let path_x = FILES_X0 + row_token_offset(&row, "a.rs");
+    let stats_x = FILES_X0 + row_token_offset(&row, "+2");
+    assert_eq!(buf.cell((marker_x, y)).unwrap().fg, app.palette().orange);
+    assert_eq!(buf.cell((path_x, y)).unwrap().fg, app.palette().text);
+    assert_eq!(buf.cell((stats_x, y)).unwrap().fg, app.palette().green);
+}
+
+#[test]
+fn reviewed_changed_kinds_keep_their_status_and_notice_semantics() {
+    let r = Repo::init();
+    r.write(".gitattributes", "*.bin binary\n*.nodiff -diff\n");
+    r.write("binary.bin", "base bytes\n");
+    r.write("deleted.rs", "gone\n");
+    r.write("modified.rs", "old\n");
+    r.write("no_text.nodiff", "old\n");
+    r.write("old_name.rs", "renamed\n");
+    r.commit_all("init");
+    r.write("added.rs", "added\n");
+    r.git(&["add", "added.rs"]);
+    r.write("binary.bin", "new bytes\n");
+    r.remove("deleted.rs");
+    r.write("modified.rs", "new\n");
+    r.write("no_text.nodiff", "new\n");
+    r.git(&["mv", "old_name.rs", "renamed.rs"]);
+    r.write("untracked.rs", "untracked\n");
+    let mut app = app_on(&r);
+    let changed: Vec<String> = app.entries.iter().map(|entry| entry.path.clone()).collect();
+    for path in &changed {
+        assert!(app.set_file_reviewed(path, true), "{path} becomes reviewed");
+    }
+
+    for (path, marker) in [
+        ("added.rs", 'A'),
+        ("binary.bin", 'M'),
+        ("deleted.rs", 'D'),
+        ("modified.rs", 'M'),
+        ("no_text.nodiff", 'M'),
+        ("renamed.rs", 'R'),
+        ("untracked.rs", '?'),
+    ] {
+        let row = files_row(&app, path);
+        assert!(
+            row.contains(&format!("{marker} ✓ {path}")),
+            "review keeps {path}'s Git status: {row:?}",
+        );
+    }
+    for path in ["binary.bin", "no_text.nodiff"] {
+        let row = files_row(&app, path);
+        assert!(
+            !row.contains('+') && !row.contains('−'),
+            "no-text changes keep empty stats: {row:?}"
+        );
+        let cursor = app
+            .file_rows
+            .iter()
+            .position(|row| row.file_index().is_some_and(|i| app.entries[i].path == path))
+            .unwrap();
+        app.select_file(cursor).unwrap();
+        assert!(
+            render(&app).contains("binary — no line comments"),
+            "review does not replace the no-text notice for {path}",
+        );
+    }
+}
+
+#[test]
+fn changes_directories_and_files_share_the_review_column_alignment() {
+    let r = Repo::init();
+    r.write("plain.rs", "old\n");
+    r.write("reviewed.rs", "old\n");
+    r.write("src/a.rs", "old\n");
+    r.write("src/b.rs", "old\n");
+    r.commit_all("init");
+    r.write("plain.rs", "new\n");
+    r.write("reviewed.rs", "new\n");
+    r.write("src/a.rs", "new\n");
+    r.write("src/b.rs", "new\n");
+    let mut app = app_on(&r);
+    assert!(app.set_file_reviewed("reviewed.rs", true));
+    app.file_cursor = app.file_rows.iter().position(|row| row.dir_path() == Some("src")).unwrap();
+    app.collapse_dir();
+
+    let buf = render_buffer(&app);
+    let dir_x = token_x(&buf, "src/", FILES_X0);
+    let plain_x = token_x(&buf, "plain.rs", FILES_X0);
+    let reviewed_x = token_x(&buf, "reviewed.rs", FILES_X0);
+    assert_eq!(dir_x, plain_x, "directories reserve the same review-marker column");
+    assert_eq!(plain_x, reviewed_x, "review state never shifts the path column");
+    assert!(files_row(&app, "src/").starts_with("▸   src/"));
+    assert!(files_row(&app, "plain.rs").starts_with("M   plain.rs"));
+    assert!(files_row(&app, "reviewed.rs").starts_with("M ✓ reviewed.rs"));
+}
+
+#[test]
+fn a_narrow_changes_list_preserves_status_and_review_columns() {
+    let r = Repo::init();
+    r.write("aaaaaaaaaaaaaaaa.rs", "old\n");
+    r.write("bbbbbbbbbbbbbbbb.rs", "old\n");
+    r.commit_all("init");
+    r.write("aaaaaaaaaaaaaaaa.rs", "old\nnew\n");
+    r.write("bbbbbbbbbbbbbbbb.rs", "old\nnew\n");
+    let mut app = app_on(&r);
+    assert!(app.set_file_reviewed("aaaaaaaaaaaaaaaa.rs", true));
+
+    let buf = render_size(&app, 40, 12);
+    let x0 = 40 - 40 * 32 / 100 + 1;
+    let x1 = 40 - 2;
+    let row = |y: u16| -> String {
+        (x0..=x1).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect()
+    };
+    assert_eq!(row(2), "M ✓ …s  +1", "the path, not either fixed marker, is elided");
+    assert_eq!(row(3), "M   …s  +1", "the blank review column has the same fixed width");
+}
+
+#[test]
+fn reviewed_styling_stays_out_of_all_files_search_and_pr() {
+    use herdr_reviewr::keymap::default_keymap;
+    use herdr_reviewr::land_search_completion;
+    use herdr_reviewr::search::{FileHit, SearchCompletion, SearchOutcome, SearchResults};
+
+    let r = Repo::init();
+    r.write("a.rs", "old\n");
+    r.commit_all("init");
+    r.write("a.rs", "new\n");
+    let mut app = app_on(&r);
+    assert!(app.set_file_reviewed("a.rs", true));
+
+    enter_tab(&mut app, Tab::AllFiles);
+    let all = render_buffer(&app);
+    let (y, row) = files_row_at(&all, "a.rs");
+    assert!(row.contains("M a.rs"), "All Files keeps its existing columns: {row:?}");
+    assert!(!row.contains('✓'));
+    let x = FILES_X0 + row.find("a.rs").unwrap() as u16;
+    assert_eq!(all.cell((x, y)).unwrap().fg, app.palette().text);
+
+    handle_key(
+        &mut app,
+        KeyEvent::from(KeyCode::Char('/')),
+        Rect::new(0, 0, 140, 40),
+        default_keymap(),
+    )
+    .unwrap();
+    land_search_completion(
+        &mut app,
+        SearchCompletion {
+            generation: 1,
+            outcome: SearchOutcome::Ready(SearchResults {
+                files: vec![FileHit { path: "a.rs".into(), spans: Vec::new() }],
+                code: Vec::new(),
+                file_total: 1,
+                code_more: false,
+            }),
+        },
+        1,
+    );
+    let search = render(&app);
+    assert!(search.lines().any(|line| line.contains("M a.rs")), "Search keeps its old row shape");
+    assert!(!search.contains('✓'), "Search never exposes review state");
+
+    app.close_search();
+    enter_tab(&mut app, Tab::Pr);
+    assert!(!render(&app).contains('✓'), "PR never exposes review state");
 }
 
 /// First painted column of `token` in `buf` at or after `x0`. Panics if it never appears.
@@ -1495,12 +1733,12 @@ fn rebound_app(keybindings: &str) -> App {
 
 #[test]
 fn hints_show_the_first_bound_key() {
-    let app = rebound_app("comment = [\"ㅊ\", \"c\"]\ntab-pr = [\"x\"]\n");
+    let app = rebound_app("comment = [\"ㅊ\", \"c\"]\ntab-pr = [\"a\"]\n");
     let out = render(&app);
     let footer = footer_line(&out);
     // A wide hint key spans two buffer cells, so the dump carries a placeholder space after it.
     assert!(footer.contains("ㅊ  comment"), "the hint is the first bound key:\n{footer}");
-    assert!(out.contains("x PR"), "the header tab hint follows its binding:\n{out}");
+    assert!(out.contains("a PR"), "the header tab hint follows its binding:\n{out}");
     assert!(!out.contains("3 PR"), "the replaced digit is gone:\n{out}");
 }
 
@@ -4232,6 +4470,12 @@ fn files_row(app: &App, token: &str) -> String {
     files_row_at(&render_buffer(app), token).1.trim_end().to_string()
 }
 
+/// A token's display-cell offset in a painted row. `str::find` is byte-based, while the
+/// reviewed check before paths and stats is a multibyte, single-cell glyph.
+fn row_token_offset(row: &str, token: &str) -> u16 {
+    row[..row.find(token).unwrap()].chars().count() as u16
+}
+
 /// Whether the row holding `token` ends in the dot, painted in the pane's last inner column
 /// and in the `M` marker's color (the cell style of `m_marker_fg`).
 fn dot_at_edge(app: &App, token: &str) -> bool {
@@ -4318,9 +4562,9 @@ fn a_folder_whose_only_change_has_no_row_wears_no_dot() {
 }
 
 #[test]
-fn a_collapsed_changes_folder_wears_no_dot_and_reserves_nothing() {
-    // On `Changes` every folder holds a change, so the dot would say nothing, and the row
-    // keeps its full width for the name.
+fn a_collapsed_changes_folder_wears_no_dot_and_only_reserves_the_review_column() {
+    // On `Changes` every folder holds a change, so the dot would say nothing. Its only
+    // trailing-name cost is the review column beside the chevron/status column.
     let r = dotted_repo();
     r.write("src/app.rs", "x2\n"); // two changed files keep `src/` a directory row
     let mut app = app_on(&r);
@@ -4333,7 +4577,11 @@ fn a_collapsed_changes_folder_wears_no_dot_and_reserves_nothing() {
     r.write(&format!("{wide}/b.rs"), "b\n");
     app.reload().unwrap();
     let row = files_row(&app, &wide[..20]);
-    assert_eq!(row, format!("▾ {wide}/"), "the exact-fit name is whole on Changes");
+    assert_eq!(
+        row,
+        format!("▾   …{}/", &wide[3..]),
+        "Changes reserves the same two review-marker cells as its file rows",
+    );
     enter_tab(&mut app, Tab::AllFiles);
     assert!(dot_at_edge(&app, "…"), "{:?}", files_row(&app, "…"));
     assert_eq!(

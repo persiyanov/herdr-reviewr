@@ -1900,6 +1900,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::BasePick => app.open_base_picker(),
             K::CommitPick => app.open_commit_picker(),
             K::Select => app.toggle_select(),
+            K::ToggleReviewed => app.toggle_current_file_reviewed(),
             K::Comment => app.start_comment(),
             // `edit`/`delete` act on the comment under the diff cursor, so they only fire with
             // the diff focused — otherwise `delete` would silently drop a comment under an

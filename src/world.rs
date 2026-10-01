@@ -9,13 +9,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 
 use crate::app::Tab;
 use crate::file_list::{Annotation, Entry};
 use crate::git;
 use crate::herdr::AgentSample;
-use crate::model::{ChangedFile, CommitPick, Scope};
+use crate::model::{ChangedFile, CommitPick, ReviewContext, Scope};
 use crate::turn::{TurnTracker, WorktreeState};
 
 /// Everything the build reads. A landed snapshot reconciles only while the view still
@@ -47,6 +47,8 @@ pub struct WorldInput {
 /// the changeset it heads land whole, from one build.
 #[derive(Debug)]
 pub struct WorldSnapshot {
+    /// The authored-review namespace derived in the same build as `changed`.
+    pub review_context: ReviewContext,
     pub changed: HashMap<String, Annotation>,
     pub entries: Vec<Entry>,
     pub branch_base: git::BaseStatus,
@@ -82,9 +84,26 @@ pub struct PickStatus {
 /// landed together so the header and the list never disagree.
 #[derive(Debug)]
 pub struct ScopeBuild {
+    pub review_context: ReviewContext,
     pub branch_base: git::BaseStatus,
     pub pick_status: Option<PickStatus>,
     pub changed: Vec<ChangedFile>,
+}
+
+/// Whether this input is intentionally outside Git. `App` holds the resolved worktree root once
+/// startup has found one, so a `.git` marker with a failed probe is an established repository we
+/// failed to read, not a new non-repository directory. Preserve the last good world in that case.
+fn repository_available(repo: &Path) -> Result<bool> {
+    match git::worktree_of(repo) {
+        git::Worktree::Root(_) => Ok(true),
+        git::Worktree::Unknown => bail!("unable to probe repository at {}", repo.display()),
+        git::Worktree::Outside => match std::fs::symlink_metadata(repo.join(".git")) {
+            Ok(_) => bail!("unable to probe established repository at {}", repo.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error)
+                .with_context(|| format!("checking repository marker at {}", repo.display())),
+        },
+    }
 }
 
 /// Build the snapshot for `input`. The changeset is computed regardless of tab so the
@@ -94,8 +113,9 @@ pub struct ScopeBuild {
 pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
     // Outside a git repo, an empty snapshot paints the quiet empty state rather than a
     // failing status line every poll.
-    if !git::is_repo(&input.repo) {
+    if !repository_available(&input.repo)? {
         return Ok(WorldSnapshot {
+            review_context: context_without_git(input),
             changed: HashMap::new(),
             entries: Vec::new(),
             branch_base: git::BaseStatus::default(),
@@ -103,7 +123,7 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
             head: None,
         });
     }
-    let ScopeBuild { branch_base, pick_status, changed } = build_changed(input)?;
+    let ScopeBuild { review_context, branch_base, pick_status, changed } = build_changed(input)?;
     let head = git::head_oid(&input.repo);
     let changed_map = annotate(&changed);
     let entries = match input.tab {
@@ -112,27 +132,41 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
         // `Changes` (the `PR` tab never builds a snapshot).
         _ => changed.iter().map(Entry::from_changed).collect(),
     };
-    Ok(WorldSnapshot { changed: changed_map, entries, branch_base, pick_status, head })
+    Ok(WorldSnapshot {
+        review_context,
+        changed: changed_map,
+        entries,
+        branch_base,
+        pick_status,
+        head,
+    })
 }
 
 /// The active scope's changed files and, on the `branch` scope, the base they diff against —
 /// the piece a scope switch rebuilds before its frame, so the header count and list never
 /// wear another scope's label.
 pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
-    let plain = |changed| ScopeBuild {
+    let plain = |review_context, changed| ScopeBuild {
+        review_context,
         branch_base: git::BaseStatus::default(),
         pick_status: None,
         changed,
     };
-    if !git::is_repo(&input.repo) {
-        return Ok(plain(Vec::new()));
+    if !repository_available(&input.repo)? {
+        return Ok(plain(context_without_git(input), Vec::new()));
     }
     match input.scope {
         Scope::LastTurn => match input.turn_baseline.as_deref() {
-            Some(t) => Ok(plain(git::changed_against_tree(&input.repo, t)?)),
-            None => Ok(plain(Vec::new())),
+            Some(t) => Ok(plain(
+                ReviewContext::LastTurn { baseline: Some(t.to_string()) },
+                git::changed_against_tree(&input.repo, t)?,
+            )),
+            None => Ok(plain(ReviewContext::LastTurn { baseline: None }, Vec::new())),
         },
-        Scope::Uncommitted => Ok(plain(git::changed_files(&input.repo, input.scope, None)?)),
+        Scope::Uncommitted => Ok(plain(
+            ReviewContext::Uncommitted,
+            git::changed_files(&input.repo, input.scope, None)?,
+        )),
         Scope::Branch => {
             // A resolve failure fails the build whole, so the landing keeps the stale
             // frame and reports — degrading to an empty snapshot would blank a populated
@@ -142,19 +176,39 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
                 .map_err(|e| anyhow::anyhow!("{}", e.0))?;
             let base_oid = resolution.status.winner.as_ref().map(|w| w.oid().to_string());
             let changed = git::changed_files(&input.repo, input.scope, base_oid.as_deref())?;
-            Ok(ScopeBuild { branch_base: resolution.status, pick_status: None, changed })
+            let review_context = ReviewContext::Branch {
+                base: resolution.status.winner.as_ref().map(|winner| winner.name().to_string()),
+            };
+            Ok(ScopeBuild {
+                review_context,
+                branch_base: resolution.status,
+                pick_status: None,
+                changed,
+            })
         }
         Scope::Commits => {
             // The scope is never entered without a pick; a tag without one
             // builds the empty changeset rather than failing the landing.
-            let Some(pick) = &input.commit_pick else { return Ok(plain(Vec::new())) };
+            let Some(pick) = &input.commit_pick else {
+                return Ok(plain(ReviewContext::Commits { pick: None }, Vec::new()));
+            };
             let (status, changed) = build_pick(&input.repo, pick)?;
             Ok(ScopeBuild {
+                review_context: ReviewContext::Commits { pick: Some(pick.clone()) },
                 branch_base: git::BaseStatus::default(),
                 pick_status: Some(status),
                 changed,
             })
         }
+    }
+}
+
+fn context_without_git(input: &WorldInput) -> ReviewContext {
+    match input.scope {
+        Scope::Uncommitted => ReviewContext::Uncommitted,
+        Scope::Branch => ReviewContext::Branch { base: input.base.clone() },
+        Scope::LastTurn => ReviewContext::LastTurn { baseline: input.turn_baseline.clone() },
+        Scope::Commits => ReviewContext::Commits { pick: input.commit_pick.clone() },
     }
 }
 

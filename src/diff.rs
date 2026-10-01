@@ -11,6 +11,7 @@ use std::path::Path;
 use similar::{ChangeTag, TextDiff};
 
 use crate::highlight::Highlighter;
+use crate::model::FileIdentity;
 
 /// An 8-bit RGB color.
 pub type Rgb = (u8, u8, u8);
@@ -136,6 +137,9 @@ pub struct FileDiff {
     pub state: FileState,
     pub view: View,
     pub rows: Vec<Row>,
+    /// Identity of the comparison sides actually loaded for this Diff view. `None` for an
+    /// empty placeholder, the All-files File view, and callers building a content-only model.
+    pub identity: Option<FileIdentity>,
 }
 
 /// A file beyond either budget renders as `too_large` rather than stalling the diff —
@@ -166,6 +170,7 @@ impl FileDiff {
             state: FileState::Normal,
             view: View::Diff,
             rows: Vec::new(),
+            identity: None,
         }
     }
 
@@ -178,6 +183,30 @@ impl FileDiff {
         new: &str,
         hl: &Highlighter,
     ) -> Self {
+        Self::build_inner(path, previous_path, old, new, None, hl)
+    }
+
+    /// Build from the same sides as [`Self::build`] and attach the identity reproduced from
+    /// the worktree bytes and mode the caller read alongside `new`.
+    pub(crate) fn build_identified(
+        path: String,
+        previous_path: Option<String>,
+        old: &str,
+        new: &str,
+        identity: FileIdentity,
+        hl: &Highlighter,
+    ) -> Self {
+        Self::build_inner(path, previous_path, old, new, Some(identity), hl)
+    }
+
+    fn build_inner(
+        path: String,
+        previous_path: Option<String>,
+        old: &str,
+        new: &str,
+        identity: Option<FileIdentity>,
+        hl: &Highlighter,
+    ) -> Self {
         let language = language_of(&path);
         let notice = |state| Self {
             path: path.clone(),
@@ -185,6 +214,7 @@ impl FileDiff {
             state,
             view: View::Diff,
             rows: Vec::new(),
+            identity: identity.clone(),
         };
         if old.contains('\0') || new.contains('\0') {
             return notice(FileState::Binary);
@@ -236,6 +266,7 @@ impl FileDiff {
             state: FileState::Normal,
             view: View::Diff,
             rows: collapse_context(&rows),
+            identity,
         }
     }
 
@@ -249,6 +280,7 @@ impl FileDiff {
             state,
             view: View::File,
             rows: Vec::new(),
+            identity: None,
         };
         if content.contains('\0') {
             return notice(FileState::Binary);
@@ -269,14 +301,38 @@ impl FileDiff {
                 }
             })
             .collect();
-        Self { path, previous_path: None, state: FileState::Normal, view: View::File, rows }
+        Self {
+            path,
+            previous_path: None,
+            state: FileState::Normal,
+            view: View::File,
+            rows,
+            identity: None,
+        }
     }
 
     /// The Diff-view `binary` notice, for a change git already reported as having no text
     /// diff. `set_diff` builds this rather than reading either side's blob, so a `-diff`
     /// lockfile costs no `git show` at all.
     pub fn binary_notice(path: String, previous_path: Option<String>) -> Self {
-        Self { path, previous_path, state: FileState::Binary, view: View::Diff, rows: Vec::new() }
+        Self {
+            path,
+            previous_path,
+            state: FileState::Binary,
+            view: View::Diff,
+            rows: Vec::new(),
+            identity: None,
+        }
+    }
+
+    pub(crate) fn binary_notice_identified(
+        path: String,
+        previous_path: Option<String>,
+        identity: FileIdentity,
+    ) -> Self {
+        let mut notice = Self::binary_notice(path, previous_path);
+        notice.identity = Some(identity);
+        notice
     }
 
     /// The File-view `too_large` notice, for an over-budget file the caller declines to read.
@@ -288,6 +344,7 @@ impl FileDiff {
             state: FileState::TooLarge,
             view: View::File,
             rows: Vec::new(),
+            identity: None,
         }
     }
 }
@@ -524,6 +581,23 @@ impl DiffCache {
         self.get_or_build(path.clone(), key, || FileDiff::build(path, previous_path, old, new, hl))
     }
 
+    /// Identified counterpart to [`Self::get`]. The identity participates in the cache key so
+    /// equal text under different modes or comparison endpoints cannot return a stale model.
+    pub(crate) fn get_identified(
+        &mut self,
+        path: String,
+        previous_path: Option<String>,
+        old: &str,
+        new: &str,
+        identity: FileIdentity,
+        hl: &Highlighter,
+    ) -> FileDiff {
+        let key = identity_hash(&identity);
+        self.get_or_build(path.clone(), key, || {
+            FileDiff::build_identified(path, previous_path, old, new, identity, hl)
+        })
+    }
+
     /// Return the cached File view when `content` is unchanged for `path`, else build it.
     /// File-view entries are namespaced under a `file:` key so a path's File view and Diff
     /// view coexist in the cache instead of evicting each other on a tab switch.
@@ -563,6 +637,12 @@ fn content_hash(previous_path: Option<&str>, old: &str, new: &str) -> u64 {
     h.finish()
 }
 
+fn identity_hash(identity: &FileIdentity) -> u64 {
+    let mut h = DefaultHasher::new();
+    identity.hash(&mut h);
+    h.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DiffCache, FileDiff, FileState, Row, View, language_of};
@@ -572,6 +652,24 @@ mod tests {
     /// The default theme's syntax pairing (bundled Catppuccin Mocha), for highlighter setup.
     fn mocha() -> crate::theme::SyntaxChoice {
         theme::resolve(Some("catppuccin")).syntax
+    }
+
+    fn live_identity(content: &[u8]) -> crate::model::FileIdentity {
+        use crate::model::{ChangeKind, FileIdentity, FileIdentityInput, content_fingerprint};
+        let fingerprint = content_fingerprint(content);
+        FileIdentity::from_git(FileIdentityInput {
+            old_endpoint: "old-tree",
+            new_endpoint: "worktree",
+            kind: ChangeKind::Modified,
+            path: "a.rs",
+            previous_path: None,
+            old_mode: "100644",
+            new_mode: "100644",
+            old_content: "old-blob",
+            new_content: &fingerprint,
+            binary: false,
+            live_new_side: true,
+        })
     }
 
     #[test]
@@ -788,5 +886,19 @@ mod tests {
         let d1 = cache.get("a.rs".into(), None, "x\n", "y\n", &hl);
         let d2 = cache.get("a.rs".into(), None, "x\n", "y\n", &hl);
         assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn loaded_diff_reproduces_the_side_it_actually_read() {
+        let hl = Highlighter::new(mocha());
+        let landed = live_identity(b"one\n");
+        let unchanged = landed.with_loaded_worktree("100644", b"one\n");
+        let moved = landed.with_loaded_worktree("100644", b"two\n");
+
+        let diff =
+            FileDiff::build_identified("a.rs".into(), None, "old\n", "two\n", moved.clone(), &hl);
+        assert_eq!(unchanged, landed);
+        assert_ne!(moved, landed, "an edit after the world build cannot match the landed row");
+        assert_eq!(diff.identity.as_ref(), Some(&moved));
     }
 }

@@ -13,6 +13,7 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"
+blake3 = "1"
 dirs = "7"
 fff-search = "0.11.0"
 # The matcher fff-search scores with: the base picker ranks branch names by the same rule

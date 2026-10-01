@@ -5,15 +5,16 @@ mod common;
 
 use std::cell::RefCell;
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::{Result, bail};
 use common::{Repo, app_on, enter_tab, typed};
-use herdr_reviewr::app::{App, Band, Focus, FooterAction, Mode};
+use herdr_reviewr::app::{App, Band, FileReviewState, Focus, FooterAction, Mode};
 use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::export::ExportTarget;
 use herdr_reviewr::herdr::{AgentChoice, AgentSample};
 use herdr_reviewr::keymap::{Action, Key, KeyCode as BindingCode, Keymap};
-use herdr_reviewr::model::{Scope, Side};
+use herdr_reviewr::model::{CommitPick, Scope, Side};
 use herdr_reviewr::turn::Status;
 use herdr_reviewr::{handle_key, handle_mouse};
 use ratatui::crossterm::event::{
@@ -25,6 +26,34 @@ use ratatui::layout::Rect;
 struct FakeTarget {
     ok: bool,
     captured: RefCell<Vec<String>>,
+}
+
+fn git_at(repo: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@herdr.test")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@herdr.test")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn plumbing_commit(repo: &Path, parent: Option<&str>, message: &str) -> String {
+    git_at(repo, &["add", "-A"]);
+    let tree = git_at(repo, &["write-tree"]);
+    let mut args = vec!["commit-tree", tree.as_str()];
+    if let Some(parent) = parent {
+        args.extend(["-p", parent]);
+    }
+    args.extend(["-m", message]);
+    let commit = git_at(repo, &args);
+    git_at(repo, &["update-ref", "HEAD", &commit]);
+    commit
 }
 
 impl FakeTarget {
@@ -63,6 +92,119 @@ fn edited_repo() -> Repo {
     r.commit_all("init");
     r.write("a.rs", "alpha\nBETA\ngamma\ndelta\nepsilon\n");
     r
+}
+
+#[test]
+fn loaded_diff_uses_the_snapshot_endpoint_after_head_moves() {
+    let r = Repo::init();
+    r.write("a.rs", "old\n");
+    r.commit_all("init");
+    r.write("a.rs", "new\n");
+
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    let snapshot = herdr_reviewr::world::build(&app.world_input()).unwrap();
+    r.commit_all("head moved after snapshot");
+    app.reconcile_world(snapshot);
+
+    let landed = &app.current_entry().unwrap().annotation.as_ref().unwrap().identity;
+    assert_eq!(
+        app.diff.identity.as_ref(),
+        Some(landed),
+        "the displayed sides reproduce the landed comparison"
+    );
+    assert!(app.visible.iter().any(|row| row.text() == "old"), "the old snapshot side is shown");
+    assert!(app.visible.iter().any(|row| row.text() == "new"), "the worktree side is shown");
+}
+
+#[test]
+fn failed_pinned_blob_load_leaves_the_display_unidentified() {
+    let r = Repo::init();
+    r.git(&["config", "commit.gpgsign", "false"]);
+    r.write("a.rs", "old\n");
+    r.commit_all("init");
+    r.write("a.rs", "new\n");
+
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    let snapshot = herdr_reviewr::world::build(&app.world_input()).unwrap();
+    let blob = r.git(&["rev-parse", "HEAD:a.rs"]).trim().to_string();
+    let object = r.path().join(".git/objects").join(&blob[..2]).join(&blob[2..]);
+    let hidden = object.with_extension("reviewr-test-hidden");
+    std::fs::rename(&object, &hidden).unwrap();
+
+    app.reconcile_world(snapshot);
+    app.focus = Focus::Diff;
+
+    assert!(app.diff.identity.is_none(), "a failed old-side load must not certify the display");
+    assert_eq!(app.current_file_reviewed(), None, "an unidentified diff is not reviewable");
+    app.toggle_current_file_reviewed();
+    assert!(!app.file_reviewed("a.rs"), "the failed load cannot create a review mark");
+
+    std::fs::rename(hidden, object).unwrap();
+}
+
+#[test]
+fn loaded_text_with_invalid_utf8_keeps_its_raw_snapshot_identity() {
+    let r = Repo::init();
+    std::fs::write(r.path().join("bytes.txt"), b"old\n").unwrap();
+    r.commit_all("init");
+    std::fs::write(r.path().join("bytes.txt"), b"new \xff\n").unwrap();
+
+    let app = app_on(&r);
+    let landed = &app.current_entry().unwrap().annotation.as_ref().unwrap().identity;
+    assert_eq!(
+        app.diff.identity.as_ref(),
+        Some(landed),
+        "display replacement characters do not alter the raw-byte review identity",
+    );
+    assert_eq!(app.current_file_reviewed(), Some(false));
+}
+
+#[test]
+fn loaded_gitlink_reproduces_snapshot_identity_and_dirty_display() {
+    let source = Repo::init();
+    source.git(&["config", "commit.gpgsign", "false"]);
+    source.write("tracked.txt", "one\n");
+    source.commit_all("submodule base");
+
+    let r = Repo::init();
+    r.git(&["config", "commit.gpgsign", "false"]);
+    r.git(&[
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        source.path().to_str().unwrap(),
+        "dep",
+    ]);
+    plumbing_commit(r.path(), None, "track submodule");
+
+    let dep = r.path().join("dep");
+    git_at(&dep, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(dep.join("tracked.txt"), "two\n").unwrap();
+    git_at(&dep, &["add", "tracked.txt"]);
+    git_at(&dep, &["commit", "-q", "-m", "advance"]);
+
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    let landed = &app.current_entry().unwrap().annotation.as_ref().unwrap().identity;
+    assert_eq!(app.diff.identity.as_ref(), Some(landed));
+    assert_eq!(app.current_file_reviewed(), Some(false));
+    assert!(
+        app.visible.iter().any(|row| row.text().starts_with("Subproject commit ")),
+        "the gitlink diff uses Git's subproject display"
+    );
+
+    std::fs::write(dep.join("tracked.txt"), "dirty\n").unwrap();
+    app.reload().unwrap();
+    app.focus = Focus::Diff;
+    let landed = &app.current_entry().unwrap().annotation.as_ref().unwrap().identity;
+    assert_eq!(app.diff.identity.as_ref(), Some(landed));
+    assert!(
+        app.visible.iter().any(|row| row.text().contains("-dirty")),
+        "nested dirtiness is visible and identity-bearing"
+    );
+    app.toggle_current_file_reviewed();
+    assert!(app.file_reviewed("dep"));
 }
 
 /// Settle the diff scroll with one display row per logical row (no wrap), for tests that
@@ -3691,7 +3833,7 @@ fn rebinding_down_frees_the_arrow_and_tab_stays_fixed() {
     let r = edited_repo();
     let mut app = app_on(&r);
     let keymap = Keymap::resolve(&[
-        (Action::Down, vec![Key::plain('x')]),
+        (Action::Down, vec![Key::plain('a')]),
         (Action::Up, vec![Key::plain('X')]),
     ])
     .unwrap();
@@ -3702,7 +3844,7 @@ fn rebinding_down_frees_the_arrow_and_tab_stays_fixed() {
     press(&mut app, &keymap, KeyCode::Down);
     assert_eq!(app.diff_cursor, 0, "the freed down arrow answers nothing");
 
-    press(&mut app, &keymap, KeyCode::Char('x'));
+    press(&mut app, &keymap, KeyCode::Char('a'));
     assert!(app.diff_cursor > 0, "the bound key moves the cursor");
 
     press(&mut app, &keymap, KeyCode::Tab);
@@ -4007,12 +4149,12 @@ fn the_comments_list_acts_through_the_same_bindings() {
     let r = edited_repo();
     let mut app = app_on(&r);
     comment_on(&mut app, '+', "note");
-    let keymap = Keymap::resolve(&[(Action::Delete, vec![Key::plain('x')])]).unwrap();
+    let keymap = Keymap::resolve(&[(Action::Delete, vec![Key::plain('a')])]).unwrap();
 
     app.open_list();
     press(&mut app, &keymap, KeyCode::Char('d'));
     assert_eq!(app.store.len(), 1, "the replaced default is inert in the list too");
-    press(&mut app, &keymap, KeyCode::Char('x'));
+    press(&mut app, &keymap, KeyCode::Char('a'));
     assert!(app.store.is_empty(), "the rebound `delete` acts on the highlighted row");
 }
 
@@ -4021,7 +4163,7 @@ fn the_pr_remedy_names_the_rebound_refresh_key() {
     use herdr_reviewr::forge::PrView;
 
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("config.toml"), "[keybindings]\nrefresh = [\"R\"]\n").unwrap();
+    std::fs::write(dir.path().join("config.toml"), "[keybindings]\nrefresh = [\"X\"]\n").unwrap();
     let config = herdr_reviewr::config::plugin_config_in(dir.path()).unwrap();
 
     let repo = Repo::init();
@@ -4035,7 +4177,7 @@ fn the_pr_remedy_names_the_rebound_refresh_key() {
     ));
 
     assert!(
-        app.pr_notice().is_some_and(|notice| notice.ends_with("then press R.")),
+        app.pr_notice().is_some_and(|notice| notice.ends_with("then press X.")),
         "the remedy follows the active refresh binding: {:?}",
         app.pr_notice()
     );
@@ -4465,6 +4607,469 @@ fn a_result_for_a_view_that_moved_on_is_discarded_whole() {
     );
     assert_eq!(app.entries, before, "the mismatched snapshot never paints");
     assert!(app.world_request.is_some(), "a fresh refresh is queued for the current view");
+}
+
+#[test]
+fn reviewed_files_become_changed_without_resurrection() {
+    let r = Repo::init();
+    r.write("a.rs", "base a\n");
+    r.write("b.rs", "base b\n");
+    r.commit_all("init");
+    r.write("a.rs", "reviewed a\n");
+    r.write("b.rs", "reviewed b\n");
+    let mut app = app_on(&r);
+    assert!(app.set_file_reviewed("a.rs", true));
+    assert!(app.set_file_reviewed("b.rs", true));
+
+    r.write("a.rs", "changed again\n");
+    let changed = completion_for(&app, 1);
+    assert!(herdr_reviewr::land_world_completion(&mut app, changed, 1));
+    assert_eq!(
+        app.file_review_state("a.rs"),
+        FileReviewState::ReviewedButChanged,
+        "only the edited file becomes reviewed-but-changed",
+    );
+    assert_eq!(
+        app.file_review_state("b.rs"),
+        FileReviewState::Reviewed,
+        "an unchanged sibling stays reviewed",
+    );
+
+    r.write("a.rs", "reviewed a\n");
+    app.reconcile_world(herdr_reviewr::world::build(&app.world_input()).unwrap());
+    assert_eq!(
+        app.file_review_state("a.rs"),
+        FileReviewState::ReviewedButChanged,
+        "restoring old bytes cannot silently accept the file again",
+    );
+
+    app.toggle_current_file_reviewed();
+    assert_eq!(app.file_review_state("a.rs"), FileReviewState::Reviewed);
+    app.toggle_current_file_reviewed();
+    assert_eq!(app.file_review_state("a.rs"), FileReviewState::Unreviewed);
+
+    r.write("b.rs", "base b\n");
+    app.reload().unwrap();
+    assert_eq!(
+        app.file_review_state("b.rs"),
+        FileReviewState::Unreviewed,
+        "a disappeared path is pruned",
+    );
+    r.write("b.rs", "reviewed b\n");
+    app.reload().unwrap();
+    assert_eq!(
+        app.file_review_state("b.rs"),
+        FileReviewState::Unreviewed,
+        "a reintroduced path starts unreviewed",
+    );
+}
+
+fn has_review_action(app: &App) -> bool {
+    app.footer_bands().iter().any(|&(action, _)| action == FooterAction::ToggleReviewed)
+}
+
+fn footer_text(app: &App) -> String {
+    let area = Rect::new(0, 0, 180, 40);
+    let backend = ratatui::backend::TestBackend::new(area.width, area.height);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| herdr_reviewr::ui::render(frame, app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..area.height)
+        .flat_map(|row| (0..area.width).map(move |col| buffer[(col, row)].symbol()))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+#[test]
+fn toggle_reviewed_targets_the_active_changes_surface_and_updates_the_footer() {
+    let r = Repo::init();
+    r.write("src/a.rs", "old a\n");
+    r.write("src/b.rs", "old b\n");
+    r.write("other.rs", "old other\n");
+    r.commit_all("init");
+    r.write("src/a.rs", "new a\n");
+    r.write("src/b.rs", "new b\n");
+    r.write("other.rs", "new other\n");
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+
+    let selected = app.current_entry().unwrap().path.clone();
+    assert!(has_review_action(&app));
+    assert!(footer_text(&app).contains("R review"));
+    press(&mut app, &keymap, KeyCode::Char('R'));
+    assert!(app.file_reviewed(&selected), "AE1: Files focus toggles the selected file");
+    assert!(footer_text(&app).contains("R unreview"));
+
+    let dir_row = app.file_rows.iter().position(|row| row.dir_path() == Some("src")).unwrap();
+    app.file_cursor = dir_row;
+    assert!(!has_review_action(&app), "AE6: a directory offers no review action");
+    press(&mut app, &keymap, KeyCode::Char('R'));
+    assert!(app.file_reviewed(&selected), "the directory press is inert");
+
+    app.focus = Focus::Diff;
+    assert!(has_review_action(&app), "AE2: Diff focus targets the displayed file behind a dir row");
+    press(&mut app, &keymap, KeyCode::Char('R'));
+    assert!(!app.file_reviewed(&selected), "Diff focus toggles the display, not the directory");
+
+    assert!(app.set_file_reviewed("other.rs", true));
+    app.file_cursor = app
+        .file_rows
+        .iter()
+        .position(|row| row.file_index().is_some_and(|index| app.entries[index].path == "other.rs"))
+        .unwrap();
+    assert_eq!(
+        app.diff_path.as_deref(),
+        Some(selected.as_str()),
+        "moving the row directly leaves the displayed diff independent"
+    );
+    press(&mut app, &keymap, KeyCode::Char('R'));
+    assert!(app.file_reviewed(&selected));
+    assert!(app.file_reviewed("other.rs"));
+    press(&mut app, &keymap, KeyCode::Char('R'));
+    assert!(!app.file_reviewed(&selected), "toggle-off affects only the displayed file");
+    assert!(app.file_reviewed("other.rs"), "a sibling review remains untouched");
+}
+
+#[test]
+fn toggle_reviewed_accepts_identified_notice_diffs_and_refreshes_a_stale_display() {
+    let r = Repo::init();
+    r.write("seed.rs", "seed\n");
+    r.commit_all("init");
+    r.write("blob-a.bin", "\0binary a\0\n");
+    r.write("blob-b.bin", "\0binary b\0\n");
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+    let path = app.diff_path.clone().unwrap();
+
+    assert!(app.visible.is_empty(), "the binary diff has no rows");
+    assert!(app.diff.identity.is_some(), "the notice still records what was loaded");
+    assert!(has_review_action(&app));
+    press(&mut app, &keymap, KeyCode::Char('R'));
+    assert!(app.file_reviewed(&path));
+
+    assert!(app.set_file_reviewed(&path, false));
+    app.diff.identity = None;
+    app.world_request = None;
+    assert!(!has_review_action(&app), "a missing display identity withholds the footer action");
+    press(&mut app, &keymap, KeyCode::Char('R'));
+    assert!(!app.file_reviewed(&path), "a stale display stores no mark");
+    assert!(app.world_request.is_some(), "the attempted action requests a fresh world build");
+
+    let mismatched = app
+        .entries
+        .iter()
+        .find(|entry| entry.path != path)
+        .and_then(|entry| entry.annotation.as_ref())
+        .map(|annotation| annotation.identity.clone())
+        .unwrap();
+    app.diff.identity = Some(mismatched);
+    app.world_request = None;
+    assert!(!has_review_action(&app), "a mismatched display identity also withholds the action");
+    press(&mut app, &keymap, KeyCode::Char('R'));
+    assert!(!app.file_reviewed(&path));
+    assert!(app.world_request.is_some(), "a mismatched display also requests a rebuild");
+}
+
+#[test]
+fn toggle_reviewed_is_gated_outside_changes_normal_mode() {
+    use herdr_reviewr::app::Tab;
+
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    let path = app.diff_path.clone().unwrap();
+    let keymap = Keymap::default();
+
+    let modes = [
+        Mode::Search,
+        Mode::Find,
+        Mode::List,
+        Mode::Picker,
+        Mode::BasePick,
+        Mode::CommitPick,
+        Mode::Composing { editing: None },
+    ];
+    for mode in modes {
+        app.mode = mode;
+        assert!(!has_review_action(&app), "{:#?} must not offer review", app.mode);
+        press(&mut app, &keymap, KeyCode::Char('R'));
+        assert!(!app.file_reviewed(&path), "{:#?} must not execute review", app.mode);
+    }
+
+    app.mode = Mode::Normal;
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(!has_review_action(&app));
+    press(&mut app, &keymap, KeyCode::Char('R'));
+    assert!(!app.file_reviewed(&path), "AE6: All Files is inert");
+
+    enter_tab(&mut app, Tab::Pr);
+    assert!(!has_review_action(&app));
+    press(&mut app, &keymap, KeyCode::Char('R'));
+    assert!(!app.file_reviewed(&path), "AE6: PR is inert");
+}
+
+#[test]
+fn rebound_toggle_reviewed_dispatches_and_supplies_the_footer_key() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "[keybindings]\ntoggle-reviewed = [\"x\"]\n")
+        .unwrap();
+    let config = herdr_reviewr::config::plugin_config_in(dir.path()).unwrap();
+    let keymap = config.keymap().clone();
+
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    app.set_plugin_config(config);
+    let path = app.current_entry().unwrap().path.clone();
+    press(&mut app, &keymap, KeyCode::Char('R'));
+    assert!(!app.file_reviewed(&path), "AE8: the old default is freed");
+    assert!(footer_text(&app).contains("x review"), "the footer uses the resolved keymap");
+    press(&mut app, &keymap, KeyCode::Char('x'));
+    assert!(app.file_reviewed(&path), "AE8: the custom binding dispatches");
+}
+
+#[test]
+fn reviewed_files_are_isolated_by_context_and_marked_changed_on_sync_return() {
+    let r = Repo::init();
+    r.write("a.rs", "base\n");
+    r.commit_all("base");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("a.rs", "committed feature\n");
+    r.commit_all("feature");
+    r.write("a.rs", "dirty\n");
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, Some("main".to_string()));
+    app.reload().unwrap();
+
+    assert!(app.set_file_reviewed("a.rs", true));
+    app.set_scope(Scope::Branch).unwrap();
+    assert!(!app.file_reviewed("a.rs"), "AE5: branch has an independent review namespace");
+    assert!(app.set_file_reviewed("a.rs", true));
+    app.set_scope(Scope::Uncommitted).unwrap();
+    assert!(app.file_reviewed("a.rs"), "AE5: unchanged uncommitted review returns");
+
+    app.set_scope(Scope::Branch).unwrap();
+    r.write("a.rs", "dirty after review\n");
+    app.set_scope(Scope::Uncommitted).unwrap();
+    assert_eq!(
+        app.file_review_state("a.rs"),
+        FileReviewState::ReviewedButChanged,
+        "a synchronous landing applies the same changed-state rule",
+    );
+}
+
+#[test]
+fn reviewed_files_are_isolated_between_selected_bases() {
+    let r = based_repo();
+    let mut app = App::new(r.path_buf(), Scope::Branch, None);
+    app.reload().unwrap();
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
+        Some("main")
+    );
+    assert!(app.set_file_reviewed("a.rs", true));
+
+    herdr_reviewr::git::write_base_pick(r.path(), "dev").unwrap();
+    app.reload().unwrap();
+    assert_eq!(
+        app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
+        Some("dev")
+    );
+    assert!(!app.file_reviewed("a.rs"), "a selected base owns its own review namespace");
+    assert!(app.set_file_reviewed("a.rs", true));
+
+    herdr_reviewr::git::write_base_pick(r.path(), "main").unwrap();
+    app.reload().unwrap();
+    assert!(app.file_reviewed("a.rs"), "returning to an unchanged base restores its review");
+}
+
+#[test]
+fn reviewed_files_are_isolated_between_last_turn_baselines() {
+    let r = Repo::init();
+    r.write("a.rs", "base\n");
+    r.commit_all("base");
+    let first = herdr_reviewr::git::snapshot_worktree(r.path()).unwrap();
+    r.write("a.rs", "middle\n");
+    let second = herdr_reviewr::git::snapshot_worktree(r.path()).unwrap();
+    r.write("a.rs", "current\n");
+
+    let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
+    app.sync_turn_baseline(Some(first.clone()));
+    app.reload().unwrap();
+    assert!(app.set_file_reviewed("a.rs", true));
+
+    app.sync_turn_baseline(Some(second.clone()));
+    app.reload().unwrap();
+    assert!(!app.file_reviewed("a.rs"), "a second baseline owns an independent namespace");
+    assert!(app.set_file_reviewed("a.rs", true));
+
+    app.sync_turn_baseline(Some(first.clone()));
+    app.reload().unwrap();
+    assert!(app.file_reviewed("a.rs"), "the exact first comparison restores its review");
+
+    r.write("a.rs", "changed after review\n");
+    app.reload().unwrap();
+    assert_eq!(app.file_review_state("a.rs"), FileReviewState::ReviewedButChanged);
+    r.write("a.rs", "current\n");
+    app.reload().unwrap();
+    assert_eq!(
+        app.file_review_state("a.rs"),
+        FileReviewState::ReviewedButChanged,
+        "restoring bytes cannot silently accept a changed review",
+    );
+
+    app.sync_turn_baseline(Some(second));
+    app.reload().unwrap();
+    assert!(app.file_reviewed("a.rs"), "an inactive baseline survives another context's change");
+}
+
+#[test]
+fn reviewed_files_are_isolated_between_commit_picks() {
+    let r = Repo::init();
+    r.write("a.rs", "base\n");
+    r.commit_all("base");
+    let base = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+    r.write("a.rs", "one\n");
+    r.commit_all("one");
+    let one = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+    r.write("a.rs", "two\n");
+    r.commit_all("two");
+    let two = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+    let first = CommitPick::single(&one);
+    let second = CommitPick::single(&two);
+
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.reload().unwrap();
+    app.commit_pick = Some(first.clone());
+    app.set_scope(Scope::Commits).unwrap();
+    assert!(app.set_file_reviewed("a.rs", true));
+
+    app.commit_pick = Some(second.clone());
+    app.reload().unwrap();
+    assert!(!app.file_reviewed("a.rs"), "a second commit run owns an independent namespace");
+    assert!(app.set_file_reviewed("a.rs", true));
+
+    app.commit_pick = Some(first);
+    app.reload().unwrap();
+    assert!(app.file_reviewed("a.rs"), "the exact first run restores its review");
+
+    r.git(&["reset", "-q", "--hard", &base]);
+    r.git(&["reflog", "expire", "--expire=now", "--all"]);
+    r.git(&["gc", "-q", "--prune=now"]);
+    app.reload().unwrap();
+    assert!(!app.file_reviewed("a.rs"), "a disappeared run permanently prunes its review");
+}
+
+#[test]
+fn all_files_scope_rebuild_uses_the_same_review_reconciliation_boundary() {
+    use herdr_reviewr::app::Tab;
+
+    let r = Repo::init();
+    r.write("a.rs", "base\n");
+    r.commit_all("base");
+    r.git(&["checkout", "-q", "-b", "feature"]);
+    r.write("a.rs", "feature\n");
+    r.commit_all("feature");
+    r.write("a.rs", "dirty\n");
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, Some("main".to_string()));
+    app.reload().unwrap();
+    assert!(app.set_file_reviewed("a.rs", true));
+
+    enter_tab(&mut app, Tab::AllFiles);
+    app.set_scope(Scope::Branch).unwrap();
+    r.write("a.rs", "dirty after review\n");
+    app.set_scope(Scope::Uncommitted).unwrap();
+    assert_eq!(
+        app.file_review_state("a.rs"),
+        FileReviewState::ReviewedButChanged,
+        "the changed-only All Files rebuild reconciles like a full world landing",
+    );
+}
+
+#[test]
+fn stale_and_failed_world_results_do_not_touch_reviewed_state() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    assert!(app.set_file_reviewed("a.rs", true));
+
+    let mut stale = completion_for(&app, 4);
+    stale.input.scope = Scope::Branch;
+    assert!(herdr_reviewr::land_world_completion(&mut app, stale, 4));
+    assert!(app.file_reviewed("a.rs"), "a rejected input cannot prune review state");
+
+    let input = app.world_input();
+    let index = r.path().join(".git/index");
+    let saved_index = std::fs::read(&index).unwrap();
+    std::fs::write(&index, b"not a git index").unwrap();
+    let failed_snapshot = herdr_reviewr::world::build(&input);
+    std::fs::write(index, saved_index).unwrap();
+    assert!(failed_snapshot.is_err(), "an unreadable Git index fails the world build");
+    let failed = herdr_reviewr::world::WorldCompletion {
+        generation: 5,
+        input,
+        reveal: false,
+        turn: None,
+        snapshot: Some(failed_snapshot),
+    };
+    assert!(herdr_reviewr::land_world_completion(&mut app, failed, 5));
+    assert!(app.file_reviewed("a.rs"), "a failed build cannot prune review state");
+}
+
+#[test]
+fn repository_probe_failure_keeps_the_landed_world_and_reviewed_state() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    assert!(app.set_file_reviewed("a.rs", true));
+    let before_entries = app.entries.clone();
+    let before_diff = app.diff.clone();
+    let input = app.world_input();
+
+    let git_dir = r.path().join(".git");
+    let saved_git_dir = r.path().join(".git-saved-for-probe-test");
+    std::fs::rename(&git_dir, &saved_git_dir).unwrap();
+    std::fs::write(&git_dir, "gitdir: missing-git-directory\n").unwrap();
+    let failed_snapshot = herdr_reviewr::world::build(&input);
+    std::fs::remove_file(&git_dir).unwrap();
+    std::fs::rename(&saved_git_dir, &git_dir).unwrap();
+
+    assert!(failed_snapshot.is_err(), "an established repository's failed probe is an error");
+    let failed = herdr_reviewr::world::WorldCompletion {
+        generation: 6,
+        input,
+        reveal: false,
+        turn: None,
+        snapshot: Some(failed_snapshot),
+    };
+    assert!(herdr_reviewr::land_world_completion(&mut app, failed, 6));
+    assert_eq!(app.entries, before_entries, "the last good navigator remains intact");
+    assert_eq!(app.diff, before_diff, "the last good diff remains intact");
+    assert!(app.file_reviewed("a.rs"), "a probe failure cannot prune authored review state");
+}
+
+#[test]
+fn a_failed_scope_rebuild_is_transactional_including_reviewed_state() {
+    let r = Repo::init();
+    r.write("a.rs", "base\n");
+    r.commit_all("base");
+    r.write("a.rs", "dirty\n");
+    let mut app = app_on(&r);
+    assert!(app.set_file_reviewed("a.rs", true));
+    let before_entries = app.entries.clone();
+    let before_diff = app.diff.clone();
+    let before_path = app.diff_path.clone();
+    let index = r.path().join(".git/index");
+    let saved_index = std::fs::read(&index).unwrap();
+    std::fs::write(&index, b"not a git index").unwrap();
+
+    let result = app.set_scope(Scope::Branch);
+    std::fs::write(&index, saved_index).unwrap();
+    assert!(result.is_err(), "the missing commit object fails the prospective build");
+    assert_eq!(app.scope, Scope::Uncommitted, "scope changes only after a successful build");
+    assert_eq!(app.entries, before_entries, "the navigator stays on the prior snapshot");
+    assert_eq!(app.diff, before_diff, "the loaded diff stays on the prior snapshot");
+    assert_eq!(app.diff_path, before_path);
+    assert!(app.file_reviewed("a.rs"), "authored review state is untouched on failure");
+
+    let fresh = app_on(&r);
+    assert!(!fresh.file_reviewed("a.rs"), "a new session starts with no review marks");
 }
 
 #[test]
@@ -5384,11 +5989,11 @@ fn the_picker_moves_by_key_and_a_digit_past_the_last_row_is_inert() {
 fn the_picker_follows_a_down_rebind_like_the_main_view() {
     let r = edited_repo();
     let mut app = app_with_picker(&r);
-    let keymap = Keymap::resolve(&[(Action::Down, vec![Key::plain('x')])]).unwrap();
+    let keymap = Keymap::resolve(&[(Action::Down, vec![Key::plain('a')])]).unwrap();
     let area = Rect::new(0, 0, 80, 24);
     assert_eq!(app.picker_cursor, 0);
 
-    handle_key(&mut app, KeyEvent::from(KeyCode::Char('x')), area, &keymap).unwrap();
+    handle_key(&mut app, KeyEvent::from(KeyCode::Char('a')), area, &keymap).unwrap();
     assert_eq!(app.picker_cursor, 1, "the rebound key moves the highlight");
     handle_key(&mut app, KeyEvent::from(KeyCode::Down), area, &keymap).unwrap();
     assert_eq!(app.picker_cursor, 1, "the freed arrow no longer moves it");
@@ -5724,6 +6329,31 @@ fn a_pick_retags_the_world_input() {
     app.input_push('d');
     app.base_picker_pick().unwrap();
     assert_ne!(app.world_input(), stale, "an in-flight build's tag no longer matches");
+}
+
+#[test]
+fn a_failed_base_pick_build_leaves_the_picker_and_visible_review_state_whole() {
+    let r = based_repo();
+    r.write("a.rs", "dirty\n");
+    let mut app = app_on(&r);
+    assert!(app.set_file_reviewed("a.rs", true));
+    app.open_base_picker();
+    goto_row(&mut app, "dev");
+    let before_entries = app.entries.clone();
+    let before_diff = app.diff.clone();
+    let index = r.path().join(".git/index");
+    let saved_index = std::fs::read(&index).unwrap();
+    std::fs::write(&index, b"not a git index").unwrap();
+
+    let result = app.base_picker_pick();
+    std::fs::write(&index, saved_index).unwrap();
+    assert!(result.is_err());
+    assert_eq!(app.mode, Mode::BasePick, "a failed prospective build keeps the picker open");
+    assert_eq!(app.scope, Scope::Uncommitted);
+    assert_eq!(herdr_reviewr::git::read_base_pick(r.path()).unwrap(), None);
+    assert_eq!(app.entries, before_entries);
+    assert_eq!(app.diff, before_diff);
+    assert!(app.file_reviewed("a.rs"));
 }
 
 #[test]
@@ -7182,6 +7812,31 @@ fn enter_picks_the_highlight_and_switches_to_the_commits_scope() {
     app.set_scope(Scope::LastTurn).unwrap();
     app.set_scope(app.scope.cycle()).unwrap();
     assert_eq!(app.scope, Scope::Commits);
+}
+
+#[test]
+fn a_failed_commit_pick_build_leaves_the_picker_and_visible_review_state_whole() {
+    let (r, shas) = commits_repo();
+    let mut app = app_on(&r);
+    assert!(app.set_file_reviewed("root.rs", true));
+    app.open_commit_picker();
+    let before_entries = app.entries.clone();
+    let before_diff = app.diff.clone();
+    let tree = r.git(&["rev-parse", &format!("{}^{{tree}}", shas[3])]);
+    let tree = tree.trim();
+    let object = r.path().join(".git/objects").join(&tree[..2]).join(&tree[2..]);
+    let hidden = object.with_extension("reviewr-test-hidden");
+    std::fs::rename(&object, &hidden).unwrap();
+
+    let result = app.commit_picker_pick();
+    std::fs::rename(&hidden, &object).unwrap();
+    assert!(result.is_err());
+    assert_eq!(app.mode, Mode::CommitPick, "a failed prospective build keeps the picker open");
+    assert_eq!(app.scope, Scope::Uncommitted);
+    assert_eq!(app.commit_pick, None);
+    assert_eq!(app.entries, before_entries);
+    assert_eq!(app.diff, before_diff);
+    assert!(app.file_reviewed("root.rs"));
 }
 
 #[test]
