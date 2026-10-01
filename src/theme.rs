@@ -172,6 +172,7 @@ fn build(name: &str) -> Option<Theme> {
         "rose-pine-dawn" => bundled("rose-pine-dawn", Light, ROSE_PINE_DAWN_TM, ROSE_PINE_DAWN),
         // Beyond herdr's set, paired with a vendored `.tmTheme`.
         "ayu" => bundled("ayu", Dark, AYU_TM, AYU),
+        "everforest" => bundled("everforest", Dark, EVERFOREST_TM, EVERFOREST),
         _ => return None,
     })
 }
@@ -249,6 +250,7 @@ const TOKYO_NIGHT_DAY_TM: &[u8] = include_bytes!("../assets/tokyo-night-day.tmTh
 const ROSE_PINE_TM: &[u8] = include_bytes!("../assets/rose-pine.tmTheme");
 const ROSE_PINE_DAWN_TM: &[u8] = include_bytes!("../assets/rose-pine-dawn.tmTheme");
 const AYU_TM: &[u8] = include_bytes!("../assets/ayu-dark.tmTheme");
+const EVERFOREST_TM: &[u8] = include_bytes!("../assets/everforest.tmTheme");
 
 /// Catppuccin Latte: a light theme, derived from its anchors to exercise the derivation
 /// path (and paired with `two-face`'s Latte syntax theme).
@@ -302,6 +304,9 @@ const ROSE_PINE_DAWN: Anchors =
 /// ports use), the `editor.fg` text, and its syntax palette for the accents.
 const AYU: Anchors =
     anchors(0x0d1017, 0xbfbdb6, 0xf07178, 0xaad94c, 0xffb454, 0xff8f40, 0xd2a6ff, 0x59c2ff);
+/// Everforest dark, hard background variant.
+const EVERFOREST: Anchors =
+    anchors(0x272e33, 0xd3c6aa, 0xe67e80, 0xa7c080, 0xdbbc7f, 0xe69875, 0xd699b6, 0x7fbbb3);
 
 /// Build `Anchors` from `0xRRGGBB` hex literals, so a palette reads as one compact row.
 /// One argument per anchor slot — the count is the palette's shape, not accidental.
@@ -639,6 +644,7 @@ mod tests {
         ("rose-pine", false),
         ("rose-pine-dawn", true),
         ("ayu", false),
+        ("everforest", false),
     ];
 
     #[test]

@@ -147,9 +147,15 @@ mod tests {
         // A loaded theme tokenizes rust into more than one span; a failed
         // load would yield a single plain span — so this guards the parse path for every
         // bundled theme, the only `SyntaxChoice` that can fail.
-        for name in
-            ["catppuccin", "tokyo-night", "tokyo-night-day", "rose-pine", "rose-pine-dawn", "ayu"]
-        {
+        for name in [
+            "catppuccin",
+            "tokyo-night",
+            "tokyo-night-day",
+            "rose-pine",
+            "rose-pine-dawn",
+            "ayu",
+            "everforest",
+        ] {
             let h = Highlighter::new(theme::resolve(Some(name)).syntax);
             let spans = h.highlight("let x = 1;\n", Some("rs"));
             assert!(spans[0].len() > 1, "{name}: bundled syntax theme failed to load");
