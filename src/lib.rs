@@ -18,6 +18,7 @@ pub mod export;
 pub mod file_list;
 pub mod forge;
 pub mod git;
+pub mod gitea;
 pub mod gitlab;
 pub mod herdr;
 pub mod highlight;

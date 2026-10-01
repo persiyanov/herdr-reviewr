@@ -2,11 +2,11 @@
 //!
 //! A fetch first derives [`PrFetchInput`] from local Git and one
 //! validated config snapshot, then routes to the resolved forge's provider: GitHub reads
-//! inline here through explicitly hosted `gh` GraphQL calls, GitLab and Azure DevOps through
-//! their own modules (`crate::gitlab`, `crate::azure_devops`). The normalized [`PrSnapshot`],
-//! the [`PrView`] failure states with their remedies, and the association helpers every
-//! provider shares all live here. Nothing ever writes to a forge. The `PR` tab renders what
-//! this module produces; degradation is in-band as [`PrView`].
+//! inline here through explicitly hosted `gh` GraphQL calls, GitLab, Azure DevOps, and Gitea
+//! through their own modules (`crate::gitlab`, `crate::azure_devops`, `crate::gitea`). The
+//! normalized [`PrSnapshot`], the [`PrView`] failure states with their remedies, and the
+//! association helpers every provider shares all live here. Nothing ever writes to a forge.
+//! The `PR` tab renders what this module produces; degradation is in-band as [`PrView`].
 
 use std::io::Read;
 use std::path::Path;
@@ -104,6 +104,7 @@ fn login_hint(forge: crate::git::Forge, host: &str) -> String {
         crate::git::Forge::AzureDevOps => {
             "`az login` (or `az devops login` with a PAT)".to_string()
         }
+        crate::git::Forge::Gitea => "`tea login add`".to_string(),
     }
 }
 
@@ -112,7 +113,7 @@ fn login_hint(forge: crate::git::Forge, host: &str) -> String {
 fn extension_hint(forge: crate::git::Forge) -> Option<&'static str> {
     match forge {
         crate::git::Forge::AzureDevOps => Some("`az extension add --name azure-devops`"),
-        crate::git::Forge::GitHub | crate::git::Forge::GitLab => None,
+        crate::git::Forge::GitHub | crate::git::Forge::GitLab | crate::git::Forge::Gitea => None,
     }
 }
 
@@ -335,8 +336,16 @@ enum CliError {
     Cancelled,
 }
 
-/// Run one prepared forge-CLI command to completion and return its stdout.
-fn run_cli(cmd: &mut Command, cancelled: &AtomicBool) -> Result<String, CliError> {
+/// What a forge-CLI that exited zero wrote.
+#[derive(Debug)]
+pub(crate) struct CliOutput {
+    pub(crate) stdout: String,
+    /// Diagnostics, or — for `tea api --include` — the HTTP status line and headers.
+    pub(crate) stderr: String,
+}
+
+/// Run one prepared forge-CLI command to completion and return what it wrote.
+fn run_cli(cmd: &mut Command, cancelled: &AtomicBool) -> Result<CliOutput, CliError> {
     let child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
     let mut child = match child {
         Ok(child) => child,
@@ -382,10 +391,11 @@ fn run_cli(cmd: &mut Command, cancelled: &AtomicBool) -> Result<String, CliError
     if cancelled.load(Ordering::Acquire) {
         return Err(CliError::Cancelled);
     }
+    let stderr = String::from_utf8_lossy(&stderr).into_owned();
     if status.success() {
-        return Ok(String::from_utf8_lossy(&stdout).into_owned());
+        return Ok(CliOutput { stdout: String::from_utf8_lossy(&stdout).into_owned(), stderr });
     }
-    Err(CliError::Failed { stderr: String::from_utf8_lossy(&stderr).into_owned() })
+    Err(CliError::Failed { stderr })
 }
 
 /// Run explicitly targeted `gh` arguments in `repo` and return stdout or a classified failure.
@@ -431,8 +441,20 @@ pub(crate) fn run_provider<E>(
     classify: impl FnOnce(&str) -> E,
     other: impl Fn(String) -> E,
 ) -> Result<String, E> {
+    run_provider_output(cmd, cancelled, not_found, classify, other).map(|output| output.stdout)
+}
+
+/// [`run_provider`], keeping a successful run's stderr — for a CLI that reports the HTTP
+/// status there rather than in its exit code.
+pub(crate) fn run_provider_output<E>(
+    cmd: &mut Command,
+    cancelled: &AtomicBool,
+    not_found: E,
+    classify: impl FnOnce(&str) -> E,
+    other: impl Fn(String) -> E,
+) -> Result<CliOutput, E> {
     match run_cli(cmd, cancelled) {
-        Ok(stdout) => Ok(stdout),
+        Ok(output) => Ok(output),
         Err(CliError::NotFound) => Err(not_found),
         Err(CliError::Failed { stderr }) => Err(classify(&stderr)),
         Err(CliError::Io(error)) => Err(other(error)),
@@ -622,6 +644,9 @@ fn fetch_inner(
         crate::git::Forge::AzureDevOps => {
             return Ok(crate::azure_devops::fetch(repo, input, repository, cancelled));
         }
+        crate::git::Forge::Gitea => {
+            return Ok(crate::gitea::fetch(repo, input, repository, cancelled));
+        }
         crate::git::Forge::GitHub => {}
     }
     // `gh pr checkout` recorded the pull request itself: exact, so it outranks the lookup.
@@ -742,7 +767,7 @@ pub(crate) fn admits(
 }
 
 /// The local sync against the PR's reported head: `Unknown` when either side is unpinned,
-/// otherwise the ahead/behind derivation. Shared by all three providers so the unpinned
+/// otherwise the ahead/behind derivation. Shared by every provider so the unpinned
 /// handling cannot drift.
 pub(crate) fn local_sync(
     repo: &Path,
@@ -783,14 +808,14 @@ pub struct AssocPr {
     pub(crate) number: u64,
     pub(crate) head_oid: String,
     /// Consulted only by providers whose lookup is not branch-filtered server-side
-    /// (Azure DevOps); GitHub and GitLab filter in the query itself.
+    /// (Azure DevOps, Gitea); GitHub and GitLab filter in the query itself.
     pub(crate) head_ref: String,
     pub(crate) created_at: String,
     /// The history sort key: the merge or close time. Empty for an open PR.
     pub(crate) closed_at: String,
     /// The lookup's full payload node, when it already is the complete pull request —
-    /// Azure DevOps lists full nodes, so its picks need no detail read. `None` when the
-    /// lookup returns reduced fields, as GitHub's and GitLab's do.
+    /// Azure DevOps and Gitea list full nodes, so their picks need no detail read. `None`
+    /// when the lookup returns reduced fields, as GitHub's and GitLab's do.
     pub(crate) raw: Option<Value>,
 }
 

@@ -910,6 +910,7 @@ dependencies = [
  "similar",
  "syntect",
  "tempfile",
+ "time",
  "toml",
  "two-face",
  "unicode-width",
