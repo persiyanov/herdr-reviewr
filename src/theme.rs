@@ -172,7 +172,7 @@ fn build(name: &str) -> Option<Theme> {
         "rose-pine-dawn" => bundled("rose-pine-dawn", Light, ROSE_PINE_DAWN_TM, ROSE_PINE_DAWN),
         // Beyond herdr's set, paired with a vendored `.tmTheme`.
         "ayu" => bundled("ayu", Dark, AYU_TM, AYU),
-        "everforest" => bundled("everforest", Dark, EVERFOREST_TM, EVERFOREST),
+        "everforest" => everforest(),
         _ => return None,
     })
 }
@@ -251,6 +251,17 @@ const ROSE_PINE_TM: &[u8] = include_bytes!("../assets/rose-pine.tmTheme");
 const ROSE_PINE_DAWN_TM: &[u8] = include_bytes!("../assets/rose-pine-dawn.tmTheme");
 const AYU_TM: &[u8] = include_bytes!("../assets/ayu-dark.tmTheme");
 const EVERFOREST_TM: &[u8] = include_bytes!("../assets/everforest.tmTheme");
+
+/// Everforest dark hard: derived from its anchors, except the diff row fills. Everforest
+/// ships its own (`bg_green`, `bg_red`), so the rows match the Neovim theme instead of a
+/// tint. It has no word-emphasis fills, so those stay derived.
+fn everforest() -> Theme {
+    let derived = bundled("everforest", Appearance::Dark, EVERFOREST_TM, EVERFOREST);
+    Theme {
+        palette: Palette { ins_bg: hex(0x3c4841), del_bg: hex(0x493b40), ..derived.palette },
+        ..derived
+    }
+}
 
 /// Catppuccin Latte: a light theme, derived from its anchors to exercise the derivation
 /// path (and paired with `two-face`'s Latte syntax theme).
@@ -545,6 +556,16 @@ mod tests {
         // The selection fill: saturated `blue` tinted over `base` at emphasis strength — a
         // real hue, nothing near the gray `surface1`/`surface2` cursor fills.
         assert_eq!(p.sel_bg, Color::Rgb(0x35, 0x3d, 0x7d));
+    }
+
+    #[test]
+    fn everforest_diff_rows_use_its_own_palette_fills() {
+        let p = resolve(Some("everforest")).palette;
+        assert_eq!(p.ins_bg, Color::Rgb(0x3c, 0x48, 0x41));
+        assert_eq!(p.del_bg, Color::Rgb(0x49, 0x3b, 0x40));
+        // Everything else still comes from the anchors.
+        assert_eq!(p.base, Color::Rgb(0x27, 0x2e, 0x33));
+        assert_eq!(p.text, Color::Rgb(0xd3, 0xc6, 0xaa));
     }
 
     #[test]
