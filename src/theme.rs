@@ -252,9 +252,9 @@ const ROSE_PINE_DAWN_TM: &[u8] = include_bytes!("../assets/rose-pine-dawn.tmThem
 const AYU_TM: &[u8] = include_bytes!("../assets/ayu-dark.tmTheme");
 const EVERFOREST_TM: &[u8] = include_bytes!("../assets/everforest.tmTheme");
 
-/// Everforest dark hard: derived from its anchors, except the diff row fills. Everforest
-/// ships its own (`bg_green`, `bg_red`), so the rows match the Neovim theme instead of a
-/// tint. It has no word-emphasis fills, so those stay derived.
+/// Everforest dark hard: derived from its anchors, except the diff row fills. They are the one
+/// hand-set fill in a derived theme because upstream ships its own (`bg_green`, `bg_red`),
+/// so the rows match the Neovim theme. It has no word-emphasis fills, so those stay derived.
 fn everforest() -> Theme {
     let derived = bundled("everforest", Appearance::Dark, EVERFOREST_TM, EVERFOREST);
     Theme {
@@ -315,7 +315,7 @@ const ROSE_PINE_DAWN: Anchors =
 /// ports use), the `editor.fg` text, and its syntax palette for the accents.
 const AYU: Anchors =
     anchors(0x0d1017, 0xbfbdb6, 0xf07178, 0xaad94c, 0xffb454, 0xff8f40, 0xd2a6ff, 0x59c2ff);
-/// Everforest dark, hard background variant.
+/// Everforest dark, hard background: `bg0`, `fg` and the accents from `autoload/everforest.vim`.
 const EVERFOREST: Anchors =
     anchors(0x272e33, 0xd3c6aa, 0xe67e80, 0xa7c080, 0xdbbc7f, 0xe69875, 0xd699b6, 0x7fbbb3);
 

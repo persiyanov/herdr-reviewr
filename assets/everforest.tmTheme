@@ -1,12 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Everforest dark (hard), from the sainnhe/everforest palette (MIT, https://github.com/sainnhe/everforest). -->
+<!-- Everforest dark (hard), from sainnhe/everforest (MIT, https://github.com/sainnhe/everforest).
+     Colors from autoload/everforest.vim (hard, dark); each scope takes the color of the matching
+     tree-sitter group linked in colors/everforest.vim (e.g. @string -> TSString -> Aqua). -->
 <plist version="1.0">
 <dict>
 	<key>author</key>
-	<string>sainnhe (palette); adapted for herdr-reviewr</string>
+	<string>sainnhe (palette and highlight groups); adapted for herdr-reviewr</string>
+	<key>colorSpaceName</key>
+	<string>sRGB</string>
 	<key>name</key>
 	<string>Everforest Dark Hard</string>
+	<key>semanticClass</key>
+	<string>theme.dark.everforest</string>
 	<key>settings</key>
 	<array>
 		<dict>
@@ -14,18 +20,18 @@
 			<dict>
 				<key>background</key>
 				<string>#272e33</string>
-				<key>foreground</key>
-				<string>#d3c6aa</string>
 				<key>caret</key>
 				<string>#d3c6aa</string>
+				<key>foreground</key>
+				<string>#d3c6aa</string>
+				<key>gutterForeground</key>
+				<string>#7a8478</string>
+				<key>invisibles</key>
+				<string>#495156</string>
 				<key>lineHighlight</key>
 				<string>#2e383c</string>
 				<key>selection</key>
 				<string>#4c3743</string>
-				<key>invisibles</key>
-				<string>#7a8478</string>
-				<key>gutterForeground</key>
-				<string>#7a8478</string>
 			</dict>
 		</dict>
 		<dict>
@@ -35,10 +41,10 @@
 			<string>comment, punctuation.definition.comment</string>
 			<key>settings</key>
 			<dict>
-				<key>foreground</key>
-				<string>#859289</string>
 				<key>fontStyle</key>
 				<string>italic</string>
+				<key>foreground</key>
+				<string>#859289</string>
 			</dict>
 		</dict>
 		<dict>
@@ -76,9 +82,9 @@
 		</dict>
 		<dict>
 			<key>name</key>
-			<string>Other constant</string>
+			<string>Character</string>
 			<key>scope</key>
-			<string>constant.character, constant.other</string>
+			<string>constant.character</string>
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
@@ -225,7 +231,7 @@
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
-				<string>#dbbc7f</string>
+				<string>#a7c080</string>
 			</dict>
 		</dict>
 		<dict>
@@ -246,10 +252,88 @@
 			<string>markup.heading, markup.heading entity.name</string>
 			<key>settings</key>
 			<dict>
-				<key>foreground</key>
-				<string>#e67e80</string>
 				<key>fontStyle</key>
 				<string>bold</string>
+				<key>foreground</key>
+				<string>#e69875</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Heading 1</string>
+			<key>scope</key>
+			<string>markup.heading.1, markup.heading.1 entity.name</string>
+			<key>settings</key>
+			<dict>
+				<key>fontStyle</key>
+				<string>bold</string>
+				<key>foreground</key>
+				<string>#e67e80</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Heading 2</string>
+			<key>scope</key>
+			<string>markup.heading.2, markup.heading.2 entity.name</string>
+			<key>settings</key>
+			<dict>
+				<key>fontStyle</key>
+				<string>bold</string>
+				<key>foreground</key>
+				<string>#e69875</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Heading 3</string>
+			<key>scope</key>
+			<string>markup.heading.3, markup.heading.3 entity.name</string>
+			<key>settings</key>
+			<dict>
+				<key>fontStyle</key>
+				<string>bold</string>
+				<key>foreground</key>
+				<string>#dbbc7f</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Heading 4</string>
+			<key>scope</key>
+			<string>markup.heading.4, markup.heading.4 entity.name</string>
+			<key>settings</key>
+			<dict>
+				<key>fontStyle</key>
+				<string>bold</string>
+				<key>foreground</key>
+				<string>#a7c080</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Heading 5</string>
+			<key>scope</key>
+			<string>markup.heading.5, markup.heading.5 entity.name</string>
+			<key>settings</key>
+			<dict>
+				<key>fontStyle</key>
+				<string>bold</string>
+				<key>foreground</key>
+				<string>#7fbbb3</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Heading 6</string>
+			<key>scope</key>
+			<string>markup.heading.6, markup.heading.6 entity.name</string>
+			<key>settings</key>
+			<dict>
+				<key>fontStyle</key>
+				<string>bold</string>
+				<key>foreground</key>
+				<string>#d699b6</string>
 			</dict>
 		</dict>
 		<dict>
@@ -259,8 +343,6 @@
 			<string>markup.bold</string>
 			<key>settings</key>
 			<dict>
-				<key>foreground</key>
-				<string>#e69875</string>
 				<key>fontStyle</key>
 				<string>bold</string>
 			</dict>
@@ -272,8 +354,6 @@
 			<string>markup.italic</string>
 			<key>settings</key>
 			<dict>
-				<key>foreground</key>
-				<string>#dbbc7f</string>
 				<key>fontStyle</key>
 				<string>italic</string>
 			</dict>
@@ -282,13 +362,24 @@
 			<key>name</key>
 			<string>Link</string>
 			<key>scope</key>
-			<string>markup.underline.link, string.other.link</string>
+			<string>markup.underline.link</string>
+			<key>settings</key>
+			<dict>
+				<key>fontStyle</key>
+				<string>underline</string>
+				<key>foreground</key>
+				<string>#7fbbb3</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Link text</string>
+			<key>scope</key>
+			<string>string.other.link</string>
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
-				<string>#7fbbb3</string>
-				<key>fontStyle</key>
-				<string>underline</string>
+				<string>#dbbc7f</string>
 			</dict>
 		</dict>
 		<dict>
@@ -311,8 +402,6 @@
 			<dict>
 				<key>foreground</key>
 				<string>#859289</string>
-				<key>fontStyle</key>
-				<string>italic</string>
 			</dict>
 		</dict>
 		<dict>
@@ -360,9 +449,5 @@
 			</dict>
 		</dict>
 	</array>
-	<key>semanticClass</key>
-	<string>theme.dark.everforest</string>
-	<key>colorSpaceName</key>
-	<string>sRGB</string>
 </dict>
 </plist>

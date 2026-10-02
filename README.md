@@ -509,7 +509,7 @@ herdr plugin link .
 
 Structured (JSON) export, a side-by-side split view, mark-file-reviewed,
 named-key notation for keybindings, OSC light/dark theme autodetect, more themes
-(`kanagawa`, `vesper`, `everforest`, a dark `github`), a `terminal`-following palette,
+(`kanagawa`, `vesper`, a dark `github`), a `terminal`-following palette,
 and OSC 52 clipboard.
 
 ## Sponsors
@@ -530,4 +530,4 @@ Bundled `.tmTheme` syntax files in `assets/`, each under its own license:
 - [Tokyo Night](https://github.com/folke/tokyonight.nvim) (`tokyo-night`, `tokyo-night-day`) — Apache-2.0.
 - [Rosé Pine](https://github.com/rose-pine/tm-theme) (`rose-pine`, `rose-pine-dawn`) — MIT.
 - [ayu](https://github.com/dempfi/ayu) (`ayu`) — MIT, converted from its Sublime color scheme.
-- [Everforest](https://github.com/sainnhe/everforest) (`everforest`, dark hard) — MIT; `.tmTheme` built from its palette.
+- [Everforest](https://github.com/sainnhe/everforest) (`everforest`) — MIT, built from its palette and highlight groups.
