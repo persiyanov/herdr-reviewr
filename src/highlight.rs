@@ -148,7 +148,7 @@ mod tests {
         // load would yield a single plain span — so this guards the parse path for every
         // bundled theme, the only `SyntaxChoice` that can fail.
         for name in
-            ["catppuccin", "ayu", "tokyo-night", "tokyo-night-day", "rose-pine", "rose-pine-dawn"]
+            ["catppuccin", "tokyo-night", "tokyo-night-day", "rose-pine", "rose-pine-dawn", "ayu"]
         {
             let h = Highlighter::new(theme::resolve(Some(name)).syntax);
             let spans = h.highlight("let x = 1;\n", Some("rs"));

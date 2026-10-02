@@ -151,7 +151,6 @@ fn build(name: &str) -> Option<Theme> {
         "catppuccin" => catppuccin(),
         "catppuccin-latte" => catppuccin_latte(),
         "dracula" => derived("dracula", Dark, E::Dracula, DRACULA),
-        "ayu" => bundled("ayu", Dark, AYU_TM, AYU),
         "nord" => derived("nord", Dark, E::Nord, NORD),
         "gruvbox" => derived("gruvbox", Dark, E::GruvboxDark, GRUVBOX),
         "gruvbox-light" => derived("gruvbox-light", Light, E::GruvboxLight, GRUVBOX_LIGHT),
@@ -171,6 +170,8 @@ fn build(name: &str) -> Option<Theme> {
         "tokyo-night-day" => bundled("tokyo-night-day", Light, TOKYO_NIGHT_DAY_TM, TOKYO_NIGHT_DAY),
         "rose-pine" => bundled("rose-pine", Dark, ROSE_PINE_TM, ROSE_PINE),
         "rose-pine-dawn" => bundled("rose-pine-dawn", Light, ROSE_PINE_DAWN_TM, ROSE_PINE_DAWN),
+        // Beyond herdr's set, paired with a vendored `.tmTheme`.
+        "ayu" => bundled("ayu", Dark, AYU_TM, AYU),
         _ => return None,
     })
 }
@@ -243,11 +244,11 @@ fn bundled(
 /// kept as the byte-identical source of today's highlighting). Licenses listed in the
 /// README's License section.
 const MOCHA_TM: &[u8] = include_bytes!("../assets/Catppuccin Mocha.tmTheme");
-const AYU_TM: &[u8] = include_bytes!("../assets/ayu-dark.tmTheme");
 const TOKYO_NIGHT_TM: &[u8] = include_bytes!("../assets/tokyo-night.tmTheme");
 const TOKYO_NIGHT_DAY_TM: &[u8] = include_bytes!("../assets/tokyo-night-day.tmTheme");
 const ROSE_PINE_TM: &[u8] = include_bytes!("../assets/rose-pine.tmTheme");
 const ROSE_PINE_DAWN_TM: &[u8] = include_bytes!("../assets/rose-pine-dawn.tmTheme");
+const AYU_TM: &[u8] = include_bytes!("../assets/ayu-dark.tmTheme");
 
 /// Catppuccin Latte: a light theme, derived from its anchors to exercise the derivation
 /// path (and paired with `two-face`'s Latte syntax theme).
@@ -267,8 +268,6 @@ const CATPPUCCIN_LATTE: Anchors =
 /// (red, green, yellow, orange, purple, blue); surfaces and diff fills are derived.
 const DRACULA: Anchors =
     anchors(0x282a36, 0xf8f8f2, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xffb86c, 0xbd93f9, 0x8be9fd);
-const AYU: Anchors =
-    anchors(0x0a0e14, 0xb3b1ad, 0xf07178, 0xc2d94c, 0xffb454, 0xff8f40, 0xd2a6ff, 0x59c2ff);
 const NORD: Anchors =
     anchors(0x2e3440, 0xd8dee9, 0xbf616a, 0xa3be8c, 0xebcb8b, 0xd08770, 0xb48ead, 0x81a1c1);
 const GRUVBOX: Anchors =
@@ -299,6 +298,10 @@ const ROSE_PINE: Anchors =
     anchors(0x191724, 0xe0def4, 0xeb6f92, 0x9ccfd8, 0xf6c177, 0xebbcba, 0xc4a7e7, 0x31748f);
 const ROSE_PINE_DAWN: Anchors =
     anchors(0xfaf4ed, 0x575279, 0xb4637a, 0x56949f, 0xea9d34, 0xd7827e, 0x907aa9, 0x286983);
+/// ayu Dark from `ayu-colors` 9.1: the `ui.bg` base (the terminal background ayu's own
+/// ports use), the `editor.fg` text, and its syntax palette for the accents.
+const AYU: Anchors =
+    anchors(0x0d1017, 0xbfbdb6, 0xf07178, 0xaad94c, 0xffb454, 0xff8f40, 0xd2a6ff, 0x59c2ff);
 
 /// Build `Anchors` from `0xRRGGBB` hex literals, so a palette reads as one compact row.
 /// One argument per anchor slot — the count is the palette's shape, not accidental.
@@ -620,7 +623,6 @@ mod tests {
         ("catppuccin", false),
         ("catppuccin-latte", true),
         ("dracula", false),
-        ("ayu", false),
         ("nord", false),
         ("gruvbox", false),
         ("gruvbox-light", true),
@@ -636,6 +638,7 @@ mod tests {
         ("tokyo-night-day", true),
         ("rose-pine", false),
         ("rose-pine-dawn", true),
+        ("ayu", false),
     ];
 
     #[test]
