@@ -467,13 +467,14 @@ The known constraints:
 - **Truecolor required** — colors are 24-bit RGB with no 256/8-color fallback. Basic terminals
   render wrong colors.
 - **Appearance detection follows the host, not every terminal palette.** On open, macOS checks the
-  system interface appearance; Linux checks GNOME's `color-scheme`/GTK theme, then `$GTK_THEME` or
-  a conventional `$COLORFGBG`. Light maps to Catppuccin Latte and dark to Mocha. System changes do
-  not update an already-open pane; toggle it off/on to re-detect. Unsupported, headless, and remote
-  environments fall back to Mocha. An explicit `theme` or `--theme` always wins. reviewr does not
-  send OSC background-color queries: Crossterm's input parser does not surface OSC replies, so
-  probing stdin could consume keystrokes; Herdr's current pane API does not report appearance.
-  Terminal themes that differ from the host setting must still be selected explicitly.
+  system interface appearance; Linux checks GNOME's `color-scheme` and GTK theme, then `$GTK_THEME`.
+  A conventional `$COLORFGBG` is the final hint on either platform. Desktop commands have a short
+  timeout; when no supported probe gives a recognized value, reviewr uses its dark fallback.
+  Terminal themes that differ from the host setting must still be selected explicitly. reviewr does
+  not send OSC background-color queries:
+  Crossterm's input parser does not surface OSC replies, so probing stdin could consume keystrokes;
+  Herdr's current pane API does not report appearance. See [Theme](#theme) for palette defaults,
+  overrides, and re-detection.
 - **Add / remove are red / green** — no secondary cue for colorblind users yet.
 - **Box-drawing glyphs required**, but no Nerd Font.
 

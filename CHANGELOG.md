@@ -7,10 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **Automatic dark/light appearance on open**: reviewr samples macOS system appearance or a
-  GNOME/GTK preference on Linux, pairing Catppuccin Mocha and Latte. Toggle the pane off/on to
-  re-detect after a system change. Explicit config and CLI themes remain overrides. OSC probing is
-  intentionally avoided because Crossterm cannot safely deliver OSC replies without risking input.
+- **Automatic appearance-based themes on open.** See [Theme](README.md#theme) for behavior and
+  [Limitations](README.md#limitations) for supported detection sources and constraints.
 
 ## [0.44.0] — 2026-10-03
 
