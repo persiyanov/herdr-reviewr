@@ -137,8 +137,7 @@ pub fn run() -> Result<()> {
     }
     // Detect once after the first paint, so a slow desktop-settings command cannot leave a
     // blank pane. The bounded probe completes before normal input dispatch begins.
-    if app.plugin_config().is_some_and(|config| cfg.theme.is_none() && config.theme().is_none())
-        && let Some(appearance) = crate::appearance::detect()
+    if cfg.theme.is_none() && let Some(appearance) = crate::appearance::detect()
         && app.set_detected_appearance(appearance)
     {
         logln!("detected system appearance {appearance:?}");

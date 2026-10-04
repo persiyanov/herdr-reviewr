@@ -6044,6 +6044,9 @@ mod tests {
         assert!(!app.set_detected_appearance(crate::appearance::Appearance::Light));
         app.set_cli_theme(Some("dracula".to_owned()));
         assert_eq!(app.theme_name, "dracula", "CLI override wins over file and appearance");
+        app.set_cli_theme(None);
+        app.set_plugin_config(crate::config::PluginConfig::default());
+        assert_eq!(app.theme_name, "catppuccin-latte", "removing the file override restores detected appearance");
     }
 
     #[test]
