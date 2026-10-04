@@ -90,11 +90,12 @@ fn parse_macos_interface_style(success: bool, stdout: &str, stderr: &str) -> Opt
     if success {
         stdout.trim().eq_ignore_ascii_case("dark").then_some(Appearance::Dark)
     } else {
-        stderr
-            .contains(
-                "The domain/default pair of (kCFPreferencesAnyApplication, AppleInterfaceStyle) does not exist",
-            )
-            .then_some(Appearance::Light)
+        (stderr.contains(
+            "The domain/default pair of (kCFPreferencesAnyApplication, AppleInterfaceStyle) does not exist",
+        ) || stderr.contains(
+            "Could not find key 'AppleInterfaceStyle' in domain 'kCFPreferencesAnyApplication'.",
+        ))
+        .then_some(Appearance::Light)
     }
 }
 
@@ -213,6 +214,14 @@ mod tests {
                 false,
                 "",
                 "2024 defaults: The domain/default pair of (kCFPreferencesAnyApplication, AppleInterfaceStyle) does not exist"
+            ),
+            Some(Appearance::Light)
+        );
+        assert_eq!(
+            parse_macos_interface_style(
+                false,
+                "",
+                "Could not find key 'AppleInterfaceStyle' in domain 'kCFPreferencesAnyApplication'."
             ),
             Some(Appearance::Light)
         );
