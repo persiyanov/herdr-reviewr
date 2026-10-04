@@ -69,7 +69,12 @@ pub fn parse_gtk_theme(value: &str) -> Option<Appearance> {
 /// Classify a conventional `foreground;background` `$COLORFGBG` value when its background is
 /// one of the unambiguous ANSI black/white endpoints. Other palette indices are terminal-specific.
 pub fn parse_colorfgbg(value: &str) -> Option<Appearance> {
-    let background = value.trim().rsplit_once(';')?.1.parse::<u8>().ok()?;
+    let mut fields = value.trim().split(';');
+    let _foreground = fields.next()?.parse::<u8>().ok()?;
+    let background = fields.next()?.parse::<u8>().ok()?;
+    if fields.next().is_some() {
+        return None;
+    }
     match background {
         0 | 8 => Some(Appearance::Dark),
         7 | 15 => Some(Appearance::Light),
@@ -174,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_gtk_and_terminal_environment_hints() {
+    fn parses_gtk_and_terminal_environment_appearance_hints() {
         assert_eq!(parse_gtk_theme("'Adwaita-dark'"), Some(Appearance::Dark));
         assert_eq!(parse_gtk_theme("Adwaita:light"), Some(Appearance::Light));
         assert_eq!(parse_gtk_theme("Adwaita"), None);
@@ -182,6 +187,9 @@ mod tests {
         assert_eq!(parse_colorfgbg("0;15"), Some(Appearance::Light));
         assert_eq!(parse_colorfgbg("15;4"), None, "palette indices are terminal-specific");
         assert_eq!(parse_colorfgbg("bad"), None);
+        assert_eq!(parse_colorfgbg("bad;15"), None);
+        assert_eq!(parse_colorfgbg("15;0;15"), None);
+        assert_eq!(parse_colorfgbg("256;0"), None);
         assert_eq!(parse_colorfgbg("0"), None, "COLORFGBG needs a foreground/background pair");
     }
 

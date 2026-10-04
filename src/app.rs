@@ -1095,7 +1095,9 @@ impl App {
         }
         let previous = self.theme_name;
         self.detected_appearance = Some(appearance);
-        self.refresh_theme();
+        if self.plugin_config().is_some() {
+            self.refresh_theme();
+        }
         self.theme_name != previous
     }
 
@@ -6025,6 +6027,19 @@ mod tests {
     use crate::model::{Comment, CommitPick, Scope, Side};
     use crate::world::{PickStatus, PickVerdict};
     use std::path::PathBuf;
+
+    #[test]
+    fn detected_appearance_survives_invalid_config_for_recovery() {
+        let mut blocked = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        blocked.set_config_error("invalid config".to_owned());
+        assert!(!blocked.set_detected_appearance(crate::appearance::Appearance::Light));
+        assert_eq!(blocked.detected_appearance(), Some(crate::appearance::Appearance::Light));
+
+        let mut recovered = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        recovered.set_plugin_config(crate::config::PluginConfig::default());
+        assert!(recovered.set_detected_appearance(blocked.detected_appearance().unwrap()));
+        assert_eq!(recovered.theme_name, "catppuccin-latte");
+    }
 
     #[test]
     fn appearance_updates_follow_paired_defaults_but_explicit_themes_win() {
