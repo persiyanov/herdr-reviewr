@@ -176,7 +176,8 @@ impl ToggleDirection {
 /// One validated snapshot of `config.toml` in the resolved config directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginConfig {
-    theme: String,
+    /// An explicit palette choice. Missing means follow the detected system appearance.
+    theme: Option<String>,
     default_scope: crate::model::Scope,
     markdown_view: MarkdownView,
     navigator_position: NavigatorPosition,
@@ -194,7 +195,7 @@ pub struct PluginConfig {
 impl Default for PluginConfig {
     fn default() -> Self {
         Self {
-            theme: crate::theme::DEFAULT.to_owned(),
+            theme: None,
             default_scope: crate::model::Scope::Uncommitted,
             markdown_view: MarkdownView::Source,
             navigator_position: NavigatorPosition::Right,
@@ -212,8 +213,9 @@ impl Default for PluginConfig {
 }
 
 impl PluginConfig {
-    pub fn theme(&self) -> &str {
-        &self.theme
+    /// The explicitly configured theme, if any. `None` follows system appearance.
+    pub fn theme(&self) -> Option<&str> {
+        self.theme.as_deref()
     }
 
     /// The scope a fresh reviewr pane is built with — startup and config recovery. A reread never
@@ -384,7 +386,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         if !crate::theme::is_known(theme) {
             return Err(value_error(path, value, "theme", "a built-in theme name"));
         }
-        theme.clone_into(&mut config.theme);
+        config.theme = Some(theme.to_owned());
     }
     if let Some(value) = table.get("default_scope") {
         config.default_scope = match string_value(
@@ -802,7 +804,10 @@ mod tests {
     #[test]
     fn missing_file_uses_all_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(super::plugin_config_in(dir.path()).unwrap(), PluginConfig::default());
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config, PluginConfig::default());
+        assert_eq!(config.theme(), None, "missing theme opts into appearance following");
+        assert_eq!(config.to_json()["theme"], serde_json::Value::Null);
     }
 
     #[test]
@@ -810,7 +815,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
-        assert_eq!(config.theme(), "gruvbox");
+        assert_eq!(config.theme(), Some("gruvbox"));
         assert_eq!(config.default_scope(), Scope::Uncommitted);
         assert_eq!(config.navigator_position(), NavigatorPosition::Right);
         assert_eq!(config.toggle_placement(), TogglePlacement::Split);
@@ -840,7 +845,7 @@ mod tests {
         .unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.markdown_view(), MarkdownView::Rendered);
-        assert_eq!(config.theme(), "tokyo-night");
+        assert_eq!(config.theme(), Some("tokyo-night"));
         assert_eq!(config.default_scope(), Scope::LastTurn);
         assert_eq!(config.navigator_position(), NavigatorPosition::Bottom);
         assert_eq!(config.toggle_placement(), TogglePlacement::Overlay);

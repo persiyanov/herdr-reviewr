@@ -886,8 +886,10 @@ pub struct App {
     palette: Palette,
     /// The active theme's name, so re-resolving to the same theme is a no-op.
     theme_name: &'static str,
-    /// The `--theme` override name (highest precedence); `None` lets the config file decide.
+    /// The `--theme` override name (highest precedence); `None` lets config/appearance decide.
     cli_theme_name: Option<String>,
+    /// Host appearance sampled on open; `None` uses the dark fallback.
+    detected_appearance: Option<crate::appearance::Appearance>,
     /// The plugin is either ready with one validated snapshot or wholly blocked on its error.
     config: PluginConfigState,
     /// The last theme name requested, so re-resolving the same name skips work and logging.
@@ -1041,6 +1043,7 @@ impl App {
             palette: theme.palette,
             theme_name: theme.name,
             cli_theme_name: None,
+            detected_appearance: None,
             config: PluginConfigState::Ready(crate::config::PluginConfig::default()),
             requested_theme_name: None,
             cache: DiffCache::new(),
@@ -1076,6 +1079,24 @@ impl App {
     pub fn set_cli_theme(&mut self, name: Option<String>) {
         self.cli_theme_name = name;
         self.refresh_theme();
+    }
+
+    /// Store a fresh appearance observation, returning whether the effective palette changed.
+    pub(crate) fn detected_appearance(&self) -> Option<crate::appearance::Appearance> {
+        self.detected_appearance
+    }
+
+    pub(crate) fn set_detected_appearance(
+        &mut self,
+        appearance: crate::appearance::Appearance,
+    ) -> bool {
+        if self.detected_appearance == Some(appearance) {
+            return false;
+        }
+        let previous = self.theme_name;
+        self.detected_appearance = Some(appearance);
+        self.refresh_theme();
+        self.theme_name != previous
     }
 
     /// Apply one complete validated plugin configuration snapshot.
@@ -1236,10 +1257,11 @@ impl App {
 
     /// Re-resolve the active theme from the CLI override or current validated snapshot.
     fn refresh_theme(&mut self) {
-        let name = self
-            .cli_theme_name
-            .clone()
-            .unwrap_or_else(|| self.config_snapshot().theme().to_owned());
+        let name = crate::appearance::select_theme(
+            self.cli_theme_name.as_deref(),
+            self.config_snapshot().theme(),
+            self.detected_appearance,
+        );
         self.set_theme(Some(&name));
     }
 
@@ -6003,6 +6025,26 @@ mod tests {
     use crate::model::{Comment, CommitPick, Scope, Side};
     use crate::world::{PickStatus, PickVerdict};
     use std::path::PathBuf;
+
+    #[test]
+    fn appearance_updates_follow_paired_defaults_but_explicit_themes_win() {
+        let mut app = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        app.set_plugin_config(crate::config::PluginConfig::default());
+        assert_eq!(app.theme_name, "catppuccin", "unknown appearance uses the dark fallback");
+        assert!(app.set_detected_appearance(crate::appearance::Appearance::Light));
+        assert_eq!(app.theme_name, "catppuccin-latte");
+        assert!(!app.set_detected_appearance(crate::appearance::Appearance::Light));
+        assert!(app.set_detected_appearance(crate::appearance::Appearance::Dark));
+        assert_eq!(app.theme_name, "catppuccin");
+
+        let config_dir = tempfile::tempdir().unwrap();
+        std::fs::write(config_dir.path().join("config.toml"), "theme = \"nord\"\n").unwrap();
+        app.set_plugin_config(crate::config::plugin_config_in(config_dir.path()).unwrap());
+        assert_eq!(app.theme_name, "nord", "explicit file theme overrides detected appearance");
+        assert!(!app.set_detected_appearance(crate::appearance::Appearance::Light));
+        app.set_cli_theme(Some("dracula".to_owned()));
+        assert_eq!(app.theme_name, "dracula", "CLI override wins over file and appearance");
+    }
 
     #[test]
     fn a_pr_settled_highlight_survives_a_kept_snapshot_and_blanks_on_a_replace() {

@@ -213,7 +213,7 @@ CLI flags on the pane command:
 | --- | --- | --- |
 | `--poll <ms>` | `2000` | worktree poll interval (min `200`) |
 | `--base <ref>` | auto | base for `branch` scope, any rev, overrides the pick |
-| `--theme <name>` | `catppuccin` | UI + syntax theme (see below) |
+| `--theme <name>` | config theme, else system appearance | UI + syntax theme; overrides both (see below) |
 | `--wrap <on\|off>` | `on` | soft-wrap long diff lines (`w` toggles at runtime) |
 
 Everything else lives in reviewr's config file:
@@ -229,6 +229,7 @@ relaunch.
 The file accepts these keys:
 
 ```toml
+# Omit `theme` to follow system appearance; a value pins one palette.
 theme = "tokyo-night"
 default_scope = "branch"
 markdown_view = "rendered"
@@ -249,13 +250,18 @@ shows the error and recovers on the next refresh after you fix it.
 
 ### Theme
 
-One theme colors the whole UI, chrome and syntax together:
+One theme colors the whole UI, chrome and syntax together. By default, reviewr follows the host
+system appearance: **Catppuccin Mocha** (`catppuccin`) for dark and **Catppuccin Latte**
+(`catppuccin-latte`) for light. reviewr samples appearance once when it opens; if system
+appearance changes while it is open, close and reopen (or toggle) the pane to re-detect. Omit
+`theme` to follow appearance; an explicit config value pins a palette:
 
 ```toml
-theme = "tokyo-night"
+theme = "tokyo-night" # optional override; remove this line to follow appearance
 ```
 
-`--theme` overrides the file. Match your terminal's light or dark background. Available:
+`--theme` overrides both the file and appearance. If detection is unavailable, reviewr safely
+falls back to dark Catppuccin. Available:
 
 - **Dark:** `catppuccin`, `catppuccin-frappe`, `catppuccin-macchiato`, `dracula`, `nord`,
   `gruvbox`, `one-dark`, `solarized`, `monokai`, `tokyo-night`, `rose-pine`,
@@ -460,8 +466,14 @@ The known constraints:
 **Terminal & theme**
 - **Truecolor required** — colors are 24-bit RGB with no 256/8-color fallback. Basic terminals
   render wrong colors.
-- **Theme must match the terminal** — the pane keeps the terminal's background, and there is no
-  auto light/dark detection yet. You match the theme by hand.
+- **Appearance detection follows the host, not every terminal palette.** On open, macOS checks the
+  system interface appearance; Linux checks GNOME's `color-scheme`/GTK theme, then `$GTK_THEME` or
+  a conventional `$COLORFGBG`. Light maps to Catppuccin Latte and dark to Mocha. System changes do
+  not update an already-open pane; toggle it off/on to re-detect. Unsupported, headless, and remote
+  environments fall back to Mocha. An explicit `theme` or `--theme` always wins. reviewr does not
+  send OSC background-color queries: Crossterm's input parser does not surface OSC replies, so
+  probing stdin could consume keystrokes; Herdr's current pane API does not report appearance.
+  Terminal themes that differ from the host setting must still be selected explicitly.
 - **Add / remove are red / green** — no secondary cue for colorblind users yet.
 - **Box-drawing glyphs required**, but no Nerd Font.
 
@@ -526,7 +538,7 @@ herdr plugin link .
 ## Roadmap
 
 Structured (JSON) export, a side-by-side split view, mark-file-reviewed,
-named-key notation for keybindings, OSC light/dark theme autodetect, more themes
+named-key notation for keybindings, more themes
 (`kanagawa`, `vesper`, a dark `github`), a `terminal`-following palette,
 and OSC 52 clipboard.
 

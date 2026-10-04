@@ -9,6 +9,7 @@
 //! [`app::App`] methods and renders with [`ui`].
 
 pub mod app;
+pub mod appearance;
 pub mod azure_devops;
 pub mod browser;
 pub mod config;
@@ -82,7 +83,6 @@ pub fn run() -> Result<()> {
     cfg.plugin_config_dir = config::resolve_config_dir(|| None);
     let mut initial_config = config::plugin_config(cfg.plugin_config_dir.as_deref());
     let mut app = app_for(&cfg, &initial_config);
-
     let mut terminal = ratatui::init();
     // The kitty keyboard protocol reports modifiers on keys the legacy encoding drops — most
     // notably Ctrl/Alt+arrows — so word-jump by arrow works where the terminal supports it.
@@ -134,6 +134,19 @@ pub fn run() -> Result<()> {
     if app.status == RESOLVING_NOTE {
         app.status.clear();
         let _ = terminal.draw(|f| ui::render(f, &app));
+    }
+    // Detect once after the first paint, so a slow desktop-settings command cannot leave a
+    // blank pane. The bounded probe completes before normal input dispatch begins.
+    if app.plugin_config().is_some_and(|config| cfg.theme.is_none() && config.theme().is_none())
+        && let Some(appearance) = crate::appearance::detect()
+        && app.set_detected_appearance(appearance)
+    {
+        logln!("detected system appearance {appearance:?}");
+        if let Err(error) = terminal.draw(|f| ui::render(f, &app)) {
+            restore_terminal(kbd);
+            herdr::clear_pane_label();
+            return Err(error.into());
+        }
     }
     if initial_config.is_ok()
         && let Err(e) = app.reload()
@@ -1591,10 +1604,13 @@ fn apply_plugin_config_observation(
                 if !*recovery_inflight {
                     *epoch = epoch.wrapping_add(1);
                     *recovery_inflight = true;
-                    let (tx, cfg, target, recovery_epoch) =
-                        (recovery_tx.clone(), cfg.clone(), next, *epoch);
+                    let (tx, cfg, target, recovery_epoch, appearance) =
+                        (recovery_tx.clone(), cfg.clone(), next, *epoch, app.detected_appearance());
                     thread::spawn(move || {
                         let mut recovered = ready_app(&cfg, target.clone());
+                        if let Some(appearance) = appearance {
+                            recovered.set_detected_appearance(appearance);
+                        }
                         if let Err(error) = recovered.reload() {
                             recovered.status = format!("load failed: {error}");
                         }
@@ -3672,7 +3688,7 @@ mod refresh_tests {
             &mut pr,
         );
         assert!(!app.gesture_active(), "the theme change completes the gesture");
-        assert_eq!(app.plugin_config().unwrap().theme(), "nord");
+        assert_eq!(app.plugin_config().unwrap().theme(), Some("nord"));
     }
 
     #[test]
@@ -3710,7 +3726,7 @@ mod refresh_tests {
         let (recovery_epoch, target, recovered) =
             rx.recv_timeout(Duration::from_secs(5)).expect("recovery worker");
         assert_eq!(recovery_epoch, epoch);
-        assert_eq!(target.theme(), "gruvbox");
-        assert_eq!(recovered.plugin_config().unwrap().theme(), "gruvbox");
+        assert_eq!(target.theme(), Some("gruvbox"));
+        assert_eq!(recovered.plugin_config().unwrap().theme(), Some("gruvbox"));
     }
 }
