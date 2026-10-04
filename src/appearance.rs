@@ -82,12 +82,20 @@ pub fn parse_colorfgbg(value: &str) -> Option<Appearance> {
     }
 }
 
-/// Parse the successful output of `defaults read -g AppleInterfaceStyle`.
+/// Parse the result of `defaults read -g AppleInterfaceStyle`.
 ///
-/// macOS omits the key in Light mode; a completed query without `Dark` is treated as Light.
-/// A command that cannot start or times out remains unknown.
-pub fn parse_macos_interface_style(value: &str) -> Appearance {
-    if value.trim().eq_ignore_ascii_case("dark") { Appearance::Dark } else { Appearance::Light }
+/// `Dark` is recognized on success; macOS's missing-key diagnostic means Light. All other
+/// results, including timeouts, remain unknown.
+fn parse_macos_interface_style(success: bool, stdout: &str, stderr: &str) -> Option<Appearance> {
+    if success {
+        stdout.trim().eq_ignore_ascii_case("dark").then_some(Appearance::Dark)
+    } else {
+        stderr
+            .contains(
+                "The domain/default pair of (kCFPreferencesAnyApplication, AppleInterfaceStyle) does not exist",
+            )
+            .then_some(Appearance::Light)
+    }
 }
 
 const COMMAND_TIMEOUT: Duration = Duration::from_millis(400);
@@ -97,12 +105,11 @@ const COMMAND_TIMEOUT: Duration = Duration::from_millis(400);
 pub(crate) fn detect() -> Option<Appearance> {
     #[cfg(target_os = "macos")]
     if let Some(result) = command_output("defaults", &["read", "-g", "AppleInterfaceStyle"]) {
-        if result.success {
-            return Some(parse_macos_interface_style(&result.stdout));
+        let appearance =
+            parse_macos_interface_style(result.success, &result.stdout, &result.stderr);
+        if appearance.is_some() {
+            return appearance;
         }
-        // The global key is absent in the normal Light appearance. A command timeout/spawn error
-        // is `None` above and falls through to other hints instead.
-        return Some(Appearance::Light);
     }
 
     #[cfg(target_os = "linux")]
@@ -132,6 +139,7 @@ pub(crate) fn detect() -> Option<Appearance> {
 struct CommandOutput {
     success: bool,
     stdout: String,
+    stderr: String,
 }
 
 /// Run a desktop-preference command off the frame loop with a strict deadline.
@@ -140,7 +148,7 @@ fn command_output(program: &str, args: &[&str]) -> Option<CommandOutput> {
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .ok()?;
     let deadline = Instant::now() + COMMAND_TIMEOUT;
@@ -151,6 +159,7 @@ fn command_output(program: &str, args: &[&str]) -> Option<CommandOutput> {
                 return Some(CommandOutput {
                     success: status.success(),
                     stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
                 });
             }
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
@@ -194,10 +203,21 @@ mod tests {
     }
 
     #[test]
-    fn macos_missing_dark_value_means_light_after_a_successful_query() {
-        assert_eq!(parse_macos_interface_style("Dark\n"), Appearance::Dark);
-        assert_eq!(parse_macos_interface_style(""), Appearance::Light);
-        assert_eq!(parse_macos_interface_style("Light"), Appearance::Light);
+    fn macos_defaults_results_only_classify_known_states() {
+        assert_eq!(parse_macos_interface_style(true, "Dark\n", ""), Some(Appearance::Dark));
+        assert_eq!(parse_macos_interface_style(true, "", ""), None);
+        assert_eq!(parse_macos_interface_style(true, "Light", ""), None);
+        assert_eq!(parse_macos_interface_style(true, "unexpected", ""), None);
+        assert_eq!(
+            parse_macos_interface_style(
+                false,
+                "",
+                "2024 defaults: The domain/default pair of (kCFPreferencesAnyApplication, AppleInterfaceStyle) does not exist"
+            ),
+            Some(Appearance::Light)
+        );
+        assert_eq!(parse_macos_interface_style(false, "", "Permission denied"), None);
+        assert_eq!(parse_macos_interface_style(false, "", "database unavailable"), None);
     }
 
     #[test]
