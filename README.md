@@ -166,11 +166,13 @@ The keys below are defaults. You can rebind every action, even to several keys a
 Plus the usual caret moves: arrows, `Home` / `End`, `Ctrl+A` / `Ctrl+E`, `Alt+b` / `Alt+f` word
 jumps, and `Ctrl+W` / `Ctrl+U` / `Ctrl+K` deletes.
 
-**PR tab** (read-only)
+**PR tab** (reads only from the forge)
 
 | Key | Action |
 | --- | --- |
 | `j` `k` | Move through description and comments |
+| `c` | On a draft: write or edit a rework note for the agent |
+| `s` / `y` | Send queued notes to the agent / copy them |
 | `PageUp` `PageDown` | Scroll focused pane |
 | `o` | Open PR in browser |
 | `r` | Refresh |
@@ -186,7 +188,10 @@ links, and scroll with the wheel.
   folder with a changed file under it shows a dot. Ignored paths show dimmed.
 - **PR** — a read-only mirror of the branch's pull request (GitHub, Azure DevOps) or merge
   request (GitLab): state, checks, description, and comments, rendered as markdown. reviewr
-  never writes to the forge.
+  never writes to the forge. Your unsubmitted drafts (GitLab draft notes, GitHub pending
+  review comments) lead the comment list, marked `draft`; a draft reply sits in its thread.
+  `c` on a draft queues a rework note: `s` sends the agent the quoted draft and your
+  suggestion, and asks it to reword, not post.
 
 ## Diff scopes
 

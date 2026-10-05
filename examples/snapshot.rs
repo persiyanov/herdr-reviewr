@@ -367,6 +367,7 @@ fn scene_pr(repo: &Path, theme: &str) -> App {
         is_resolved: false,
         is_outdated: false,
         replies: Vec::new(),
+        draft_id: None,
     };
     app.pr = PrView::Pr(Box::new(PrSnapshot {
         number: 42,

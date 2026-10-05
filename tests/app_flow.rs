@@ -3003,6 +3003,7 @@ fn changed_count_and_staleness_stay_scope_based_on_all_files() {
         text: "?".into(),
         diff_anchored: true,
         rev: herdr_reviewr::model::Rev::Worktree,
+        draft: None,
     };
     app.store.add(comment.clone());
 
@@ -7964,6 +7965,7 @@ fn editing_a_stale_comment_leaves_the_open_markdown_rendered() {
         text: "note".into(),
         diff_anchored: true,
         rev: herdr_reviewr::model::Rev::Worktree,
+        draft: None,
     });
     app.open_list();
     app.start_edit();
@@ -10098,4 +10100,98 @@ fn the_line_field_closes_when_its_file_or_tab_changes() {
     open_find(&mut app, &keymap);
     app.set_tab(Tab::Pr).unwrap();
     assert_eq!(app.mode, Mode::Normal, "the PR tab closes find");
+}
+
+/// A general draft, a published thread with a draft reply, and a published comment.
+fn drafts_snapshot() -> herdr_reviewr::forge::PrView {
+    use herdr_reviewr::forge::{Comment, PrSnapshot, PrView, Reply};
+    PrView::Pr(Box::new(PrSnapshot {
+        number: 1497,
+        comments: vec![
+            Comment {
+                author: "you".into(),
+                body: "Split the commit.".into(),
+                created_at: String::new(),
+                draft_id: Some(684_068),
+                ..common::comment()
+            },
+            Comment {
+                body: "Published root.".into(),
+                replies: vec![Reply {
+                    author: "you".into(),
+                    author_is_bot: false,
+                    body: "Agreed.".into(),
+                    created_at: String::new(),
+                    draft_id: Some(684_070),
+                }],
+                ..common::comment()
+            },
+            Comment { body: "Published only.".into(), ..common::comment() },
+        ],
+        ..common::pr_snapshot()
+    }))
+}
+
+#[test]
+fn a_rework_note_on_a_draft_queues_and_sends_to_the_agent() {
+    use herdr_reviewr::app::Tab;
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.set_tab(Tab::Pr).unwrap();
+    app.pr_forge = herdr_reviewr::git::Forge::GitLab;
+    app.pr = drafts_snapshot();
+
+    let acts: Vec<_> = app.footer_bands().into_iter().map(|(a, _)| a).collect();
+    assert!(acts.contains(&FooterAction::Rework), "a draft row offers the rework key");
+    press(&mut app, &keymap, KeyCode::Char('c'));
+    assert!(matches!(app.mode, Mode::Composing { editing: None }));
+    assert_eq!(app.pending_location().as_deref(), Some("MR !1497 draft note 684068"));
+    typed(&mut app, "one sentence");
+    press(&mut app, &keymap, KeyCode::Enter);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.store.len(), 1);
+
+    // `c` again edits the queued note instead of adding a second one.
+    press(&mut app, &keymap, KeyCode::Char('c'));
+    assert!(matches!(app.mode, Mode::Composing { editing: Some(0) }));
+    assert_eq!(app.input, "one sentence");
+    press(&mut app, &keymap, KeyCode::Esc);
+
+    // The thread row targets its draft reply.
+    app.pr_move(1);
+    press(&mut app, &keymap, KeyCode::Char('c'));
+    typed(&mut app, "add the reason");
+    press(&mut app, &keymap, KeyCode::Enter);
+    assert_eq!(app.store.len(), 2);
+
+    // A refresh keeps the queued notes.
+    app.pr = drafts_snapshot();
+    assert_eq!(app.store.len(), 2, "comments survive a PR refresh");
+
+    let target = FakeTarget::ok();
+    assert!(app.export(&target));
+    let sent = target.last();
+    assert!(sent.contains("MR !1497 draft note 684068\n> Split the commit.\n"), "{sent}");
+    assert!(sent.contains("Reword this draft note. Do not post it. Suggestion: one sentence"));
+    assert!(sent.contains("MR !1497 draft reply 684070\n> Agreed.\n"), "{sent}");
+    assert!(app.store.is_empty());
+}
+
+#[test]
+fn a_published_row_takes_no_rework_note() {
+    use herdr_reviewr::app::Tab;
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.set_tab(Tab::Pr).unwrap();
+    app.pr_forge = herdr_reviewr::git::Forge::GitLab;
+    app.pr = drafts_snapshot();
+    app.pr_move(2);
+    let acts: Vec<_> = app.footer_bands().into_iter().map(|(a, _)| a).collect();
+    assert!(!acts.contains(&FooterAction::Rework), "a published row offers no rework key");
+    press(&mut app, &keymap, KeyCode::Char('c'));
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.status, "only a draft takes a rework note");
+    assert!(app.store.is_empty());
 }

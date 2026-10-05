@@ -128,11 +128,64 @@ pub struct Comment {
     pub diff_anchored: bool,
     /// Where the new side was read.
     pub rev: Rev,
+    /// Set on a rework note: the agent rewords this PR draft note. `lines` quotes its body.
+    pub draft: Option<DraftRef>,
+}
+
+/// The PR draft note a rework note targets.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DraftRef {
+    pub forge: crate::git::Forge,
+    pub number: u64,
+    pub draft_id: u64,
+    /// The draft's `path:line` anchor. `None` for a general draft.
+    pub anchor: Option<String>,
+    pub reply: bool,
+}
+
+impl DraftRef {
+    /// The rework note for this draft: `body` quoted, `text` the reviewer's suggestion.
+    pub fn note(self, body: &str, text: String) -> Comment {
+        let lines = body
+            .lines()
+            .map(|line| format!("> {line}").trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Comment {
+            file: String::new(),
+            side: Side::New,
+            start: 0,
+            end: 0,
+            lines,
+            text,
+            diff_anchored: false,
+            rev: Rev::Worktree,
+            draft: Some(self),
+        }
+    }
+
+    fn location(&self) -> String {
+        let (n, id) = (self.number, self.draft_id);
+        let mut out = match (self.forge, self.reply) {
+            (crate::git::Forge::GitLab, false) => format!("MR !{n} draft note {id}"),
+            (crate::git::Forge::GitLab, true) => format!("MR !{n} draft reply {id}"),
+            (_, false) => format!("PR #{n} pending comment {id}"),
+            (_, true) => format!("PR #{n} pending reply {id}"),
+        };
+        if let Some(anchor) = &self.anchor {
+            out.push_str(" at ");
+            out.push_str(anchor);
+        }
+        out
+    }
 }
 
 impl Comment {
     /// The `path:start-end` (or `path:line`) location, with ` (removed)` when old-side.
     pub fn location(&self) -> String {
+        if let Some(draft) = &self.draft {
+            return draft.location();
+        }
         let range = if self.start == self.end {
             format!("{}:{}", self.file, self.start)
         } else {
@@ -233,6 +286,7 @@ mod tests {
             text: text.into(),
             diff_anchored: true,
             rev: Rev::Worktree,
+            draft: None,
         }
     }
 

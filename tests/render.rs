@@ -2337,6 +2337,7 @@ fn a_finding_paints_its_replies_in_the_read_pane() {
                 author_is_bot: false,
                 body: "Addressed in abc".into(),
                 created_at: "2026-06-27T11:30:00Z".into(),
+                draft_id: None,
             }],
             ..common::comment()
         }],
@@ -2350,6 +2351,77 @@ fn a_finding_paints_its_replies_in_the_read_pane() {
     assert!(out.contains('─'), "a rule separates turns:\n{out}");
     assert!(!out.contains("open on"), "{out}");
     assert!(!out.contains("↳"), "{out}");
+}
+
+#[test]
+fn a_draft_and_a_draft_reply_carry_the_draft_badge() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{Comment, PrSnapshot, PrView, Reply};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    app.pr = PrView::Pr(Box::new(PrSnapshot {
+        comments: vec![
+            Comment {
+                author: "you".into(),
+                body: "my pending remark".into(),
+                created_at: String::new(),
+                draft_id: Some(684_068),
+                ..common::comment()
+            },
+            Comment {
+                body: "published root".into(),
+                replies: vec![Reply {
+                    author: "you".into(),
+                    author_is_bot: false,
+                    body: "pending reply".into(),
+                    created_at: String::new(),
+                    draft_id: Some(684_071),
+                }],
+                ..common::comment()
+            },
+        ],
+        ..common::pr_snapshot()
+    }));
+    let out = render(&app);
+    assert!(out.contains("comments · 2 · 2 drafts"), "the header counts drafts:\n{out}");
+    assert!(out.contains("draft reply"), "the thread row marks its draft reply:\n{out}");
+    assert!(out.contains("@you · DRAFT 684068"), "the read pane byline names the draft:\n{out}");
+    assert!(out.contains("my pending remark"), "{out}");
+}
+
+#[test]
+fn a_rework_note_composes_and_shows_under_its_draft() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{Comment, PrSnapshot, PrView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    app.pr_forge = herdr_reviewr::git::Forge::GitLab;
+    app.pr = PrView::Pr(Box::new(PrSnapshot {
+        number: 1497,
+        comments: vec![Comment {
+            author: "you".into(),
+            body: "my pending remark".into(),
+            created_at: String::new(),
+            draft_id: Some(684_068),
+            ..common::comment()
+        }],
+        ..common::pr_snapshot()
+    }));
+    app.start_pr_rework();
+    common::typed(&mut app, "make it shorter");
+    let out = render(&app);
+    assert!(out.contains("comment · MR !1497 draft note 684068"), "the composer opens:\n{out}");
+    assert!(out.contains("make it shorter"), "{out}");
+    app.submit_comment();
+    let out = render(&app);
+    assert!(out.contains("rework note · queued for the agent"), "{out}");
+    assert!(out.contains("make it shorter"), "{out}");
 }
 
 #[test]

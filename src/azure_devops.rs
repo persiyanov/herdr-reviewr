@@ -577,6 +577,7 @@ fn replies_from_thread(thread: &Value) -> Vec<Reply> {
                 author,
                 body: comment["content"].as_str().unwrap_or("").trim().to_string(),
                 created_at: comment["publishedDate"].as_str().unwrap_or("").to_string(),
+                draft_id: None,
             }
         })
         .collect()
@@ -635,6 +636,7 @@ fn merge_comments(threads: &[&Value], pr: &Value) -> Vec<Comment> {
             is_resolved,
             is_outdated: false,
             replies: replies_from_thread(thread),
+            draft_id: None,
         });
     }
     for reviewer in pr["reviewers"].as_array().into_iter().flatten() {

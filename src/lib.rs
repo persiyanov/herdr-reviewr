@@ -1625,7 +1625,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // The read-only PR tab: navigate the snapshot and open links; authoring actions are inert.
+    // The PR tab: navigate the snapshot, open links, and queue rework notes for drafts.
     if app.tab == crate::app::Tab::Pr {
         match (action, key.code) {
             (Some(K::Quit), _) => app.request_quit(),
@@ -1636,6 +1636,11 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             (Some(K::TabChanges), _) => app.set_tab(crate::app::Tab::Changes)?,
             (Some(K::TabAllFiles), _) => app.set_tab(crate::app::Tab::AllFiles)?,
             (Some(K::OpenPr), _) => app.pr_open(),
+            (Some(K::Comment), _) => app.start_pr_rework(),
+            (Some(K::Send), _) => app.send_to_agent(),
+            (Some(K::Copy), _) => {
+                app.export(&Clipboard);
+            }
             (Some(K::Search), _) => app.open_search(),
             (Some(K::NavigatorPosition), _) => app.cycle_navigator_position(),
             (Some(K::NavigatorGrow), _) => app.resize_navigator(4),
@@ -2712,6 +2717,7 @@ mod refresh_tests {
             text: "keep".into(),
             diff_anchored: true,
             rev: crate::model::Rev::Worktree,
+            draft: None,
         });
         app.set_config_error("invalid config".to_string());
         let q = Event::Key(KeyEvent::from(KeyCode::Char('q')));

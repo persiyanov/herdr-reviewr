@@ -190,6 +190,8 @@ pub struct Comment {
     pub is_outdated: bool,
     /// Replies after the root, oldest first. Empty for a single card.
     pub replies: Vec<Reply>,
+    /// The caller's unpublished GitLab draft note id. `None` when published.
+    pub draft_id: Option<u64>,
 }
 
 /// One reply on a thread. The root lives on [`Comment`].
@@ -199,6 +201,8 @@ pub struct Reply {
     pub author_is_bot: bool,
     pub body: String,
     pub created_at: String,
+    /// The caller's unpublished GitLab draft note id. `None` when published.
+    pub draft_id: Option<u64>,
 }
 
 /// What a comment is anchored to.
@@ -858,11 +862,11 @@ fn build_detail_query(number: u64) -> String {
          headRefOid isCrossRepository \
          commits(last:1){{nodes{{commit{{statusCheckRollup{{contexts(first:100){{pageInfo{{hasNextPage}} nodes{{__typename \
          ... on CheckRun{{name status conclusion}} ... on StatusContext{{context state}}}}}}}}}}}}}} \
-         reviews(last:100){{pageInfo{{hasPreviousPage}} nodes{{author{{login}} body submittedAt}}}} \
+         reviews(last:100){{pageInfo{{hasPreviousPage}} nodes{{author{{login}} body submittedAt state databaseId}}}} \
          comments(last:100){{pageInfo{{hasPreviousPage}} nodes{{author{{login}} body createdAt}}}} \
          reviewThreads(last:100){{pageInfo{{hasPreviousPage}} nodes{{id isResolved isOutdated path \
          startLine line originalStartLine originalLine diffSide \
-         comments(first:100){{pageInfo{{hasNextPage endCursor}} nodes{{author{{login}} body createdAt diffHunk}}}}}}}}}}}}}}"
+         comments(first:100){{pageInfo{{hasNextPage endCursor}} nodes{{author{{login}} body createdAt diffHunk state databaseId}}}}}}}}}}}}}}"
     )
 }
 
@@ -932,7 +936,7 @@ fn append_thread_comment_page(thread: &mut Value, page: &Value) -> Result<(), Gh
 fn thread_comments_page(target: &FetchTarget<'_>, id: &str, after: &str) -> Result<Value, GhError> {
     let q = "query($id:ID!,$after:String!){node(id:$id){... on PullRequestReviewThread{\
              comments(first:100, after:$after){pageInfo{hasNextPage endCursor} \
-             nodes{author{login} body createdAt}}}}}";
+             nodes{author{login} body createdAt diffHunk state databaseId}}}}}";
     graphql(
         target.repo,
         target.host,
@@ -1022,10 +1026,15 @@ pub(crate) fn upsert_latest(checks: &mut Vec<Check>, check: Check) {
     }
 }
 
-/// Keep each bot's latest PR-level post, then order newest first.
+/// Keep each bot's latest PR-level post, then order newest first, drafts leading.
 pub(crate) fn finish_comments(out: &mut Vec<Comment>) {
     dedup_bot_prose(out);
     out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    out.sort_by_key(|c| !carries_draft(c));
+}
+
+fn carries_draft(c: &Comment) -> bool {
+    c.draft_id.is_some() || c.replies.iter().any(|r| r.draft_id.is_some())
 }
 
 /// The latest run per check name, normalised from check runs and commit statuses.
@@ -1075,7 +1084,10 @@ fn merge_comments(reviews: &Value, issues: &Value, threads: &Value) -> Vec<Comme
         if body.is_empty() {
             continue;
         }
-        out.push(prose_comment(CommentKind::Review, &r["author"], body, r["submittedAt"].as_str()));
+        let mut review =
+            prose_comment(CommentKind::Review, &r["author"], body, r["submittedAt"].as_str());
+        review.draft_id = pending_id(r);
+        out.push(review);
     }
 
     // Plain conversation comments (the `comment` cards).
@@ -1124,11 +1136,17 @@ fn merge_comments(reviews: &Value, issues: &Value, threads: &Value) -> Vec<Comme
             is_resolved: t["isResolved"].as_bool().unwrap_or(false),
             is_outdated: t["isOutdated"].as_bool().unwrap_or(false),
             replies: replies_from_nodes(&nodes[root_i..]),
+            draft_id: pending_id(root),
         });
     }
 
     finish_comments(&mut out);
     out
+}
+
+/// The viewer's unsubmitted review or comment: GitHub shows a `PENDING` one only to its author.
+fn pending_id(node: &Value) -> Option<u64> {
+    (node["state"].as_str() == Some("PENDING")).then(|| node["databaseId"].as_u64()).flatten()
 }
 
 fn prose_comment(
@@ -1208,6 +1226,7 @@ pub(crate) fn prose_row(
         is_resolved: false,
         is_outdated: false,
         replies: Vec::new(),
+        draft_id: None,
     }
 }
 
@@ -1227,6 +1246,7 @@ fn replies_from_nodes(nodes: &[Value]) -> Vec<Reply> {
                 author: login,
                 body: body.to_string(),
                 created_at: n["createdAt"].as_str().unwrap_or("").to_string(),
+                draft_id: pending_id(n),
             })
         })
         .collect()
@@ -1707,6 +1727,42 @@ mod tests {
     }
 
     #[test]
+    fn pending_review_comments_are_drafts_and_lead() {
+        let reviews = serde_json::json!([
+            {"author": {"login": "me"}, "state": "PENDING", "body": "Summary draft.",
+             "submittedAt": null, "databaseId": 77},
+            {"author": {"login": "ann"}, "state": "COMMENTED", "body": "Done.",
+             "submittedAt": "2026-06-27T09:00:00Z", "databaseId": 70}
+        ]);
+        let threads = serde_json::json!([
+            {"isResolved": false, "isOutdated": false, "path": "a.rs", "line": 4,
+             "diffSide": "RIGHT", "comments": {"nodes": [
+                {"author": {"login": "me"}, "body": "Pending finding.", "state": "PENDING",
+                 "databaseId": 345, "createdAt": "2026-06-27T08:00:00Z"}
+             ]}},
+            {"isResolved": false, "isOutdated": false, "path": "b.rs", "line": 9,
+             "diffSide": "RIGHT", "comments": {"nodes": [
+                {"author": {"login": "ann"}, "body": "Published.", "state": "SUBMITTED",
+                 "databaseId": 300, "createdAt": "2026-06-27T12:00:00Z"},
+                {"author": {"login": "me"}, "body": "Pending reply.", "state": "PENDING",
+                 "databaseId": 346, "createdAt": "2026-06-27T12:30:00Z"}
+             ]}}
+        ]);
+        let out = merge_comments(&reviews, &serde_json::json!([]), &threads);
+        assert_eq!(out.len(), 4);
+        // The three rows with a draft lead, newest-first among themselves.
+        assert_eq!(out[0].body, "Published.");
+        assert_eq!(out[0].draft_id, None);
+        assert_eq!(out[0].replies[0].draft_id, Some(346));
+        assert_eq!(out[1].body, "Pending finding.");
+        assert_eq!((out[1].draft_id, out[1].anchor.as_str()), (Some(345), "a.rs:4"));
+        assert_eq!(out[2].body, "Summary draft.");
+        assert_eq!((out[2].draft_id, out[2].kind), (Some(77), CommentKind::Review));
+        assert_eq!(out[3].body, "Done.");
+        assert_eq!(out[3].draft_id, None, "a submitted review is no draft");
+    }
+
+    #[test]
     fn comments_merge_three_surfaces_newest_first() {
         let reviews = serde_json::json!([
             {"author": {"login": "codex[bot]"}, "state": "COMMENTED", "body": "Codex review.", "submittedAt": "2026-06-27T10:00:00Z"}
@@ -1874,6 +1930,7 @@ mod tests {
             is_resolved: false,
             is_outdated: false,
             replies: Vec::new(),
+            draft_id: None,
         };
         let mut out = vec![
             row(CommentKind::Review, "review", "approved", ""),

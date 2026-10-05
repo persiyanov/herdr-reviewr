@@ -15,7 +15,9 @@ use crate::herdr::{self, AgentChoice, SendTarget};
 use crate::highlight::Highlighter;
 use crate::logln;
 use crate::marks::{MarkMap, Unit, diff_lines};
-use crate::model::{ChangeKind, ChangedFile, Comment, CommentStore, CommitPick, Rev, Scope, Side};
+use crate::model::{
+    ChangeKind, ChangedFile, Comment, CommentStore, CommitPick, DraftRef, Rev, Scope, Side,
+};
 use crate::rendered::{Built, Content, OldMap, RenderedIndex, RenderedInput, RenderedView, RowId};
 use crate::roles::Palette;
 use crate::theme;
@@ -486,6 +488,8 @@ pub fn find_case_sensitive(query: &str) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FooterAction {
     Comment,
+    /// Write or edit the rework note for the PR draft on the cursor's row.
+    Rework,
     Select,
     ClearSelection,
     EditComment,
@@ -630,6 +634,8 @@ pub struct App {
     armed_cross: Option<ArmedCross>,
     /// Whether this compose opened from the comments list, to return there.
     resume_list: bool,
+    /// The PR draft a new rework note targets, and the body it quotes.
+    compose_draft: Option<(DraftRef, String)>,
     /// Directories toggled away from the tab's default, by path.
     toggled_dirs: HashSet<String>,
     /// The inactive tab's saved state, swapped in on a tab switch.
@@ -829,6 +835,7 @@ impl App {
             reveal_center: false,
             armed_cross: None,
             resume_list: false,
+            compose_draft: None,
             toggled_dirs: HashSet::new(),
             stash: TabStash::default(),
             changeset: Changeset::default(),
@@ -1032,6 +1039,7 @@ impl App {
                 self.select_anchor = old.select_anchor;
                 self.comment_target = old.comment_target;
                 self.resume_list = old.resume_list;
+                self.compose_draft = old.compose_draft.take();
                 self.toggled_dirs = std::mem::take(&mut old.toggled_dirs);
                 self.stash = std::mem::take(&mut old.stash);
                 self.wrap = old.wrap;
@@ -2512,7 +2520,7 @@ impl App {
         let old_number = self.pr_snapshot().map(|s| s.number);
         let selected = self
             .pr_selected_comment()
-            .map(|c| (c.author.clone(), c.created_at.clone(), c.anchor.clone()));
+            .map(|c| (c.author.clone(), c.created_at.clone(), c.anchor.clone(), c.draft_id));
         self.pr = view;
         let offset = self.pr_description_offset();
         let restored = if on_description {
@@ -2520,9 +2528,12 @@ impl App {
                 .then_some(0)
                 .filter(|_| self.pr_snapshot().map(|s| s.number) == old_number)
         } else {
-            selected.as_ref().and_then(|(author, created, anchor)| {
+            selected.as_ref().and_then(|(author, created, anchor, draft)| {
                 let i = self.pr_snapshot()?.comments.iter().position(|c| {
-                    c.author == *author && c.created_at == *created && c.anchor == *anchor
+                    c.author == *author
+                        && c.created_at == *created
+                        && c.anchor == *anchor
+                        && c.draft_id == *draft
                 })?;
                 Some(i + offset)
             })
@@ -2599,6 +2610,46 @@ impl App {
         }
         let offset = self.pr_description_offset();
         self.pr_snapshot()?.comments.get(self.pr_cursor - offset)
+    }
+
+    /// The cursor row's draft, else its thread's newest draft reply, with the body to quote.
+    #[must_use]
+    pub fn pr_draft_target(&self) -> Option<(DraftRef, String)> {
+        let (forge, number) = (self.pr_forge, self.pr_snapshot()?.number);
+        let cm = self.pr_selected_comment()?;
+        let anchor = cm.place.as_ref().map(|_| cm.anchor.clone());
+        if let Some(draft_id) = cm.draft_id {
+            let draft = DraftRef { forge, number, draft_id, anchor, reply: false };
+            return Some((draft, cm.body.clone()));
+        }
+        let reply = cm.replies.iter().rev().find(|r| r.draft_id.is_some())?;
+        let draft_id = reply.draft_id?;
+        Some((DraftRef { forge, number, draft_id, anchor, reply: true }, reply.body.clone()))
+    }
+
+    /// The store index of the rework note queued for `draft_id`.
+    #[must_use]
+    pub fn rework_note_for(&self, draft_id: u64) -> Option<usize> {
+        self.store.iter().position(|c| c.draft.as_ref().is_some_and(|d| d.draft_id == draft_id))
+    }
+
+    /// `comment` on `PR`: write the cursor draft's rework note, or edit the queued one.
+    pub fn start_pr_rework(&mut self) {
+        let Some((draft, body)) = self.pr_draft_target() else {
+            self.status = "only a draft takes a rework note".to_string();
+            return;
+        };
+        self.resume_list = false;
+        if let Some(i) = self.rework_note_for(draft.draft_id) {
+            self.input = self.store.get(i).map(|c| c.text.clone()).unwrap_or_default();
+            self.caret = self.input.chars().count();
+            self.mode = Mode::Composing { editing: Some(i) };
+        } else {
+            self.input.clear();
+            self.caret = 0;
+            self.compose_draft = Some((draft, body));
+            self.mode = Mode::Composing { editing: None };
+        }
     }
 
     /// Move the navigator cursor by `delta`, resetting the read pane to the top.
@@ -3223,7 +3274,10 @@ impl App {
     /// Whether the list's comment is editable: only in the view it was made on.
     fn list_comment_editable(&self) -> bool {
         self.mode == Mode::List
-            && self.store.get(self.list_cursor).is_some_and(|c| self.rev_is_current(c))
+            && self
+                .store
+                .get(self.list_cursor)
+                .is_some_and(|c| c.draft.is_none() && self.rev_is_current(c))
     }
 
     /// Whether `edit` opens a file, as the footer asks.
@@ -3531,6 +3585,7 @@ impl App {
     fn leave_compose(&mut self) {
         self.input.clear();
         self.caret = 0;
+        self.compose_draft = None;
         let resume = std::mem::take(&mut self.resume_list);
         if resume && !self.store.is_empty() {
             self.list_cursor = self.list_cursor.min(self.store.len() - 1);
@@ -3553,6 +3608,14 @@ impl App {
                 logln!("comment edit [{i}] :: {text}");
                 self.store.edit(i, text);
                 self.status = "comment updated".to_string();
+            }
+            None if self.compose_draft.is_some() => {
+                if let Some((draft, body)) = self.compose_draft.take() {
+                    let c = draft.note(&body, text);
+                    logln!("rework note add {} :: {}", c.location(), c.text);
+                    self.store.add(c);
+                    self.status = "rework note added".to_string();
+                }
             }
             None => {
                 if let Some(c) = self.build_comment(text) {
@@ -3645,13 +3708,17 @@ impl App {
         let diff_anchored = self.diff.view == View::Diff;
         // A content comment reads the worktree whatever the scope.
         let rev = if diff_anchored { self.current_rev() } else { Rev::Worktree };
-        Some(Comment { file, side, start, end, lines, text, diff_anchored, rev })
+        Some(Comment { file, side, start, end, lines, text, diff_anchored, rev, draft: None })
     }
 
     /// The composer's `path:line`, while composing.
     pub fn pending_location(&self) -> Option<String> {
         match self.mode {
             Mode::Composing { editing: Some(i) } => self.store.get(i).map(Comment::location),
+            Mode::Composing { editing: None } if self.compose_draft.is_some() => {
+                let (draft, body) = self.compose_draft.clone()?;
+                Some(draft.note(&body, String::new()).location())
+            }
             Mode::Composing { editing: None } => {
                 let file = self.diff_path.clone()?;
                 let (side, start, end, _) = self.selection_anchor()?;
@@ -3665,6 +3732,7 @@ impl App {
                     text: String::new(),
                     diff_anchored: true,
                     rev: Rev::Worktree,
+                    draft: None,
                 };
                 Some(c.location())
             }
@@ -4368,8 +4436,15 @@ impl App {
         // `PR`: `o open` for any resolved PR; `move` holds only the steps the tab has.
         if self.tab == Tab::Pr {
             let mut out = Vec::new();
+            if self.pr_draft_target().is_some() {
+                out.push((A::Rework, Primary));
+            }
             if self.pr_snapshot().is_some() {
-                out.push((A::OpenPr, Primary));
+                out.push((A::OpenPr, if out.is_empty() { Primary } else { Do }));
+            }
+            if !self.store.is_empty() {
+                out.push((A::Send, Send));
+                out.push((A::Copy, Go));
             }
             out.push((A::Search, Go));
             out.push((A::TogglePane, Go));
@@ -4936,7 +5011,9 @@ impl App {
 
     /// Whether a comment's anchor may have moved: its file left the changeset, or the disk.
     pub fn is_stale(&self, c: &Comment) -> bool {
-        if c.diff_anchored {
+        if c.draft.is_some() {
+            false
+        } else if c.diff_anchored {
             !self.changeset.files.contains_key(&c.file)
         } else {
             !self.repo.join(&c.file).exists()
@@ -5486,6 +5563,7 @@ mod tests {
             text: "saved".to_string(),
             diff_anchored: true,
             rev: crate::model::Rev::Worktree,
+            draft: None,
         });
         old.mode = Mode::Composing { editing: None };
         old.resume_list = true;
@@ -5780,6 +5858,7 @@ mod tests {
             text: "note".into(),
             diff_anchored: true,
             rev: crate::model::Rev::Worktree,
+            draft: None,
         });
         app.diff_cursor = 2;
         app.start_edit();
@@ -5811,6 +5890,7 @@ mod tests {
             text: "note".into(),
             diff_anchored: true,
             rev: crate::model::Rev::Worktree,
+            draft: None,
         });
         app.rendered.content =
             Some(crate::rendered::Content { text: "# heading".into(), old: None, nothing: false });
@@ -5836,6 +5916,7 @@ mod tests {
             text: "note".into(),
             diff_anchored: true,
             rev: crate::model::Rev::Worktree,
+            draft: None,
         });
         app.diff_cursor = 2;
         app.toggle_select();
@@ -5865,6 +5946,7 @@ mod tests {
             text: "note".into(),
             diff_anchored: true,
             rev: crate::model::Rev::Worktree,
+            draft: None,
         });
         app.diff_cursor = 2;
         app.tab = super::Tab::Pr;
@@ -5886,6 +5968,7 @@ mod tests {
             text: "note".into(),
             diff_anchored: true,
             rev: crate::model::Rev::Worktree,
+            draft: None,
         });
         app.diff_cursor = 0;
         app.focus = crate::Focus::Files;

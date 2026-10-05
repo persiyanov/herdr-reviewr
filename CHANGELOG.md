@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Drafts on the PR tab**: your unsubmitted GitLab draft notes and GitHub pending review comments lead the comment list, marked `draft`, and a draft reply sits in its thread.
+- **Rework notes for drafts**: `c` on a draft queues your suggestion, and `s` sends the quoted draft to the agent to reword. reviewr still posts nothing.
+
 ## [0.45.0] — 2026-10-05
 
 ### Added

@@ -190,9 +190,9 @@ fn fetch_inner(
     let sync = crate::forge::local_sync(repo, input.local.head_oid.as_deref(), mr_head)
         .map_err(|error| GlabError::LocalGit(error.0))?;
 
-    // The three surfaces read concurrently.
+    // The four surfaces read concurrently.
     let target_path = project_path.as_str();
-    let (discussions, approvals, checks) = std::thread::scope(|scope| {
+    let (discussions, approvals, checks, drafts) = std::thread::scope(|scope| {
         let discussions =
             scope.spawn(|| newest_discussions(repo, host, target_path, iid, cancelled));
         let approvals = scope.spawn(|| {
@@ -204,22 +204,31 @@ fn fetch_inner(
             ))
         });
         let checks = scope.spawn(|| fetch_checks(repo, host, target_path, &mr, cancelled));
+        let drafts = scope.spawn(|| {
+            optional_surface(glab_api(
+                repo,
+                host,
+                &format!("projects/{target_path}/merge_requests/{iid}/draft_notes?per_page=100"),
+                cancelled,
+            ))
+        });
         (
             crate::forge::join_read(discussions, || died("discussions")),
             crate::forge::join_read(approvals, || died("approvals")),
             crate::forge::join_read(checks, || died("checks")),
+            crate::forge::join_read(drafts, || died("draft notes")),
         )
     });
     let (rows, discussions_capped) = discussions?;
     let approvals = approvals?;
     let (checks, jobs_capped) = checks?;
+    let drafts = drafts?;
 
     Ok(PrView::Pr(Box::new(build_snapshot(
         &mr,
         sync,
         checks,
-        &rows,
-        &approvals,
+        merge_comments(&rows, &approvals, &drafts),
         discussions_capped,
         jobs_capped,
     ))))
@@ -551,13 +560,12 @@ fn job_status(status: &str, allow_failure: bool) -> CheckStatus {
 
 // ---- Pure normalization (unit-tested) --------------------------------------------------
 
-/// Assemble the snapshot from the MR detail, discussion rows, and approvals responses.
+/// Assemble the snapshot from the MR detail and the merged comment rows.
 fn build_snapshot(
     mr: &Value,
     sync: Sync,
     checks: Vec<Check>,
-    rows: &[Value],
-    approvals: &Value,
+    comments: Vec<Comment>,
     comments_truncated: bool,
     checks_truncated: bool,
 ) -> PrSnapshot {
@@ -576,7 +584,7 @@ fn build_snapshot(
         merge: derive_merge(mr),
         sync,
         checks,
-        comments: merge_comments(rows, approvals),
+        comments,
         comments_truncated,
         checks_truncated,
     }
@@ -646,16 +654,21 @@ fn replies_from_discussion(discussion: &Value) -> Vec<Reply> {
                 author,
                 body: note["body"].as_str().unwrap_or("").trim().to_string(),
                 created_at: note["created_at"].as_str().unwrap_or("").to_string(),
+                draft_id: None,
             }
         })
         .collect()
 }
 
-/// Discussions and approvals as one newest-first list.
-fn merge_comments(discussions: &[Value], approvals: &Value) -> Vec<Comment> {
+/// Discussions, approvals, and draft notes as one newest-first list, drafts leading.
+fn merge_comments(discussions: &[Value], approvals: &Value, drafts: &Value) -> Vec<Comment> {
     let mut out: Vec<Comment> = Vec::new();
+    let mut threads: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for discussion in discussions {
         let Some(root) = comment_root(discussion) else { continue };
+        if let Some(id) = discussion["id"].as_str() {
+            threads.insert(id, out.len());
+        }
         let author = root["author"]["username"].as_str().unwrap_or("").to_string();
         let position = &root["position"];
         // A diff-position thread is a finding; anything else is a plain comment.
@@ -687,8 +700,10 @@ fn merge_comments(discussions: &[Value], approvals: &Value) -> Vec<Comment> {
             is_resolved,
             is_outdated: false,
             replies: replies_from_discussion(discussion),
+            draft_id: None,
         });
     }
+    merge_drafts(&mut out, &threads, drafts);
     for user in approvals["approved_by"].as_array().into_iter().flatten() {
         let author = user["user"]["username"].as_str().unwrap_or("").to_string();
         if author.is_empty() {
@@ -706,6 +721,62 @@ fn merge_comments(discussions: &[Value], approvals: &Value) -> Vec<Comment> {
     }
     finish_comments(&mut out);
     out
+}
+
+/// Drafts are always the caller's; the surface carries no username.
+const DRAFT_AUTHOR: &str = "you";
+
+/// Fold draft notes into `out`: a reply under its loaded thread, else a row of its own.
+fn merge_drafts(
+    out: &mut Vec<Comment>,
+    threads: &std::collections::HashMap<&str, usize>,
+    drafts: &Value,
+) {
+    for draft in drafts.as_array().into_iter().flatten() {
+        let Some(id) = draft["id"].as_u64() else { continue };
+        let note = draft["note"].as_str().unwrap_or("").trim();
+        let body = if note.is_empty() { "_Empty draft._".to_string() } else { note.to_string() };
+        let discussion = draft["discussion_id"].as_str().filter(|d| !d.is_empty());
+        if let Some(&row) = discussion.and_then(|d| threads.get(d)) {
+            out[row].replies.push(Reply {
+                author: DRAFT_AUTHOR.to_string(),
+                author_is_bot: false,
+                body,
+                created_at: String::new(),
+                draft_id: Some(id),
+            });
+            continue;
+        }
+        // The thread is outside the fetched discussions.
+        let body = match discussion {
+            Some(d) => format!("_Draft reply to thread `{d}`, which is not loaded._\n\n{body}"),
+            None => body,
+        };
+        let position = &draft["position"];
+        let path = position["new_path"].as_str().or_else(|| position["old_path"].as_str());
+        let (kind, anchor, place) = match path {
+            Some(path) => {
+                let ((start, end), side) = gitlab_position(position);
+                let place = crate::forge::FindingPlace::from_lines(path, start, end, side);
+                (CommentKind::Finding, place.anchor(), Some(place))
+            }
+            None => (CommentKind::Comment, "comment".to_string(), None),
+        };
+        out.push(Comment {
+            kind,
+            author: DRAFT_AUTHOR.to_string(),
+            author_is_bot: false,
+            anchor,
+            place,
+            body,
+            snippet: None,
+            created_at: String::new(),
+            is_resolved: false,
+            is_outdated: false,
+            replies: Vec::new(),
+            draft_id: Some(id),
+        });
+    }
 }
 
 fn gitlab_position(position: &Value) -> ((Option<u64>, Option<u64>), Option<crate::model::Side>) {
@@ -792,7 +863,7 @@ mod tests {
 
     #[test]
     fn snapshot_maps_the_merge_request_fields() {
-        let s = build_snapshot(&mr_node(), Sync::InSync, Vec::new(), &[], &json!({}), false, false);
+        let s = build_snapshot(&mr_node(), Sync::InSync, Vec::new(), Vec::new(), false, false);
         assert_eq!(s.number, 42);
         assert_eq!(s.title, "Add search");
         assert_eq!(s.state, PrState::Open);
@@ -1109,7 +1180,7 @@ mod tests {
             }
         ]);
         let approvals = json!({"approved_by": [{"user": {"username": "reviewer"}}]});
-        let comments = merge_comments(discussions.as_array().unwrap(), &approvals);
+        let comments = merge_comments(discussions.as_array().unwrap(), &approvals, &Value::Null);
         assert_eq!(comments.len(), 4);
         let finding = comments.iter().find(|c| c.body == "Looks wrong.").unwrap();
         assert_eq!(finding.kind, CommentKind::Finding);
@@ -1126,6 +1197,109 @@ mod tests {
             comments.iter().find(|c| c.kind == CommentKind::Review).unwrap().author,
             "reviewer"
         );
+    }
+
+    /// A draft note as GitLab returns it: no author object, no timestamp.
+    fn draft(id: u64, note: &str, discussion: Option<&str>, position: &Value) -> Value {
+        json!({"id": id, "author_id": 5, "note": note, "discussion_id": discussion,
+            "position": position, "resolve_discussion": false})
+    }
+
+    fn null_position() -> Value {
+        json!({"base_sha": null, "start_sha": null, "head_sha": null, "old_path": null,
+            "new_path": null, "position_type": null, "old_line": null, "new_line": null,
+            "line_range": null})
+    }
+
+    fn one_thread() -> Value {
+        json!([{
+            "id": "abc123",
+            "notes": [{"system": false, "body": "Published.", "author": {"username": "reviewer"},
+                "created_at": "2026-07-22T11:00:00Z"}]
+        }, {
+            "id": "def456",
+            "notes": [{"system": false, "body": "Newer.", "author": {"username": "reviewer"},
+                "created_at": "2026-07-22T12:00:00Z"}]
+        }])
+    }
+
+    #[test]
+    fn a_general_draft_is_a_leading_plain_comment() {
+        let drafts = json!([draft(684_068, "General remark.", None, &null_position())]);
+        let comments = merge_comments(one_thread().as_array().unwrap(), &json!({}), &drafts);
+        assert_eq!(comments.len(), 3);
+        let first = &comments[0];
+        assert_eq!(first.draft_id, Some(684_068));
+        assert_eq!(first.kind, CommentKind::Comment);
+        assert_eq!((first.author.as_str(), first.anchor.as_str()), ("you", "comment"));
+        assert_eq!(first.body, "General remark.");
+        assert!(first.place.is_none());
+        assert_eq!(comments[1].body, "Newer.");
+        assert!(comments[1..].iter().all(|c| c.draft_id.is_none()));
+    }
+
+    #[test]
+    fn a_positioned_draft_is_a_finding_on_its_lines() {
+        let position = json!({"position_type": "text", "old_path": "src/a.rs",
+            "new_path": "src/a.rs", "old_line": null, "new_line": 14,
+            "line_range": {"start": {"type": "new", "new_line": 12},
+                           "end": {"type": "new", "new_line": 14}}});
+        let old_only = json!({"position_type": "text", "old_path": "src/gone.rs",
+            "new_path": null, "old_line": 3, "new_line": null, "line_range": null});
+        let drafts = json!([
+            draft(684_069, "Range finding.", None, &position),
+            draft(684_070, "Old side.", None, &old_only),
+        ]);
+        let comments = merge_comments(&[], &json!({}), &drafts);
+        assert_eq!(comments.len(), 2);
+        let finding = &comments[0];
+        assert_eq!(finding.kind, CommentKind::Finding);
+        assert_eq!(finding.anchor, "src/a.rs:12-14");
+        assert_eq!(finding.place.as_ref().unwrap().side, Some(crate::model::Side::New));
+        assert_eq!(comments[1].anchor, "src/gone.rs:3");
+        assert_eq!(comments[1].place.as_ref().unwrap().side, Some(crate::model::Side::Old));
+    }
+
+    #[test]
+    fn a_reply_draft_lands_under_its_thread_and_lifts_it() {
+        let drafts = json!([draft(684_071, "Agreed, fix it.", Some("abc123"), &null_position())]);
+        let comments = merge_comments(one_thread().as_array().unwrap(), &json!({}), &drafts);
+        assert_eq!(comments.len(), 2, "a reply adds no row");
+        let thread = &comments[0];
+        assert_eq!(thread.body, "Published.");
+        assert_eq!(thread.draft_id, None);
+        assert_eq!(thread.replies.len(), 1);
+        assert_eq!(thread.replies[0].draft_id, Some(684_071));
+        assert_eq!(thread.replies[0].author, "you");
+        assert_eq!(thread.replies[0].body, "Agreed, fix it.");
+    }
+
+    #[test]
+    fn a_reply_draft_to_an_unloaded_thread_stands_alone_with_a_hint() {
+        let drafts = json!([draft(7, "Late reply.", Some("feedbeef"), &null_position())]);
+        let comments = merge_comments(one_thread().as_array().unwrap(), &json!({}), &drafts);
+        assert_eq!(comments.len(), 3);
+        assert_eq!(comments[0].draft_id, Some(7));
+        assert!(comments[0].body.contains("`feedbeef`"), "{}", comments[0].body);
+        assert!(comments[0].body.ends_with("Late reply."));
+    }
+
+    #[test]
+    fn an_empty_draft_still_shows() {
+        let drafts = json!([draft(9, "   ", None, &null_position()), {"note": "no id"}]);
+        let comments = merge_comments(&[], &json!({}), &drafts);
+        assert_eq!(comments.len(), 1, "a draft without an id is dropped");
+        assert_eq!(comments[0].draft_id, Some(9));
+        assert_eq!(comments[0].body, "_Empty draft._");
+    }
+
+    #[test]
+    fn an_unavailable_draft_surface_shows_no_drafts() {
+        let drafts = optional_surface(Err(GlabError::Unavailable("404 Not Found".into()))).unwrap();
+        let comments = merge_comments(one_thread().as_array().unwrap(), &json!({}), &drafts);
+        assert_eq!(comments.len(), 2);
+        assert!(comments.iter().all(|c| c.draft_id.is_none()));
+        assert!(optional_surface(Err(GlabError::Other("boom".into()))).is_err());
     }
 
     #[test]

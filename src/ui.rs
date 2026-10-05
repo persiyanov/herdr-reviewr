@@ -72,7 +72,11 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     if app.tab == Tab::Pr {
         render_pr_header(frame, app, p.tab);
-        render_pr_read(frame, app, p.diff);
+        let (read, composer) = pr_compose_split(app, p.diff);
+        render_pr_read(frame, app, read);
+        if let Some(area) = composer {
+            render_composer(frame, app, area);
+        }
         // `PR` never hides its navigator, so no hidden gate here.
         render_pr_nav(frame, app, p.files);
     } else {
@@ -2427,6 +2431,18 @@ fn render_find_band(frame: &mut Frame, app: &App, area: Rect) {
     anchor_input_cursor(frame, area, label.width() + caret_cell_col, 0);
 }
 
+/// The `PR` read pane and, while a rework note is composed, the composer box under it.
+fn pr_compose_split(app: &App, area: Rect) -> (Rect, Option<Rect>) {
+    if !matches!(app.mode, Mode::Composing { .. }) {
+        return (area, None);
+    }
+    let rows = box_rows(&app.input, composer_content_width(area.width as usize)).len();
+    let h = (rows as u16 + 2).clamp(3, (area.height / 2).max(3)).min(area.height);
+    let [read, composer] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(h)]).areas(area);
+    (read, Some(composer))
+}
+
 /// The inline comment input box, drawn at `area` (under the selection in the diff).
 fn render_composer(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
@@ -2567,6 +2583,7 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
     let hint = |action: K| app.keymap().hint(action).label();
     let (k, l): (String, &str) = match action {
         A::Comment => (hint(K::Comment), "comment"),
+        A::Rework => (hint(K::Comment), "rework"),
         // One word for one gesture: `v` marks a range end in the diff and the commit picker alike.
         A::Select | A::CommitAnchor => (hint(K::Select), "select"),
         A::ClearSelection => ("esc".into(), "clear"),
@@ -4242,10 +4259,19 @@ fn pr_nav_rows(app: &App, width: usize, now: std::time::SystemTime) -> Vec<PrNav
         });
     }
     rows.push(PrNavRow { spans: Vec::new(), cursor: None });
-    rows.push(PrNavRow {
-        spans: vec![Span::styled(format!("comments · {}", s.comments.len()), dim)],
-        cursor: None,
-    });
+    let drafts: usize = s
+        .comments
+        .iter()
+        .map(|c| {
+            usize::from(c.draft_id.is_some())
+                + c.replies.iter().filter(|r| r.draft_id.is_some()).count()
+        })
+        .sum();
+    let mut header = format!("comments · {}", s.comments.len());
+    if drafts > 0 {
+        let _ = write!(header, " · {drafts} draft{}", if drafts == 1 { "" } else { "s" });
+    }
+    rows.push(PrNavRow { spans: vec![Span::styled(header, dim)], cursor: None });
     let offset = app.pr_description_offset();
     rows.extend(s.comments.iter().enumerate().map(|(index, comment)| PrNavRow {
         spans: pr_comment_row(comment, width, now, p, on(index + offset)),
@@ -4278,7 +4304,7 @@ fn pr_checks_header(s: &forge::PrSnapshot) -> String {
     checks_summary(s)
 }
 
-/// One comment row: `@author anchor`, then a trailing `resolved`/`outdated` marker or the age.
+/// One comment row: `@author anchor`, then a trailing `draft`/`resolved`/`outdated` marker or the age.
 fn pr_comment_row(
     cm: &forge::Comment,
     width: usize,
@@ -4288,7 +4314,12 @@ fn pr_comment_row(
 ) -> Vec<Span<'static>> {
     let author_color =
         p.ink(if cm.author_is_bot { Ink::TextMuted } else { Ink::TextSecondary }, on);
-    let trailing = if cm.is_resolved {
+    let draft_reply = cm.replies.iter().any(|r| r.draft_id.is_some());
+    let trailing = if cm.draft_id.is_some() {
+        "draft".to_string()
+    } else if draft_reply {
+        "draft reply".to_string()
+    } else if cm.is_resolved {
         "resolved".to_string()
     } else if cm.is_outdated {
         "outdated".to_string()
@@ -4298,10 +4329,12 @@ fn pr_comment_row(
     let author = format!("@{} ", cm.author);
     let budget = width.saturating_sub(author.width() + trailing.width() + 3).max(1);
     let anchor = elide_head(&cm.anchor, budget);
+    let trailing_ink =
+        if cm.draft_id.is_some() || draft_reply { Ink::Warning } else { Ink::TextMuted };
     vec![
         Span::styled(author, Style::default().fg(author_color)),
         Span::styled(anchor, text_style(p, on)),
-        Span::styled(format!("  {trailing}"), Style::default().fg(p.ink(Ink::TextMuted, on))),
+        Span::styled(format!("  {trailing}"), Style::default().fg(p.ink(trailing_ink, on))),
     ]
 }
 
@@ -4459,11 +4492,19 @@ fn push_comment_byline(
     author: &str,
     is_bot: bool,
     created_at: &str,
+    draft_id: Option<u64>,
     now: std::time::SystemTime,
     p: &Palette,
 ) {
     let author_color = p.ink(if is_bot { Ink::TextMuted } else { Ink::TextSecondary }, Fill::Base);
     let mut spans = vec![Span::styled(format!("@{author}"), Style::default().fg(author_color))];
+    if let Some(id) = draft_id {
+        spans.push(Span::styled(SEP, Style::default().fg(p.mark(Ink::Border, Fill::Base))));
+        spans.push(Span::styled(
+            format!("DRAFT {id}"),
+            Style::default().fg(p.ink(Ink::Warning, Fill::Base)).add_modifier(Modifier::BOLD),
+        ));
+    }
     let age = relative_age(created_at, now);
     if !age.is_empty() {
         spans.push(Span::styled(SEP, Style::default().fg(p.mark(Ink::Border, Fill::Base))));
@@ -4516,7 +4557,15 @@ fn pr_read_content(app: &App, inner: Rect) -> PrReadContent {
         snippet = push_finding_quote(&mut lines, app, cm, width, p);
         let now = std::time::SystemTime::now();
         // Every turn gets a byline, so a reply never reads as the same comment.
-        push_comment_byline(&mut lines, &cm.author, cm.author_is_bot, &cm.created_at, now, p);
+        push_comment_byline(
+            &mut lines,
+            &cm.author,
+            cm.author_is_bot,
+            &cm.created_at,
+            cm.draft_id,
+            now,
+            p,
+        );
         let mut rendered = app.pr_body_render(&cm.body, width.max(1), 0);
         let offset = lines.len();
         lines.append(&mut rendered.lines);
@@ -4528,6 +4577,7 @@ fn pr_read_content(app: &App, inner: Rect) -> PrReadContent {
                 &reply.author,
                 reply.author_is_bot,
                 &reply.created_at,
+                reply.draft_id,
                 now,
                 p,
             );
@@ -4535,6 +4585,20 @@ fn pr_read_content(app: &App, inner: Rect) -> PrReadContent {
             let offset = lines.len();
             lines.append(&mut rendered.lines);
             body_meta.push((offset, rendered));
+        }
+        if let Some(note) = app
+            .pr_draft_target()
+            .and_then(|(draft, _)| app.rework_note_for(draft.draft_id))
+            .and_then(|i| app.store.get(i))
+        {
+            push_comment_rule(&mut lines, width, p);
+            lines.push(Line::from(Span::styled(
+                "rework note · queued for the agent",
+                Style::default().fg(p.ink(Ink::Comment, Fill::Base)),
+            )));
+            for piece in wrap_text(&note.text, width.max(1)) {
+                lines.push(Line::from(Span::styled(piece, text_style(p, Fill::Base))));
+            }
         }
     } else if app.pr_on_description() {
         if let Some(s) = app.pr_snapshot() {

@@ -7,7 +7,13 @@ use crate::model::Comment;
 
 /// One comment as its export block: location, snippet, then text.
 pub fn format_comment(comment: &Comment) -> String {
-    format!("{}\n{}\n{}", comment.location(), comment.lines, normalize_text(&comment.text))
+    let text = normalize_text(&comment.text);
+    let text = if comment.draft.is_some() {
+        format!("Reword this draft note. Do not post it. Suggestion: {text}")
+    } else {
+        text
+    };
+    format!("{}\n{}\n{}", comment.location(), comment.lines, text)
 }
 
 /// Comment text without blank lines, which would read as the separator between comments.
@@ -285,6 +291,7 @@ mod tests {
             text: text.into(),
             diff_anchored: true,
             rev: crate::model::Rev::Worktree,
+            draft: None,
         }
     }
 
@@ -323,5 +330,53 @@ mod tests {
         let a1 = comment("a.rs", Side::New, 3, 3, "+z", "earlier");
         let out = format_all(&[&b, &a2, &a1]);
         assert_eq!(out, "a.rs:3\n+z\nearlier\n\na.rs:20\n+y\nlater\n\nb.rs:5\n+x\ntwo");
+    }
+
+    #[test]
+    fn a_github_rework_note_names_the_pending_comment() {
+        use crate::model::DraftRef;
+        let c = DraftRef {
+            forge: crate::git::Forge::GitHub,
+            number: 12,
+            draft_id: 345,
+            anchor: Some("src/a.rs:4".into()),
+            reply: false,
+        }
+        .note("Typo.", "say which one".into());
+        assert_eq!(
+            format_comment(&c),
+            "PR #12 pending comment 345 at src/a.rs:4\n> Typo.\n\
+             Reword this draft note. Do not post it. Suggestion: say which one"
+        );
+    }
+
+    #[test]
+    fn a_rework_note_quotes_the_draft_and_asks_for_a_reword() {
+        use crate::model::DraftRef;
+        let general = DraftRef {
+            forge: crate::git::Forge::GitLab,
+            number: 1497,
+            draft_id: 684_068,
+            anchor: None,
+            reply: false,
+        }
+        .note("Split the commit.\n\nOne per fix.", "shorter, one sentence".into());
+        assert_eq!(
+            format_comment(&general),
+            "MR !1497 draft note 684068\n> Split the commit.\n>\n> One per fix.\n\
+             Reword this draft note. Do not post it. Suggestion: shorter, one sentence"
+        );
+        let reply = DraftRef {
+            forge: crate::git::Forge::GitLab,
+            number: 1497,
+            draft_id: 684_070,
+            anchor: Some("src/a.rs:12-14".into()),
+            reply: true,
+        }
+        .note("Agreed.", "add the reason".into());
+        assert!(
+            format_comment(&reply)
+                .starts_with("MR !1497 draft reply 684070 at src/a.rs:12-14\n> Agreed.\n")
+        );
     }
 }
