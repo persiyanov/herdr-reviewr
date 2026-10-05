@@ -2023,6 +2023,7 @@ fn an_unsupported_host_points_at_the_per_forge_host_keys() {
     assert!(out.contains("github_host"), "GitHub key offered:\n{out}");
     assert!(out.contains("gitlab_host"), "GitLab key offered:\n{out}");
     assert!(out.contains("azure_devops_host"), "Azure DevOps key offered:\n{out}");
+    assert!(out.contains("gitea_host"), "Gitea key offered:\n{out}");
 }
 
 #[test]
@@ -2057,6 +2058,36 @@ fn an_azure_devops_repository_renders_pr_nouns_and_remedies() {
     let out = render(&app);
     assert!(out.contains("`az login`"), "login remedy:\n{out}");
     assert!(out.contains("az devops login"), "the PAT alternative is offered:\n{out}");
+}
+
+#[test]
+fn a_gitea_repository_renders_pr_nouns_and_remedies() {
+    use herdr_reviewr::forge::{PrSnapshot, PrView};
+    use herdr_reviewr::git::Forge;
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    app.pr_forge = Forge::Gitea;
+
+    // The empty state speaks the forge's noun.
+    app.apply_pr(PrView::NoPr);
+    let out = render(&app);
+    assert!(out.contains("No pull request yet"), "Gitea empty state:\n{out}");
+
+    // The chip uses the `#` reference form.
+    app.apply_pr(PrView::Pr(Box::new(PrSnapshot { number: 1475, ..common::pr_snapshot() })));
+    let out = render(&app);
+    assert!(out.contains("#1475"), "PR reference form:\n{out}");
+
+    // Each failure names its own CLI and login command.
+    app.apply_pr(PrView::NoCli(Forge::Gitea));
+    let out = render(&app);
+    assert!(out.contains("Install `tea`"), "tea install step:\n{out}");
+    app.apply_pr(PrView::NotAuthed(Forge::Gitea, "code.corp.example".to_string()));
+    let out = render(&app);
+    assert!(out.contains("Run `tea login add`, then"), "login remedy:\n{out}");
 }
 
 #[test]

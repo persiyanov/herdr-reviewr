@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Gitea in the PR tab**: pull requests on gitea.com, or one self-hosted instance set with `gitea_host`, through the `tea` CLI: state, checks (Gitea Actions included), reviews, comments, and review threads.
+
 ## [0.45.0] — 2026-10-05
 
 ### Added

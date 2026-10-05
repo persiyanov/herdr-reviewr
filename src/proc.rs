@@ -99,8 +99,23 @@ pub(crate) enum RunError {
     Stopped,
 }
 
+/// What a tool that exited zero wrote to each pipe.
+#[derive(Debug)]
+pub(crate) struct RunOutput {
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+}
+
 /// Run `cmd` in its own process tree to its stdout; once `stop` says so, the whole tree ends.
 pub(crate) fn run_tree(cmd: Command, stop: impl Fn() -> bool) -> Result<String, RunError> {
+    run_tree_output(cmd, stop).map(|ran| ran.stdout)
+}
+
+/// [`run_tree`], keeping a successful run's stderr as well.
+pub(crate) fn run_tree_output(
+    cmd: Command,
+    stop: impl Fn() -> bool,
+) -> Result<RunOutput, RunError> {
     let mut cmd = CommandWrap::from(cmd);
     // No stdin: the terminal belongs to the pane.
     cmd.command_mut().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -143,10 +158,11 @@ pub(crate) fn run_tree(cmd: Command, stop: impl Fn() -> bool) -> Result<String, 
         }
     };
     let (stdout, stderr) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
+    let stderr = String::from_utf8_lossy(&stderr).into_owned();
     if status.success() {
-        return Ok(String::from_utf8_lossy(&stdout).into_owned());
+        return Ok(RunOutput { stdout: String::from_utf8_lossy(&stdout).into_owned(), stderr });
     }
-    Err(RunError::Failed { stderr: String::from_utf8_lossy(&stderr).into_owned() })
+    Err(RunError::Failed { stderr })
 }
 
 /// Read `pipe` to its end on a thread of its own.

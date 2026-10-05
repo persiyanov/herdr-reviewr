@@ -59,7 +59,7 @@ impl Config {
     }
 }
 
-const PLUGIN_CONFIG_KEYS: [&str; 13] = [
+const PLUGIN_CONFIG_KEYS: [&str; 14] = [
     "theme",
     "default_scope",
     "markdown_view",
@@ -70,6 +70,7 @@ const PLUGIN_CONFIG_KEYS: [&str; 13] = [
     "github_host",
     "gitlab_host",
     "azure_devops_host",
+    "gitea_host",
     "editor",
     "url_opener",
     "keybindings",
@@ -170,6 +171,7 @@ pub struct PluginConfig {
     github_host: Option<String>,
     gitlab_host: Option<String>,
     azure_devops_host: Option<String>,
+    gitea_host: Option<String>,
     editor: Option<String>,
     url_opener: Option<String>,
     keymap: crate::keymap::Keymap,
@@ -188,6 +190,7 @@ impl Default for PluginConfig {
             github_host: None,
             gitlab_host: None,
             azure_devops_host: None,
+            gitea_host: None,
             editor: None,
             url_opener: None,
             keymap: crate::keymap::Keymap::default(),
@@ -238,12 +241,17 @@ impl PluginConfig {
         self.azure_devops_host.as_deref()
     }
 
+    pub fn gitea_host(&self) -> Option<&str> {
+        self.gitea_host.as_deref()
+    }
+
     /// The forge host set one fetch resolves remotes against.
     pub fn forge_hosts(&self) -> crate::git::ForgeHosts<'_> {
         crate::git::ForgeHosts {
             github: self.github_host(),
             gitlab: self.gitlab_host(),
             azure_devops: self.azure_devops_host(),
+            gitea: self.gitea_host(),
         }
     }
 
@@ -433,6 +441,9 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
     if let Some(value) = table.get("azure_devops_host") {
         config.azure_devops_host = Some(parse_forge_host(path, "azure_devops_host", value)?);
     }
+    if let Some(value) = table.get("gitea_host") {
+        config.gitea_host = Some(parse_forge_host(path, "gitea_host", value)?);
+    }
     if let Some(value) = table.get("editor") {
         let command = value
             .as_str()
@@ -469,6 +480,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         ("github_host", &config.github_host),
         ("gitlab_host", &config.gitlab_host),
         ("azure_devops_host", &config.azure_devops_host),
+        ("gitea_host", &config.gitea_host),
     ];
     for (index, (key, value)) in host_keys.iter().enumerate() {
         let Some(value) = value else { continue };
@@ -856,6 +868,10 @@ mod tests {
             // Any organization label matches the built-in wildcard.
             ("azure_devops_host = \"foo.visualstudio.com\"\n", "`azure_devops_host`"),
             ("github_host = \"bar.visualstudio.com\"\n", "`github_host`"),
+            ("gitea_host = \"gitea.com\"\n", "`gitea_host`"),
+            ("gitea_host = \"github.com\"\n", "`gitea_host`"),
+            ("github_host = \"gitea.com\"\n", "`github_host`"),
+            ("gitea_host = \"https://code.corp.example\"\n", "`gitea_host`"),
         ];
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -904,6 +920,9 @@ mod tests {
             ("github_host", "azure_devops_host"),
             ("gitlab_host", "azure_devops_host"),
             ("github_host", "gitlab_host"),
+            ("github_host", "gitea_host"),
+            ("gitlab_host", "gitea_host"),
+            ("azure_devops_host", "gitea_host"),
         ];
         for (first, second) in pairs {
             std::fs::write(
@@ -916,6 +935,16 @@ mod tests {
             assert!(error.contains(second), "{first}/{second}: {error}");
             assert!(error.contains("code.corp.example"), "{first}/{second}: {error}");
         }
+    }
+
+    #[test]
+    fn gitea_host_parses_into_the_forge_host_set() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "gitea_host = \"Code.Corp.EXAMPLE\"\n")
+            .unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.gitea_host(), Some("code.corp.example"));
+        assert_eq!(config.forge_hosts().gitea, Some("code.corp.example"));
     }
 
     #[test]
