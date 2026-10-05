@@ -1887,6 +1887,10 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             (Some(K::TabChanges), _) => app.set_tab(crate::app::Tab::Changes)?,
             (Some(K::TabAllFiles), _) => app.set_tab(crate::app::Tab::AllFiles)?,
             (Some(K::OpenPr), _) => app.pr_open(),
+            // The sends address the agent, never the forge — the tab stays read-only. `send`
+            // takes the comment under the navigator cursor; `send-all` takes every comment.
+            (Some(K::Send), _) => app.pr_send_selected(),
+            (Some(K::SendAll), _) => app.pr_send_all(),
             (Some(K::Search), _) => app.open_search(),
             (Some(K::NavigatorPosition), _) => app.cycle_navigator_position(),
             (Some(K::NavigatorGrow), _) => app.resize_navigator(4),
@@ -1989,10 +1993,11 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::Find => app.open_find(),
             K::GotoLine => app.open_line(),
             K::Keys => app.toggle_keys(),
-            // `delete` off the diff and `open-pr` off the `PR` tab are inert. `edit` is not:
-            // it reaches the navigator's file rows too. `quit-discard` only answers the quit
-            // question, above.
-            K::Delete | K::OpenPr | K::QuitDiscard => {}
+            // `delete` off the diff, `open-pr` and `send-all` off the `PR` tab, are inert —
+            // on the file tabs `send` already takes every comment, so `send-all` would only
+            // duplicate it. `edit` is not: it reaches the navigator's file rows too.
+            // `quit-discard` only answers the quit question, above.
+            K::Delete | K::OpenPr | K::SendAll | K::QuitDiscard => {}
         }
         return Ok(());
     }

@@ -174,6 +174,8 @@ jumps, and `Ctrl+W` / `Ctrl+U` / `Ctrl+K` deletes.
 | `PageUp` `PageDown` | Scroll focused pane |
 | `o` | Open PR in browser |
 | `r` | Refresh |
+| `s` | Send the selected comment to the agent |
+| `a` | Send all comments to the agent |
 
 The mouse works too. Drag over any text to select and copy it, double-click a word,
 triple-click a line. Click or drag the line-number gutter to comment. Click files, tabs, and
@@ -377,6 +379,7 @@ The action names and their defaults:
 | `goto-line` | `:` |
 | `keys` | `?` |
 | `send` | `s`, `S` |
+| `send-all` | `a`, `A` |
 | `copy` | `y`, `Y` |
 | `open-pr` | `o` |
 | `refresh` | `r` |
@@ -458,6 +461,7 @@ workspace. Put `herdr-reviewr` itself in a layout pane, never the invoke.
 The known constraints:
 
 **Terminal & theme**
+
 - **Truecolor required** — colors are 24-bit RGB with no 256/8-color fallback. Basic terminals
   render wrong colors.
 - **Theme must match the terminal** — the pane keeps the terminal's background, and there is no
@@ -466,11 +470,13 @@ The known constraints:
 - **Box-drawing glyphs required**, but no Nerd Font.
 
 **Platform**
+
 - **macOS and Linux only** — no Windows.
 - **Clipboard export** uses `pbcopy`, `wl-copy`, `xclip`, or `xsel`. With none installed it
   says so, and **Send** still works.
 
 **herdr coupling**
+
 - **Send needs an agent in the workspace** — one agent takes the comments straight away, and
   several open a picker so you choose. With no agent, Send says so and keeps your comments.
 - **Send refuses an agent at a permission prompt** — the prompt would drop the paste. Your
@@ -480,6 +486,7 @@ The known constraints:
   own edits included.
 
 **PR tab (GitHub, GitLab, and Azure DevOps)**
+
 - **Read-only** — needs the forge's authenticated CLI (`gh`, `glab`, or `az`) and a
   recognized `upstream` or `origin`. Without either it tells you what to fix, and the other
   tabs keep working. Other forges are not supported.
@@ -491,6 +498,7 @@ The known constraints:
   more.
 
 **Review model**
+
 - **Comments are in-memory and single-session** — closing the pane loses any you haven't sent
   or copied out.
 - **Sending is all-or-nothing** — Send (or copy) delivers the whole set and clears it. A
@@ -499,6 +507,7 @@ The known constraints:
   number. reviewr flags a stale comment instead of dropping it.
 
 **Budgets**
+
 - Files over 2 MB or 50,000 lines show a "too large" notice. Binary files get no diff.
 
 ## Building from source
