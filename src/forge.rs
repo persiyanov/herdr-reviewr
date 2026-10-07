@@ -79,7 +79,7 @@ impl PrView {
 }
 
 /// The login command the unauthenticated remedy advertises.
-fn login_hint(forge: crate::git::Forge, host: &str) -> String {
+pub(crate) fn login_hint(forge: crate::git::Forge, host: &str) -> String {
     match forge {
         crate::git::Forge::GitHub | crate::git::Forge::GitLab => {
             format!("`{} auth login --hostname {host}`", forge.cli())
@@ -305,7 +305,12 @@ impl PrSnapshot {
 }
 
 /// Run explicitly targeted `gh` arguments in `repo` and return stdout or a classified failure.
-fn gh(repo: &Path, host: &str, args: &[&str], cancelled: &AtomicBool) -> Result<String, GhError> {
+pub(crate) fn gh(
+    repo: &Path,
+    host: &str,
+    args: &[&str],
+    cancelled: &AtomicBool,
+) -> Result<String, GhError> {
     let mut cmd = crate::proc::command("gh");
     cmd.current_dir(repo).args(args);
     run_provider(
@@ -389,9 +394,9 @@ pub(crate) fn reports_status(lowercased_stderr: &str, code: u16) -> bool {
     })
 }
 
-/// A classified `gh` failure, mapped to a [`PrView`] degraded state.
+/// A classified `gh` failure, mapped to a [`PrView`] or a `Releases` degraded state.
 #[derive(Debug, PartialEq, Eq)]
-enum GhError {
+pub(crate) enum GhError {
     NoGh,
     NotAuthed(String),
     /// GraphQL could not resolve the addressed pull request or repository.
@@ -867,7 +872,7 @@ fn build_detail_query(number: u64) -> String {
 }
 
 /// Run a GraphQL `query`, every variable a raw `-f` string: `-F` would make branch `123` an Int.
-fn graphql(
+pub(crate) fn graphql(
     repo: &Path,
     host: &str,
     query: &str,

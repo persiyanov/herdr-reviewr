@@ -970,7 +970,7 @@ pub(crate) fn remote_identities(
 }
 
 /// Classify one remote's fetch URL; a missing remote is clean, other failures transient.
-fn remote_identity(
+pub(crate) fn remote_identity(
     repo: &Path,
     remote: &str,
     hosts: &ForgeHosts<'_>,

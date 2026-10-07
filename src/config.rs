@@ -1094,6 +1094,7 @@ mod tests {
 
     #[test]
     fn keybinding_collision_names_each_action() {
+        use crate::keymap::{Action, Key};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
@@ -1104,6 +1105,18 @@ mod tests {
         std::fs::write(&path, "[keybindings]\ncomment = [\"c\", \"c\"]\n").unwrap();
         let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
         assert!(error.contains("bound twice") && error.contains("`comment`"), "{error}");
+        // A shared tab is named; actions on different tabs may share a key.
+        std::fs::write(&path, "[keybindings]\nrefresh = [\"c\"]\n").unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("`refresh`") && error.contains("on the Changes tab"), "{error}");
+        std::fs::write(&path, "[keybindings]\nopen-pr = [\"c\"]\n").unwrap();
+        let config = super::plugin_config_in(dir.path()).expect("open-pr and comment share no tab");
+        let keymap = config.keymap();
+        assert_eq!(keymap.action_on(crate::app::Tab::Pr, Key::plain('c')), Some(Action::OpenPr));
+        assert_eq!(
+            keymap.action_on(crate::app::Tab::Changes, Key::plain('c')),
+            Some(Action::Comment)
+        );
     }
 
     #[test]

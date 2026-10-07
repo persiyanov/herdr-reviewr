@@ -2,6 +2,18 @@
 
 use std::sync::LazyLock;
 
+use crate::app::Tab;
+
+/// A tab's name as an error says it.
+fn tab_name(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Changes => "Changes",
+        Tab::AllFiles => "All files",
+        Tab::Pr => "PR",
+        Tab::Releases => "Releases",
+    }
+}
+
 /// One rebindable action from the keymap table in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -26,6 +38,7 @@ pub enum Action {
     TabChanges,
     TabAllFiles,
     TabPr,
+    TabReleases,
     Wrap,
     Rendered,
     NavigatorPosition,
@@ -46,6 +59,7 @@ pub enum Action {
     Send,
     Copy,
     OpenPr,
+    CreateRelease,
     Refresh,
     Quit,
     /// Quit and drop unsent comments; its own key, so a held `q` can't answer its own question.
@@ -151,7 +165,7 @@ impl Key {
 }
 
 /// Every action with its config name and default keys, the one table the keymap derives from.
-const ACTIONS: [(Action, &str, &[Key]); 44] = [
+const ACTIONS: [(Action, &str, &[Key]); 46] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -173,6 +187,7 @@ const ACTIONS: [(Action, &str, &[Key]); 44] = [
     (Action::TabChanges, "tab-changes", &[Key::plain('1')]),
     (Action::TabAllFiles, "tab-all-files", &[Key::plain('2')]),
     (Action::TabPr, "tab-pr", &[Key::plain('3')]),
+    (Action::TabReleases, "tab-releases", &[Key::plain('4')]),
     (Action::Wrap, "wrap", &[Key::plain('w')]),
     (Action::Rendered, "rendered", &[Key::plain('m')]),
     (Action::NavigatorPosition, "navigator-position", &[Key::plain('p')]),
@@ -193,12 +208,79 @@ const ACTIONS: [(Action, &str, &[Key]); 44] = [
     (Action::Send, "send", &[Key::plain('s'), Key::plain('S')]),
     (Action::Copy, "copy", &[Key::plain('y'), Key::plain('Y')]),
     (Action::OpenPr, "open-pr", &[Key::plain('o')]),
+    (Action::CreateRelease, "create-release", &[Key::plain('c')]),
     (Action::Refresh, "refresh", &[Key::plain('r')]),
     (Action::Quit, "quit", &[Key::plain('q')]),
     (Action::QuitDiscard, "quit-discard", &[Key::plain('Q')]),
 ];
 
+/// Every tab.
+const ALL_TABS: &[Tab] = &[Tab::Changes, Tab::AllFiles, Tab::Pr, Tab::Releases];
+/// The tabs with a file list and a diff.
+const FILE_TABS: &[Tab] = &[Tab::Changes, Tab::AllFiles];
+
 impl Action {
+    /// The tabs this action acts on, as `dispatch_key` routes it; its keys bind only there.
+    #[must_use]
+    pub fn tabs(self) -> &'static [Tab] {
+        use Action as A;
+        match self {
+            // The `PR` and `Releases` key branches handle these too; send, copy and quit-discard
+            // answer the quit question, which every tab asks.
+            A::Down
+            | A::Up
+            | A::PageUp
+            | A::PageDown
+            | A::Expand
+            | A::Collapse
+            | A::NavigatorPosition
+            | A::NavigatorGrow
+            | A::NavigatorShrink
+            | A::TabChanges
+            | A::TabAllFiles
+            | A::TabPr
+            | A::TabReleases
+            | A::Search
+            | A::Keys
+            | A::Send
+            | A::Copy
+            | A::Refresh
+            | A::Quit
+            | A::QuitDiscard => ALL_TABS,
+            A::NextHunk
+            | A::PrevHunk
+            | A::NextFile
+            | A::PrevFile
+            | A::HalfUp
+            | A::HalfDown
+            | A::ScopeUncommitted
+            | A::ScopeBranch
+            | A::ScopeLastTurn
+            | A::ScopeCommits
+            | A::BasePick
+            | A::CommitPick
+            | A::Wrap
+            | A::Rendered
+            | A::NavigatorHide
+            | A::Select
+            | A::Comment
+            | A::Edit
+            | A::Delete
+            | A::NextComment
+            | A::PrevComment
+            | A::Comments
+            | A::Find
+            | A::GotoLine => FILE_TABS,
+            A::OpenPr => &[Tab::Pr],
+            A::CreateRelease => &[Tab::Releases],
+        }
+    }
+
+    /// The first tab both actions act on: where their keys would collide.
+    fn shared_tab(self, other: Self) -> Option<Tab> {
+        self.tabs().iter().copied().find(|tab| other.tabs().contains(tab))
+    }
+
     /// The action's `[keybindings]` name.
     pub fn name(self) -> &'static str {
         ACTIONS.iter().find(|(action, ..)| *action == self).expect("every action listed").1
@@ -263,7 +345,11 @@ impl Keymap {
         let mut seen: Vec<(Key, Action)> = Vec::new();
         for (action, keys) in &keymap.bindings {
             for &key in keys {
-                match seen.iter().find(|(k, _)| *k == key) {
+                // Two actions share a key only when no tab has both.
+                let collides = |(k, other): &&(Key, Action)| {
+                    *k == key && (other == action || other.shared_tab(*action).is_some())
+                };
+                match seen.iter().find(collides) {
                     Some((_, first)) if first == action => {
                         return Err(format!(
                             "`{}` is bound twice to `{}`",
@@ -272,11 +358,13 @@ impl Keymap {
                         ));
                     }
                     Some((_, first)) => {
+                        let tab = first.shared_tab(*action).expect("a collision shares a tab");
                         return Err(format!(
-                            "`{}` is bound to both `{}` and `{}`",
+                            "`{}` is bound to both `{}` and `{}` on the {} tab",
                             key.config_str(),
                             first.name(),
-                            action.name()
+                            action.name(),
+                            tab_name(tab)
                         ));
                     }
                     None => seen.push((key, *action)),
@@ -292,9 +380,18 @@ impl Keymap {
         &self.bindings
     }
 
-    /// The action `key` fires, if any.
+    /// The action `key` fires on `tab`, if any.
     #[must_use]
-    pub fn action_for(&self, key: Key) -> Option<Action> {
+    pub fn action_on(&self, tab: Tab, key: Key) -> Option<Action> {
+        self.bindings
+            .iter()
+            .find(|(action, keys)| keys.contains(&key) && action.tabs().contains(&tab))
+            .map(|(action, _)| *action)
+    }
+
+    /// The action `key` fires on some tab, for tests of keys no two actions share.
+    #[cfg(test)]
+    pub(crate) fn action_for(&self, key: Key) -> Option<Action> {
         self.bindings.iter().find(|(_, keys)| keys.contains(&key)).map(|(action, _)| *action)
     }
 
@@ -311,7 +408,8 @@ impl Keymap {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Key, KeyCode, Keymap};
+    use super::{ACTIONS, Action, Key, KeyCode, Keymap};
+    use crate::app::Tab;
 
     #[test]
     fn defaults_bind_every_action_and_hint_is_first_key() {
@@ -327,6 +425,9 @@ mod tests {
         assert_eq!(keymap.action_for(Key::plain('?')), Some(Action::Keys));
         assert_eq!(keymap.hint(Action::Send), Key::plain('s'));
         assert_eq!(keymap.hint(Action::TabPr), Key::plain('3'));
+        assert_eq!(keymap.action_for(Key::plain('4')), Some(Action::TabReleases));
+        assert_eq!(keymap.action_on(Tab::Releases, Key::plain('c')), Some(Action::CreateRelease));
+        assert_eq!(keymap.action_on(Tab::Changes, Key::plain('c')), Some(Action::Comment));
         assert_eq!(keymap.action_for(Key::named(KeyCode::Right)), Some(Action::Expand));
         assert_eq!(keymap.action_for(Key::named(KeyCode::Left)), Some(Action::Collapse));
         assert_eq!(keymap.action_for(Key::named(KeyCode::Down)), Some(Action::Down));
@@ -338,6 +439,50 @@ mod tests {
         // The hint stays the first bound key: `j` for `down`, the named key for `expand`.
         assert_eq!(keymap.hint(Action::Down), Key::plain('j'));
         assert_eq!(keymap.hint(Action::Expand), Key::named(KeyCode::Right));
+    }
+
+    #[test]
+    fn a_key_fires_the_action_bound_to_it_on_that_tab() {
+        let keymap = Keymap::default();
+        let c = Key::plain('c');
+        assert_eq!(keymap.action_on(Tab::Changes, c), Some(Action::Comment));
+        assert_eq!(keymap.action_on(Tab::AllFiles, c), Some(Action::Comment));
+        assert_eq!(keymap.action_on(Tab::Releases, c), Some(Action::CreateRelease));
+        assert_eq!(keymap.action_on(Tab::Pr, c), None, "the PR tab comments nowhere");
+        assert_eq!(keymap.action_on(Tab::Pr, Key::plain('o')), Some(Action::OpenPr));
+        assert_eq!(keymap.action_on(Tab::Changes, Key::plain('o')), None);
+        for tab in [Tab::Changes, Tab::AllFiles, Tab::Pr, Tab::Releases] {
+            assert_eq!(keymap.action_on(tab, Key::plain('q')), Some(Action::Quit), "{tab:?}");
+            assert_eq!(keymap.action_on(tab, Key::plain('4')), Some(Action::TabReleases));
+        }
+    }
+
+    #[test]
+    fn every_default_key_fires_its_action_on_every_tab_it_acts_on() {
+        let keymap = Keymap::default();
+        for (action, _, keys) in ACTIONS {
+            for &tab in action.tabs() {
+                for &key in keys {
+                    assert_eq!(keymap.action_on(tab, key), Some(action), "{key:?} on {tab:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_shared_key_collides_only_on_a_tab_with_both_actions() {
+        // Open-PR and create-release never share a tab, so one key serves both.
+        let keymap = Keymap::resolve(&[(Action::CreateRelease, vec![Key::plain('o')])]).unwrap();
+        assert_eq!(keymap.action_on(Tab::Releases, Key::plain('o')), Some(Action::CreateRelease));
+        assert_eq!(keymap.action_on(Tab::Pr, Key::plain('o')), Some(Action::OpenPr));
+        // A global action shares every tab, so it collides with either.
+        let error = Keymap::resolve(&[(Action::Refresh, vec![Key::plain('c')])]).unwrap_err();
+        assert!(error.contains("`comment`") && error.contains("`refresh`"), "{error}");
+        assert!(error.contains("on the Changes tab"), "the error names the tab: {error}");
+        let error = Keymap::resolve(&[(Action::OpenPr, vec![Key::plain('r')])]).unwrap_err();
+        assert!(error.contains("on the PR tab"), "{error}");
+        let error = Keymap::resolve(&[(Action::Comment, vec![Key::plain('o')])]);
+        assert!(error.is_ok(), "comment and open-PR share no tab: {error:?}");
     }
 
     #[test]

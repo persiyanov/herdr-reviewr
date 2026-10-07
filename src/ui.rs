@@ -77,26 +77,35 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     // The search screen replaces the body; the header and footer chrome stay
     if app.mode == Mode::Search {
-        if app.tab == Tab::Pr {
-            render_pr_header(frame, app, p.tab);
-        } else {
-            render_tab_bar(frame, app, p.tab);
+        match app.tab {
+            Tab::Pr => render_pr_header(frame, app, p.tab),
+            Tab::Releases => render_releases_header(frame, app, p.tab),
+            Tab::Changes | Tab::AllFiles => render_tab_bar(frame, app, p.tab),
         }
         render_search(frame, app, p.body);
         render_footer(frame, app, p.status);
         return;
     }
 
-    if app.tab == Tab::Pr {
-        render_pr_header(frame, app, p.tab);
-        render_pr_read(frame, app, p.diff);
-        // `PR` never hides its navigator, so no hidden gate here.
-        render_pr_nav(frame, app, p.files);
-    } else {
-        render_tab_bar(frame, app, p.tab);
-        render_diff_view(frame, app, p.diff);
-        if !app.navigator_hidden_here() {
-            render_file_list(frame, app, p.files);
+    match app.tab {
+        Tab::Pr => {
+            render_pr_header(frame, app, p.tab);
+            render_pr_read(frame, app, p.diff);
+            // `PR` never hides its navigator, so no hidden gate here.
+            render_pr_nav(frame, app, p.files);
+        }
+        Tab::Releases => {
+            render_releases_header(frame, app, p.tab);
+            render_releases_read(frame, app, p.diff);
+            // Nor does `Releases`.
+            render_releases_nav(frame, app, p.files);
+        }
+        Tab::Changes | Tab::AllFiles => {
+            render_tab_bar(frame, app, p.tab);
+            render_diff_view(frame, app, p.diff);
+            if !app.navigator_hidden_here() {
+                render_file_list(frame, app, p.files);
+            }
         }
     }
     // The drag highlight paints over the finished body.
@@ -104,6 +113,17 @@ pub fn render(frame: &mut Frame, app: &App) {
     // One footer band on every tab, drawn after the per-tab base so it sits on both layouts.
     render_footer(frame, app, p.status);
 
+    // The release review is a modal over the form, its scrim with it.
+    if app.tab == Tab::Releases
+        && app
+            .releases
+            .draft
+            .as_ref()
+            .is_some_and(|d| d.stage != crate::release_create::Stage::Edit)
+    {
+        scrim_behind(frame, app, area);
+        render_release_review(frame, app, area);
+    }
     // One match decides scrim and popup, so a scrim never comes without its popup.
     let popup: Option<fn(&mut Frame, &App, Rect)> = match app.mode {
         Mode::List => Some(render_comments_list),
@@ -578,7 +598,7 @@ pub fn read_point_clamped(
 /// The commentable row whose gutter `(col, row)` lands on, continuation lines included.
 #[must_use]
 pub fn gutter_row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
-    if app.tab == Tab::Pr {
+    if !app.tab.is_file_tab() {
         return None;
     }
     let pane = read_pane(area, app);
@@ -1253,13 +1273,14 @@ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) ->
     None
 }
 
-/// The three tab labels, each led by its hint key; the third is `PR` or `MR`.
-fn tab_labels(keymap: &Keymap, forge: crate::git::Forge) -> [(Tab, String); 3] {
+/// The four tab labels, each led by its hint key; the third is `PR` or `MR`.
+fn tab_labels(keymap: &Keymap, forge: crate::git::Forge) -> [(Tab, String); 4] {
     use crate::keymap::Action as K;
     [
         (Tab::Changes, format!("{} Changes", keymap.hint(K::TabChanges).label())),
         (Tab::AllFiles, format!("{} Files", keymap.hint(K::TabAllFiles).label())),
         (Tab::Pr, format!("{} {}", keymap.hint(K::TabPr).label(), forge.abbr())),
+        (Tab::Releases, format!("{} Releases", keymap.hint(K::TabReleases).label())),
     ]
 }
 const HEADER_LEAD: &str = " ";
@@ -2512,6 +2533,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_origin_title_keeps_its_branch_as_it_narrows() {
+        let at = |room| origin_title("mikebronner", "herdr-reviewr", "main", room);
+        assert_eq!(at(60), "mikebronner/herdr-reviewr@main");
+        assert_eq!(at(30), "mikebronner/herdr-reviewr@main", "an exact fit");
+        assert_eq!(at(29), "herdr-reviewr@main", "the owner goes first");
+        assert_eq!(at(12), "herdr-…@main", "then the repo, the branch kept");
+        assert_eq!(at(7), "herdr-…", "only a pane too narrow for both cuts the branch");
+    }
+
+    #[test]
+    fn the_header_shrinks_upstream_before_it_drops_the_notice() {
+        let full = "persiyanov/herdr-reviewr";
+        let at = |room| upstream_label(full, "persiyanov", Some("v0.47.0 is newer"), room);
+        let pair = |name: &str, notice: &str| Some((name.to_string(), notice.to_string()));
+        // `upstream: ` is 10, the notice with its gap 18.
+        assert_eq!(at(52), pair(full, "  v0.47.0 is newer"), "an exact fit");
+        assert_eq!(at(51), pair("persiyanov", "  v0.47.0 is newer"), "the owner first");
+        assert_eq!(at(38), pair("persiyanov", "  v0.47.0 is newer"));
+        assert_eq!(at(37), pair(full, ""), "then the notice drops, the name whole again");
+        assert_eq!(at(33), pair("persiyanov", ""), "then the owner alone");
+        assert_eq!(at(16), pair("persi…", ""), "then the name is cut");
+        assert_eq!(at(11), None);
+        assert_eq!(upstream_label(full, "persiyanov", None, 34), pair(full, ""));
+    }
+
+    #[test]
+    fn the_upstream_label_narrows_to_its_owner_then_cuts() {
+        let at = |room| upstream_text("persiyanov/herdr-reviewr", "persiyanov", room);
+        assert_eq!(at(40).as_deref(), Some("persiyanov/herdr-reviewr"));
+        assert_eq!(at(34).as_deref(), Some("persiyanov/herdr-reviewr"), "an exact fit");
+        assert_eq!(at(33).as_deref(), Some("persiyanov"), "then the owner alone");
+        assert_eq!(at(16).as_deref(), Some("persi…"), "then cut");
+        assert_eq!(at(11), None, "no room, no label");
+    }
+
+    #[test]
     fn a_stamp_ahead_of_this_clock_reads_now_until_a_second_past_it() {
         let then = crate::forge::parse_iso("2026-06-27T12:00:00Z").unwrap() as u64;
         let now = UNIX_EPOCH + std::time::Duration::from_secs(then - 30);
@@ -2737,10 +2794,37 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         // `enter` opens the highlight in every list: a search result, a base, a commit run.
         A::OpenResult | A::PickBaseRow => ("enter".into(), "open"),
         A::OpenPr => (hint(K::OpenPr), "open ↗"),
-        A::Refresh => (hint(K::Refresh), "refresh"),
-        A::Tabs => {
-            (format!("{}·{}·{}", hint(K::TabChanges), hint(K::TabAllFiles), hint(K::TabPr)), "tabs")
+        A::CreateRelease => (hint(K::CreateRelease), "new release"),
+        A::DraftReviewPublish => ("ctrl+o".into(), "publish…"),
+        A::DraftReviewSave => ("ctrl+s".into(), "save draft…"),
+        A::DraftGenerate => ("ctrl+g".into(), "generate notes"),
+        A::DraftEditNotes => ("ctrl+e".into(), "notes in editor"),
+        A::DraftToggle => {
+            use crate::release_create::Field;
+            let field = app.releases.draft.as_ref().map(|d| d.field);
+            let label = if field == Some(Field::Discussion) { "category" } else { "toggle" };
+            return ("space".into(), label.into());
         }
+        A::DraftField => ("tab".into(), "next field"),
+        A::DraftSend => {
+            use crate::release_create::{Finish, Stage};
+            let draft = app.releases.draft.as_ref().map(|d| d.stage.clone());
+            let what =
+                if draft == Some(Stage::Review(Finish::Draft)) { "save draft" } else { "publish" };
+            return ("y".into(), what.into());
+        }
+        A::DraftBack => ("esc".into(), "back"),
+        A::Refresh => (hint(K::Refresh), "refresh"),
+        A::Tabs => (
+            format!(
+                "{}·{}·{}·{}",
+                hint(K::TabChanges),
+                hint(K::TabAllFiles),
+                hint(K::TabPr),
+                hint(K::TabReleases)
+            ),
+            "tabs",
+        ),
         A::Quit => (hint(K::Quit), "quit"),
     };
     (k, l.into())
@@ -4757,6 +4841,721 @@ fn check_glyph(p: &Palette, status: forge::CheckStatus) -> (&'static str, Color)
         forge::CheckStatus::Pending => ("○", p.mark(Ink::Warning, on)),
         forge::CheckStatus::Skipped => ("⊘", p.mark(Ink::TextMuted, on)),
     }
+}
+
+// --- Releases tab --------------------------------
+
+/// The `Releases` tab's header: tabs, then `upstream: <owner>/<repo>` and any newer release.
+fn render_releases_header(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.palette();
+    let bar = Style::default().bg(p.fill(Fill::Bar));
+    let mut spans = tab_bar_spans(app);
+    let w = area.width as usize;
+    if let Some((s, upstream)) =
+        app.releases.snapshot().and_then(|s| Some((s, s.upstream.as_ref()?)))
+    {
+        let used: usize = spans.iter().map(Span::width).sum();
+        let room = w.saturating_sub(used + HEADER_LEAD.len());
+        let full = upstream.repository.full_path();
+        let notice = s.upstream_notice();
+        if let Some((name, notice)) =
+            upstream_label(&full, upstream.repository.owner(), notice.as_deref(), room)
+        {
+            let label = UPSTREAM_LEAD.len() + name.width() + notice.width();
+            spans.push(Span::styled(" ".repeat(room - label), bar));
+            spans.push(Span::styled(UPSTREAM_LEAD, bar.fg(p.ink(Ink::TextMuted, Fill::Bar))));
+            let x = area.x + (room - label + used + UPSTREAM_LEAD.len()) as u16;
+            let url = crate::releases::web_url(&upstream.repository);
+            app.note_painted_link(x, x + name.width() as u16, area.y, std::sync::Arc::from(url));
+            let link = bar.fg(p.ink(Ink::Accent, Fill::Bar)).add_modifier(Modifier::UNDERLINED);
+            spans.push(Span::styled(name, link));
+            spans.push(Span::styled(notice, bar.fg(p.ink(Ink::Warning, Fill::Bar))));
+        }
+    }
+    let used: usize = spans.iter().map(Span::width).sum();
+    if used < w {
+        spans.push(Span::styled(" ".repeat(w - used), bar));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+const UPSTREAM_LEAD: &str = "upstream: ";
+
+/// Upstream's name and notice in `room`: the name shrinks to its owner, then the notice drops.
+fn upstream_label(
+    full: &str,
+    owner: &str,
+    notice: Option<&str>,
+    room: usize,
+) -> Option<(String, String)> {
+    if let Some(notice) = notice.map(|n| format!("{HEADER_GAP}{n}")) {
+        for name in [full, owner] {
+            if UPSTREAM_LEAD.len() + name.width() + notice.width() <= room {
+                return Some((name.to_string(), notice));
+            }
+        }
+    }
+    upstream_text(full, owner, room).map(|name| (name, String::new()))
+}
+
+/// Upstream's name in what `room` leaves after its label: whole, then its owner, then cut.
+fn upstream_text(full: &str, owner: &str, room: usize) -> Option<String> {
+    let left = room.checked_sub(UPSTREAM_LEAD.len()).filter(|left| *left >= 2)?;
+    Some(if full.width() <= left { full.to_string() } else { truncate_width(owner, left) })
+}
+
+/// The list's title: `<owner>/<repo>@<branch>`, a link to `origin`.
+fn releases_nav_title(app: &App, area: Rect) -> Line<'static> {
+    let Some(s) = app.releases.snapshot() else { return Line::from(framed_title("Releases")) };
+    let p = app.palette();
+    let link =
+        Style::default().fg(p.ink(Ink::Accent, Fill::Base)).add_modifier(Modifier::UNDERLINED);
+    // The corner, then the title's leading space.
+    let room = (area.width as usize).saturating_sub(4);
+    let title = origin_title(s.repository.owner(), s.repository.name(), &s.branch, room);
+    let x = area.x + 2;
+    let url = crate::releases::web_url(&s.repository);
+    app.note_painted_link(x, x + title.width() as u16, area.y, std::sync::Arc::from(url));
+    Line::from(vec![Span::raw(" "), Span::styled(title, link), Span::raw(" ")])
+}
+
+/// `owner/repo@branch` in `room`: whole, else the repo alone, cut before the branch is.
+fn origin_title(owner: &str, name: &str, branch: &str, room: usize) -> String {
+    let at = format!("@{branch}");
+    let whole = format!("{owner}/{name}{at}");
+    if whole.width() <= room {
+        return whole;
+    }
+    let left = room.saturating_sub(at.width());
+    if left >= 4 {
+        return format!("{}{at}", truncate_width(name, left));
+    }
+    truncate_width(&format!("{name}{at}"), room)
+}
+
+/// The release tree: unreleased commits at the root, then each version over its commits.
+fn render_releases_nav(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::releases::TreeRow;
+    let p = app.palette();
+    let block = bordered("", app.focus == Focus::Files, p).title(releases_nav_title(app, area));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let Some(s) = app.releases.snapshot() else { return };
+    let tab = &app.releases;
+    let rows = tab.rows();
+    let width = inner.width as usize;
+    let viewport = inner.height as usize;
+    let scroll = tab.settle_nav(rows.len(), viewport);
+    let commit_of = |row: &TreeRow| match *row {
+        TreeRow::Commit { node, index } => tab.commit(node, index),
+        TreeRow::Draft { .. } | TreeRow::Release { .. } | TreeRow::Note { .. } => None,
+    };
+    // The lead column fits the widest version shown, and never more than half the row.
+    let lead = rows
+        .iter()
+        .filter_map(commit_of)
+        .map(|c| c.tags.join(" ").width())
+        .max()
+        .unwrap_or(0)
+        .max(COMMIT_SHA_W)
+        .min(width / 2);
+    let muted = |on: Fill| Style::default().fg(p.ink(Ink::TextMuted, on));
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(viewport)
+        .map(|(i, row)| {
+            let on = cursor_fill(i == tab.cursor());
+            let spans = match *row {
+                TreeRow::Draft { release } => draft_row(&s.releases[release], width, p, on),
+                TreeRow::Release { node, open } => release_node_row(app, s, node, open, width, on),
+                TreeRow::Commit { node, .. } => {
+                    let nest = if node.is_some() { "  " } else { "" };
+                    let mut spans = vec![Span::raw(nest)];
+                    if let Some(commit) = commit_of(row) {
+                        spans.extend(release_row(commit, lead, width - nest.len(), p, on));
+                    }
+                    spans
+                }
+                TreeRow::Note { node } => {
+                    let text = match tab.load(node) {
+                        Some(crate::releases::NodeLoad::Failed(error)) => {
+                            format!("couldn't load: {error}")
+                        }
+                        Some(crate::releases::NodeLoad::Loaded { .. }) => {
+                            "older commits not shown".to_string()
+                        }
+                        _ => "loading…".to_string(),
+                    };
+                    vec![Span::styled(format!("  {}", truncate_width(&text, width - 2)), muted(on))]
+                }
+            };
+            selectable_row(p, spans, width, on)
+        })
+        .collect();
+    frame.render_widget(List::new(items), inner);
+}
+
+/// A draft release: its tag-to-be and title, dim, marked as a draft.
+fn draft_row(
+    release: &crate::releases::Release,
+    width: usize,
+    p: &Palette,
+    on: Fill,
+) -> Vec<Span<'static>> {
+    let muted = Style::default().fg(p.ink(Ink::TextMuted, on));
+    let mark = "✎ ";
+    let tail = "  draft";
+    let room = width.saturating_sub(mark.width() + tail.width());
+    let name = match (release.tag.is_empty(), release.name.is_empty()) {
+        (true, true) => "untitled".to_string(),
+        (true, false) => release.name.clone(),
+        (false, true) => release.tag.clone(),
+        (false, false) if release.name == release.tag => release.tag.clone(),
+        (false, false) => format!("{} {}", release.tag, release.name),
+    };
+    vec![
+        Span::styled(mark, muted),
+        Span::styled(truncate_width(&name, room), muted.add_modifier(Modifier::ITALIC)),
+        Span::styled(tail, Style::default().fg(p.ink(Ink::Warning, on))),
+    ]
+}
+
+/// The ink of a version's tag: a full release, a pre-release, and a bare tag each read apart.
+pub(crate) fn version_ink(release: Option<&crate::releases::Release>) -> Ink {
+    match release {
+        Some(release) if release.prerelease => Ink::Warning,
+        Some(_) => Ink::Success,
+        None => Ink::Accent,
+    }
+}
+
+/// A version node: arrow, tag, release title or tagged commit's subject, and its loaded count.
+fn release_node_row(
+    app: &App,
+    s: &crate::releases::ReleasesSnapshot,
+    node: usize,
+    open: bool,
+    width: usize,
+    on: Fill,
+) -> Vec<Span<'static>> {
+    let p = app.palette();
+    let version = &s.versions[node];
+    let release = s.release(&version.tag);
+    let arrow = if open { "▾ " } else { "▸ " };
+    let count = match app.releases.load(node) {
+        Some(crate::releases::NodeLoad::Loaded { commits, more }) => {
+            format!("  {}{}", commits.len(), if *more { "+" } else { "" })
+        }
+        _ => String::new(),
+    };
+    let tag = truncate_width(&version.tag, width.saturating_sub(arrow.width() + count.width()));
+    let ink = version_ink(release);
+    let mut spans = vec![
+        Span::styled(arrow, Style::default().fg(p.ink(Ink::TextMuted, on))),
+        Span::styled(tag, Style::default().fg(p.ink(ink, on)).add_modifier(Modifier::BOLD)),
+    ];
+    let used: usize = spans.iter().map(Span::width).sum();
+    let title = match release {
+        Some(release) if !release.name.is_empty() => release.name.as_str(),
+        _ => version.commit.subject.as_str(),
+    };
+    let budget = width.saturating_sub(used + 1 + count.width());
+    if budget > 0 && !title.is_empty() && title != version.tag {
+        spans.push(Span::styled(
+            format!(" {}", truncate_width(title, budget)),
+            Style::default().fg(p.ink(Ink::TextSecondary, on)),
+        ));
+    }
+    spans.push(Span::styled(count, Style::default().fg(p.ink(Ink::TextMuted, on))));
+    spans
+}
+
+/// One commit row: the versions accented, else the dim short oid, then the subject.
+fn release_row(
+    commit: &crate::releases::ReleaseCommit,
+    lead: usize,
+    width: usize,
+    p: &Palette,
+    on: Fill,
+) -> Vec<Span<'static>> {
+    let (label, style) = if commit.tags.is_empty() {
+        (
+            commit.oid.chars().take(COMMIT_SHA_W).collect::<String>(),
+            Style::default().fg(p.ink(Ink::TextMuted, on)),
+        )
+    } else {
+        (
+            commit.tags.join(" "),
+            Style::default().fg(p.ink(Ink::Accent, on)).add_modifier(Modifier::BOLD),
+        )
+    };
+    let label = truncate_width(&label, lead);
+    let gap = " ".repeat(lead.saturating_sub(label.width()) + 1);
+    let subject = truncate_width(&commit.subject, width.saturating_sub(lead + 1));
+    vec![Span::styled(label, style), Span::raw(gap), Span::styled(subject, text_style(p, on))]
+}
+
+/// The read pane's title: a version's release title or tag, or the selected commit.
+fn releases_read_title(app: &App) -> String {
+    use crate::releases::Notes;
+    if let Some(commit) = app.releases.selected() {
+        return format!("Commit {}", commit.oid.chars().take(COMMIT_SHA_W).collect::<String>());
+    }
+    match app.releases.notes() {
+        Some(Notes::Release(release)) => {
+            let mut title = match (release.name.is_empty(), release.tag.is_empty()) {
+                (false, _) => release.name.clone(),
+                (true, false) => release.tag.clone(),
+                (true, true) => "Untitled".to_string(),
+            };
+            if release.draft {
+                title.push_str(" · draft");
+            }
+            if release.prerelease {
+                title.push_str(" · pre-release");
+            }
+            title
+        }
+        Some(Notes::TagOnly(version)) => version.tag.clone(),
+        None => "Releases".to_string(),
+    }
+}
+
+/// The notes pane's content: its lines, the markdown among them, and the links on them.
+struct ReleasesRead {
+    lines: Vec<Line<'static>>,
+    /// The rendered markdown and the line it starts on.
+    doc: Option<(usize, crate::markdown::Rendered)>,
+    /// Each link painted outside the markdown: its line, columns, and URL.
+    links: Vec<(usize, usize, usize, String)>,
+    /// The release form's fields by their first line, for clicks.
+    fields: Vec<(usize, crate::release_create::Field)>,
+    /// The line the form's caret or focus is on, kept in view.
+    focus_line: Option<usize>,
+}
+
+/// A commit's full message: its subject, its body, then who and when, and its whole oid.
+fn commit_message_lines(
+    commit: &crate::releases::ReleaseCommit,
+    width: usize,
+    p: &Palette,
+) -> Vec<Line<'static>> {
+    let muted = Style::default().fg(p.ink(Ink::TextMuted, Fill::Base));
+    let subject = text_style(p, Fill::Base).add_modifier(Modifier::BOLD);
+    let body = text_style(p, Fill::Base);
+    let message = if commit.message.is_empty() { &commit.subject } else { &commit.message };
+    let mut parts = message.splitn(2, '\n');
+    let mut lines: Vec<Line<'static>> = wrap_text(parts.next().unwrap_or_default(), width)
+        .into_iter()
+        .map(|l| Line::from(Span::styled(l, subject)))
+        .collect();
+    for line in parts.next().unwrap_or_default().lines() {
+        let wrapped = wrap_text(line, width);
+        if wrapped.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.extend(wrapped.into_iter().map(|l| Line::from(Span::styled(l, body))));
+    }
+    lines.push(Line::default());
+    let byline = [commit.author.as_str(), commit.date.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    for meta in [byline, commit.oid.clone()].into_iter().filter(|m| !m.is_empty()) {
+        lines.extend(
+            wrap_text(&meta, width).into_iter().map(|l| Line::from(Span::styled(l, muted))),
+        );
+    }
+    lines
+}
+
+/// The selected row's view: a commit's message, a version's notes, or the tab's state.
+fn releases_notes_body(app: &App, width: usize) -> ReleasesRead {
+    use crate::releases::Notes;
+    let p = app.palette();
+    let muted = Style::default().fg(p.ink(Ink::TextMuted, Fill::Base));
+    let mut read = ReleasesRead {
+        lines: Vec::new(),
+        doc: None,
+        links: Vec::new(),
+        fields: Vec::new(),
+        focus_line: None,
+    };
+    let say = |read: &mut ReleasesRead, text: &str| {
+        read.lines
+            .extend(wrap_text(text, width).into_iter().map(|l| Line::from(Span::styled(l, muted))));
+    };
+    if let Some(commit) = app.releases.selected() {
+        read.lines = commit_message_lines(commit, width, p);
+        return read;
+    }
+    let notes = app.releases.notes();
+    // The release published here shows its page on its node.
+    let tag = match notes {
+        Some(Notes::Release(release)) => Some(release.tag.as_str()),
+        Some(Notes::TagOnly(version)) => Some(version.tag.as_str()),
+        None => None,
+    };
+    if let Some((_, url)) = app.releases.published.as_ref().filter(|(t, _)| Some(t.as_str()) == tag)
+    {
+        let lead = "Published: ";
+        let link =
+            Style::default().fg(p.ink(Ink::Accent, Fill::Base)).add_modifier(Modifier::UNDERLINED);
+        let shown = truncate_width(url, width.saturating_sub(lead.width()));
+        read.links.push((0, lead.width(), shown.width(), url.clone()));
+        read.lines.push(Line::from(vec![Span::styled(lead, muted), Span::styled(shown, link)]));
+        read.lines.push(Line::default());
+    }
+    match (app.releases.snapshot(), notes) {
+        (_, Some(Notes::Release(release))) if release.notes.trim().is_empty() => {
+            say(&mut read, &format!("{} has no release notes.", release.tag));
+        }
+        (_, Some(Notes::Release(release))) => {
+            let mut doc = app.markdown_render(&release.notes, width, app.releases.expanded());
+            let at = read.lines.len();
+            read.lines.append(&mut doc.lines);
+            read.doc = Some((at, doc));
+        }
+        (_, Some(Notes::TagOnly(version))) => {
+            say(&mut read, &format!("Tag {} has no GitHub release.", version.tag));
+            read.lines.push(Line::default());
+            read.lines.extend(commit_message_lines(&version.commit, width, p));
+        }
+        (Some(s), None) => say(&mut read, &format!("{} has no commits.", s.branch)),
+        (None, None) => {
+            let refresh = app.keymap().hint(crate::keymap::Action::Refresh);
+            if let Some(message) = app.releases.view.message(refresh) {
+                say(&mut read, &message);
+            }
+        }
+    }
+    read
+}
+
+/// The width of the form's label column.
+const FORM_LABEL: usize = 14;
+
+/// A text field's lines with the caret drawn in when focused, each wrapped to `width`.
+fn text_field_lines(
+    field: &crate::release_create::TextField,
+    focused: bool,
+    width: usize,
+    style: Style,
+) -> (Vec<String>, usize) {
+    let (caret_line, caret_col) = field.line_col();
+    let mut out = Vec::new();
+    let mut caret_at = 0;
+    for (i, line) in field.text.split('\n').enumerate() {
+        let mut line = line.to_string();
+        if focused && i == caret_line {
+            let at = line.char_indices().nth(caret_col).map_or(line.len(), |(b, _)| b);
+            line.insert(at, '▏');
+            caret_at =
+                out.len() + line.chars().take(caret_col).collect::<String>().width() / width.max(1);
+        }
+        let wrapped = wrap_text(&line, width.max(1));
+        out.extend(if wrapped.is_empty() { vec![String::new()] } else { wrapped });
+    }
+    let _ = style;
+    (out, caret_at)
+}
+
+/// The release form: every field editable at once, or at the review, everything it will send.
+fn release_draft_body(
+    app: &App,
+    draft: &crate::release_create::ReleaseDraft,
+    width: usize,
+) -> ReleasesRead {
+    use crate::release_create::{Categories, Field, Stage};
+    let p = app.palette();
+    let muted = Style::default().fg(p.ink(Ink::TextMuted, Fill::Base));
+    let text = text_style(p, Fill::Base);
+    let warning = Style::default().fg(p.ink(Ink::Warning, Fill::Base));
+    let accent = Style::default().fg(p.ink(Ink::Accent, Fill::Base)).add_modifier(Modifier::BOLD);
+    let mut read = ReleasesRead {
+        lines: Vec::new(),
+        doc: None,
+        links: Vec::new(),
+        fields: Vec::new(),
+        focus_line: None,
+    };
+    let value_w = width.saturating_sub(FORM_LABEL).max(1);
+    let label = |field: Field, focused: bool| {
+        let mark = if focused { "› " } else { "  " };
+        Span::styled(
+            format!("{mark}{:<w$}", field.label(), w = FORM_LABEL - 2),
+            if focused { accent } else { muted },
+        )
+    };
+    // At the review the form stays drawn under the popup, with no focus or caret.
+    let editing = draft.stage == Stage::Edit;
+    let focused = |field: Field| editing && draft.field == field;
+    let single = |read: &mut ReleasesRead,
+                  field: Field,
+                  value: &crate::release_create::TextField,
+                  hint: &str| {
+        let on = focused(field);
+        let (lines, caret) = text_field_lines(value, on, value_w, text);
+        if on {
+            read.focus_line = Some(read.lines.len() + caret);
+        }
+        read.fields.push((read.lines.len(), field));
+        for (i, line) in lines.into_iter().enumerate() {
+            let lead = if i == 0 { label(field, on) } else { Span::raw(" ".repeat(FORM_LABEL)) };
+            let mut spans = vec![lead, Span::styled(line, text)];
+            if i == 0 && !hint.is_empty() {
+                spans.push(Span::styled(format!("  {hint}"), muted));
+            }
+            read.lines.push(Line::from(spans));
+        }
+    };
+    single(&mut read, Field::Tag, &draft.tag, "");
+    single(&mut read, Field::Title, &draft.title, "");
+    // The target is the commit selected in the tree, shown, never edited.
+    let short: String = draft.target.chars().take(COMMIT_SHA_W).collect();
+    let target = format!("{short} {}", draft.target_subject);
+    read.lines.push(Line::from(vec![
+        Span::styled(format!("  {:<w$}", "Target", w = FORM_LABEL - 2), muted),
+        Span::styled(truncate_width(&target, value_w), muted),
+    ]));
+    let choice = |read: &mut ReleasesRead, field: Field, value: String| {
+        if focused(field) {
+            read.focus_line = Some(read.lines.len());
+        }
+        read.fields.push((read.lines.len(), field));
+        read.lines.push(Line::from(vec![label(field, focused(field)), Span::styled(value, text)]));
+    };
+    let check = |on: bool| if on { "[x]" } else { "[ ]" };
+    choice(&mut read, Field::Prerelease, check(draft.prerelease).to_string());
+    let latest = if draft.prerelease {
+        "[ ] never for a pre-release".to_string()
+    } else {
+        check(draft.latest).to_string()
+    };
+    choice(&mut read, Field::Latest, latest);
+    let discussion = match (&draft.categories, draft.discussion) {
+        (Categories::Loading, _) => "loading categories…".to_string(),
+        (Categories::Off, _) => "discussions are off for this repository".to_string(),
+        (Categories::Failed(error), _) => format!("categories unavailable: {error}"),
+        (Categories::Ready(names), Some(i)) => format!("‹ {} ›", names[i]),
+        (Categories::Ready(_), None) => "‹ none ›".to_string(),
+    };
+    choice(&mut read, Field::Discussion, discussion);
+    if let Some(error) = &draft.error {
+        read.lines.push(Line::default());
+        read.lines.extend(
+            wrap_text(error, width).into_iter().map(|l| Line::from(Span::styled(l, warning))),
+        );
+    }
+    read.lines.push(Line::default());
+    // The notes start in the value column, as every other field's value does.
+    if draft.generating {
+        choice(&mut read, Field::Notes, "generating notes…".to_string());
+    } else {
+        single(&mut read, Field::Notes, &draft.notes, "");
+    }
+    read
+}
+
+/// The review: a modal over the form, listing what will be sent, with the question at its foot.
+fn render_release_review(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::release_create::{Finish, Stage};
+    let Some(draft) = &app.releases.draft else { return };
+    let finish = match draft.stage {
+        Stage::Review(finish) | Stage::Sending(finish) => finish,
+        Stage::Edit => return,
+    };
+    let Some(crate::release_create::Reviewed { release }) = &draft.reviewed else { return };
+    let p = app.palette();
+    let muted = Style::default().fg(p.ink(Ink::TextMuted, Fill::Base));
+    let text = text_style(p, Fill::Base);
+    let accent = Style::default().fg(p.ink(Ink::Accent, Fill::Base)).add_modifier(Modifier::BOLD);
+    let body = panes(area, app).body;
+    let popup =
+        body_popup(area, app, body.width * LIST_POPUP_W_PCT / 100, body.height.saturating_sub(2));
+    frame.render_widget(Clear, popup);
+    let title = match finish {
+        Finish::Publish => "Publish this release?",
+        Finish::Draft => "Save this draft?",
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(p.mark(Ink::Accent, Fill::Base)))
+        .title(framed_title(title));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let width = (inner.width as usize).max(1);
+    let value_w = width.saturating_sub(FORM_LABEL).max(1);
+    let repo = format!("{}/{}", draft.repository.host(), draft.repository.full_path());
+    // What will be sent, each value wrapped under its label.
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut row = |name: &str, value: String| {
+        for (i, piece) in wrap_text(&value, value_w).into_iter().enumerate() {
+            let name = if i == 0 { name } else { "" };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {name:<w$}", w = FORM_LABEL - 2), muted),
+                Span::styled(piece, text),
+            ]));
+        }
+    };
+    let yes = |on: bool| if on { "yes" } else { "no" }.to_string();
+    row("Repository", repo.clone());
+    row("Tag", release.tag.clone());
+    row("Target", release.target.clone());
+    row("Title", release.title.clone());
+    row("Pre-release", yes(release.prerelease));
+    row("Latest", release.latest.map_or_else(|| "set when published".into(), yes));
+    row("Discussion", release.discussion.clone().unwrap_or_else(|| "none".into()));
+    lines.push(Line::default());
+    let mut read =
+        ReleasesRead { lines, doc: None, links: Vec::new(), fields: Vec::new(), focus_line: None };
+    push_notes(app, &mut read, &release.notes, width, muted);
+    // The question sits at the foot, apart from the list, with its keys.
+    let question = match draft.stage {
+        Stage::Sending(Finish::Publish) => format!("Publishing to {repo}…"),
+        Stage::Sending(Finish::Draft) => format!("Saving the draft on {repo}…"),
+        Stage::Review(Finish::Draft) => {
+            "y saves the draft; GitHub tags it only when it is published. esc goes back.".into()
+        }
+        _ => "y publishes; GitHub cuts the tag, nothing is tagged here. esc goes back.".into(),
+    };
+    let prompt: Vec<Line<'static>> = std::iter::once(Line::from(Span::styled(
+        "─".repeat(width),
+        Style::default().fg(p.mark(Ink::Border, Fill::Base)),
+    )))
+    .chain(wrap_text(&question, width).into_iter().map(|l| Line::from(Span::styled(l, accent))))
+    .collect();
+    let prompt_h = (prompt.len() as u16).min(inner.height);
+    let list = Rect::new(inner.x, inner.y, inner.width, inner.height - prompt_h);
+    let max = read.lines.len().saturating_sub(list.height as usize);
+    let scroll = app.releases.settle_review(max);
+    if let Some((at, doc)) = &read.doc {
+        note_markdown_regions(app, doc, list, scroll, *at);
+    }
+    frame.render_widget(Paragraph::new(read.lines).scroll((saturating_row(scroll), 0)), list);
+    render_overflow_scrollbar(
+        frame,
+        Rect::new(popup.x, list.y, popup.width, list.height),
+        max,
+        scroll,
+        p,
+    );
+    frame.render_widget(
+        Paragraph::new(prompt),
+        Rect::new(inner.x, inner.y + inner.height - prompt_h, inner.width, prompt_h),
+    );
+}
+
+/// Notes rendered as markdown, or a word that there are none.
+fn push_notes(app: &App, read: &mut ReleasesRead, notes: &str, width: usize, muted: Style) {
+    if notes.trim().is_empty() {
+        read.lines.push(Line::from(Span::styled("No notes.", muted)));
+        return;
+    }
+    let mut rendered = app.markdown_render(notes, width, app.releases.expanded());
+    let at = read.lines.len();
+    read.lines.append(&mut rendered.lines);
+    read.doc = Some((at, rendered));
+}
+
+/// The notes pane: the selected row's view, or the release form in its place.
+fn render_releases_read(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.palette();
+    let title = match &app.releases.draft {
+        Some(_) => "New release".to_string(),
+        None => releases_read_title(app),
+    };
+    let block = bordered(&title, app.focus == Focus::Diff || app.releases.draft.is_some(), p);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let width = (inner.width as usize).max(1);
+    let read = match &app.releases.draft {
+        Some(draft) => release_draft_body(app, draft, width),
+        None => releases_notes_body(app, width),
+    };
+    // A failed refresh's remedy sits above the notes it kept, leaving them a row.
+    let notice: Vec<String> = app
+        .releases
+        .notice()
+        .map(|notice| wrap_text(notice, width))
+        .unwrap_or_default()
+        .into_iter()
+        .take((inner.height as usize).saturating_sub(1))
+        .collect();
+    let notice_height = notice.len() as u16;
+    let warning = Style::default().fg(p.ink(Ink::Warning, Fill::Base));
+    frame.render_widget(
+        Paragraph::new(
+            notice.into_iter().map(|l| Line::from(Span::styled(l, warning))).collect::<Vec<_>>(),
+        ),
+        Rect::new(inner.x, inner.y, inner.width, notice_height),
+    );
+    let body = Rect::new(
+        inner.x,
+        inner.y.saturating_add(notice_height),
+        inner.width,
+        inner.height.saturating_sub(notice_height),
+    );
+    let max = read.lines.len().saturating_sub(body.height as usize);
+    let scroll = if app.releases.draft.is_some() {
+        // The form scrolls itself, so the focused field stays in view.
+        let cell = app.releases.form_scroll();
+        let mut scroll = cell.get().min(max);
+        if let Some(line) = read.focus_line {
+            let height = (body.height as usize).max(1);
+            if line < scroll {
+                scroll = line;
+            } else if line >= scroll + height {
+                scroll = line + 1 - height;
+            }
+        }
+        cell.set(scroll);
+        let rows = read.fields.iter().filter_map(|(line, field)| {
+            let y = line.checked_sub(scroll).filter(|y| *y < body.height as usize)?;
+            Some((body.y + y as u16, *field))
+        });
+        app.releases.note_form_rows(rows.collect());
+        scroll
+    } else {
+        app.releases.note_read_max(max);
+        app.releases.read_scroll().min(max)
+    };
+    if let Some((at, doc)) = &read.doc {
+        note_markdown_regions(app, doc, body, scroll, *at);
+    }
+    for (line, start, len, url) in &read.links {
+        if let Some(y) = line.checked_sub(scroll).filter(|y| *y < body.height as usize) {
+            let x = body.x + *start as u16;
+            app.note_painted_link(
+                x,
+                x + *len as u16,
+                body.y + y as u16,
+                std::sync::Arc::from(url.as_str()),
+            );
+        }
+    }
+    frame.render_widget(Paragraph::new(read.lines).scroll((saturating_row(scroll), 0)), body);
+    render_overflow_scrollbar(
+        frame,
+        Rect::new(area.x, body.y, area.width, body.height),
+        max,
+        scroll,
+        p,
+    );
+}
+
+/// The tree row a click on the list lands on.
+#[must_use]
+pub fn releases_row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
+    let inner = inner_rect(panes(area, app).files);
+    if !contains(inner, col, row) {
+        return None;
+    }
+    let i = (row - inner.y) as usize + app.releases.nav_scroll();
+    (i < app.releases.rows().len()).then_some(i)
 }
 
 // --- helpers -------------------------------------------------------------------

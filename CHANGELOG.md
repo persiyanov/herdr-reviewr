@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Releases tab** (`4`): `origin`'s default branch on GitHub as a tree, unreleased commits first and then every version tag, folded, its commits loaded when you unfold it. A version with a GitHub release reads in its own color and shows its notes, rendered as markdown, under its title; a selected commit shows its whole message. The list's title names `origin` and its default branch (`owner/repo@main`), the header names `upstream: owner/repo`, both linked, and says when upstream's latest release is newer than origin's highest version. Rebindable as `tab-releases`.
+- **Create a release** (`c` on the Releases tab): an in-pane form for the unreleased commit selected in the tree — tag, title, pre-release, latest, a discussion category, and markdown notes typed in place, with GitHub's generated notes (`ctrl+g`) or your terminal editor (`ctrl+e`). `ctrl+o` reviews a publish and `ctrl+s` a draft; only `y` at the review sends. GitHub cuts the tag; nothing is tagged locally. Drafts and pre-releases read apart in the tree.
+
+### Changed
+- **Keys are per tab**: an action's keys bind only on the tabs where it acts, so two actions share a key when no tab has both (`c` comments on Changes and All files, and creates a release on Releases). A config binding a key to two actions on one tab is still refused, and the error now names the tab.
+
 ## [0.46.0] — 2026-10-06
 
 ### Changed

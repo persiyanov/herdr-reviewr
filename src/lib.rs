@@ -23,6 +23,8 @@ pub mod markdown;
 pub(crate) mod marks;
 pub mod model;
 pub mod proc;
+pub mod release_create;
+pub mod releases;
 pub(crate) mod rendered;
 pub mod roles;
 pub mod schedule;
@@ -158,26 +160,8 @@ fn run_editor(
     // Absolute, so no editor reads it as a flag; symlinks kept, unlike canonicalize.
     let joined = app.repo.join(&target.path);
     let path = std::path::absolute(&joined).unwrap_or(joined);
-    let command = match editor::resolve(
-        configured,
-        std::env::var("VISUAL").ok().as_deref(),
-        std::env::var("EDITOR").ok().as_deref(),
-        // Read per press, so a fixed git config is heard.
-        || git::core_editor(&app.repo),
-        &path,
-        target.line,
-    ) {
-        Ok(command) => command,
-        // Two causes, and the second would otherwise be told to set what it set.
-        Err(editor::NoEditor::Unset) => {
-            app.status =
-                "no editor: set `editor` in the config, $EDITOR, or git's core.editor".into();
-            return Ok(());
-        }
-        Err(editor::NoEditor::NamesNoProgram) => {
-            app.status = "the editor command names no program".into();
-            return Ok(());
-        }
+    let Some(command) = resolve_editor(app, configured, &path, target.line) else {
+        return Ok(());
     };
     // A tracked row can be gone from disk, and an editor would recreate it on save.
     if !path.is_file() {
@@ -332,6 +316,135 @@ struct ActiveFetch {
     cancelled: Arc<AtomicBool>,
     /// When the fetch dispatched — the hang bound in `request_refresh` measures from it.
     started: Instant,
+}
+
+/// A release form worker's result, for the form that asked.
+#[derive(Debug)]
+enum DraftDone {
+    Generated { id: u64, seq: u64, notes: Result<String, String> },
+    Published { id: u64, tag: String, url: Result<String, String> },
+    Categories { id: u64, categories: crate::release_create::Categories },
+}
+
+/// Run one draft request on a worker; the frame loop never waits on `gh`.
+fn spawn_draft_request(
+    repo: &std::path::Path,
+    request: crate::release_create::Request,
+    tx: crate::wake::Sender<DraftDone>,
+) {
+    use crate::release_create::{Request, categories, generate, gh_runner, publish};
+    let repo = repo.to_path_buf();
+    thread::spawn(move || {
+        let done = match request {
+            Request::Categories { id, repository } => {
+                let run = gh_runner(repo, repository.host().to_string());
+                DraftDone::Categories { id, categories: categories(&run, &repository) }
+            }
+            Request::Generate { id, seq, host, args } => {
+                DraftDone::Generated { id, seq, notes: generate(&gh_runner(repo, host), &args) }
+            }
+            Request::Publish { id, release } => {
+                let run = gh_runner(repo, release.repository.host().to_string());
+                DraftDone::Published { id, tag: release.tag.clone(), url: publish(&run, &release) }
+            }
+        };
+        let _ = tx.send(done);
+    });
+}
+
+#[derive(Debug)]
+struct TaggedReleases {
+    generation: u64,
+    config_epoch: u64,
+    view: crate::releases::ReleasesView,
+}
+
+/// One releases fetch at a time; a completion paints only if its generation and epoch are current.
+#[derive(Debug, Default)]
+struct ReleasesRefresh {
+    generation: u64,
+    /// The fetch in flight, owned until its worker reports back.
+    active: Option<ActiveFetch>,
+    /// A fetch is owed, dispatched once none is in flight.
+    owed: bool,
+    /// An ambient trigger rode the in-flight fetch, so one fresh fetch follows it.
+    trailing: bool,
+    wait_started: Option<Instant>,
+}
+
+impl ReleasesRefresh {
+    /// A commanded refresh restarts, an ambient one rides and follows; a hung fetch is abandoned.
+    fn request(&mut self, kind: crate::app::RefreshKind) {
+        self.wait_started.get_or_insert_with(Instant::now);
+        let hung =
+            self.active.as_ref().is_some_and(|active| active.started.elapsed() >= FETCH_HANG);
+        if kind == crate::app::RefreshKind::Ambient && !hung && self.active.is_some() {
+            self.trailing = true;
+            return;
+        }
+        self.cancel();
+        if hung {
+            self.active = None;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        self.owed = true;
+        self.trailing = false;
+    }
+
+    /// The owed fetch's tag and cancel flag, once none is in flight.
+    fn take_dispatch(&mut self, config_epoch: u64) -> Option<(u64, Arc<AtomicBool>)> {
+        if !self.owed || self.active.is_some() {
+            return None;
+        }
+        self.owed = false;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.active = Some(ActiveFetch {
+            tag: (self.generation, config_epoch),
+            cancelled: cancelled.clone(),
+            started: Instant::now(),
+        });
+        Some((self.generation, cancelled))
+    }
+
+    /// The view to paint: current generation and config only; a stale config's result refetches.
+    fn completed(
+        &mut self,
+        completion: TaggedReleases,
+        config_epoch: u64,
+    ) -> Option<crate::releases::ReleasesView> {
+        let tag = (completion.generation, completion.config_epoch);
+        // A worker abandoned as hung reports into nothing.
+        if self.active.as_ref().map(|active| active.tag) != Some(tag) {
+            return None;
+        }
+        self.active = None;
+        if completion.generation != self.generation {
+            return None;
+        }
+        if completion.config_epoch != config_epoch {
+            self.generation = self.generation.wrapping_add(1);
+            self.owed = true;
+            return None;
+        }
+        self.wait_started = None;
+        if std::mem::take(&mut self.trailing) {
+            self.generation = self.generation.wrapping_add(1);
+            self.owed = true;
+        }
+        Some(completion.view)
+    }
+
+    fn cancel(&self) {
+        if let Some(active) = &self.active {
+            active.cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
+impl Drop for ReleasesRefresh {
+    fn drop(&mut self) {
+        self.cancel();
+    }
 }
 
 /// The config and layout behind the visible frame; input dispatches only while they match.
@@ -838,6 +951,14 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
     let mut recovery_inflight = false;
     let (pr_tx, pr_rx) = crate::wake::channel::<TaggedPr>(&waker);
     let mut pr = PrCoordinator::new(app.plugin_config().is_some());
+    let (releases_tx, releases_rx) = crate::wake::channel::<TaggedReleases>(&waker);
+    // The release form's reads and its send, each on a worker.
+    let (draft_tx, draft_rx) = crate::wake::channel::<DraftDone>(&waker);
+    // A version node's commits load only when it unfolds, one worker per node.
+    let (node_tx, node_rx) =
+        crate::wake::channel::<(crate::releases::NodeKey, crate::releases::NodeLoad)>(&waker);
+    let mut releases = ReleasesRefresh::default();
+    let mut last_releases_poll = Instant::now();
     // The world worker builds input-tagged jobs; the loop reconciles their completions.
     let (world_tx, world_job_rx) = mpsc::channel::<crate::world::WorldJob>();
     let (world_res_tx, world_rx) = crate::wake::channel::<crate::world::WorldCompletion>(&waker);
@@ -925,14 +1046,20 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 app.set_pr_refreshing(true);
                 pr.wait_started = None;
             }
+            if releases.wait_started.is_some_and(|started| started.elapsed() >= INDICATOR_DELAY) {
+                app.releases.set_refreshing(true);
+                releases.wait_started = None;
+            }
             // The refresh glyph: at once when commanded, past the delay when ambient.
             if std::mem::take(&mut app.refresh_commanded) {
                 glyph_since.get_or_insert_with(Instant::now);
             }
-            let glyph_due = if app.tab == crate::app::Tab::Pr {
-                app.pr_refreshing()
-            } else {
-                world_indicator(world_live.running.map(|at| (at.elapsed(), world_live.builds)))
+            let glyph_due = match app.tab {
+                crate::app::Tab::Pr => app.pr_refreshing(),
+                crate::app::Tab::Releases => app.releases.refreshing(),
+                crate::app::Tab::Changes | crate::app::Tab::AllFiles => {
+                    world_indicator(world_live.running.map(|at| (at.elapsed(), world_live.builds)))
+                }
             };
             let mut glyph_wake = None;
             if glyph_due {
@@ -1151,6 +1278,73 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 pr.request_refresh(kind);
             }
 
+            // Releases: the same triggers, and a worker per fetch; a hidden pane fetches nothing.
+            let releases_poll = app.pane_visible()
+                && app.tab == crate::app::Tab::Releases
+                && last_releases_poll.elapsed() >= PR_POLL;
+            let pending = if app.pane_visible() { app.releases.take_pending() } else { None };
+            if let Some(kind) =
+                pending.or(releases_poll.then_some(crate::app::RefreshKind::Ambient))
+            {
+                last_releases_poll = Instant::now();
+                releases.request(kind);
+            }
+            if let Ok(completion) = releases_rx.try_recv()
+                && let Some(view) = releases.completed(completion, config_epoch)
+            {
+                app.apply_releases(view);
+                continue;
+            }
+            if let Ok((key, load)) = node_rx.try_recv() {
+                app.releases.land_node(&key, load);
+                continue;
+            }
+            if let Ok(done) = draft_rx.try_recv() {
+                match done {
+                    DraftDone::Generated { id, seq, notes } => {
+                        app.releases.land_generated(id, seq, notes);
+                    }
+                    DraftDone::Categories { id, categories } => {
+                        app.releases.land_categories(id, categories);
+                    }
+                    DraftDone::Published { id, tag, url } => {
+                        if let Ok(url) = &url {
+                            app.status = format!("published {tag}: {url}");
+                        }
+                        app.releases.land_published(id, tag, url);
+                    }
+                }
+                continue;
+            }
+            for request in app.releases.take_draft_requests() {
+                spawn_draft_request(&app.repo, request, draft_tx.clone());
+            }
+            if app.pane_visible()
+                && let Some(s) = app.releases.snapshot()
+            {
+                let repository = s.repository.clone();
+                for key in app.releases.take_node_requests() {
+                    let (tx, repo, repository) =
+                        (node_tx.clone(), app.repo.clone(), repository.clone());
+                    thread::spawn(move || {
+                        let load = crate::releases::fetch_node(&repo, &repository, &key);
+                        let _ = tx.send((key, load));
+                    });
+                }
+            }
+            if app.pane_visible()
+                && let Some(plugin_config) = app.plugin_config()
+                && let Some((generation, cancelled)) = releases.take_dispatch(config_epoch)
+            {
+                let (tx, repo, plugin_config, epoch) =
+                    (releases_tx.clone(), app.repo.clone(), plugin_config.clone(), config_epoch);
+                thread::spawn(move || {
+                    let view =
+                        crate::releases::fetch(&repo, &plugin_config.forge_hosts(), &cancelled);
+                    let _ = tx.send(TaggedReleases { generation, config_epoch: epoch, view });
+                });
+            }
+
             // A fetch waits for a fresh probe; a gesture holds both PR drains.
             if !app.gates_pr_drain()
                 && let Ok(completion) = pr_rx.try_recv()
@@ -1267,9 +1461,12 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             if let Some(due) = age_due {
                 timeout = timeout.min(due.saturating_duration_since(Instant::now()));
             }
-            // The PR tab refetches every minute while it is on screen.
+            // The PR and Releases tabs refetch every minute while on screen.
             if app.pane_visible() && app.tab == crate::app::Tab::Pr {
                 timeout = timeout.min(PR_POLL.saturating_sub(last_pr_poll.elapsed()));
+            }
+            if app.pane_visible() && app.tab == crate::app::Tab::Releases {
+                timeout = timeout.min(PR_POLL.saturating_sub(last_releases_poll.elapsed()));
             }
             // Workers wake the loop when their results land, so nothing in flight needs a timer,
             // except the glyph lighting a building job past its delay.
@@ -1285,7 +1482,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             if let Some(wake) = glyph_wake {
                 timeout = timeout.min(wake.max(Duration::from_millis(15)));
             }
-            if let Some(started) = pr.wait_started {
+            if let Some(started) = pr.wait_started.into_iter().chain(releases.wait_started).min() {
                 timeout = timeout.min(INDICATOR_DELAY.saturating_sub(started.elapsed()));
             }
             if app.config_error().is_none()
@@ -1389,6 +1586,9 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             if app.editor_request.is_some() {
                 run_editor(terminal, app, painted_frame.editor(), &mut open_editors)?;
             }
+            if app.releases.take_notes_edit() {
+                run_notes_editor(terminal, app, painted_frame.editor())?;
+            }
             if app.should_quit {
                 break;
             }
@@ -1415,7 +1615,9 @@ fn handle_blocked_event(app: &mut App, event: &Event) {
         Event::Key(k) if k.kind == KeyEventKind::Press => {
             // `q` quits whatever the modifiers, asking first when comments are queued.
             let action = match k.code {
-                KeyCode::Char(c) => keymap::default_keymap().action_for(keymap::Key::plain(c)),
+                // Quit and quit-discard bind on every tab, so any tab reads them.
+                KeyCode::Char(c) => keymap::default_keymap()
+                    .action_on(crate::app::Tab::Changes, keymap::Key::plain(c)),
                 _ => None,
             };
             match (app.confirming_quit, action) {
@@ -1759,7 +1961,9 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         PageDown => Some(keymap::KeyCode::PageDown),
         _ => None,
     };
-    let action = code.and_then(|code| keymap.action_for(crate::keymap::Key { ctrl, alt, code }));
+    // A key fires the action bound to it on this tab.
+    let key_on_tab = |code| keymap.action_on(app.tab, crate::keymap::Key { ctrl, alt, code });
+    let action = code.and_then(key_on_tab);
 
     // The quit question owns the keyboard; `q` leaves it open, so auto-repeat never answers it.
     if app.confirming_quit {
@@ -1847,6 +2051,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             }
             (Some(K::TabChanges), _) => app.set_tab(crate::app::Tab::Changes)?,
             (Some(K::TabAllFiles), _) => app.set_tab(crate::app::Tab::AllFiles)?,
+            (Some(K::TabReleases), _) => app.set_tab(crate::app::Tab::Releases)?,
             (Some(K::OpenPr), _) => app.pr_open(),
             (Some(K::Search), _) => app.open_search(),
             (Some(K::NavigatorPosition), _) => app.cycle_navigator_position(),
@@ -1863,6 +2068,51 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             (Some(K::PageUp), _) => app.pr_scroll_read(-PAGE),
             (Some(K::Expand), _) => app.expand_pr_details(),
             (Some(K::Collapse), _) => app.collapse_pr_details(),
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    // The release form owns the keyboard: its fields take every printable.
+    if app.tab == crate::app::Tab::Releases && app.releases.draft.is_some() {
+        release_draft_key(app, key);
+        return Ok(());
+    }
+
+    // The Releases tab: walk the default branch's commits and read their notes.
+    if app.tab == crate::app::Tab::Releases {
+        match (action, key.code) {
+            (Some(K::CreateRelease), _) => app.start_release(),
+            (Some(K::Quit), _) => app.request_quit(),
+            (Some(K::Refresh), _) => {
+                app.releases.request(crate::app::RefreshKind::Forced);
+                app.refresh_commanded = true;
+            }
+            (Some(K::TabChanges), _) => app.set_tab(crate::app::Tab::Changes)?,
+            (Some(K::TabAllFiles), _) => app.set_tab(crate::app::Tab::AllFiles)?,
+            (Some(K::TabPr), _) => app.set_tab(crate::app::Tab::Pr)?,
+            (Some(K::Search), _) => app.open_search(),
+            (Some(K::NavigatorPosition), _) => app.cycle_navigator_position(),
+            (Some(K::NavigatorGrow), _) => app.resize_navigator(4),
+            (Some(K::NavigatorShrink), _) => app.resize_navigator(-4),
+            (Some(K::Down), _) => app.releases.move_by(1),
+            (Some(K::Up), _) => app.releases.move_by(-1),
+            (Some(K::Keys), _) => app.toggle_keys(),
+            (_, Esc) => app.escape(),
+            (_, Tab) => app.toggle_focus(),
+            (Some(K::PageDown), _) if app.focus == Focus::Files => app.releases.move_by(PAGE),
+            (Some(K::PageUp), _) if app.focus == Focus::Files => app.releases.move_by(-PAGE),
+            (Some(K::PageDown), _) => app.releases.scroll_read(PAGE),
+            (Some(K::PageUp), _) => app.releases.scroll_read(-PAGE),
+            // On a release node in the list, `expand`/`collapse` fold it, as on a folder.
+            (Some(K::Expand), _) if app.focus == Focus::Files && app.releases.on_release() => {
+                app.releases.set_open(true);
+            }
+            (Some(K::Collapse), _) if app.focus == Focus::Files && app.releases.on_release() => {
+                app.releases.set_open(false);
+            }
+            (Some(K::Expand), _) => app.expand_release_details(),
+            (Some(K::Collapse), _) => app.releases.collapse_details(),
             _ => {}
         }
         return Ok(());
@@ -1895,6 +2145,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::TabChanges => app.set_tab(crate::app::Tab::Changes)?,
             K::TabAllFiles => app.set_tab(crate::app::Tab::AllFiles)?,
             K::TabPr => app.set_tab(crate::app::Tab::Pr)?,
+            K::TabReleases => app.set_tab(crate::app::Tab::Releases)?,
             K::Down => app.move_cursor(1)?,
             K::Up => app.move_cursor(-1)?,
             // `expand`/`collapse` act on a directory or fold, else scroll sideways.
@@ -1943,7 +2194,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::GotoLine => app.open_line(),
             K::Keys => app.toggle_keys(),
             // Inert here; `quit-discard` only answers the quit question.
-            K::Delete | K::OpenPr | K::QuitDiscard => {}
+            K::Delete | K::OpenPr | K::CreateRelease | K::QuitDiscard => {}
         }
         return Ok(());
     }
@@ -1954,6 +2205,165 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         Esc => app.escape(),
         _ => {}
     }
+    Ok(())
+}
+
+/// A key on the release form: every field types at once; only the review's `y` sends.
+fn release_draft_key(app: &mut App, key: KeyEvent) {
+    use crate::release_create::{Finish, Stage, TextField};
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let Some(draft) = app.releases.draft.as_mut() else { return };
+    let mut edit_notes = false;
+    let mut review_scroll = None;
+    let request = match (draft.stage.clone(), key.code) {
+        (Stage::Review(_), KeyCode::Char('y')) if !ctrl && !alt => draft.confirm(),
+        // The review scrolls its list; nothing else there moves or sends.
+        (Stage::Review(_), KeyCode::Down) => {
+            review_scroll = Some(1);
+            None
+        }
+        (Stage::Review(_), KeyCode::Up) => {
+            review_scroll = Some(-1);
+            None
+        }
+        (Stage::Review(_), KeyCode::PageDown) => {
+            review_scroll = Some(PAGE);
+            None
+        }
+        (Stage::Review(_), KeyCode::PageUp) => {
+            review_scroll = Some(-PAGE);
+            None
+        }
+        (Stage::Review(_), KeyCode::Esc) => {
+            draft.back();
+            None
+        }
+        (Stage::Edit, KeyCode::Esc) => {
+            app.releases.draft = None;
+            None
+        }
+        (Stage::Edit, KeyCode::Char('g')) if ctrl => draft.generate(),
+        (Stage::Edit, code) => {
+            match code {
+                KeyCode::Char('o') if ctrl => {
+                    draft.review(Finish::Publish);
+                    review_scroll = Some(0);
+                }
+                KeyCode::Char('s') if ctrl => {
+                    draft.review(Finish::Draft);
+                    review_scroll = Some(0);
+                }
+                KeyCode::Char('e') if ctrl => edit_notes = true,
+                KeyCode::BackTab => draft.step_field(false),
+                KeyCode::Enter if draft.takes_newline() => draft.edit(|t| t.insert('\n')),
+                KeyCode::Tab | KeyCode::Enter => draft.step_field(true),
+                KeyCode::Up | KeyCode::Down => {
+                    let down = code == KeyCode::Down;
+                    let mut moved = false;
+                    if draft.takes_newline() {
+                        draft.edit(|t| moved = t.vertical(down));
+                    }
+                    if !moved {
+                        draft.step_field(down);
+                    }
+                }
+                KeyCode::Left | KeyCode::Right if draft.text_mut().is_none() => {
+                    draft.toggle(code == KeyCode::Right);
+                }
+                KeyCode::Char(' ') if draft.text_mut().is_none() => draft.toggle(true),
+                KeyCode::Left => draft.edit(TextField::left),
+                KeyCode::Right => draft.edit(TextField::right),
+                KeyCode::Home => draft.edit(TextField::home),
+                KeyCode::End => draft.edit(TextField::end),
+                KeyCode::Backspace => draft.edit(TextField::backspace),
+                KeyCode::Delete => draft.edit(TextField::delete),
+                KeyCode::Char(ch) if !ctrl && !alt => draft.edit(|t| t.insert(ch)),
+                _ => {}
+            }
+            None
+        }
+        _ => None,
+    };
+    app.releases.send(request);
+    if edit_notes {
+        app.releases.edit_notes();
+    }
+    match review_scroll {
+        Some(0) => app.releases.reset_review_scroll(),
+        Some(delta) => app.releases.scroll_review(delta),
+        None => {}
+    }
+}
+
+/// The editor command for `path`, or `None` with the reason on the status line.
+fn resolve_editor(
+    app: &mut App,
+    configured: Option<&str>,
+    path: &std::path::Path,
+    line: u32,
+) -> Option<editor::EditorCommand> {
+    let resolved = editor::resolve(
+        configured,
+        std::env::var("VISUAL").ok().as_deref(),
+        std::env::var("EDITOR").ok().as_deref(),
+        // Read per press, so a fixed git config is heard.
+        || git::core_editor(&app.repo),
+        path,
+        line,
+    );
+    match resolved {
+        Ok(command) => Some(command),
+        // Two causes, and the second would otherwise be told to set what it set.
+        Err(editor::NoEditor::Unset) => {
+            app.status =
+                "no editor: set `editor` in the config, $EDITOR, or git's core.editor".into();
+            None
+        }
+        Err(editor::NoEditor::NamesNoProgram) => {
+            app.status = "the editor command names no program".into();
+            None
+        }
+    }
+}
+
+/// Edit the release form's notes in a terminal editor, through a temp file outside the repo.
+fn run_notes_editor(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    configured: Option<&str>,
+) -> Result<()> {
+    let Some(notes) = app.releases.draft.as_ref().map(|draft| draft.notes.text.clone()) else {
+        return Ok(());
+    };
+    let file = tempfile::Builder::new().prefix("release-notes-").suffix(".md").tempfile()?;
+    std::fs::write(file.path(), notes)?;
+    let Some(command) = resolve_editor(app, configured, file.path(), 1) else { return Ok(()) };
+    // A window editor returns before its edit lands, so its notes could never be read back.
+    if !command.wants_terminal {
+        app.status = format!("release notes need a terminal editor, not {}", command.program);
+        return Ok(());
+    }
+    let Some(mut cmd) = proc::user_command(&command.program) else {
+        app.status = format!("editor not found: {}", command.program);
+        return Ok(());
+    };
+    cmd.args(&command.args).current_dir(&app.repo);
+    app.forget_pointer();
+    release_terminal();
+    let launched = cmd.status();
+    claim_terminal();
+    drain_input(app)?;
+    match launched.map(|status| (status, std::fs::read_to_string(file.path()))) {
+        Ok((status, Ok(edited))) if status.success() => {
+            if let Some(draft) = app.releases.draft.as_mut() {
+                draft.set_notes(&edited);
+            }
+        }
+        Ok((status, _)) => app.status = format!("editor exited with {status}; notes unchanged"),
+        Err(e) => app.status = format!("editor failed: {e}"),
+    }
+    invalidate_screen(terminal)?;
     Ok(())
 }
 
@@ -1969,7 +2379,7 @@ fn handle_resize(app: &mut App) {
 /// Arm a text gesture on a mouse-down over text; its click count acts at release.
 fn handle_text_down(app: &mut App, m: MouseEvent, area: Rect) -> bool {
     use crate::selection::{Gesture, Point, Surface, TextDrag};
-    let file_tab = app.tab != crate::app::Tab::Pr;
+    let file_tab = app.tab.is_file_tab();
     let arm = |app: &mut App, surface: Surface, point: Point| {
         let count = app.note_click(m.column, m.row, point.row, surface);
         app.gesture =
@@ -2310,7 +2720,7 @@ fn perform_click(
             } else if let Some(key) = app.painted_details_at(m.column, m.row) {
                 app.focus = Focus::Diff;
                 app.toggle_details(&key);
-            } else if app.tab == crate::app::Tab::Pr {
+            } else if !app.tab.is_file_tab() {
                 // The painted surface has no cursor: a click only focuses the pane.
                 if ui::in_diff_pane(area, app, m.column, m.row) {
                     app.focus = Focus::Diff;
@@ -2501,6 +2911,44 @@ fn dispatch_mouse(
         _ => {}
     }
 
+    // The `Releases` tab: click a row, a fold, a link, or a disclosure; the wheel scrolls.
+    if app.tab == crate::app::Tab::Releases {
+        let in_list = ui::in_files_pane(area, app, m.column, m.row);
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(ui::HeaderHit::Tab(tab)) =
+                    ui::hit_header(area, app, keymap, m.column, m.row)
+                {
+                    app.set_tab(tab)?;
+                } else if let Some(url) = app.painted_link_at(m.column, m.row) {
+                    // The repository links over the list, or a link in the notes.
+                    app.open_link(&url);
+                } else if in_list {
+                    app.focus = Focus::Files;
+                    if let Some(row) = ui::releases_row_at(area, app, m.column, m.row) {
+                        app.releases.click(row);
+                    }
+                } else if ui::in_diff_pane(area, app, m.column, m.row) {
+                    app.focus = Focus::Diff;
+                    if let Some(field) = app.releases.form_field_at(m.row)
+                        && let Some(draft) = app.releases.draft.as_mut()
+                        && draft.stage == crate::release_create::Stage::Edit
+                    {
+                        draft.focus(field);
+                    } else if let Some(key) = app.painted_details_at(m.column, m.row) {
+                        app.toggle_details(&key);
+                    }
+                }
+            }
+            MouseEventKind::ScrollDown if in_list => app.releases.scroll_nav(3),
+            MouseEventKind::ScrollUp if in_list => app.releases.scroll_nav(-3),
+            MouseEventKind::ScrollDown => app.releases.scroll_read(3),
+            MouseEventKind::ScrollUp => app.releases.scroll_read(-3),
+            _ => {}
+        }
+        return Ok(());
+    }
+
     // The `PR` tab: click, select and copy, wheel; nothing edits.
     if app.tab == crate::app::Tab::Pr {
         match m.kind {
@@ -2639,7 +3087,64 @@ mod refresh_tests {
         glyph_clears, handle_blocked_event, handle_resize, ready_app, schedule_pr_probe,
         world_indicator,
     };
-    use crate::app::{App, Tab};
+    use crate::app::{App, RefreshKind, Tab};
+
+    fn releases_done(generation: u64, config_epoch: u64) -> super::TaggedReleases {
+        super::TaggedReleases {
+            generation,
+            config_epoch,
+            view: crate::releases::ReleasesView::NoDefaultBranch,
+        }
+    }
+
+    #[test]
+    fn a_releases_fetch_runs_alone_an_ambient_trigger_rides_it_and_a_commanded_one_supersedes() {
+        use std::sync::atomic::Ordering;
+        let mut releases = super::ReleasesRefresh::default();
+        assert!(releases.take_dispatch(0).is_none(), "nothing fetches before a trigger");
+        releases.request(RefreshKind::Ambient);
+        let (first, first_cancel) = releases.take_dispatch(0).expect("the trigger dispatches");
+        assert!(releases.take_dispatch(0).is_none(), "one fetch at a time");
+
+        releases.request(RefreshKind::Ambient);
+        assert!(!first_cancel.load(Ordering::Acquire), "an ambient trigger rides the fetch");
+        assert!(releases.completed(releases_done(first, 0), 0).is_some(), "it still paints");
+        let (trailing, trailing_cancel) =
+            releases.take_dispatch(0).expect("the ridden trigger's fetch follows the paint");
+
+        releases.request(RefreshKind::Forced);
+        assert!(trailing_cancel.load(Ordering::Acquire), "a commanded refresh cancels the old");
+        assert!(releases.take_dispatch(0).is_none(), "and waits for its worker to exit");
+        assert!(
+            releases.completed(releases_done(trailing, 0), 0).is_none(),
+            "a superseded result never paints"
+        );
+        let (forced, _) = releases.take_dispatch(0).expect("the commanded fetch goes out");
+        assert!(releases.completed(releases_done(forced, 0), 0).is_some());
+        assert!(releases.take_dispatch(0).is_none(), "nothing is owed after it lands");
+    }
+
+    #[test]
+    fn a_releases_result_read_under_an_old_config_refetches_instead_of_painting() {
+        let mut releases = super::ReleasesRefresh::default();
+        releases.request(RefreshKind::Ambient);
+        let (generation, _) = releases.take_dispatch(3).unwrap();
+        assert!(releases.completed(releases_done(generation, 3), 4).is_none());
+        let (again, _) = releases.take_dispatch(4).expect("refetched under the new config");
+        assert!(releases.completed(releases_done(again, 4), 4).is_some());
+    }
+
+    #[test]
+    fn a_hung_releases_fetch_is_abandoned_and_its_late_result_ignored() {
+        let mut releases = super::ReleasesRefresh::default();
+        releases.request(RefreshKind::Ambient);
+        let (hung, _) = releases.take_dispatch(0).unwrap();
+        releases.active.as_mut().unwrap().started = Instant::now().checked_sub(FETCH_HANG).unwrap();
+        releases.request(RefreshKind::Ambient);
+        let (fresh, _) = releases.take_dispatch(0).expect("an ambient trigger replaces a hung one");
+        assert!(releases.completed(releases_done(hung, 0), 0).is_none(), "the dead reader is out");
+        assert!(releases.completed(releases_done(fresh, 0), 0).is_some());
+    }
 
     #[test]
     fn a_recovery_saved_over_twice_recovers_to_the_newest_config() {

@@ -653,8 +653,8 @@ fn the_header_totals_the_scope_and_hides_them_at_zero() {
     r.write("untracked.rs", "one\ntwo\n");
     let app = app_on(&r);
 
-    // An exact fit at 64 columns, which breaks if the multi-byte `−` counts as bytes.
-    let header = render_at(&app, 64).lines().next().unwrap().to_string();
+    // An exact fit at 76 columns, which breaks if the multi-byte `−` counts as bytes.
+    let header = render_at(&app, 76).lines().next().unwrap().to_string();
     assert!(header.contains("2 changed  +3 −1"), "count, then the totals:\n{header}");
 
     let clean = Repo::init();
@@ -977,7 +977,7 @@ fn pr_header_names_the_resolved_branch_and_marks_a_fork() {
     assert!(header.contains("⑂ persiyanov/feature"), "fork head is marked:\n{header}");
     // Narrow bars drop the branch first; the chip's number stays.
     app.pr = snap(false);
-    let narrow = render_at(&app, 46).lines().next().unwrap().to_string();
+    let narrow = render_at(&app, 58).lines().next().unwrap().to_string();
     assert!(!narrow.contains("persiyanov/feature"), "branch drops when narrow:\n{narrow}");
     assert!(narrow.contains("#226"), "the chip survives a narrow bar:\n{narrow}");
 
@@ -3761,7 +3761,7 @@ fn a_narrow_header_never_maps_a_click_outside_the_painted_base() {
     app.set_scope(Scope::Branch).unwrap();
 
     // Truncated, the label's hit columns are exactly its painted run.
-    for width in [40u16, 56, 72] {
+    for width in [52u16, 68, 84] {
         let area = Rect { x: 0, y: 0, width, height: 12 };
         let line0 = dump(&render_size(&app, width, 12)).lines().next().unwrap().to_string();
         let cells: Vec<char> = line0.chars().collect();
@@ -3806,7 +3806,7 @@ fn an_overlong_skipped_tail_never_evicts_the_base_name() {
     r.commit_all("edit");
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
-    let line0 = dump(&render_size(&app, 80, 20)).lines().next().unwrap().to_string();
+    let line0 = dump(&render_size(&app, 92, 20)).lines().next().unwrap().to_string();
     assert!(line0.contains("vs main"), "the resolved name keeps first claim: {line0}");
     assert!(line0.contains("· feature/x"), "the skipped tail paints in what remains: {line0}");
     assert!(line0.contains('…'), "the tail truncates with a trailing ellipsis: {line0}");
@@ -4040,7 +4040,7 @@ fn the_commits_header_names_the_pick_and_its_verdict() {
     app.open_commit_picker();
     app.commit_picker_escape(); // drop the restored anchor: a run of one again
     app.commit_picker_pick().unwrap();
-    let narrow = render_at(&app, 72).lines().next().unwrap().to_string();
+    let narrow = render_at(&app, 84).lines().next().unwrap().to_string();
     assert!(narrow.contains(short(&shas[3])), "the sha survives: {narrow}");
     assert!(narrow.contains('…'), "the subject clips: {narrow}");
 
@@ -4051,7 +4051,7 @@ fn the_commits_header_names_the_pick_and_its_verdict() {
     common::land_world(&mut app);
     let line0 = render(&app).lines().next().unwrap().to_string();
     assert!(line0.contains("· off branch"), "{line0}");
-    let narrow = render_at(&app, 72).lines().next().unwrap().to_string();
+    let narrow = render_at(&app, 84).lines().next().unwrap().to_string();
     assert!(narrow.contains("· off branch"), "the marker survives truncation: {narrow}");
     // And the picker shows the pick as a row above the list.
     app.open_commit_picker();
@@ -4928,4 +4928,92 @@ fn the_line_field_paints_its_number_count_and_footer() {
     // The digits are a line, not a search: `row 1337` lights no match.
     let hl = app.palette().fill(Fill::Highlight);
     assert!(!render_buffer(&app).content.iter().any(|c| c.bg == hl), "no find highlight");
+}
+
+#[test]
+fn four_opens_releases_and_every_tab_key_works_from_it() {
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    let area = Rect::new(0, 0, 140, 40);
+    let keymap = Keymap::default();
+    for (key, tab) in [
+        ('4', Tab::Releases),
+        ('1', Tab::Changes),
+        ('4', Tab::Releases),
+        ('2', Tab::AllFiles),
+        ('4', Tab::Releases),
+        ('3', Tab::Pr),
+        ('4', Tab::Releases),
+    ] {
+        handle_key(&mut app, KeyEvent::from(KeyCode::Char(key)), area, &keymap).unwrap();
+        assert_eq!(app.tab, tab, "`{key}`");
+    }
+    let header = render(&app).lines().next().unwrap().to_string();
+    assert!(header.contains("4 Releases"), "the fourth tab, led by its key:\n{header}");
+    for tab in [Tab::Changes, Tab::AllFiles, Tab::Pr, Tab::Releases] {
+        assert!(!tab_hit_cols(&app, &keymap, tab).is_empty(), "{tab:?} is clickable");
+    }
+    app.keys_expanded = true;
+    let expanded = render(&app);
+    assert!(expanded.contains("1·2·3·4 tabs"), "the key list names all four:\n{expanded}");
+}
+
+#[test]
+fn the_releases_tab_key_rebinds_like_the_others() {
+    let mut app = rebound_app("tab-releases = [\"x\"]\n");
+    let area = Rect::new(0, 0, 140, 40);
+    let keymap = app.keymap().clone();
+    handle_key(&mut app, KeyEvent::from(KeyCode::Char('4')), area, &keymap).unwrap();
+    assert_eq!(app.tab, Tab::Changes, "the replaced digit is free");
+    handle_key(&mut app, KeyEvent::from(KeyCode::Char('x')), area, &keymap).unwrap();
+    assert_eq!(app.tab, Tab::Releases);
+    let out = render(&app);
+    assert!(out.contains("x Releases") && !out.contains("4 Releases"), "{out}");
+}
+
+#[test]
+fn each_releases_state_without_a_list_says_what_to_do() {
+    use herdr_reviewr::git::Forge;
+    use herdr_reviewr::releases::ReleasesView;
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Releases).unwrap();
+    let pending = render(&app);
+    assert!(!pending.contains("loading"), "a quick load flashes nothing:\n{pending}");
+    for (view, needle) in [
+        (ReleasesView::Loading, "loading…"),
+        (ReleasesView::NotGitHub(Forge::GitLab), "reads GitHub only. This repository is on GitLab"),
+        (ReleasesView::NotGitHub(Forge::AzureDevOps), "on Azure DevOps"),
+        (ReleasesView::NoCli, "Install `gh`, then press r"),
+        (ReleasesView::NotAuthed("github.com".into()), "gh auth login --hostname github.com"),
+        (ReleasesView::NeedsForgeRemote, "needs a GitHub remote named origin."),
+        (ReleasesView::NoDefaultBranch, "no default branch yet"),
+        (ReleasesView::Error("rate limited".into()), "GitHub unavailable: rate limited"),
+    ] {
+        app.apply_releases(view.clone());
+        let out = render(&app);
+        assert!(out.contains(needle), "{view:?}:\n{out}");
+    }
+}
+
+#[test]
+fn each_tab_shows_its_own_binding_for_a_shared_key() {
+    use herdr_reviewr::releases::ReleasesView;
+    let mut app = edited_app();
+    app.focus = Focus::Diff;
+    app.keys_expanded = true;
+    let changes = render(&app);
+    assert!(changes.contains("c comment"), "{changes}");
+    assert!(!changes.contains("new release"), "{changes}");
+    app.set_tab(Tab::Releases).unwrap();
+    app.apply_releases(ReleasesView::NoCli);
+    let releases = render(&app);
+    assert!(
+        !releases.contains("c comment"),
+        "no comment key where comments do not exist: {releases}"
+    );
 }
