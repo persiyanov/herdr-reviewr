@@ -33,6 +33,7 @@ pub enum Action {
     NavigatorGrow,
     NavigatorShrink,
     Select,
+    ToggleReviewed,
     Comment,
     Edit,
     Delete,
@@ -151,7 +152,7 @@ impl Key {
 }
 
 /// Every action with its config name and default keys, the one table the keymap derives from.
-const ACTIONS: [(Action, &str, &[Key]); 44] = [
+const ACTIONS: [(Action, &str, &[Key]); 45] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -180,6 +181,7 @@ const ACTIONS: [(Action, &str, &[Key]); 44] = [
     (Action::NavigatorGrow, "navigator-grow", &[Key::plain('<')]),
     (Action::NavigatorShrink, "navigator-shrink", &[Key::plain('>')]),
     (Action::Select, "select", &[Key::plain('v')]),
+    (Action::ToggleReviewed, "toggle-reviewed", &[Key::plain('R')]),
     (Action::Comment, "comment", &[Key::plain('c')]),
     (Action::Edit, "edit", &[Key::plain('e')]),
     (Action::Delete, "delete", &[Key::plain('d')]),
@@ -321,6 +323,7 @@ mod tests {
         assert_eq!(keymap.action_for(Key::plain('m')), Some(Action::Rendered));
         assert_eq!(keymap.action_for(Key::plain('p')), Some(Action::NavigatorPosition));
         assert_eq!(keymap.action_for(Key::plain('z')), Some(Action::NavigatorHide));
+        assert_eq!(keymap.action_for(Key::plain('R')), Some(Action::ToggleReviewed));
         assert_eq!(keymap.action_for(Key::plain('x')), None);
         assert_eq!(keymap.action_for(Key::plain('g')), Some(Action::ScopeCommits));
         assert_eq!(keymap.action_for(Key::plain('G')), Some(Action::CommitPick));

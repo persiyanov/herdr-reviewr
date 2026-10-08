@@ -950,6 +950,26 @@ mod tests {
     }
 
     #[test]
+    fn toggle_reviewed_rebinds_and_keeps_collision_validation() {
+        use crate::keymap::{Action, Key};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        std::fs::write(&path, "[keybindings]\ntoggle-reviewed = [\"x\"]\n").unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.keymap().action_for(Key::plain('x')), Some(Action::ToggleReviewed));
+        assert_eq!(config.keymap().action_for(Key::plain('R')), None, "the default is freed");
+        std::fs::write(&path, "[keybindings]\ntoggle-reviewed = [\"c\"]\n").unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("`toggle-reviewed`")
+                && error.contains("`comment`")
+                && error.contains('c'),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn goto_line_defaults_to_colon_and_rebinds() {
         use crate::keymap::{Action, Key};
         let dir = tempfile::tempdir().unwrap();

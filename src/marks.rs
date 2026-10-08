@@ -1,7 +1,7 @@
 //! Change marks for rendered markdown: the unit owning each changed line, and markers for the rest.
 //! A line belongs to its block in its own document; a change no block shows becomes a marker.
 
-use crate::diff::{Bar, MarkerKind, Row};
+use crate::diff::{Bar, DiffLine, MarkerKind, Row};
 use crate::markdown::Rendered;
 use std::collections::{HashMap, HashSet};
 
@@ -162,6 +162,24 @@ impl MarkMap {
     /// Where diff line `i` sits among the new side's lines.
     pub(crate) fn bounds(&self, i: usize) -> Bounds {
         self.bounds.get(i).copied().unwrap_or_default()
+    }
+
+    /// Rendered units whose every changed source line still belongs to a reviewed edit.
+    pub(crate) fn reviewed_units<'a>(
+        &self,
+        lines: impl IntoIterator<Item = &'a Row>,
+        reviewed: &HashSet<DiffLine>,
+    ) -> HashSet<Unit> {
+        let mut units = HashMap::new();
+        for (i, row) in lines.into_iter().enumerate() {
+            let Some(line) = DiffLine::of(row) else { continue };
+            let is_reviewed = reviewed.contains(&line);
+            for unit in [self.owner(i), self.extras.get(i).copied().flatten()].into_iter().flatten()
+            {
+                units.entry(unit).and_modify(|all| *all &= is_reviewed).or_insert(is_reviewed);
+            }
+        }
+        units.into_iter().filter_map(|(unit, all)| all.then_some(unit)).collect()
     }
 }
 

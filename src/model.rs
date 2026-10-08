@@ -43,10 +43,27 @@ impl Scope {
 }
 
 /// The `commits` pick: the run `oldest..=newest`, full ids, equal for a run of one.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct CommitPick {
     pub oldest: String,
     pub newest: String,
+}
+
+/// The semantic namespace for reviewed files. Resolved endpoints stay in each identity, so a
+/// moving ref invalidates files without creating another recoverable context.
+#[derive(Clone, Default, PartialEq, Eq, Hash, Debug)]
+pub enum ReviewContext {
+    #[default]
+    Uncommitted,
+    Branch {
+        base: Option<String>,
+    },
+    LastTurn {
+        baseline: Option<String>,
+    },
+    Commits {
+        pick: Option<CommitPick>,
+    },
 }
 
 impl CommitPick {
@@ -67,7 +84,7 @@ pub enum Rev {
 }
 
 /// How a file changed within a scope.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ChangeKind {
     Added,
     Modified,
@@ -75,6 +92,164 @@ pub enum ChangeKind {
     Renamed,
     Copied,
     Untracked,
+}
+
+/// The exact comparison behind a changed-file row. It stays opaque outside Git; other code may
+/// only compare and retain it.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct FileIdentity(std::sync::Arc<FileIdentityParts>);
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct FileIdentityParts {
+    old_endpoint: String,
+    new_endpoint: String,
+    kind: ChangeKind,
+    path: String,
+    previous_path: Option<String>,
+    old_mode: String,
+    new_mode: String,
+    old_content: String,
+    new_content: String,
+    binary: bool,
+    live_new_side: bool,
+}
+
+impl std::fmt::Debug for FileIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FileIdentity(..)")
+    }
+}
+
+/// Inputs kept at the Git boundary while constructing an opaque [`FileIdentity`].
+#[derive(Clone, Copy)]
+pub(crate) struct FileIdentityInput<'a> {
+    pub old_endpoint: &'a str,
+    pub new_endpoint: &'a str,
+    pub kind: ChangeKind,
+    pub path: &'a str,
+    pub previous_path: Option<&'a str>,
+    pub old_mode: &'a str,
+    pub new_mode: &'a str,
+    pub old_content: &'a str,
+    pub new_content: &'a str,
+    pub binary: bool,
+    pub live_new_side: bool,
+}
+
+impl FileIdentity {
+    pub(crate) fn from_git(input: FileIdentityInput<'_>) -> Self {
+        let old_side_absent = input.old_mode == "000000";
+        Self(std::sync::Arc::new(FileIdentityParts {
+            old_endpoint: input.old_endpoint.to_string(),
+            new_endpoint: input.new_endpoint.to_string(),
+            kind: if old_side_absent { ChangeKind::Added } else { input.kind },
+            path: input.path.to_string(),
+            previous_path: input.previous_path.map(str::to_string),
+            old_mode: input.old_mode.to_string(),
+            new_mode: input.new_mode.to_string(),
+            old_content: if old_side_absent {
+                "absent".to_string()
+            } else {
+                input.old_content.to_string()
+            },
+            new_content: input.new_content.to_string(),
+            binary: input.binary,
+            live_new_side: input.live_new_side,
+        }))
+    }
+
+    pub(crate) fn with_loaded_worktree_fingerprint(&self, mode: &str, content: &str) -> Self {
+        if !self.uses_live_worktree() {
+            return self.clone();
+        }
+        let mut parts = (*self.0).clone();
+        parts.new_mode = mode.to_string();
+        parts.new_content = content.to_string();
+        Self(std::sync::Arc::new(parts))
+    }
+
+    /// The same file comparison under a newer aggregate snapshot endpoint.
+    pub(crate) fn with_new_endpoint(&self, endpoint: &str) -> Self {
+        let mut parts = (*self.0).clone();
+        parts.new_endpoint = endpoint.to_string();
+        Self(std::sync::Arc::new(parts))
+    }
+
+    /// Whether this file's two sides are unchanged, even if another file moved the snapshot tree.
+    pub(crate) fn same_file_comparison(&self, other: &Self) -> bool {
+        let (a, b) = (&self.0, &other.0);
+        a.old_endpoint == b.old_endpoint
+            && a.kind == b.kind
+            && a.path == b.path
+            && a.previous_path == b.previous_path
+            && a.old_mode == b.old_mode
+            && a.new_mode == b.new_mode
+            && a.old_content == b.old_content
+            && a.new_content == b.new_content
+            && a.binary == b.binary
+            && a.live_new_side == b.live_new_side
+    }
+
+    pub(crate) fn uses_live_worktree(&self) -> bool {
+        self.0.live_new_side
+    }
+
+    /// Whether two comparisons share the same old file and can compare base-anchored edits.
+    pub(crate) fn same_old_side(&self, other: &Self) -> bool {
+        let (a, b) = (&self.0, &other.0);
+        a.old_endpoint == b.old_endpoint
+            && a.path == b.path
+            && a.previous_path == b.previous_path
+            && a.old_mode == b.old_mode
+            && a.old_content == b.old_content
+    }
+
+    pub(crate) fn new_side_absent(&self) -> bool {
+        self.0.new_mode == "000000"
+    }
+
+    pub(crate) fn is_landed_deletion(&self) -> bool {
+        self.0.kind == ChangeKind::Deleted && self.new_side_absent()
+    }
+
+    pub(crate) fn live_side_certified(&self) -> bool {
+        !self.uses_live_worktree() || self.is_landed_deletion() || !self.new_side_absent()
+    }
+
+    pub(crate) fn is_dirty_gitlink(&self) -> bool {
+        self.new_is_gitlink() && !self.0.new_content.ends_with(":..")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn old_endpoint(&self) -> &str {
+        &self.0.old_endpoint
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_new_side(&self) -> bool {
+        self.0.new_mode != "000000"
+    }
+
+    pub(crate) fn new_is_gitlink(&self) -> bool {
+        self.0.new_mode == "160000"
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture() -> Self {
+        Self::from_git(FileIdentityInput {
+            old_endpoint: "fixture-old",
+            new_endpoint: "fixture-new",
+            kind: ChangeKind::Modified,
+            path: "fixture",
+            previous_path: None,
+            old_mode: "100644",
+            new_mode: "100644",
+            old_content: "fixture-old",
+            new_content: "fixture-new",
+            binary: false,
+            live_new_side: false,
+        })
+    }
 }
 
 impl ChangeKind {
@@ -105,6 +280,8 @@ pub struct ChangedFile {
     pub old_size: u64,
     /// The bytes git stores on the new side, 0 where there is none; `None` for the worktree.
     pub new_size: Option<u64>,
+    /// The exact comparison which produced this row.
+    pub identity: FileIdentity,
 }
 
 impl ChangedFile {

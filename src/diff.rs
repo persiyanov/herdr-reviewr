@@ -1,12 +1,13 @@
 //! The diff model: a file's changes as highlighted rows, terminal-free.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 
-use similar::{ChangeTag, TextDiff};
+use similar::{Algorithm, ChangeTag, DiffTag, TextDiff, capture_diff_slices};
 
 use crate::highlight::Highlighter;
+use crate::model::FileIdentity;
 use crate::text::{line_body, lines};
 
 /// An 8-bit RGB color.
@@ -50,6 +51,39 @@ pub enum Row {
         text: String,
         kind: RenderedKind,
     },
+}
+
+/// One changed line's stable identity within a diff against the same old side.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum DiffLine {
+    Old(u32),
+    New(u32),
+}
+
+impl DiffLine {
+    pub(crate) fn of(row: &Row) -> Option<Self> {
+        match row {
+            Row::Deletion { old_no, .. } => Some(Self::Old(*old_no)),
+            Row::Insertion { new_no, .. } => Some(Self::New(*new_no)),
+            Row::Context { .. } | Row::Fold { .. } | Row::Rendered { .. } => None,
+        }
+    }
+}
+
+/// A base-anchored replacement retained when its file is marked reviewed.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct ReviewedEdit {
+    old_start: u32,
+    old_len: u32,
+    new_fingerprints: Vec<u64>,
+}
+
+/// One current edit and the rows that paint it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct DiffEdit {
+    reviewed: ReviewedEdit,
+    old_lines: std::ops::Range<u32>,
+    new_lines: std::ops::Range<u32>,
 }
 
 /// What a rendered row is.
@@ -201,8 +235,12 @@ pub struct FileDiff {
     pub notice: Option<Notice>,
     pub view: View,
     pub rows: Vec<Row>,
+    /// The exact landed comparison whose content this view loaded.
+    pub identity: Option<FileIdentity>,
     /// The `(old, new)` line numbers of each line edited in place.
     pub pairs: Vec<(u32, u32)>,
+    /// Base-anchored edit blocks, before context folding.
+    edits: Vec<DiffEdit>,
 }
 
 /// The line budget; the byte budget below catches one huge line.
@@ -235,7 +273,16 @@ impl FileDiff {
         notice: Option<Notice>,
         view: View,
     ) -> Self {
-        Self { path, previous_path, notice, view, rows: Vec::new(), pairs: Vec::new() }
+        Self {
+            path,
+            previous_path,
+            notice,
+            view,
+            rows: Vec::new(),
+            identity: None,
+            pairs: Vec::new(),
+            edits: Vec::new(),
+        }
     }
 
     /// Build the diff of `old` to `new`; `previous_path` is a rename or copy source.
@@ -246,8 +293,36 @@ impl FileDiff {
         new: &str,
         hl: &Highlighter,
     ) -> Self {
+        Self::build_inner(path, previous_path, old, new, None, hl)
+    }
+
+    /// Build from the same sides as [`Self::build`] and attach the identity reproduced from
+    /// the worktree bytes and mode the caller read alongside `new`.
+    pub(crate) fn build_identified(
+        path: String,
+        previous_path: Option<String>,
+        old: &str,
+        new: &str,
+        identity: FileIdentity,
+        hl: &Highlighter,
+    ) -> Self {
+        Self::build_inner(path, previous_path, old, new, Some(identity), hl)
+    }
+
+    fn build_inner(
+        path: String,
+        previous_path: Option<String>,
+        old: &str,
+        new: &str,
+        identity: Option<FileIdentity>,
+        hl: &Highlighter,
+    ) -> Self {
         let language = language_of(&path);
-        let notice = |n| Self::rowless(path.clone(), previous_path.clone(), Some(n), View::Diff);
+        let notice = |n| {
+            let mut diff = Self::rowless(path.clone(), previous_path.clone(), Some(n), View::Diff);
+            diff.identity.clone_from(&identity);
+            diff
+        };
         if old.contains('\0') || new.contains('\0') {
             return notice(Notice::Binary);
         }
@@ -299,6 +374,7 @@ impl FileDiff {
         // Pair on text alone, then mark endings, so an ending-only change pairs with its twin.
         let paired = compute_emphasis(&mut rows);
         mark_crs(&mut rows, &old_lines, &new_lines, &paired);
+        let edits = diff_edits(&rows, &new_lines);
         let mut pairs: Vec<(u32, u32)> =
             paired.iter().filter_map(|&(d, i)| rows[d].old_no().zip(rows[i].new_no())).collect();
         pairs.sort_unstable();
@@ -308,7 +384,9 @@ impl FileDiff {
             notice: None,
             view: View::Diff,
             rows: collapse_context(&rows),
+            identity,
             pairs,
+            edits,
         }
     }
 
@@ -341,6 +419,83 @@ impl FileDiff {
     pub fn notice(path: String, previous_path: Option<String>, notice: Notice, view: View) -> Self {
         Self::rowless(path, previous_path, Some(notice), view)
     }
+
+    pub(crate) fn notice_identified(
+        path: String,
+        previous_path: Option<String>,
+        notice: Notice,
+        identity: FileIdentity,
+    ) -> Self {
+        let mut diff = Self::notice(path, previous_path, notice, View::Diff);
+        diff.identity = Some(identity);
+        diff
+    }
+
+    /// The edit script captured by a whole-file review action.
+    pub(crate) fn reviewed_edits(&self) -> Vec<ReviewedEdit> {
+        self.edits.iter().map(|edit| edit.reviewed.clone()).collect()
+    }
+
+    /// Changed rows that remain unchanged within the same base-anchored edit.
+    pub(crate) fn reviewed_lines(&self, reviewed: &[ReviewedEdit]) -> HashSet<DiffLine> {
+        let reviewed: HashMap<_, _> =
+            reviewed.iter().map(|edit| ((edit.old_start, edit.old_len), edit)).collect();
+        let mut lines = HashSet::new();
+        for edit in &self.edits {
+            let key = (edit.reviewed.old_start, edit.reviewed.old_len);
+            let Some(previous) = reviewed.get(&key) else { continue };
+            lines.extend(edit.old_lines.clone().map(DiffLine::Old));
+            if previous.new_fingerprints == edit.reviewed.new_fingerprints {
+                lines.extend(edit.new_lines.clone().map(DiffLine::New));
+                continue;
+            }
+            for op in capture_diff_slices(
+                Algorithm::Myers,
+                &previous.new_fingerprints,
+                &edit.reviewed.new_fingerprints,
+            ) {
+                if op.tag() == DiffTag::Equal {
+                    lines.extend(
+                        op.new_range()
+                            .map(|offset| DiffLine::New(edit.new_lines.start + offset as u32)),
+                    );
+                }
+            }
+        }
+        lines
+    }
+}
+
+/// Normalize the diff's change blocks against positions in the old side.
+fn diff_edits(rows: &[Row], new_lines: &[&str]) -> Vec<DiffEdit> {
+    change_blocks(rows)
+        .into_iter()
+        .map(|(deletions, insertions)| {
+            let old_start = deletions.clone().next().and_then(|i| rows[i].old_no()).map_or_else(
+                || rows[..insertions.start].iter().rev().find_map(Row::old_no).unwrap_or(0),
+                |line| line - 1,
+            );
+            let new_start = insertions.clone().find_map(|i| rows[i].new_no()).unwrap_or(0);
+            let new_fingerprints = insertions
+                .clone()
+                .filter_map(|i| rows[i].new_no())
+                .map(|line| {
+                    let mut fingerprint = DefaultHasher::new();
+                    new_lines[line as usize - 1].hash(&mut fingerprint);
+                    fingerprint.finish()
+                })
+                .collect();
+            DiffEdit {
+                reviewed: ReviewedEdit {
+                    old_start,
+                    old_len: deletions.len() as u32,
+                    new_fingerprints,
+                },
+                old_lines: old_start + 1..old_start + 1 + deletions.len() as u32,
+                new_lines: new_start..new_start + insertions.len() as u32,
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn set_row_spans(row: &mut Row, next: Vec<Span>) {
@@ -607,6 +762,23 @@ impl DiffCache {
         self.get_or_build(path.clone(), key, || FileDiff::build(path, previous_path, old, new, hl))
     }
 
+    pub(crate) fn get_identified(
+        &mut self,
+        path: String,
+        previous_path: Option<String>,
+        old: &str,
+        new: &str,
+        identity: FileIdentity,
+        hl: &Highlighter,
+    ) -> FileDiff {
+        // The identity already includes both exact content objects, paths, modes, and endpoints.
+        // Avoid scanning both full strings again on every file navigation.
+        let key = identity_hash(&identity);
+        self.get_or_build(path.clone(), key, || {
+            FileDiff::build_identified(path, previous_path, old, new, identity, hl)
+        })
+    }
+
     /// The File view for `path`, under a `file:` key so it never evicts the path's diff.
     pub fn get_file(&mut self, path: String, content: &str, hl: &Highlighter) -> FileDiff {
         let key = content_hash(None, content, content);
@@ -642,15 +814,39 @@ fn content_hash(previous_path: Option<&str>, old: &str, new: &str) -> u64 {
     h.finish()
 }
 
+fn identity_hash(identity: &FileIdentity) -> u64 {
+    let mut h = DefaultHasher::new();
+    identity.hash(&mut h);
+    h.finish()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DiffCache, FileDiff, Notice, Row, SIMILAR_WINDOW, View, language_of};
+    use super::{DiffCache, DiffLine, FileDiff, Notice, Row, SIMILAR_WINDOW, View, language_of};
     use crate::highlight::Highlighter;
     use crate::theme;
 
     /// The default theme's syntax pairing (bundled Catppuccin Mocha), for highlighter setup.
     fn mocha() -> crate::theme::SyntaxChoice {
         theme::resolve(Some("catppuccin")).syntax
+    }
+
+    fn live_identity(content: &[u8]) -> crate::model::FileIdentity {
+        use crate::model::{ChangeKind, FileIdentity, FileIdentityInput};
+        let fingerprint = String::from_utf8_lossy(content);
+        FileIdentity::from_git(FileIdentityInput {
+            old_endpoint: "old-tree",
+            new_endpoint: "worktree",
+            kind: ChangeKind::Modified,
+            path: "a.rs",
+            previous_path: None,
+            old_mode: "100644",
+            new_mode: "100644",
+            old_content: "old-blob",
+            new_content: &fingerprint,
+            binary: false,
+            live_new_side: true,
+        })
     }
 
     #[test]
@@ -684,6 +880,71 @@ mod tests {
     fn build(old: &str, new: &str) -> FileDiff {
         let hl = Highlighter::new(mocha());
         FileDiff::build("a.rs".into(), None, old, new, &hl)
+    }
+
+    #[test]
+    fn reviewed_edits_match_unchanged_lines_at_the_same_base_anchor() {
+        let base = "base\nmiddle\ntail\n";
+        let reviewed = build(base, "base\nseen\nmiddle\ntail\n").reviewed_edits();
+        let current = build(base, "base\nseen\nmiddle\nlater\ntail\n");
+        let unchanged = current.reviewed_lines(&reviewed);
+        assert!(unchanged.contains(&DiffLine::New(2)), "the exact reviewed insertion matches");
+        assert!(!unchanged.contains(&DiffLine::New(4)), "a later insertion does not match");
+
+        let rewritten = build(base, "base\nrewritten\nmiddle\ntail\n");
+        assert_eq!(
+            rewritten.reviewed_lines(&reviewed),
+            std::collections::HashSet::new(),
+            "a changed payload invalidates the complete reviewed block",
+        );
+
+        let moved = build(base, "base\nmiddle\nseen\ntail\n");
+        assert!(
+            moved.reviewed_lines(&reviewed).is_empty(),
+            "the same payload at another base anchor is new work",
+        );
+
+        let top_reviewed = build(base, "seen\nbase\nmiddle\ntail\n").reviewed_edits();
+        let top_current = build(base, "seen\nbase\nmiddle\nlater\ntail\n");
+        assert!(
+            top_current.reviewed_lines(&top_reviewed).contains(&DiffLine::New(1)),
+            "a top-of-file insertion keeps its base anchor",
+        );
+
+        let deletion_base = "head\ngone\nmiddle\ntail\n";
+        let deletion = build(deletion_base, "head\nmiddle\ntail\n").reviewed_edits();
+        let after_deletion = build(deletion_base, "head\nmiddle\nlater\ntail\n");
+        assert!(
+            after_deletion.reviewed_lines(&deletion).contains(&DiffLine::Old(2)),
+            "a retained deletion matches its old-side line",
+        );
+
+        let replacement_base = "head\nold\nmiddle\ntail\n";
+        let replacement = build(replacement_base, "head\nnew\nmiddle\ntail\n").reviewed_edits();
+        let after_replacement = build(replacement_base, "head\nnew\nmiddle\nlater\ntail\n");
+        let replacement_lines = after_replacement.reviewed_lines(&replacement);
+        assert!(replacement_lines.contains(&DiffLine::Old(2)));
+        assert!(replacement_lines.contains(&DiffLine::New(2)));
+
+        let adjacent_reviewed = build(base, "base\nseen\nmiddle\ntail\n").reviewed_edits();
+        let adjacent_current = build(base, "base\nseen\nlater\nmiddle\ntail\n");
+        let adjacent_lines = adjacent_current.reviewed_lines(&adjacent_reviewed);
+        assert!(
+            adjacent_lines.contains(&DiffLine::New(2)),
+            "a reviewed line remains reviewed when the insertion block grows",
+        );
+        assert!(
+            !adjacent_lines.contains(&DiffLine::New(3)),
+            "the adjacent line added later remains new",
+        );
+
+        let whole_file_reviewed = build("", "one\ntwo\nthree\n").reviewed_edits();
+        let whole_file_current = build("", "one\ntwo\nnew\nthree\n");
+        let whole_file_lines = whole_file_current.reviewed_lines(&whole_file_reviewed);
+        assert!(whole_file_lines.contains(&DiffLine::New(1)));
+        assert!(whole_file_lines.contains(&DiffLine::New(2)));
+        assert!(!whole_file_lines.contains(&DiffLine::New(3)));
+        assert!(whole_file_lines.contains(&DiffLine::New(4)));
     }
 
     #[test]
@@ -946,5 +1207,19 @@ mod tests {
         let d1 = cache.get("a.rs".into(), None, "x\n", "y\n", &hl);
         let d2 = cache.get("a.rs".into(), None, "x\n", "y\n", &hl);
         assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn loaded_diff_reproduces_the_side_it_actually_read() {
+        let hl = Highlighter::new(mocha());
+        let landed = live_identity(b"one\n");
+        let unchanged = landed.with_loaded_worktree_fingerprint("100644", "one\n");
+        let moved = landed.with_loaded_worktree_fingerprint("100644", "two\n");
+
+        let diff =
+            FileDiff::build_identified("a.rs".into(), None, "old\n", "two\n", moved.clone(), &hl);
+        assert_eq!(unchanged, landed);
+        assert_ne!(moved, landed, "an edit after the world build cannot match the landed row");
+        assert_eq!(diff.identity.as_ref(), Some(&moved));
     }
 }

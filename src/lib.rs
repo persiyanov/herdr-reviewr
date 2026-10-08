@@ -1927,6 +1927,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::BasePick => app.open_base_picker(),
             K::CommitPick => app.open_commit_picker(),
             K::Select => app.toggle_select(),
+            K::ToggleReviewed => app.toggle_current_file_reviewed(),
             K::Comment => app.start_comment(),
             // `delete` needs the diff focused, never an off-screen cursor; `edit` works anywhere.
             K::Edit => app.start_edit(),
