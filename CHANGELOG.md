@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **The send picker names panes as their borders do**: a row shows the agent's name, else its pane's label, else its display name or kind, so several labelled Claude Code panes no longer all read `claude`.
+
 ## [0.46.0] — 2026-10-06
 
 ### Changed
