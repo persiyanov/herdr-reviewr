@@ -380,6 +380,9 @@ fn open(
         && let Some(tab) = opened.tab_id.as_deref()
     {
         let _ = herdr::rename_tab(tab, herdr::LABEL);
+        if open.focus && herdr::focus_tab(tab).is_err() {
+            logln!("focusing tab {tab} failed");
+        }
     }
 
     let success = format!("opened {} ({}) in {ws}", opened.pane_id, placement.as_str());
