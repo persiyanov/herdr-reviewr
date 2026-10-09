@@ -42,7 +42,7 @@ pub trait ExportTarget {
 pub fn send_failure(error: &herdr::SendError, agent: Option<&str>, copy: &str) -> String {
     use herdr::{HerdrError as H, SendError as S};
     let cause = match error {
-        S::AtPrompt(name) => return format!("answer {name}'s prompt first"),
+        S::AtPrompt(name) => return format!("answer {}'s prompt first", agent.unwrap_or(name)),
         S::Herdr(H::PaneGone) => format!("{} closed", agent.unwrap_or("the agent")),
         S::NoAgent => "no agent in this workspace".to_string(),
         S::TooLarge => "review too large to send".to_string(),
@@ -235,7 +235,8 @@ mod tests {
         let agent = Agent { pane: "w8:p1".into(), name: "release-bot".into() };
         let rows = [
             (S::Herdr(H::PaneGone), "release-bot closed, press y to copy"),
-            (S::AtPrompt("codex".into()), "answer codex's prompt first"),
+            // A prompt refusal names the selected row, just as a successful send does.
+            (S::AtPrompt("codex".into()), "answer release-bot's prompt first"),
             (S::NoAgent, "no agent in this workspace, press y to copy"),
             (S::TooLarge, "review too large to send, press y to copy"),
             (S::Herdr(H::Unanswered), "herdr didn't answer, press y to copy"),
@@ -254,6 +255,11 @@ mod tests {
         // Before any agent is chosen, a gone pane names no one.
         let gone = S::Herdr(H::PaneGone);
         assert_eq!(send_failure(&gone, None, "y"), "the agent closed, press y to copy");
+        // Without a selected row, the prompt refusal keeps the name reported by readiness.
+        assert_eq!(
+            send_failure(&S::AtPrompt("codex".into()), None, "y"),
+            "answer codex's prompt first"
+        );
         #[cfg(not(windows))]
         {
             let missing = anyhow::Error::from(super::clipboard::NoTool);
