@@ -230,6 +230,14 @@ impl PaneList {
         answer(&call(&["pane", "list", "--workspace", ws])?)
     }
 
+    /// This snapshot's non-empty pane labels, keyed by pane id.
+    fn labels(self) -> HashMap<String, String> {
+        self.panes
+            .into_iter()
+            .filter_map(|pane| pane.label.map(|label| (pane.pane_id, label)))
+            .collect()
+    }
+
     /// The entry for pane `pane`, if the snapshot lists it.
     pub(crate) fn pane(&self, pane: &str) -> Option<&PaneEntry> {
         self.panes.iter().find(|entry| entry.pane_id == pane)
@@ -430,34 +438,45 @@ pub fn send_target(ids: &PaneIds) -> Result<SendTarget, SendError> {
     let picked = candidates(&agents, ws.as_deref(), me.as_deref());
     match picked.len() {
         0 => Err(SendError::NoAgent),
-        // The sole-agent send shows no row, so only the picker pays for the tab-label call.
-        1 => Ok(SendTarget::One(picked[0].choice(&HashMap::new()))),
+        // The sole-agent send shows no row, so only the picker pays for the label calls.
+        1 => Ok(SendTarget::One(picked[0].choice(&HashMap::new(), &HashMap::new()))),
         _ => {
-            let tabs = tab_labels(ws.as_deref());
-            Ok(SendTarget::Many(picked.into_iter().map(|agent| agent.choice(&tabs)).collect()))
+            // Both labels are best effort, so they share one wait instead of adding a second.
+            let (tabs, panes) = std::thread::scope(|scope| {
+                let tabs = scope.spawn(|| tab_labels(ws.as_deref()));
+                let panes = scope.spawn(|| pane_labels(ws.as_deref()));
+                (tabs.join().unwrap_or_default(), panes.join().unwrap_or_default())
+            });
+            Ok(SendTarget::Many(
+                picked.into_iter().map(|agent| agent.choice(&tabs, &panes)).collect(),
+            ))
         }
     }
 }
 
 impl AgentPane {
     /// This pane as a picker row.
-    fn choice(&self, tabs: &HashMap<String, String>) -> AgentChoice {
+    fn choice(
+        &self,
+        tabs: &HashMap<String, String>,
+        panes: &HashMap<String, String>,
+    ) -> AgentChoice {
         AgentChoice {
             pane_id: self.pane_id.clone(),
-            name: self.row_name(),
+            name: self.row_name(panes.get(&self.pane_id).map(String::as_str)),
             state: self.row_state(),
             tab: tabs.get(&self.tab_id).cloned().unwrap_or_default(),
         }
     }
 
-    /// The agent's `name`, else `display_agent`, else its kind, else the pane id.
-    fn row_name(&self) -> String {
-        [&self.name, &self.display_agent, &self.agent]
+    /// The agent's name, else its pane label, display agent, kind, or pane id; empty names fall through.
+    fn row_name(&self, pane_label: Option<&str>) -> String {
+        [self.name.as_deref(), pane_label, self.display_agent.as_deref(), self.agent.as_deref()]
             .into_iter()
             .flatten()
-            .next()
-            .cloned()
-            .unwrap_or_else(|| self.pane_id.clone())
+            .find(|name| !name.is_empty())
+            .unwrap_or(&self.pane_id)
+            .to_owned()
     }
 
     /// The state's label from `state_labels`, else herdr's own spelling, never `unknown`.
@@ -479,6 +498,12 @@ impl AgentPane {
     fn is_agent_other_than(&self, me: Option<&str>) -> bool {
         self.agent.is_some() && Some(self.pane_id.as_str()) != me
     }
+}
+
+/// Pane id to label for one workspace; best effort, never failing the send.
+fn pane_labels(ws: Option<&str>) -> HashMap<String, String> {
+    let Some(ws) = ws else { return HashMap::new() };
+    PaneList::of(ws).map(PaneList::labels).unwrap_or_default()
 }
 
 /// Tab id to label for one workspace; best effort, never failing the send.
@@ -588,7 +613,7 @@ fn readiness_in(agents: &[AgentPane], pane: &str) -> Result<(), SendError> {
             Err(HerdrError::PaneGone.into())
         }
         Some(agent) if agent.status() == Status::Blocked => {
-            Err(SendError::AtPrompt(agent.row_name()))
+            Err(SendError::AtPrompt(agent.row_name(None)))
         }
         Some(_) => Ok(()),
     }
@@ -900,8 +925,12 @@ mod tests {
         ws: Option<&str>,
         me: Option<&str>,
         tabs: &HashMap<String, String>,
+        panes: &HashMap<String, String>,
     ) -> Vec<AgentChoice> {
-        super::candidates(agents, ws, me).into_iter().map(|agent| agent.choice(tabs)).collect()
+        super::candidates(agents, ws, me)
+            .into_iter()
+            .map(|agent| agent.choice(tabs, panes))
+            .collect()
     }
 
     #[test]
@@ -989,24 +1018,33 @@ mod tests {
     }
 
     #[test]
-    fn a_row_name_prefers_the_rename_then_the_display_agent_then_the_kind() {
+    fn a_row_name_prefers_the_rename_then_the_pane_label_then_the_display_agent_then_the_kind() {
+        let renamed = named("w8:p1", "w8:t1", "w8", Some("release-bot"));
         // `herdr agent rename` sets `name`, which wins.
-        assert_eq!(named("w8:p1", "w8:t1", "w8", Some("release-bot")).row_name(), "release-bot");
-        // `--clear` leaves the key present and null, which falls through like an absent one.
+        assert_eq!(renamed.row_name(Some("wiki-revision")), "release-bot");
+        let displayed =
+            AgentPane { display_agent: Some("Claude".into()), ..agent("w8:p1", "w8:t1", "w8") };
+        // A pane label outranks the display agent, since the border shows it.
+        assert_eq!(displayed.row_name(Some("wiki-revision")), "wiki-revision");
+        assert_eq!(displayed.row_name(None), "Claude");
+        // An empty pane label falls through like an absent one.
+        assert_eq!(displayed.row_name(Some("")), "Claude");
         let cleared = named("w8:p1", "w8:t1", "w8", None);
-        assert_eq!(cleared.row_name(), "claude");
-        // With no kind either, the pane id keeps the row and the success line from going blank.
+        // `--clear` leaves the key present and null, which falls through like an absent one.
+        assert_eq!(cleared.row_name(None), "claude");
+        // An empty pane label still lets the agent kind name the row.
+        assert_eq!(cleared.row_name(Some("")), "claude");
         let anonymous = AgentPane { agent: None, ..agent("w8:p1", "w8:t1", "w8") };
-        assert_eq!(anonymous.row_name(), "w8:p1");
-        let displayed = AgentPane {
-            agent: None,
-            display_agent: Some("Claude".into()),
-            ..agent("w8:p1", "w8:t1", "w8")
-        };
-        assert_eq!(displayed.row_name(), "Claude");
+        // With no kind either, the pane id keeps the row and the success line from going blank.
+        assert_eq!(anonymous.row_name(None), "w8:p1");
+        // An empty pane label must not hide the pane id fallback.
+        assert_eq!(anonymous.row_name(Some("")), "w8:p1");
         // An empty name parses as no name, so it falls through too.
         let emptied = r#"{"result":{"agents":[{"agent":"codex","agent_status":"idle","pane_id":"w8:p2","tab_id":"w8:t1","workspace_id":"w8","name":"","display_agent":""}]}}"#;
-        assert_eq!(super::parse_agents(emptied).unwrap()[0].row_name(), "codex");
+        let parsed = super::parse_agents(emptied).unwrap();
+        assert_eq!(parsed[0].row_name(None), "codex");
+        // A pane label identifies the pane even when herdr sends empty agent names.
+        assert_eq!(parsed[0].row_name(Some("wiki-revision")), "wiki-revision");
     }
 
     #[test]
@@ -1020,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_rows_are_every_workspace_agent_in_herdr_order_with_its_tab_label() {
+    fn picker_rows_are_every_workspace_agent_in_herdr_order_with_its_pane_and_tab_labels() {
         let agents = vec![
             agent("w8:p1", "w8:t1", "w8"),
             non_agent_pane("w8:p4", "w8:t1", "w8"),
@@ -1030,13 +1068,14 @@ mod tests {
         let mut tabs = HashMap::new();
         tabs.insert("w8:t1".to_string(), "Grip Outreach".to_string());
         // w8:t2 has no label, so that row shows its state alone.
-        let rows = rows(&agents, Some("w8"), Some("w8:p9"), &tabs);
+        let panes = HashMap::from([("w8:p1".into(), "wiki-revision".into())]);
+        let rows = rows(&agents, Some("w8"), Some("w8:p9"), &tabs, &panes);
         assert_eq!(
             rows,
             vec![
                 AgentChoice {
                     pane_id: "w8:p1".into(),
-                    name: "claude".into(),
+                    name: "wiki-revision".into(),
                     state: "working".into(),
                     tab: "Grip Outreach".into(),
                 },
@@ -1058,7 +1097,7 @@ mod tests {
             non_agent_pane("w3:p4", "w3:t1", "w3"),
             agent("w3:p5", "w3:t1", "w3"),
         ];
-        let rows_of = |ws| rows(&agents, ws, Some("w3:p5"), &HashMap::new());
+        let rows_of = |ws| rows(&agents, ws, Some("w3:p5"), &HashMap::new(), &HashMap::new());
         let picked: Vec<_> = rows_of(Some("w3")).iter().map(|r| r.pane_id.clone()).collect();
         assert_eq!(picked, ["w3:p1"]);
         // No workspace id means no candidates — never every agent on the machine.
@@ -1070,11 +1109,11 @@ mod tests {
         // Exactly what herdr 0.7.5 emits: no `name`, no `display_agent`, no `state_labels`.
         let json = r#"{"result":{"agents":[{"agent":"claude","agent_status":"idle","pane_id":"w8:p1","tab_id":"w8:t1","workspace_id":"w8"}]}}"#;
         let parsed = parse_agents(json).unwrap();
-        assert_eq!(parsed[0].row_name(), "claude");
+        assert_eq!(parsed[0].row_name(None), "claude");
         assert_eq!(parsed[0].row_state(), "idle");
         // And with `name` explicitly null, as `herdr agent rename --clear` leaves it.
         let cleared = r#"{"result":{"agents":[{"agent":"codex","agent_status":"idle","pane_id":"w8:p2","tab_id":"w8:t1","workspace_id":"w8","name":null}]}}"#;
-        assert_eq!(parse_agents(cleared).unwrap()[0].row_name(), "codex");
+        assert_eq!(parse_agents(cleared).unwrap()[0].row_name(None), "codex");
     }
 
     /// A herdr that accepts and never answers holds the exchange only until its deadline.
@@ -1160,6 +1199,14 @@ mod tests {
             HerdrError::Refused(Some("internal".into()))
         );
         assert_eq!(super::error_code("plain words"), None);
+    }
+
+    #[test]
+    fn a_pane_list_parses_to_labels_and_unlabelled_or_empty_panes_are_dropped() {
+        let json = r#"{"result":{"panes":[{"pane_id":"w7:p14","label":"s19-wiki-revision"},{"pane_id":"w7:p15"},{"pane_id":"w7:p16","label":""},{"pane_id":"w7:p17","label":null}]}}"#;
+        let panes = super::answer::<super::PaneList>(json).unwrap();
+        let labels = panes.labels();
+        assert_eq!(labels, HashMap::from([("w7:p14".into(), "s19-wiki-revision".into())]));
     }
 
     #[test]
