@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A tab open shows the tab**: with `toggle_placement = "tab"`, toggle and open switch to reviewr's new tab again. Since herdr 0.9, `--focus` focused the pane but left the previous tab on screen.
+
 ## [0.46.0] — 2026-10-06
 
 ### Changed
