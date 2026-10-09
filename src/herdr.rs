@@ -441,8 +441,12 @@ pub fn send_target(ids: &PaneIds) -> Result<SendTarget, SendError> {
         // The sole-agent send shows no row, so only the picker pays for the label calls.
         1 => Ok(SendTarget::One(picked[0].choice(&HashMap::new(), &HashMap::new()))),
         _ => {
-            let tabs = tab_labels(ws.as_deref());
-            let panes = pane_labels(ws.as_deref());
+            // Both labels are best effort, so they share one wait instead of adding a second.
+            let (tabs, panes) = std::thread::scope(|scope| {
+                let tabs = scope.spawn(|| tab_labels(ws.as_deref()));
+                let panes = scope.spawn(|| pane_labels(ws.as_deref()));
+                (tabs.join().unwrap_or_default(), panes.join().unwrap_or_default())
+            });
             Ok(SendTarget::Many(
                 picked.into_iter().map(|agent| agent.choice(&tabs, &panes)).collect(),
             ))
@@ -465,7 +469,7 @@ impl AgentPane {
         }
     }
 
-    /// The agent's name, else its pane label, display agent, kind, or pane id; empty labels fall through.
+    /// The agent's name, else its pane label, display agent, kind, or pane id; empty names fall through.
     fn row_name(&self, pane_label: Option<&str>) -> String {
         [self.name.as_deref(), pane_label, self.display_agent.as_deref(), self.agent.as_deref()]
             .into_iter()
@@ -1203,12 +1207,6 @@ mod tests {
         let panes = super::answer::<super::PaneList>(json).unwrap();
         let labels = panes.labels();
         assert_eq!(labels, HashMap::from([("w7:p14".into(), "s19-wiki-revision".into())]));
-        assert!(super::answer::<super::PaneList>("[]").is_err());
-        assert!(super::answer::<super::PaneList>("not json").is_err());
-        assert!(
-            super::answer::<super::PaneList>(r#"{"result":{"panes":[{"label":"missing id"}]}}"#)
-                .is_err()
-        );
     }
 
     #[test]

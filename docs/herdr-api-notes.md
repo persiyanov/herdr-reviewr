@@ -101,8 +101,8 @@ The direct-run mode rides on four calls plus the plain-pane env, all confirmed l
   `pane process-info` and plain `pane close` (verified live, 0.7.5). The actions key their
   converge-vs-refuse branches on that code.
 - **`herdr pane rename <id> [LABEL]... [--clear]`** sets and clears a pane's label. The binary
-  stamps its own pane `reviewr` at startup and clears it on a normal exit — display only,
-  nothing reads it back.
+  stamps its own pane `reviewr` at startup and clears it on a normal exit — that label is
+  display only. The send picker reads other panes' labels to name its rows.
 - **`herdr plugin config-dir <plugin_id>`** prints the plugin's config directory
   (`~/.config/herdr/plugins/config/persiyanov.reviewr`). The binary falls back to it when
   `HERDR_PLUGIN_CONFIG_DIR` is unset, so a hand-launched pane reads the same `config.toml`.
@@ -226,6 +226,8 @@ workspace. No sample held two agents in one tab, so the order inside a tab is un
 `herdr tab list --workspace <ws>` → `{"result":{"tabs":[ {tab_id, label, number, pane_count} ]}}`.
 `label` and `number` differ: a tab with `number: 4` defaults to `label: "1"`, a per-workspace
 ordinal. The picker joins `label` on `tab_id`, best effort.
+The picker also joins `label` from `herdr pane list --workspace <ws>` on `pane_id`, best effort,
+using a non-empty pane label after the agent's `name` and before its display name or kind.
 
 `herdr tab rename <tab_id> <label>` sets a tab's `label` (0.7.5). A `tab`-placement open uses it to
 name the fresh tab `reviewr`.
