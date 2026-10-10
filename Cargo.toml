@@ -57,7 +57,7 @@ which = "8.0.6"
 # and the watcher's check for a network filesystem.
 rustix = { version = "1.1.5", features = ["event", "fs", "termios"] }
 # Already in the tree through crossterm. Writes a window resize into the wake pipe.
-signal-hook = "0.3.18"
+signal-hook = "0.4.5"
 
 [target.'cfg(windows)'.dependencies]
 # The Win32 clipboard, written as UTF-16 so non-ASCII survives (`clip.exe` mangles it). Text
