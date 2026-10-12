@@ -1535,8 +1535,8 @@ fn reconcile_plugin_config(
     if pr_changed {
         pr.config_changed(app.tab == crate::app::Tab::Pr);
     }
-    if previous.theme() != current.theme() {
-        // A theme change rebuilds the highlighted diffs before anything mixes states.
+    if previous.theme() != current.theme() || previous.budget() != current.budget() {
+        // A theme or budget change rebuilds the diffs before anything mixes states.
         if let Err(error) = app.reload() {
             app.status = format!("config refresh failed: {error}");
         }
@@ -1570,7 +1570,9 @@ fn recovery_verdict(
 fn config_ends_gesture(previous: &PluginConfig, observed: Option<&PluginConfig>) -> bool {
     match observed {
         Some(c) => {
-            previous.navigator_position() != c.navigator_position() || previous.theme() != c.theme()
+            previous.navigator_position() != c.navigator_position()
+                || previous.theme() != c.theme()
+                || previous.budget() != c.budget()
         }
         None => true,
     }

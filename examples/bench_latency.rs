@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use herdr_reviewr::diff::DiffCache;
+use herdr_reviewr::diff::{Budget, DiffCache};
 use herdr_reviewr::git;
 use herdr_reviewr::highlight::Highlighter;
 use herdr_reviewr::theme;
@@ -100,16 +100,16 @@ fn main() {
             sample(3, || {
                 let mut cache = DiffCache::new(); // cold: fresh cache each run
                 let c = std::fs::read_to_string(repo.join(path)).unwrap_or_default();
-                cache.get_file(path.clone(), &c, &hl);
+                cache.get_file(path.clone(), &c, &hl, Budget::default());
             }),
         );
         let mut warm = DiffCache::new();
-        warm.get_file(path.clone(), &content, &hl);
+        warm.get_file(path.clone(), &content, &hl, Budget::default());
         row(
             &format!("file open, All files WARM ({tag})"),
             sample(5, || {
                 let c = std::fs::read_to_string(repo.join(path)).unwrap_or_default();
-                warm.get_file(path.clone(), &c, &hl);
+                warm.get_file(path.clone(), &c, &hl, Budget::default());
             }),
         );
     }
@@ -130,17 +130,17 @@ fn main() {
             sample(3, || {
                 let mut cache = DiffCache::new();
                 let (old, new) = sides();
-                cache.get(path.clone(), source.clone(), &old, &new, &hl);
+                cache.get(path.clone(), source.clone(), &old, &new, &hl, Budget::default());
             }),
         );
         let mut warm = DiffCache::new();
         let (old0, new0) = sides();
-        warm.get(path.clone(), source.clone(), &old0, &new0, &hl);
+        warm.get(path.clone(), source.clone(), &old0, &new0, &hl, Budget::default());
         row(
             "diff open, Changes WARM (same file re-poll)",
             sample(5, || {
                 let (old, new) = sides();
-                warm.get(path.clone(), source.clone(), &old, &new, &hl);
+                warm.get(path.clone(), source.clone(), &old, &new, &hl, Budget::default());
             }),
         );
     } else {

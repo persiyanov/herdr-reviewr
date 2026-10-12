@@ -1244,7 +1244,7 @@ pub enum DiffSides {
     Binary,
 }
 
-/// `path`'s sides from `old` to `new` (the worktree when `None`); a rename or copy reads `source`.
+/// [`diff_sides_within`] under the default line budget.
 pub fn diff_sides(
     repo: &Path,
     old: &str,
@@ -1252,8 +1252,21 @@ pub fn diff_sides(
     path: &str,
     source: Option<&str>,
 ) -> Result<DiffSides> {
+    diff_sides_within(repo, old, new, path, source, crate::diff::MAX_LINES)
+}
+
+/// `path`'s sides from `old` to `new` (the worktree when `None`); a rename or copy reads `source`.
+/// Each side is whole up to `lines` long.
+pub fn diff_sides_within(
+    repo: &Path,
+    old: &str,
+    new: Option<&str>,
+    path: &str,
+    source: Option<&str>,
+    lines: usize,
+) -> Result<DiffSides> {
     // Git before 2.50 overflows twice a wider context on Windows; a longer side opens too large.
-    let context = format!("-U{}", crate::diff::MAX_LINES);
+    let context = format!("-U{lines}");
     let mut args = vec![
         // An empty context line prints as a lone space, whatever the user set.
         "-c",

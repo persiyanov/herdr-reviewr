@@ -995,6 +995,11 @@ impl App {
         }
     }
 
+    /// The file size budgets: the snapshot's, or the defaults while blocked.
+    fn budget(&self) -> crate::diff::Budget {
+        self.plugin_config().map(crate::config::PluginConfig::budget).unwrap_or_default()
+    }
+
     /// The error-only state rendered while plugin configuration is invalid.
     pub fn config_error(&self) -> Option<&str> {
         match &self.config {
@@ -1336,9 +1341,11 @@ impl App {
         }
         self.diff_path = Some(path.clone());
         let previous_path = self.rename_source(&path);
+        let budget = self.budget();
         let (old, new) = match self.content_sides(&path) {
             Ok((old, new)) => {
-                self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
+                self.diff =
+                    self.cache.get(path, previous_path, &old, &new, &self.highlighter, budget);
                 (old, new)
             }
             Err(notice) => {
@@ -1372,9 +1379,11 @@ impl App {
 
     /// The File view for `path`: the too-large notice unread, else the highlighted worktree content.
     fn file_view(&mut self, path: &str) -> (FileDiff, String) {
-        match worktree_content(&self.repo, path) {
+        let budget = self.budget();
+        match worktree_content(&self.repo, path, budget) {
             Ok(content) => {
-                let diff = self.cache.get_file(path.to_string(), &content, &self.highlighter);
+                let diff =
+                    self.cache.get_file(path.to_string(), &content, &self.highlighter, budget);
                 (diff, content)
             }
             Err(notice) => {
@@ -1728,20 +1737,28 @@ impl App {
         if annotation.binary {
             return Err(Notice::Binary);
         }
+        let budget = self.budget();
         // An untracked file is all new side, read raw.
         if annotation.kind == ChangeKind::Untracked {
-            return worktree_content(&self.repo, path).map(|new| (String::new(), new));
+            return worktree_content(&self.repo, path, budget).map(|new| (String::new(), new));
         }
         // git diffs a tracked symlink as its target path, so the worktree side is the link's size.
         let new_size = annotation.new_size.unwrap_or_else(|| {
             std::fs::symlink_metadata(self.repo.join(path)).map_or(0, |m| m.len())
         });
         let total = annotation.old_size.saturating_add(new_size);
-        if crate::diff::over_byte_budget(usize::try_from(total).unwrap_or(usize::MAX)) {
+        if budget.over_bytes(usize::try_from(total).unwrap_or(usize::MAX)) {
             return Err(Notice::TooLarge);
         }
         let source = annotation.previous_path.as_deref();
-        match git::diff_sides(&self.repo, &ends.old, ends.new.as_deref(), path, source) {
+        match git::diff_sides_within(
+            &self.repo,
+            &ends.old,
+            ends.new.as_deref(),
+            path,
+            source,
+            budget.lines,
+        ) {
             Ok(git::DiffSides::Text { old, new }) => Ok((old, new)),
             Ok(git::DiffSides::Binary) => Err(Notice::Binary),
             Err(error) => {
@@ -2909,6 +2926,7 @@ impl App {
     fn cross_target(&mut self, forward: bool) -> Option<usize> {
         // From the open file: a cursor parked above it would find it again.
         let mut row = self.open_file_row();
+        let budget = self.budget();
         while let Some(next) = self.file_row_from(row, forward) {
             row = next;
             let i = self.file_rows[row].file_index().expect("file_row_from yields file rows");
@@ -2920,7 +2938,7 @@ impl App {
             // A notice holds no hunk.
             let Ok((old, new)) = self.content_sides(&entry.path) else { continue };
             let source = self.rename_source(&entry.path);
-            let diff = self.cache.get(entry.path, source, &old, &new, &self.highlighter);
+            let diff = self.cache.get(entry.path, source, &old, &new, &self.highlighter, budget);
             if hunk_row(&diff.rows, None, forward).is_some() {
                 return Some(row);
             }
@@ -5255,7 +5273,11 @@ fn is_markdown_path(path: &str) -> bool {
 }
 
 /// `path`'s worktree text, regular files only: over the budget, the notice, never read.
-fn worktree_content(repo: &std::path::Path, path: &str) -> Result<String, crate::diff::Notice> {
+fn worktree_content(
+    repo: &std::path::Path,
+    path: &str,
+    budget: crate::diff::Budget,
+) -> Result<String, crate::diff::Notice> {
     use std::io::{ErrorKind, Read};
     let at = repo.join(path);
     let meta = match std::fs::metadata(&at) {
@@ -5267,12 +5289,12 @@ fn worktree_content(repo: &std::path::Path, path: &str) -> Result<String, crate:
         }
         Err(_) => return Err(crate::diff::Notice::Unreadable),
     };
-    if crate::diff::over_byte_budget(usize::try_from(meta.len()).unwrap_or(usize::MAX)) {
+    if budget.over_bytes(usize::try_from(meta.len()).unwrap_or(usize::MAX)) {
         return Err(crate::diff::Notice::TooLarge);
     }
     // Capped, so a file grown since its stat still stops past the budget.
     let mut bytes = Vec::new();
-    let cap = crate::diff::MAX_BYTES as u64 + 1;
+    let cap = budget.bytes as u64 + 1;
     match std::fs::File::open(at).and_then(|f| f.take(cap).read_to_end(&mut bytes)) {
         Ok(_) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
         Err(_) => Err(crate::diff::Notice::Unreadable),
@@ -6059,6 +6081,35 @@ mod tests {
         let before = git_commands();
         app.set_diff("gone.txt".to_string());
         assert_eq!(git_commands() - before, 0, "a path outside the changeset was read");
+    }
+
+    /// The config's budgets, not the defaults, decide what opens too large.
+    #[test]
+    fn the_configured_budget_decides_what_opens_too_large() {
+        use crate::diff::Notice;
+        let (dir, git) = test_repo();
+        let repo = dir.path();
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "fresh\n").unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let open = |app: &mut App, toml: &str, path: &str| {
+            std::fs::write(config.path().join("config.toml"), toml).unwrap();
+            app.set_plugin_config(crate::config::plugin_config_in(config.path()).unwrap());
+            app.reload().unwrap();
+            app.set_diff(path.to_string());
+            app.diff.notice
+        };
+
+        let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
+        assert_eq!(open(&mut app, "", "a.txt"), None);
+        // One line before and three after: four, over three.
+        assert_eq!(open(&mut app, "max_file_lines = 3\n", "a.txt"), Some(Notice::TooLarge));
+        // The untracked file's six bytes, over five, and then within six.
+        assert_eq!(open(&mut app, "max_file_bytes = 5\n", "new.txt"), Some(Notice::TooLarge));
+        assert_eq!(open(&mut app, "max_file_bytes = 6\n", "new.txt"), None);
     }
 
     /// A failed `git diff` shows a notice, never an empty diff that reads as unchanged.
