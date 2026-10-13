@@ -20,6 +20,8 @@ use crate::file_list::RowKind;
 use crate::forge;
 use crate::git;
 use crate::herdr::AgentChoice;
+use crate::image_preview::Side as ImageSide;
+use crate::image_session::KittyImage;
 use crate::keymap::Keymap;
 use crate::model::{ChangeKind, ChangedFile, Comment};
 use crate::roles::Palette;
@@ -1765,6 +1767,17 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    if app.image_is_current_view()
+        && let Some(pair) = app.image_pair()
+    {
+        render_image_pair(frame, app, inner, pair);
+        return;
+    }
+    if app.image_loading() {
+        frame.render_widget(dim_paragraph("Before / After image metadata loading…", p), inner);
+        return;
+    }
+
     if app.visible.is_empty() {
         // `All files` is no diff, so its copy avoids diff words.
         let gone = app.commits_gone_message();
@@ -1888,6 +1901,90 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         let band = Rect { y: inner.y + body_h as u16, height: 1, ..inner };
         render_find_band(frame, app, band);
     }
+}
+
+/// Rowless image panels keep metadata above graphics and outside comment geometry.
+fn render_image_pair(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    pair: &crate::image_worker::ResultPair,
+) {
+    let p = app.palette();
+    let panels = image_panels(area);
+    for (side, title, panel, prepared) in [
+        (&pair.before, "Before", panels[0], pair.prepared.0.as_ref()),
+        (&pair.after, "After", panels[1], pair.prepared.1.as_ref()),
+    ] {
+        let block = Block::default().borders(Borders::ALL).title(title);
+        let inside = block.inner(panel);
+        frame.render_widget(block, panel);
+        let reason = if app.image_metadata_only {
+            "metadata view"
+        } else if app.image_graphics_checking {
+            "checking terminal graphics…"
+        } else if !app.image_graphics_accepted() {
+            "graphics unavailable on this terminal hop"
+        } else if pair.request.metrics_estimated {
+            "cell ratio estimated 10×20"
+        } else {
+            "cell ratio reported by terminal hop"
+        };
+        let text = format!(
+            "{}\n{}",
+            image_metadata(side),
+            if app.image_refreshing() { "refreshing image…" } else { reason }
+        );
+        frame.render_widget(
+            dim_paragraph(&text, p),
+            Rect { height: inside.height.min(4), ..inside },
+        );
+        if app.image_draws_graphics()
+            && let Some(prepared) = prepared
+        {
+            frame.render_widget(KittyImage::new(prepared), image_pixels(panel));
+        }
+    }
+}
+
+fn image_metadata(side: &ImageSide) -> String {
+    format!(
+        "{}\n{}",
+        side.label(),
+        match side.provenance() {
+            crate::image_preview::Provenance::Blob { oid } =>
+                format!("pinned blob {}", crate::git::abbreviate_oid(&oid)),
+            crate::image_preview::Provenance::Worktree { digest } => format!(
+                "guarded worktree {:02x}{:02x}{:02x}{:02x}",
+                digest[0], digest[1], digest[2], digest[3]
+            ),
+            crate::image_preview::Provenance::Unavailable { detail } => detail,
+            crate::image_preview::Provenance::Missing => "no side".into(),
+        }
+    )
+}
+
+fn image_panels(area: Rect) -> [Rect; 2] {
+    let panels = if area.width < 64 {
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area)
+    } else {
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area)
+    };
+    [panels[0], panels[1]]
+}
+
+fn image_pixels(panel: Rect) -> Rect {
+    let inner = inner_rect(panel);
+    Rect { y: inner.y + inner.height.min(4), height: inner.height.saturating_sub(4), ..inner }
+}
+
+pub(crate) fn image_regions(area: Rect, app: &App) -> [Rect; 2] {
+    image_panels(inner_rect(panes(area, app).diff)).map(image_pixels)
+}
+
+pub(crate) fn image_preview_cells(area: Rect, app: &App) -> (u16, u16) {
+    let [left, right] = image_regions(area, app);
+    (left.width.min(right.width), left.height.min(right.height))
 }
 
 /// The line-number column width for a diff of `rows` lines.
@@ -2664,6 +2761,9 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::CollapseDir => (hint(K::Collapse), "collapse"),
         A::TogglePane => {
             return ("tab".into(), if app.focus == Focus::Files { "diff" } else { "files" }.into());
+        }
+        A::ImageView => {
+            (hint(K::ImageView), if app.image_metadata_only { "preview" } else { "metadata" })
         }
         A::Rendered => {
             (hint(K::Rendered), if app.rendered_active() { "source" } else { "rendered" })

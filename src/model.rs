@@ -95,6 +95,8 @@ impl ChangeKind {
 pub struct ChangedFile {
     pub path: String,
     pub kind: ChangeKind,
+    /// Unmerged raw records are unsupported sources, never absent sides.
+    pub conflicted: bool,
     pub additions: u32,
     pub deletions: u32,
     /// The source path of a renamed or copied file, whose old content lives there.
@@ -105,6 +107,12 @@ pub struct ChangedFile {
     pub old_size: u64,
     /// The bytes git stores on the new side, 0 where there is none; `None` for the worktree.
     pub new_size: Option<u64>,
+    /// Raw diff endpoint identity; zero OIDs still record absence/worktree separately by scope.
+    pub old_oid: String,
+    pub new_oid: String,
+    /// Git modes from the landed raw record, retained for binary/image source selection.
+    pub old_mode: String,
+    pub new_mode: String,
 }
 
 impl ChangedFile {

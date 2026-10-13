@@ -105,6 +105,15 @@ pub(crate) enum RunError {
 
 /// Run `cmd` in its own process tree to its stdout; once `stop` says so, the whole tree ends.
 pub(crate) fn run_tree(cmd: Command, stop: impl Fn() -> bool) -> Result<String, RunError> {
+    run_tree_bytes(cmd, None, stop).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The same process-tree lifetime for binary output, optionally capped before allocation.
+pub(crate) fn run_tree_bytes(
+    cmd: Command,
+    limit: Option<usize>,
+    stop: impl Fn() -> bool,
+) -> Result<Vec<u8>, RunError> {
     let mut cmd = CommandWrap::from(cmd);
     // No stdin: the terminal belongs to the pane.
     cmd.command_mut().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -118,49 +127,66 @@ pub(crate) fn run_tree(cmd: Command, stop: impl Fn() -> bool) -> Result<String, 
         Err(error) => return Err(RunError::Io(error.to_string())),
     };
     // Drained while polling, so a large answer cannot block the child.
-    let stdout = read_all(child.stdout().take());
-    let stderr = read_all(child.stderr().take());
+    let readers = (read_all(child.stdout().take(), limit), read_all(child.stderr().take(), limit));
+    let (stdout, stderr) = match readers {
+        (Ok(stdout), Ok(stderr)) => (stdout, stderr),
+        (stdout, stderr) => {
+            let _ = child.start_kill();
+            let _ = child.inner_mut().wait();
+            for reader in [stdout, stderr].into_iter().flatten() {
+                let _ = reader.join();
+            }
+            return Err(RunError::Io("could not start output reader".into()));
+        }
+    };
     // Done once the tool exits and its pipes close; a lingering descendant is ended once.
     let mut ended = false;
     let status = loop {
         if stop() {
-            // The readers are left to finish as the ended tree closes their pipes.
-            let _ = child.start_kill();
-            // The tool alone, and only unreaped: a job's own wait blocks on news a poll drained.
-            if !ended {
-                let _ = child.inner_mut().wait();
-            }
-            return Err(RunError::Stopped);
+            break Err(RunError::Stopped);
         }
         match child.try_wait() {
-            Ok(Some(status)) if stdout.is_finished() && stderr.is_finished() => break status,
+            Ok(Some(status)) if stdout.is_finished() && stderr.is_finished() => break Ok(status),
             Ok(Some(_)) if !ended => {
                 ended = true;
                 let _ = child.start_kill();
             }
             Ok(_) => thread::sleep(Duration::from_millis(5)),
-            Err(error) => {
-                let _ = child.start_kill();
-                let _ = child.inner_mut().wait();
-                return Err(RunError::Io(error.to_string()));
-            }
+            Err(error) => break Err(RunError::Io(error.to_string())),
         }
     };
-    let (stdout, stderr) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
+    let _ = child.start_kill();
+    // Reap only the leader still alive; the wrapped tree's wait may block after a poll.
+    if status.is_err() && !ended {
+        let _ = child.inner_mut().wait();
+    }
+    let stdout = stdout.join();
+    let stderr = stderr.join();
+    let status = status?;
+    let stdout = stdout.map_err(|_| RunError::Io("stdout reader failed".into()))??;
+    let stderr = stderr.map_err(|_| RunError::Io("stderr reader failed".into()))??;
     if status.success() {
-        return Ok(String::from_utf8_lossy(&stdout).into_owned());
+        return Ok(stdout);
     }
     Err(RunError::Failed { stderr: String::from_utf8_lossy(&stderr).into_owned() })
 }
 
 /// Read `pipe` to its end on a thread of its own.
-fn read_all(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
+fn read_all(
+    pipe: Option<impl Read + Send + 'static>,
+    limit: Option<usize>,
+) -> io::Result<thread::JoinHandle<Result<Vec<u8>, RunError>>> {
+    thread::Builder::new().spawn(move || {
         let mut bytes = Vec::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut bytes);
+        if let Some(pipe) = pipe {
+            pipe.take(limit.map_or(u64::MAX, |n| (n as u64).saturating_add(1)))
+                .read_to_end(&mut bytes)
+                .map_err(|error| RunError::Io(error.to_string()))?;
         }
-        bytes
+        if limit.is_some_and(|n| bytes.len() > n) {
+            return Err(RunError::Io("output exceeded byte limit".into()));
+        }
+        Ok(bytes)
     })
 }
 
@@ -412,6 +438,23 @@ mod tests {
         let done = spawn_run(cmd, || false);
         let result = done.recv_timeout(Duration::from_secs(10)).expect("the tool's exit ends it");
         assert_eq!(result.map(|out| out.trim().to_string()).ok().as_deref(), Some("answer"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_binary_run_ends_descendants_with_redirected_pipes() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            r#"(sleep 3; printf survived > "$1") >/dev/null 2>&1 & printf '\000\377ok'"#,
+            "tool",
+        ])
+        .arg(dir.path().join("survived"));
+        let bytes = super::run_tree_bytes(cmd, Some(32), || false).unwrap();
+        assert_eq!(bytes, [0, 255, b'o', b'k']);
+        assert!(!survived(dir.path(), started), "a redirected descendant outlived success");
     }
 
     /// A bare name reaches a batch shim through PATHEXT.

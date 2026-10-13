@@ -60,10 +60,11 @@ impl Config {
     }
 }
 
-const PLUGIN_CONFIG_KEYS: [&str; 13] = [
+const PLUGIN_CONFIG_KEYS: [&str; 14] = [
     "theme",
     "default_scope",
     "markdown_view",
+    "image_view",
     "navigator_position",
     "toggle_placement",
     "toggle_direction",
@@ -82,6 +83,14 @@ pub enum MarkdownView {
     #[default]
     Source,
     Rendered,
+}
+
+/// How raster changes open; metadata remains available even when previews are selected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImageView {
+    #[default]
+    Preview,
+    Metadata,
 }
 
 /// Where the navigator sits around the read pane.
@@ -164,6 +173,7 @@ pub struct PluginConfig {
     theme: String,
     default_scope: crate::model::Scope,
     markdown_view: MarkdownView,
+    image_view: ImageView,
     navigator_position: NavigatorPosition,
     toggle_placement: TogglePlacement,
     toggle_direction: ToggleDirection,
@@ -182,6 +192,7 @@ impl Default for PluginConfig {
             theme: crate::theme::DEFAULT.to_owned(),
             default_scope: crate::model::Scope::Uncommitted,
             markdown_view: MarkdownView::Source,
+            image_view: ImageView::Preview,
             navigator_position: NavigatorPosition::Right,
             toggle_placement: TogglePlacement::Split,
             toggle_direction: ToggleDirection::Right,
@@ -209,6 +220,11 @@ impl PluginConfig {
     /// How a fresh pane shows markdown; only `m` flips a running one.
     pub fn markdown_view(&self) -> MarkdownView {
         self.markdown_view
+    }
+
+    /// How a fresh pane opens supported binary image changes.
+    pub fn image_view(&self) -> ImageView {
+        self.image_view
     }
 
     pub fn navigator_position(&self) -> NavigatorPosition {
@@ -366,6 +382,16 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
                         "markdown_view",
                         "one of source, rendered",
                     ));
+                }
+            };
+    }
+    if let Some(value) = table.get("image_view") {
+        config.image_view =
+            match string_value(path, "image_view", value, "one of preview, metadata")? {
+                "preview" => ImageView::Preview,
+                "metadata" => ImageView::Metadata,
+                _ => {
+                    return Err(value_error(path, value, "image_view", "one of preview, metadata"));
                 }
             };
     }
@@ -668,7 +694,8 @@ pub(crate) fn plugin_config_from_herdr() -> Result<PluginConfig, PluginConfigErr
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, MarkdownView, NavigatorPosition, PluginConfig, ToggleDirection, TogglePlacement,
+        Config, ImageView, MarkdownView, NavigatorPosition, PluginConfig, ToggleDirection,
+        TogglePlacement,
     };
     use crate::keymap::KeyCode;
     use crate::model::Scope;
@@ -742,6 +769,7 @@ mod tests {
         assert_eq!(config.github_host(), None);
         assert_eq!(config.url_opener(), None);
         assert_eq!(config.markdown_view(), MarkdownView::Source);
+        assert_eq!(config.image_view(), ImageView::Preview);
     }
 
     #[test]
@@ -758,11 +786,13 @@ mod tests {
                 "auto_open = false\n",
                 "github_host = \"GitHub.Example.COM\"\n",
                 "markdown_view = \"rendered\"\n",
+                "image_view = \"metadata\"\n",
             ),
         )
         .unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.markdown_view(), MarkdownView::Rendered);
+        assert_eq!(config.image_view(), ImageView::Metadata);
         assert_eq!(config.theme(), "tokyo-night");
         assert_eq!(config.default_scope(), Scope::LastTurn);
         assert_eq!(config.navigator_position(), NavigatorPosition::Bottom);
@@ -832,6 +862,7 @@ mod tests {
             ("default_scope = \"commits\"\n", "`default_scope`"),
             ("markdown_view = \"preview\"\n", "`markdown_view`"),
             ("markdown_view = true\n", "`markdown_view`"),
+            ("image_view = \"pixels\"\n", "`image_view`"),
             ("navigator_position = \"center\"\n", "`navigator_position`"),
             ("toggle_placement = \"left\"\n", "`toggle_placement`"),
             ("toggle_direction = \"left\"\n", "`toggle_direction`"),

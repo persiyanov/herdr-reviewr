@@ -184,12 +184,17 @@ mod tests {
         ChangedFile {
             path: path.into(),
             kind: ChangeKind::Modified,
+            conflicted: false,
             additions: 1,
             deletions: 0,
             previous_path: None,
             binary: false,
             old_size: 0,
             new_size: None,
+            old_oid: "0".repeat(40),
+            new_oid: "0".repeat(40),
+            old_mode: "000000".into(),
+            new_mode: "100644".into(),
         }
     }
 

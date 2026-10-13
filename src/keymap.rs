@@ -28,6 +28,7 @@ pub enum Action {
     TabPr,
     Wrap,
     Rendered,
+    ImageView,
     NavigatorPosition,
     NavigatorHide,
     NavigatorGrow,
@@ -151,7 +152,7 @@ impl Key {
 }
 
 /// Every action with its config name and default keys, the one table the keymap derives from.
-const ACTIONS: [(Action, &str, &[Key]); 44] = [
+const ACTIONS: [(Action, &str, &[Key]); 45] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -175,6 +176,7 @@ const ACTIONS: [(Action, &str, &[Key]); 44] = [
     (Action::TabPr, "tab-pr", &[Key::plain('3')]),
     (Action::Wrap, "wrap", &[Key::plain('w')]),
     (Action::Rendered, "rendered", &[Key::plain('m')]),
+    (Action::ImageView, "image-view", &[Key::plain('i')]),
     (Action::NavigatorPosition, "navigator-position", &[Key::plain('p')]),
     (Action::NavigatorHide, "navigator-hide", &[Key::plain('z')]),
     (Action::NavigatorGrow, "navigator-grow", &[Key::plain('<')]),

@@ -13,6 +13,9 @@ use crate::forge;
 use crate::git;
 use crate::herdr::{self, AgentChoice, SendTarget};
 use crate::highlight::Highlighter;
+use crate::image_worker::{
+    Request as ImageRequest, ResultPair as ImageResultPair, Source as ImageSource,
+};
 use crate::logln;
 use crate::marks::{MarkMap, Unit, diff_lines};
 use crate::model::{ChangeKind, ChangedFile, Comment, CommentStore, CommitPick, Rev, Scope, Side};
@@ -524,6 +527,7 @@ pub enum FooterAction {
     TogglePane,
     /// Flip markdown between rendered and source, named by destination.
     Rendered,
+    ImageView,
     NavigatorPosition,
     /// Hide or show the navigator; hidden, it joins row 1.
     NavigatorHide,
@@ -654,6 +658,13 @@ pub struct App {
     rendered: RenderedView,
     /// The pane-wide markdown choice, flipped only by `m`.
     markdown_rendered: bool,
+    /// The image metadata fallback is always available; this toggles automatic preview demand.
+    pub image_metadata_only: bool,
+    image_graphics_accepted: bool,
+    pub(crate) image_graphics_checking: bool,
+    image_session_epoch: u64,
+    /// Raster preview state is deliberately separate from diff rows: images never acquire anchors.
+    image: ImageState,
     /// The rendered rows' wrap width, `0` until the first frame.
     rendered_width: usize,
     /// The link regions painted this frame.
@@ -768,6 +779,45 @@ pub struct App {
     pub herdr: HerdrView,
 }
 
+#[derive(Debug, Default)]
+struct ImageState {
+    view: Option<crate::image_worker::ViewIdentity>,
+    requested: Option<ImageRequest>,
+    displayed: Option<ImageResultPair>,
+    generation: u64,
+    started: Option<Instant>,
+    reprobe: bool,
+}
+
+fn raster_path(path: &str) -> bool {
+    path.rsplit_once('.').is_some_and(|(_, ext)| {
+        matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp")
+    })
+}
+
+fn image_source(mode: &str, oid: &str, path: &str, worktree: bool) -> ImageSource {
+    if !git::image_path_is_exact(path) {
+        return ImageSource::Unsupported {
+            detail: "image pathname cannot be represented exactly".into(),
+        };
+    }
+    if mode == "000000" {
+        return ImageSource::Missing;
+    }
+    if mode != "100644" && mode != "100755" {
+        return ImageSource::Unsupported {
+            detail: format!("image source has unsupported git mode {mode}"),
+        };
+    }
+    if worktree {
+        ImageSource::Worktree { path: path.to_string() }
+    } else if oid.is_empty() || oid.chars().all(|c| c == '0') {
+        ImageSource::Unsupported { detail: "pinned image blob is unavailable".into() }
+    } else {
+        ImageSource::Blob { oid: oid.to_string() }
+    }
+}
+
 /// What herdr's connection said about this pane, carried whole across a config recovery.
 #[derive(Debug)]
 pub struct HerdrView {
@@ -863,6 +913,11 @@ impl App {
             wrap: true,
             rendered: RenderedView::default(),
             markdown_rendered: false,
+            image_metadata_only: false,
+            image_graphics_accepted: false,
+            image_graphics_checking: true,
+            image_session_epoch: 0,
+            image: ImageState::default(),
             rendered_width: 0,
             painted_links: std::cell::RefCell::new(Vec::new()),
             painted_slots: std::cell::RefCell::new(Vec::new()),
@@ -1009,6 +1064,9 @@ impl App {
         self.list_cursor = old.list_cursor;
         // The footer expansion is one global toggle, carried regardless of the recovered mode
         self.keys_expanded = old.keys_expanded;
+        self.base_epoch = old.base_epoch;
+        self.image_metadata_only = old.image_metadata_only;
+        self.image = std::mem::take(&mut old.image);
         // Session memory, like the comments.
         self.last_sent_pane = old.last_sent_pane.take();
         // The commit pick is session memory like the comments: replaced, never cleared
@@ -1238,6 +1296,11 @@ impl App {
             })
         });
         self.changeset = snapshot.changeset;
+        // A landed world is a new worktree observation. Keep same-view pixels and their own
+        // labels until an atomically tagged replacement wins, but invalidate demand provenance.
+        if !open_untouched {
+            self.image.generation = self.image.generation.wrapping_add(1);
+        }
         self.entries = snapshot.entries;
         self.adopt_branch_base(snapshot.branch_base);
         self.adopt_pick_status(snapshot.pick_status);
@@ -1968,6 +2031,246 @@ impl App {
     /// Seed a fresh pane's markdown view; a reread never flips it.
     pub fn seed_from_config(&mut self, config: &crate::config::PluginConfig) {
         self.markdown_rendered = config.markdown_view() == crate::config::MarkdownView::Rendered;
+        self.image_metadata_only = config.image_view() == crate::config::ImageView::Metadata;
+    }
+
+    /// Toggle raster graphics without changing the stable file/cursor/comment place state.
+    pub fn toggle_image_view(&mut self) {
+        self.image_metadata_only = !self.image_metadata_only;
+        self.image.reprobe = !self.image_metadata_only;
+        self.status = if self.image_metadata_only {
+            "image metadata view".into()
+        } else {
+            "image preview requested".into()
+        };
+    }
+
+    /// The metadata/pixel pair currently belongs to `view`; callers must never put it below a
+    /// different file's title while a replacement is loading.
+    pub(crate) fn image_pair(&self) -> Option<&ImageResultPair> {
+        self.image.displayed.as_ref()
+    }
+
+    pub(crate) fn image_graphics_accepted(&self) -> bool {
+        self.image_graphics_accepted
+    }
+
+    pub(crate) fn set_image_graphics_accepted(&mut self, accepted: bool) {
+        self.image_graphics_accepted = accepted;
+    }
+
+    fn current_image_view(&self) -> Option<crate::image_worker::ViewIdentity> {
+        if self.tab != Tab::Changes {
+            return None;
+        }
+        let path = self.diff_path.as_ref()?;
+        let file = self.changeset.files.get(path)?;
+        if !(file.binary || (file.kind == ChangeKind::Untracked && file.new_mode == "000000"))
+            || !raster_path(path)
+            || self.changeset.ends.is_none()
+        {
+            return None;
+        }
+        Some(crate::image_worker::ViewIdentity {
+            repo: self.repo.clone(),
+            scope: self.scope,
+            base: (self.scope == Scope::Branch).then(|| self.base.clone()).flatten(),
+            selector_epoch: if self.scope == Scope::Branch { self.base_epoch } else { 0 },
+            pick: (self.scope == Scope::Commits).then(|| self.commit_pick.clone()).flatten(),
+            path: path.clone(),
+            previous_path: file.previous_path.clone(),
+        })
+    }
+
+    pub(crate) fn take_image_reprobe(&mut self) -> bool {
+        std::mem::take(&mut self.image.reprobe)
+    }
+
+    pub(crate) fn wants_image_probe(&self) -> bool {
+        self.current_image_view().is_some()
+            && self.mode == Mode::Normal
+            && self.pane_visible()
+            && !self.image_metadata_only
+            && self.config_error().is_none()
+    }
+
+    pub(crate) fn image_is_current_view(&self) -> bool {
+        self.image
+            .displayed
+            .as_ref()
+            .is_some_and(|pair| self.current_image_view().as_ref() == Some(&pair.request.view_key))
+    }
+
+    pub(crate) fn image_loading(&self) -> bool {
+        self.image.started.is_some_and(|at| at.elapsed() >= Duration::from_millis(150))
+            && self.image.displayed.is_none()
+            && self.current_image_view().is_some()
+    }
+
+    pub(crate) fn image_refreshing(&self) -> bool {
+        self.image.started.is_some_and(|at| at.elapsed() >= Duration::from_millis(150))
+    }
+
+    pub(crate) fn image_wait(&self) -> Option<Duration> {
+        self.image.started.and_then(|at| {
+            let left = Duration::from_millis(150).saturating_sub(at.elapsed());
+            (!left.is_zero()).then_some(left)
+        })
+    }
+
+    pub(crate) fn set_image_session_epoch(&mut self, epoch: u64) {
+        self.image_session_epoch = epoch;
+    }
+
+    pub(crate) fn image_draws_graphics(&self) -> bool {
+        self.image_is_current_view()
+            && self.mode == Mode::Normal
+            && self.pane_visible()
+            && !self.image_metadata_only
+            && self.image_graphics_accepted
+            && self.config_error().is_none()
+            && self
+                .image
+                .displayed
+                .as_ref()
+                .is_some_and(|pair| pair.request.session_epoch == self.image_session_epoch)
+    }
+
+    pub(crate) fn image_demand(
+        &mut self,
+        cells: (u16, u16),
+        session_epoch: u64,
+        metrics: (u16, u16),
+        metrics_estimated: bool,
+    ) -> Option<ImageRequest> {
+        let view = self.current_image_view();
+        if self.image.view != view {
+            self.image.view.clone_from(&view);
+            self.image.displayed = None;
+            self.image.requested = None;
+            self.image.started = None;
+        }
+        let view = view?;
+        if !self.pane_visible() || self.mode != Mode::Normal || self.config_error().is_some() {
+            return None;
+        }
+        let file = self.changeset.files.get(&view.path)?;
+        let ends = self.changeset.ends.as_ref()?;
+        let old_path = file.previous_path.as_deref().unwrap_or(&view.path);
+        let invalid_path =
+            !git::image_path_is_exact(&view.path) || !git::image_path_is_exact(old_path);
+        let before = if file.conflicted {
+            ImageSource::Unsupported {
+                detail: "unmerged image; resolve the conflict before previewing".into(),
+            }
+        } else if file.old_mode == "000000" {
+            ImageSource::Missing
+        } else if invalid_path {
+            ImageSource::Unsupported {
+                detail: "image pathname cannot be represented exactly".into(),
+            }
+        } else {
+            image_source(file.old_mode.as_str(), &file.old_oid, old_path, false)
+        };
+        let after = if file.conflicted {
+            before.clone()
+        } else if file.new_mode == "000000" && file.kind != ChangeKind::Untracked {
+            ImageSource::Missing
+        } else if invalid_path {
+            ImageSource::Unsupported {
+                detail: "image pathname cannot be represented exactly".into(),
+            }
+        } else if file.kind == ChangeKind::Untracked && file.new_mode == "000000" {
+            ImageSource::Unsupported {
+                detail: "untracked image is not a readable regular file".into(),
+            }
+        } else {
+            image_source(file.new_mode.as_str(), &file.new_oid, &view.path, ends.new.is_none())
+        };
+        let mut request = ImageRequest {
+            view_key: view,
+            content_generation: self.image.generation,
+            session_epoch,
+            before,
+            after,
+            cells,
+            ids: (0, 0),
+            graphics: !self.image_metadata_only
+                && self.image_graphics_accepted
+                && cells.0 > 0
+                && cells.1 > 0,
+            metrics,
+            metrics_estimated,
+        };
+        if self.image.displayed.is_none() {
+            request.graphics = false;
+        }
+        if self.image.started.is_some()
+            && self.image.requested.as_ref().is_some_and(|old| {
+                let mut generation_only = request.clone();
+                generation_only.content_generation = old.content_generation;
+                same_image_demand(old, &generation_only)
+            })
+        {
+            return None;
+        }
+        if self.image.requested.as_ref().is_some_and(|old| same_image_demand(old, &request)) {
+            return None;
+        }
+        Some(request)
+    }
+
+    pub(crate) fn image_demand_active(&self) -> bool {
+        self.current_image_view().is_some()
+            && self.pane_visible()
+            && self.mode == Mode::Normal
+            && self.config_error().is_none()
+    }
+
+    pub(crate) fn cancel_image_demand(&mut self) {
+        self.image.requested = None;
+        self.image.started = None;
+    }
+
+    pub(crate) fn request_image(&mut self, request: &ImageRequest) {
+        self.image.requested = Some(request.clone());
+        self.image.started = Some(Instant::now());
+    }
+
+    pub(crate) fn image_worker_failed(&mut self) {
+        self.image.started = None;
+        let Some(request) = self.image.requested.clone() else { return };
+        let error = |source: &ImageSource| match source {
+            ImageSource::Missing => crate::image_preview::Side::Missing,
+            _ => crate::image_preview::Side::Error {
+                detail: "image worker stopped; restart ReviewR".into(),
+                provenance: crate::image_preview::Provenance::Unavailable {
+                    detail: "source not prepared".into(),
+                },
+            },
+        };
+        self.image.displayed = Some(ImageResultPair {
+            before: error(&request.before),
+            after: error(&request.after),
+            prepared: (None, None),
+            request,
+        });
+    }
+
+    pub(crate) fn land_image(&mut self, result: ImageResultPair) -> bool {
+        let Some(expected) = &self.image.requested else { return false };
+        if expected != &result.request
+            || self.current_image_view().as_ref() != Some(&result.request.view_key)
+        {
+            return false;
+        }
+        if result.request.content_generation != self.image.generation {
+            self.cancel_image_demand();
+            return false;
+        }
+        self.image.started = None;
+        self.image.displayed = Some(result);
+        true
     }
 
     /// Whether `m` acts: a file tab holding renderable markdown.
@@ -4556,6 +4859,10 @@ impl App {
             }
         }
 
+        if self.current_image_view().is_some() {
+            out.push((A::ImageView, Do));
+        }
+
         // `edit` wherever the press opens a file, ahead of the navigator keys.
         if self.edit_opens_a_file() {
             let at = out
@@ -4638,6 +4945,12 @@ impl App {
             self.list_cursor = step(self.list_cursor, delta, self.store.len());
         }
     }
+}
+
+fn same_image_demand(old: &ImageRequest, new: &ImageRequest) -> bool {
+    let mut demand = new.clone();
+    demand.ids = old.ids;
+    old == &demand
 }
 
 /// The picker's opening row: the last-sent agent if still listed, else the first.
@@ -6197,3 +6510,7 @@ mod tests {
         assert_eq!(rows, ["+one", "+two"], "the root commit adds the file, read in that one diff");
     }
 }
+
+#[cfg(test)]
+#[path = "app/image_tests.rs"]
+mod image_tests;

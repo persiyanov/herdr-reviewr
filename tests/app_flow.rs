@@ -2596,6 +2596,22 @@ fn write_in_turn(
     app.sync_turn(host.status());
 }
 
+// Use real event times after the snapshot window in the cross-turn fixtures.
+fn write_after_snapshot(
+    app: &mut App,
+    host: &mut herdr_reviewr::turn::TurnHost,
+    r: &Repo,
+    path: &str,
+    body: &str,
+) {
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    r.write(path, body);
+    let at = std::time::Instant::now();
+    let paths = Some([path.to_string()].into());
+    host.on_worktree_change(&herdr_reviewr::turn::Wrote { first: at, last: at, paths });
+    app.sync_turn(host.status());
+}
+
 /// An app and turn host on one resolved top level, as `run` builds them.
 /// The raw temp path would split them: macOS resolves `/var` to `/private/var`.
 fn turn_setup(r: &Repo) -> (App, herdr_reviewr::turn::TurnHost) {
@@ -2651,10 +2667,11 @@ fn a_question_only_turn_keeps_the_previous_turns_diff() {
     // Turn A edits a file.
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
-    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
+    write_after_snapshot(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
     // Turn B is a question — no file change.
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
     app.reload().unwrap();
@@ -2949,13 +2966,15 @@ fn a_write_racing_the_start_snapshot_empties_the_turn_and_says_why() {
     r.commit_all("init");
     // A previous turn left a diff to lose.
     let (mut app, mut host) = started_turn(&r);
-    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
+    write_after_snapshot(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     assert!(host.baseline().is_some(), "turn A promoted");
     // Turn B's first write lands as herdr reports it working.
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
+    let raced_at = std::time::Instant::now();
     r.write("a.rs", "three\n");
-    assert!(fed(&mut host, std::time::Instant::now(), &["a.rs"]), "the race moves the baseline");
+    assert!(fed(&mut host, raced_at, &["a.rs"]), "the race moves the baseline");
     app.sync_turn(host.status());
     assert_eq!(host.baseline(), None, "empty, never part of turn B, nor turn A's");
     assert!(herdr_reviewr::git::read_baseline_ref(r.path()).is_none(), "the ref is gone too");
@@ -2984,14 +3003,19 @@ fn a_question_only_turns_snapshot_expires_at_its_end() {
     r.write("a.rs", "one\n");
     r.commit_all("init");
     let (mut app, mut host) = started_turn(&r);
-    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
+    write_after_snapshot(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
     let turn_a = host.baseline().map(str::to_string);
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     // Turn B asks a question and ends; the reviewer then edits.
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
+    std::thread::sleep(std::time::Duration::from_millis(250));
     r.write("a.rs", "reviewer\n");
-    assert!(!fed(&mut host, later(), &["a.rs"]), "the reviewer's edit is not turn B's");
+    assert!(
+        !fed(&mut host, std::time::Instant::now(), &["a.rs"]),
+        "the reviewer's edit is not turn B's"
+    );
     assert_eq!(host.baseline().map(str::to_string), turn_a, "turn A's diff stays");
 }
 

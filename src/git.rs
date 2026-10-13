@@ -34,6 +34,186 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     run(git_command(repo), args)
 }
 
+/// Read one full immutable blob OID without filters, replacement objects, or text decoding.
+pub fn blob_bytes(repo: &Path, oid: &str, limit: usize) -> Result<Vec<u8>, GitFail> {
+    blob_bytes_current(repo, oid, limit, &|| true)
+}
+
+/// A superseded image demand stops and reaps its active blob subprocess before returning.
+pub fn blob_bytes_current(
+    repo: &Path,
+    oid: &str,
+    limit: usize,
+    current: &impl Fn() -> bool,
+) -> Result<Vec<u8>, GitFail> {
+    if !matches!(oid.len(), 40 | 64)
+        || !oid.bytes().all(|b| b.is_ascii_hexdigit())
+        || oid.bytes().all(|b| b == b'0')
+    {
+        return Err(GitFail("image blob requires a full nonzero object OID".into()));
+    }
+    if bounded_blob_command(repo, &["cat-file", "-t", oid], 16, current)? != b"blob\n" {
+        return Err(GitFail("image object is not a blob".into()));
+    }
+    let size = bounded_blob_command(repo, &["cat-file", "-s", oid], 32, current)?;
+    let size = std::str::from_utf8(&size)
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .ok_or_else(|| GitFail("git blob size was invalid".into()))?;
+    if size > limit {
+        return Err(GitFail("image source exceeds preview byte limit".into()));
+    }
+    let bytes = bounded_blob_command(repo, &["cat-file", "blob", oid], size, current)?;
+    if bytes.len() != size {
+        return Err(GitFail("image blob length did not match pinned object".into()));
+    }
+    Ok(bytes)
+}
+
+/// Bound both output and lifetime, retaining ownership until the process tree and reader finish.
+fn bounded_blob_command(
+    repo: &Path,
+    args: &[&str],
+    limit: usize,
+    current: &impl Fn() -> bool,
+) -> Result<Vec<u8>, GitFail> {
+    if !current() {
+        return Err(GitFail("image demand superseded".into()));
+    }
+    let mut command = git_command(repo);
+    command.args(args).env("GIT_NO_REPLACE_OBJECTS", "1").env("GIT_NO_LAZY_FETCH", "1");
+    let started = std::time::Instant::now();
+    crate::proc::run_tree_bytes(command, Some(limit), || {
+        !current() || started.elapsed() >= std::time::Duration::from_secs(5)
+    })
+    .map_err(|error| {
+        use crate::proc::RunError;
+        GitFail(match error {
+            RunError::Stopped if !current() => "image demand superseded".into(),
+            RunError::Stopped => "image blob read timed out".into(),
+            error => format!("read image blob: {error:?}"),
+        })
+    })
+}
+
+/// Refuse replacement characters conservatively: the existing text path model may be lossy.
+pub fn image_path_is_exact(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains(['\0', '\u{fffd}'])
+        && path.split('/').all(|p| !p.is_empty() && p != "." && p != "..")
+        && Path::new(path).components().all(|p| matches!(p, std::path::Component::Normal(_)))
+}
+
+/// Read raw worktree bytes through anchored handles, refusing ambiguous paths and unsupported types.
+pub fn guarded_worktree_bytes(repo: &Path, path: &str, limit: usize) -> Result<Vec<u8>, GitFail> {
+    if !image_path_is_exact(path) {
+        return Err(GitFail("image path is ambiguous or not repository-relative".into()));
+    }
+    guarded_worktree_read(repo, path, limit)
+}
+
+#[cfg(not(unix))]
+fn guarded_worktree_read(_repo: &Path, _path: &str, _limit: usize) -> Result<Vec<u8>, GitFail> {
+    Err(GitFail("guarded worktree image reads are unsupported on this platform".into()))
+}
+
+#[cfg(unix)]
+fn guarded_worktree_read(repo: &Path, path: &str, limit: usize) -> Result<Vec<u8>, GitFail> {
+    guarded_worktree_read_with(repo, path, limit, || {})
+}
+
+#[cfg(unix)]
+fn guarded_worktree_read_with(
+    repo: &Path,
+    path: &str,
+    limit: usize,
+    before_read: impl FnOnce(),
+) -> Result<Vec<u8>, GitFail> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, fstat, open, openat, statat};
+    use std::io::Read;
+    let failure = |e| GitFail(format!("guarded image read failed: {e}"));
+    let changed = || GitFail("image path or contents changed while reading".into());
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let root = open(repo, flags | OFlags::DIRECTORY, Mode::empty()).map_err(failure)?;
+    let root_stat = fstat(&root).map_err(failure)?;
+    let mut directories = vec![root];
+    let mut links = Vec::new();
+    let components: Vec<_> = path.split('/').collect();
+    for name in &components[..components.len() - 1] {
+        let parent = directories.last().expect("root directory");
+        let before = statat(parent, *name, AtFlags::SYMLINK_NOFOLLOW).map_err(failure)?;
+        let dir =
+            openat(parent, *name, flags | OFlags::DIRECTORY, Mode::empty()).map_err(failure)?;
+        if !same_image_directory(&before, &fstat(&dir).map_err(failure)?) {
+            return Err(changed());
+        }
+        links.push(before);
+        directories.push(dir);
+    }
+    let parent = directories.last().expect("image parent");
+    let name = components.last().expect("image name");
+    let before = statat(parent, *name, AtFlags::SYMLINK_NOFOLLOW).map_err(failure)?;
+    if FileType::from_raw_mode(before.st_mode) != FileType::RegularFile {
+        return Err(GitFail("image source is not a regular file".into()));
+    }
+    let size = usize::try_from(before.st_size).map_err(|_| changed())?;
+    if size > limit {
+        return Err(GitFail("image source exceeds preview byte limit".into()));
+    }
+    let fd = openat(parent, *name, flags, Mode::empty()).map_err(failure)?;
+    let opened = fstat(&fd).map_err(failure)?;
+    if !same_image_stat(&before, &opened) {
+        return Err(changed());
+    }
+    before_read();
+    let mut file = std::fs::File::from(fd);
+    let mut bytes = Vec::with_capacity(size);
+    (&mut file)
+        .take(u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| GitFail(format!("read image failed: {e}")))?;
+    if bytes.len() != size
+        || bytes.len() > limit
+        || !same_image_stat(&opened, &fstat(&file).map_err(failure)?)
+        || !same_image_stat(
+            &opened,
+            &statat(parent, *name, AtFlags::SYMLINK_NOFOLLOW).map_err(failure)?,
+        )
+    {
+        return Err(changed());
+    }
+    for (i, expected) in links.iter().enumerate() {
+        if !same_image_directory(
+            expected,
+            &statat(&directories[i], components[i], AtFlags::SYMLINK_NOFOLLOW).map_err(failure)?,
+        ) {
+            return Err(changed());
+        }
+    }
+    let current_root = open(repo, flags | OFlags::DIRECTORY, Mode::empty()).map_err(failure)?;
+    if !same_image_directory(&root_stat, &fstat(&current_root).map_err(failure)?) {
+        return Err(changed());
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn same_image_directory(a: &rustix::fs::Stat, b: &rustix::fs::Stat) -> bool {
+    a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_mode == b.st_mode
+}
+
+#[cfg(unix)]
+fn same_image_stat(a: &rustix::fs::Stat, b: &rustix::fs::Stat) -> bool {
+    a.st_dev == b.st_dev
+        && a.st_ino == b.st_ino
+        && a.st_mode == b.st_mode
+        && a.st_size == b.st_size
+        && a.st_mtime == b.st_mtime
+        && a.st_mtime_nsec == b.st_mtime_nsec
+        && a.st_ctime == b.st_ctime
+        && a.st_ctime_nsec == b.st_ctime_nsec
+}
+
 /// Run `cmd` (a [`git_command`]) with `args` and return stdout. Errors on non-zero exit.
 fn run(mut cmd: std::process::Command, args: &[&str]) -> Result<String> {
     let out = cmd
@@ -1924,21 +2104,31 @@ pub fn diff_base(head: Option<String>) -> String {
 
 /// The changeset from `base` to the worktree, untracked files included.
 pub fn changed_from(repo: &Path, base: &str) -> Result<Vec<ChangedFile>> {
-    let out = IndexCopy::with(repo, |index| index.git(repo, &diff_args(&[base])))?;
-    assemble(repo, &out, true, None)
+    let (out, unmerged) = IndexCopy::with(repo, |index| {
+        Ok((
+            index.git(repo, &diff_args(&[base]))?,
+            index.git(repo, &["ls-files", "--unmerged", "-z"])?,
+        ))
+    })?;
+    assemble(repo, &out, true, None, &unmerged)
 }
 
 /// [`changed_from`] limited to `paths`, each a file or a directory.
 pub fn changed_from_in(repo: &Path, base: &str, paths: &[String]) -> Result<Vec<ChangedFile>> {
     let specs = literal_pathspecs(paths);
     let args = with_pathspecs(diff_args(&[base]), &specs);
-    let out = IndexCopy::with(repo, |index| index.git(repo, &args))?;
-    assemble(repo, &out, true, Some(paths))
+    let (out, unmerged) = IndexCopy::with(repo, |index| {
+        Ok((
+            index.git(repo, &args)?,
+            index.git(repo, &with_pathspecs(vec!["ls-files", "--unmerged", "-z"], &specs))?,
+        ))
+    })?;
+    assemble(repo, &out, true, Some(paths), &unmerged)
 }
 
 /// The changeset between two trees: `commits`, and `last-turn` against its snapshot.
 pub fn changed_between(repo: &Path, old: &str, new: &str) -> Result<Vec<ChangedFile>> {
-    assemble(repo, &git(repo, &diff_args(&[old, new]))?, false, None)
+    assemble(repo, &git(repo, &diff_args(&[old, new]))?, false, None, "")
 }
 
 /// [`changed_between`] limited to `paths`.
@@ -1950,7 +2140,7 @@ pub fn changed_between_in(
 ) -> Result<Vec<ChangedFile>> {
     let specs = literal_pathspecs(paths);
     let out = git(repo, &with_pathspecs(diff_args(&[old, new]), &specs))?;
-    assemble(repo, &out, false, Some(paths))
+    assemble(repo, &out, false, Some(paths), "")
 }
 
 /// One `git diff` per changeset: raw records, then line counts.
@@ -2186,6 +2376,7 @@ fn assemble(
     out: &str,
     worktree: bool,
     paths: Option<&[String]>,
+    unmerged: &str,
 ) -> Result<Vec<ChangedFile>> {
     let (rows, numstat) = parse_raw(out);
     let counts = parse_numstat(numstat);
@@ -2195,6 +2386,13 @@ fn assemble(
         .flatten()
         .collect();
     let sizes = blob_sizes(repo, &blobs)?;
+    let mut conflicts: HashSet<_> =
+        rows.iter().filter(|r| r.conflicted).map(|r| r.path.clone()).collect();
+    for record in unmerged.split('\0').filter(|p| !p.is_empty()) {
+        if let Some((_, path)) = record.split_once('\t') {
+            conflicts.insert(path.to_string());
+        }
+    }
     let size = |oid: &str| sizes.get(oid).copied().unwrap_or(0);
     let mut seen = HashSet::new();
     let mut files = Vec::new();
@@ -2206,11 +2404,16 @@ fn assemble(
         let (additions, deletions) = verdict.unwrap_or((0, 0));
         files.push(ChangedFile {
             kind: row.kind,
+            conflicted: conflicts.contains(&row.path),
             additions,
             deletions,
             binary: verdict.is_none(),
             old_size: size(&row.old_oid),
             new_size: (!worktree).then(|| size(&row.new_oid)),
+            old_oid: row.old_oid,
+            new_oid: row.new_oid,
+            old_mode: row.old_mode,
+            new_mode: row.new_mode,
             path: row.path,
             previous_path: row.previous_path,
         });
@@ -2248,7 +2451,10 @@ fn assemble(
                 continue;
             }
             // An unset `diff` attribute counts no lines, as for a tracked path.
-            let additions = if undiffable.contains(path.as_str()) {
+            let new_mode = worktree_image_mode(repo, &path);
+            let additions = if new_mode == "000000" {
+                Some(0)
+            } else if undiffable.contains(path.as_str()) {
                 None
             } else {
                 untracked_additions(repo, &path, &mut buf, &known, &mut fresh)
@@ -2257,12 +2463,17 @@ fn assemble(
             files.push(ChangedFile {
                 path,
                 kind: ChangeKind::Untracked,
+                conflicted: false,
                 additions: additions.unwrap_or(0),
                 deletions: 0,
                 previous_path: None,
                 binary,
                 old_size: 0,
                 new_size: None,
+                old_oid: "0".repeat(40),
+                new_oid: "0".repeat(40),
+                old_mode: "000000".into(),
+                new_mode,
             });
         }
         *session.counts.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(fresh);
@@ -2270,6 +2481,25 @@ fn assemble(
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
+}
+
+/// Actual untracked type, with an empty mode for types git cannot store.
+fn worktree_image_mode(repo: &Path, path: &str) -> String {
+    let Ok(meta) = std::fs::symlink_metadata(repo.join(path)) else { return "000000".into() };
+    if meta.file_type().is_symlink() {
+        return "120000".into();
+    }
+    if !meta.is_file() {
+        return "000000".into();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 != 0 {
+            return "100755".into();
+        }
+    }
+    "100644".into()
 }
 
 /// Of untracked `paths`, those whose `diff` attribute is unset, in one `check-attr -z`.
@@ -2428,6 +2658,7 @@ fn parse_numstat(out: &str) -> HashMap<String, Option<(u32, u32)>> {
 /// One record of `git diff --raw --no-abbrev -z`.
 #[derive(Debug, PartialEq, Eq)]
 struct RawRow {
+    conflicted: bool,
     kind: ChangeKind,
     path: String,
     /// The old path of a rename or copy, whose content is the old side.
@@ -2435,6 +2666,8 @@ struct RawRow {
     /// Each side's blob, all zeros where the side is absent or is the worktree.
     old_oid: String,
     new_oid: String,
+    old_mode: String,
+    new_mode: String,
 }
 
 /// The raw records of a [`diff_args`] run, and the numstat records after them.
@@ -2451,7 +2684,7 @@ fn parse_raw(out: &str) -> (Vec<RawRow>, &str) {
         let mut next = rest;
         let Some(meta) = field(&mut next) else { break };
         let fields: Vec<&str> = meta[1..].split(' ').collect();
-        let [_, _, old_oid, new_oid, status] = fields[..] else { break };
+        let [old_mode, new_mode, old_oid, new_oid, status] = fields[..] else { break };
         let (kind, previous_path) = match status.chars().next() {
             Some('A') => (ChangeKind::Added, None),
             Some('D') => (ChangeKind::Deleted, None),
@@ -2466,11 +2699,14 @@ fn parse_raw(out: &str) -> (Vec<RawRow>, &str) {
         let Some(path) = field(&mut next) else { break };
         rest = next;
         rows.push(RawRow {
+            conflicted: status.starts_with('U'),
             kind,
             path: path.to_string(),
             previous_path,
             old_oid: old_oid.to_string(),
             new_oid: new_oid.to_string(),
+            old_mode: old_mode.to_string(),
+            new_mode: new_mode.to_string(),
         });
     }
     (rows, rest)
@@ -3159,5 +3395,99 @@ mod tests {
             let got = HunkHeader::parse(line).map(|h| (h.old, h.new));
             assert_eq!(got, want, "{line:?}");
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod image_source_guard_tests {
+    use super::{bounded_blob_command, guarded_worktree_read_with};
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn blob_timeout_ends_the_process_tree_and_pipe_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        let error = bounded_blob_command(
+            dir.path(),
+            &["-c", "alias.guard-probe=!sleep 30", "guard-probe"],
+            16,
+            &|| true,
+        )
+        .unwrap_err();
+        assert!(error.0.contains("timed out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn cancelled_blob_demand_reaps_its_process_and_reader_without_waiting_for_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        let error = bounded_blob_command(
+            dir.path(),
+            &["-c", "alias.guard-probe=!sleep 30", "guard-probe"],
+            16,
+            &|| started.elapsed() < std::time::Duration::from_millis(50),
+        )
+        .unwrap_err();
+        assert!(error.0.contains("superseded"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn unrelated_sibling_creation_does_not_invalidate_anchored_regular_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("parent")).unwrap();
+        std::fs::write(dir.path().join("parent/f.png"), b"inside").unwrap();
+        let bytes = guarded_worktree_read_with(dir.path(), "parent/f.png", 100, || {
+            std::fs::write(dir.path().join("parent/sibling"), b"new").unwrap();
+            std::fs::write(dir.path().join("root-sibling"), b"new").unwrap();
+        })
+        .unwrap();
+        assert_eq!(bytes, b"inside");
+    }
+
+    #[test]
+    fn same_size_inode_replacement_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("f.png");
+        std::fs::write(&at, b"before").unwrap();
+        assert!(
+            guarded_worktree_read_with(dir.path(), "f.png", 100, || {
+                let replacement = dir.path().join("replacement");
+                std::fs::write(&replacement, b"after!").unwrap();
+                std::fs::rename(replacement, &at).unwrap();
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn same_size_in_place_rewrite_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("f.png");
+        std::fs::write(&at, b"before").unwrap();
+        assert!(
+            guarded_worktree_read_with(dir.path(), "f.png", 100, || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                std::fs::write(&at, b"after!").unwrap();
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn swapped_parent_is_rejected_without_following_outside_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("parent")).unwrap();
+        std::fs::write(dir.path().join("parent/f.png"), b"inside").unwrap();
+        std::fs::write(outside.path().join("f.png"), b"outside").unwrap();
+        assert!(
+            guarded_worktree_read_with(dir.path(), "parent/f.png", 100, || {
+                std::fs::rename(dir.path().join("parent"), dir.path().join("moved")).unwrap();
+                symlink(outside.path(), dir.path().join("parent")).unwrap();
+            })
+            .is_err()
+        );
     }
 }

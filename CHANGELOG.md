@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Raster change previews** — PNG, JPEG, GIF first frames, and WebP changes can render as
+  bounded Before/After previews in capable Kitty-graphics terminal paths, with a permanent
+  metadata fallback and `image_view = "preview" | "metadata"` configuration. SVG remains text.
+
 ## [0.46.0] — 2026-10-06
 
 ### Changed

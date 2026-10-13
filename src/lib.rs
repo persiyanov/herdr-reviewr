@@ -15,6 +15,9 @@ pub mod gitlab;
 pub mod herdr;
 pub mod herdr_socket;
 pub mod highlight;
+pub mod image_preview;
+pub mod image_session;
+pub mod image_worker;
 mod input;
 pub mod keymap;
 #[macro_use]
@@ -40,6 +43,7 @@ pub mod watch;
 pub mod world;
 
 use std::io;
+use std::io::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -147,12 +151,25 @@ fn drain_input(app: &mut App) -> Result<()> {
     Ok(())
 }
 
+/// Retire graphics IDs only after the serialized cleanup bytes have been flushed.
+fn send_image_cleanup(
+    session: &mut crate::image_session::Session,
+    cleanup: &str,
+    output: &mut impl io::Write,
+) -> io::Result<()> {
+    output.write_all(cleanup.as_bytes())?;
+    output.flush()?;
+    session.cleanup_sent();
+    Ok(())
+}
+
 /// Open a file in the editor: a terminal one takes the pane, a window one is left running.
 fn run_editor(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     configured: Option<&str>,
     open: &mut Vec<std::process::Child>,
+    image_session: &mut crate::image_session::Session,
 ) -> Result<()> {
     let Some(target) = app.editor_request.take() else { return Ok(()) };
     // Absolute, so no editor reads it as a flag; symlinks kept, unlike canonicalize.
@@ -207,6 +224,9 @@ fn run_editor(
     }
 
     // A terminal editor gets the pane, and the loop waits it out.
+    let cleanup = image_session.invalidate();
+    send_image_cleanup(image_session, &cleanup, &mut io::stdout().lock())?;
+    app.set_image_session_epoch(image_session.epoch);
     app.forget_pointer();
     release_terminal();
     let launched = cmd.status();
@@ -829,6 +849,15 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
     #[cfg(unix)]
     wake.sys().watch_resizes()?;
     let waker = wake.waker();
+    // Image preparation is one coalescing worker. It owns all decode/Kitty encoding and wakes us
+    // only when its single newest result slot changes.
+    let (image_tx, image_rx) = crate::wake::channel::<()>(&waker);
+    let image_worker = crate::image_worker::Worker::new(image_tx)?;
+    let mut image_session = crate::image_session::Session::attached();
+    let mut image_layout = None;
+    let mut image_frame_area = None;
+    let mut image_worker_alive = true;
+    let mut protocol_stalled = false;
     // Probes and forge reads run on workers.
     let (probe_tx, probe_rx) = crate::wake::channel::<(
         u64,
@@ -909,6 +938,55 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             app.catch_up_held_view();
             let size = terminal.size()?;
             let area = Rect::new(0, 0, size.width, size.height);
+            if app.take_image_reprobe()
+                && image_session.hop == crate::image_session::HopGraphics::Rejected
+            {
+                let cleanup = image_session.invalidate();
+                send_image_cleanup(&mut image_session, &cleanup, &mut io::stdout().lock())?;
+            }
+            while let Some(reply) = input::take_graphics_reply() {
+                image_session.reply(&reply);
+            }
+            if app.wants_image_probe()
+                && let Some(probe) = image_session.begin_probe()
+            {
+                let _ = io::stdout().write_all(probe.as_bytes());
+                let _ = io::stdout().flush();
+            }
+            let stalled = input::protocol_stalled();
+            if stalled && !protocol_stalled {
+                app.status = "terminal response incomplete; Esc resumes input".into();
+            }
+            if !stalled
+                && protocol_stalled
+                && app.status == "terminal response incomplete; Esc resumes input"
+            {
+                app.status.clear();
+            }
+            protocol_stalled = stalled;
+            image_session.expire_probe();
+            app.image_graphics_checking =
+                image_session.hop == crate::image_session::HopGraphics::Unknown;
+            app.set_image_graphics_accepted(
+                image_session.hop == crate::image_session::HopGraphics::Accepted,
+            );
+            if image_worker_alive {
+                loop {
+                    match image_rx.try_recv() {
+                        Ok(()) => {
+                            if let Some(result) = image_worker.take_result() {
+                                app.land_image(result);
+                            }
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            image_worker_alive = false;
+                            app.image_worker_failed();
+                            break;
+                        }
+                    }
+                }
+            }
             // A frame reads the config only when it changed; a hidden pane reads it once shown.
             if app.pane_visible() && std::mem::take(&mut config_dirty) {
                 reconcile_plugin_config(
@@ -968,6 +1046,56 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             };
             // Rewrap rendered markdown before the heights measure it.
             app.sync_rendered_width(ui::rendered_width(area, app));
+            let regions = ui::image_regions(area, app);
+            if image_frame_area.is_some_and(|previous| previous != area)
+                || (repaint_whole && app.pane_visible())
+                || (image_session.has_images()
+                    && (!app.image_draws_graphics() || image_layout != Some(regions)))
+            {
+                let cleanup = if image_frame_area.is_some_and(|previous| previous != area)
+                    || (repaint_whole && app.pane_visible())
+                {
+                    image_session.invalidate()
+                } else {
+                    image_session.reset_protocols()
+                };
+                app.set_image_graphics_accepted(
+                    image_session.hop == crate::image_session::HopGraphics::Accepted,
+                );
+                send_image_cleanup(&mut image_session, &cleanup, &mut io::stdout().lock())?;
+            }
+            image_frame_area = Some(area);
+            image_layout = Some(regions);
+            app.set_image_session_epoch(image_session.epoch);
+            if let Some(mut request) = app.image_demand(
+                ui::image_preview_cells(area, app),
+                image_session.epoch,
+                image_session.pixel_metrics(),
+                image_session.metrics == crate::image_session::CellMetrics::Estimated,
+            ) {
+                if request.graphics {
+                    if let (Some(before), Some(after)) =
+                        (image_session.reserve_id(), image_session.reserve_id())
+                    {
+                        request.ids = (before, after);
+                    } else {
+                        request.graphics = false;
+                        app.set_image_graphics_accepted(false);
+                        image_session.hop = crate::image_session::HopGraphics::Rejected;
+                        app.status = "graphics IDs exhausted; restart ReviewR".into();
+                    }
+                }
+                app.request_image(&request);
+                if image_worker_alive {
+                    image_worker.request(request);
+                } else {
+                    app.image_worker_failed();
+                }
+            }
+            if !app.image_demand_active() {
+                image_worker.cancel();
+                app.cancel_image_demand();
+            }
             let heights = ui::diff_row_heights(app, area);
             app.settle_diff_scroll(&heights, effective);
             let file_vp = ui::file_viewport_height(area, app);
@@ -984,7 +1112,51 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 if std::mem::take(&mut repaint_whole) {
                     invalidate_screen(terminal)?;
                 }
-                terminal.draw(|f| age_due = ui::render_frame(f, app))?;
+                let ids: Vec<_> = app
+                    .image_pair()
+                    .filter(|_| app.image_draws_graphics())
+                    .into_iter()
+                    .flat_map(|pair| [pair.prepared.0.as_ref(), pair.prepared.1.as_ref()])
+                    .zip(regions)
+                    .filter_map(|(prepared, region)| {
+                        prepared
+                            .filter(|p| p.cells.0 <= region.width && p.cells.1 <= region.height)
+                            .map(|p| p.image_id)
+                    })
+                    .collect();
+                let cleanup = image_session.retain(&ids);
+                send_image_cleanup(&mut image_session, &cleanup, &mut io::stdout().lock())?;
+                for id in ids {
+                    image_session.adopt(id);
+                }
+                let mut cleanup_error = None;
+                let drawn = terminal.draw(|f| {
+                    if f.area() != area {
+                        let cleanup = image_session.invalidate();
+                        app.set_image_session_epoch(image_session.epoch);
+                        app.set_image_graphics_accepted(false);
+                        image_frame_area = Some(f.area());
+                        image_layout = Some(ui::image_regions(f.area(), app));
+                        if let Err(error) = send_image_cleanup(
+                            &mut image_session,
+                            &cleanup,
+                            &mut io::stdout().lock(),
+                        ) {
+                            cleanup_error = Some(error);
+                            return;
+                        }
+                    }
+                    age_due = ui::render_frame(f, app);
+                });
+                if let Some(error) = cleanup_error {
+                    return Err(error.into());
+                }
+                if let Err(error) = drawn {
+                    let cleanup = image_session.invalidate();
+                    let _ =
+                        send_image_cleanup(&mut image_session, &cleanup, &mut io::stdout().lock());
+                    return Err(error.into());
+                }
             }
             let age_due = age_due.map(|due| Instant::now() + due);
 
@@ -1261,6 +1433,14 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             // Only armed one-shot deadlines wake an idle loop; with none, it sleeps until something
             // happens. A status line fades on time.
             let mut timeout = Duration::MAX;
+            if let Some(wait) = image_session.probe_wait() {
+                timeout = timeout.min(wait);
+            }
+            if app.pane_visible()
+                && let Some(wait) = app.image_wait()
+            {
+                timeout = timeout.min(wait);
+            }
             if !app.status.is_empty() {
                 timeout = timeout.min(STATUS_TTL.saturating_sub(status_at.elapsed()));
             }
@@ -1387,7 +1567,14 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 app.tick_base_picker_probe();
             }
             if app.editor_request.is_some() {
-                run_editor(terminal, app, painted_frame.editor(), &mut open_editors)?;
+                run_editor(
+                    terminal,
+                    app,
+                    painted_frame.editor(),
+                    &mut open_editors,
+                    &mut image_session,
+                )?;
+                app.set_image_session_epoch(image_session.epoch);
             }
             if app.should_quit {
                 break;
@@ -1399,6 +1586,8 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
         }
         Ok(())
     })();
+    let cleanup = image_session.cleanup();
+    let _ = send_image_cleanup(&mut image_session, &cleanup, &mut io::stdout().lock());
     restore_terminal();
     drain_pr_shutdown(&mut pr, &probe_rx, &pr_rx);
     result
@@ -1916,6 +2105,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::PrevFile => app.prev_file(),
             K::Wrap => app.toggle_wrap(),
             K::Rendered => app.toggle_rendered(),
+            K::ImageView => app.toggle_image_view(),
             K::NavigatorPosition => app.cycle_navigator_position(),
             K::NavigatorHide => app.toggle_navigator_hidden(),
             K::NavigatorGrow => app.resize_navigator(4),
@@ -3581,5 +3771,41 @@ mod refresh_tests {
         assert_eq!(recovery_epoch, epoch);
         assert_eq!(target.theme(), "gruvbox");
         assert_eq!(recovered.plugin_config().unwrap().theme(), "gruvbox");
+    }
+}
+
+#[cfg(test)]
+mod image_cleanup_tests {
+    use super::send_image_cleanup;
+    use std::io::{self, Write};
+
+    struct FailedOutput {
+        flush: bool,
+    }
+
+    impl Write for FailedOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.flush { Ok(bytes.len()) } else { Err(io::ErrorKind::BrokenPipe.into()) }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    #[test]
+    fn cleanup_keeps_retired_ids_on_write_or_flush_failure_and_consumes_on_success() {
+        let mut session = crate::image_session::Session::new();
+        session.adopt(17);
+        let cleanup = session.cleanup();
+        for flush in [false, true] {
+            assert!(
+                send_image_cleanup(&mut session, &cleanup, &mut FailedOutput { flush }).is_err()
+            );
+            assert_eq!(session.cleanup(), cleanup);
+        }
+        let mut output = Vec::new();
+        send_image_cleanup(&mut session, &cleanup, &mut output).unwrap();
+        assert_eq!(output, cleanup.as_bytes());
+        assert!(session.cleanup().is_empty());
     }
 }

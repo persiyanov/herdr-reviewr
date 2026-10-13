@@ -13,6 +13,8 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"
+# Already used by fff-search; exact-byte identities keep unchanged raster uploads cached.
+blake3 = "1.8.7"
 dirs = "7"
 fff-search = "0.11.0"
 # Already in the tree. Names each workspace's action lock file one-to-one.
@@ -27,6 +29,9 @@ semver = "1.0.28"
 # Already in the tree through fff-search, which walks with it. Walks a folder that appears into the
 # search index, and on Linux the directories the watcher places a watch on.
 ignore = "0.4.33"
+# Image review previews decode only the four explicitly supported raster formats.  The renderer
+# owns Kitty upload framing; default features would pull in terminal fallbacks we do not use.
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # Pinned in the lockfile through ratatui's optional `palette` feature. WCAG contrast and OKLab
 # for the color roles, instead of hand-rolled matrices.
 palette = { version = "0.7.7", default-features = false, features = ["std"] }
@@ -35,6 +40,9 @@ palette = { version = "0.7.7", default-features = false, features = ["std"] }
 process-wrap = { version = "10.0.1", default-features = false, features = ["std", "process-group", "job-object"] }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30"
+ratatui-image = { version = "11.1.0", default-features = false }
+terminput = "0.5.15"
+terminput-crossterm = "0.4.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = { version = "3.2.0", features = ["text"] }
@@ -72,18 +80,9 @@ interprocess = "2.4.4"
 # Opens a link through `ShellExecuteW` with no shell between, so an `&` in a URL can't
 # truncate or inject.
 opener = "0.9.0"
-# crossterm's unix input parser, published on its own, and its mapping onto crossterm's events:
-# the Windows reader parses the console's VT input with them (`src/input/vt.rs`).
-terminput = "0.5.15"
-terminput-crossterm = "0.4.11"
 # The waits, events and pipe cancel no safe wrapper offers: the frame loop's wait on console input
 # and its wake event, and cancelling a herdr subscription's read. The features are already on in the tree.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_IO", "Win32_System_Threading"] }
-
-[dev-dependencies]
-# The Windows input parser's tests run on every OS (`src/input/vt.rs`).
-terminput = "0.5.15"
-terminput-crossterm = "0.4.11"
 
 [lints.rust]
 # Deny, not forbid: on Windows the frame loop's wait (`src/wake.rs`) and the herdr
