@@ -15,6 +15,7 @@ pub mod gitlab;
 pub mod herdr;
 pub mod herdr_socket;
 pub mod highlight;
+pub mod image_view;
 mod input;
 pub mod keymap;
 #[macro_use]
@@ -76,6 +77,8 @@ pub fn run() -> Result<()> {
     let mut app = app_for(&cfg, &initial_config);
 
     let mut terminal = ratatui::init();
+    // herpi fork: ask the terminal how it draws images before input is claimed.
+    app.picker = image_view::picker();
     // `ratatui::init` claimed the screen and raw mode; the input modes are left.
     claim_input_modes();
     // Paint before the first load, so a hung `git` never leaves herdr's blank pane (issue #4).

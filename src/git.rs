@@ -34,6 +34,25 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     run(git_command(repo), args)
 }
 
+/// herpi fork: the bytes of `path` at `rev` (`git cat-file blob`), at most
+/// [`crate::image_view::MAX_IMAGE_BYTES`] plus one, so an oversized image is named, not read.
+pub fn blob(repo: &Path, rev: &str, path: &str) -> Result<Vec<u8>> {
+    let spec = format!("{rev}:{path}");
+    let size = git(repo, &["cat-file", "-s", &spec])?;
+    let size: usize = size.trim().parse().unwrap_or(usize::MAX);
+    if size > crate::image_view::MAX_IMAGE_BYTES {
+        return Ok(vec![0; crate::image_view::MAX_IMAGE_BYTES + 1]);
+    }
+    let out = git_command(repo)
+        .args(["cat-file", "blob", &spec])
+        .output()
+        .map_err(|e| anyhow::anyhow!(git_error(&["cat-file"], "could not run", e)))?;
+    if !out.status.success() {
+        bail!(git_error(&["cat-file"], "failed", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(out.stdout)
+}
+
 /// Run `cmd` (a [`git_command`]) with `args` and return stdout. Errors on non-zero exit.
 fn run(mut cmd: std::process::Command, args: &[&str]) -> Result<String> {
     let out = cmd

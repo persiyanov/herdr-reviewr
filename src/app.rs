@@ -637,6 +637,10 @@ pub struct App {
     /// The active scope's changed files and the ends they were diffed between, on every tab.
     changeset: Changeset,
     pub diff: FileDiff,
+    /// herpi fork: the open image file's preview, shown where the diff would be.
+    pub image_view: Option<crate::image_view::ImageView>,
+    /// herpi fork: how this terminal draws images; `None` turns previews off.
+    pub picker: Option<ratatui_image::picker::Picker>,
     /// `diff.rows` with folds applied: what the cursor and hit tests index.
     pub visible: Vec<Row>,
     /// Fold anchors (first-hidden-line numbers) currently expanded; survives a refresh.
@@ -854,6 +858,8 @@ impl App {
             stash: TabStash::default(),
             changeset: Changeset::default(),
             diff: FileDiff::empty(),
+            image_view: None,
+            picker: None,
             visible: Vec::new(),
             expanded_folds: HashSet::new(),
             diff_path: None,
@@ -1296,6 +1302,7 @@ impl App {
 
     /// Show no file: no diff, rows, render, or marks.
     fn clear_open_view(&mut self) {
+        self.image_view = None;
         self.diff = FileDiff::empty();
         self.diff_path = None;
         self.rendered.clear();
@@ -1338,19 +1345,57 @@ impl App {
         let previous_path = self.rename_source(&path);
         let (old, new) = match self.content_sides(&path) {
             Ok((old, new)) => {
-                self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
+                self.diff = self.cache.get(path.clone(), previous_path, &old, &new, &self.highlighter);
                 (old, new)
             }
             Err(notice) => {
-                self.diff = FileDiff::notice(path, previous_path, notice, View::Diff);
+                self.diff = FileDiff::notice(path.clone(), previous_path, notice, View::Diff);
                 (String::new(), String::new())
             }
         };
         // The new side is the render input, the old side the marks' base; a notice holds none.
         let renders = self.markdown_file() && self.diff.notice.is_none();
         self.rendered.content = if renders { self.content(new, Some(old)) } else { None };
+        self.load_image_view(&path, false);
         self.rebuild_visible();
         self.settle_read();
+    }
+
+    /// herpi fork: a binary image file previews as its sides (`All files`: the file itself).
+    /// Reloaded with the diff, so a refresh shows the agent's latest image.
+    fn load_image_view(&mut self, path: &str, file_view: bool) {
+        use crate::image_view::{ImageSide, ImageView, is_image_path, sides_for};
+        let binary = self.diff.notice == Some(crate::diff::Notice::Binary);
+        let Some(picker) = self.picker.as_ref().filter(|_| binary && is_image_path(path)) else {
+            self.image_view = None;
+            return;
+        };
+        let worktree = |path: &str| -> Result<Vec<u8>, String> {
+            std::fs::read(self.repo.join(path)).map_err(|_| "not readable".to_string())
+        };
+        let sides = if file_view {
+            vec![ImageSide::new("file", worktree(path), picker)]
+        } else {
+            let annotation = self.changeset.files.get(path);
+            let ends = self.changeset.ends.as_ref();
+            let kind = annotation.map_or(crate::model::ChangeKind::Modified, |a| a.kind);
+            let (has_old, has_new) = sides_for(kind);
+            let source = annotation.and_then(|a| a.previous_path.as_deref()).unwrap_or(path);
+            let mut sides = Vec::new();
+            if let (true, Some(ends)) = (has_old, ends) {
+                let bytes = git::blob(&self.repo, &ends.old, source).map_err(|_| "not readable".to_string());
+                sides.push(ImageSide::new("before", bytes, picker));
+            }
+            if has_new {
+                let bytes = match ends.and_then(|ends| ends.new.as_deref()) {
+                    Some(new) => git::blob(&self.repo, new, path).map_err(|_| "not readable".to_string()),
+                    None => worktree(path),
+                };
+                sides.push(ImageSide::new("after", bytes, picker));
+            }
+            sides
+        };
+        self.image_view = Some(ImageView { path: path.to_string(), sides });
     }
 
     /// The `All files` File view for `path`: its worktree content, no folds.
@@ -1366,6 +1411,7 @@ impl App {
         let renders = self.markdown_file() && diff.notice.is_none();
         self.rendered.content = if renders { self.content(content, None) } else { None };
         self.diff = diff;
+        self.load_image_view(path, true);
         self.rebuild_visible();
         self.settle_read();
     }

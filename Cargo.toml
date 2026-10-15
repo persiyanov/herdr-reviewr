@@ -35,6 +35,10 @@ palette = { version = "0.7.7", default-features = false, features = ["std"] }
 process-wrap = { version = "10.0.1", default-features = false, features = ["std", "process-group", "job-object"] }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30"
+# herpi fork: an image file previews as the image in the diff view (kitty graphics through
+# unicode placeholders, colored half-blocks elsewhere). Five decoders only, no SVG.
+ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = { version = "3.2.0", features = ["text"] }

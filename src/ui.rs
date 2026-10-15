@@ -1765,6 +1765,13 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // herpi fork: an image file shows its sides where the diff would be.
+    if let Some(view) = app.image_view.as_ref().filter(|v| app.diff_path.as_deref() == Some(v.path.as_str())) {
+        let dim = Style::default().fg(p.ink(Ink::TextMuted, Fill::Base));
+        let strong = Style::default().fg(p.ink(Ink::Text, Fill::Base)).add_modifier(Modifier::BOLD);
+        crate::image_view::render(frame, view, inner, dim, strong);
+        return;
+    }
     if app.visible.is_empty() {
         // `All files` is no diff, so its copy avoids diff words.
         let gone = app.commits_gone_message();
