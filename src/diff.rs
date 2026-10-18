@@ -205,15 +205,31 @@ pub struct FileDiff {
     pub pairs: Vec<(u32, u32)>,
 }
 
-/// The line budget; the byte budget below catches one huge line.
+/// The default line budget; the byte budget below catches one huge line.
 pub(crate) const MAX_LINES: usize = 50_000;
-/// The byte budget. A file larger than this renders as a `too_large` notice.
+/// The default byte budget.
 pub(crate) const MAX_BYTES: usize = 2_000_000;
 
-/// Whether a file of `len` bytes is over the size budget.
-#[must_use]
-pub fn over_byte_budget(len: usize) -> bool {
-    len > MAX_BYTES
+/// How large a file renders; past either budget it is a `too_large` notice. A diff counts its
+/// two sides together.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Budget {
+    pub lines: usize,
+    pub bytes: usize,
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self { lines: MAX_LINES, bytes: MAX_BYTES }
+    }
+}
+
+impl Budget {
+    /// Whether a file of `len` bytes is over the byte budget.
+    #[must_use]
+    pub fn over_bytes(self, len: usize) -> bool {
+        len > self.bytes
+    }
 }
 
 impl Default for FileDiff {
@@ -245,18 +261,19 @@ impl FileDiff {
         old: &str,
         new: &str,
         hl: &Highlighter,
+        budget: Budget,
     ) -> Self {
         let language = language_of(&path);
         let notice = |n| Self::rowless(path.clone(), previous_path.clone(), Some(n), View::Diff);
         if old.contains('\0') || new.contains('\0') {
             return notice(Notice::Binary);
         }
-        if over_byte_budget(old.len() + new.len()) {
+        if budget.over_bytes(old.len() + new.len()) {
             return notice(Notice::TooLarge);
         }
         // One split feeds both the diff and the highlighter, so row `i` paints line `i`.
         let (old_lines, new_lines) = (lines(old), lines(new));
-        if old_lines.len() + new_lines.len() > MAX_LINES {
+        if old_lines.len() + new_lines.len() > budget.lines {
             return notice(Notice::TooLarge);
         }
 
@@ -313,16 +330,16 @@ impl FileDiff {
     }
 
     /// Build the File view: all of `content` as `Context` rows, under the same budgets.
-    fn build_file(path: String, content: &str, hl: &Highlighter) -> Self {
+    fn build_file(path: String, content: &str, hl: &Highlighter, budget: Budget) -> Self {
         let notice = |n| Self::rowless(path.clone(), None, Some(n), View::File);
         if content.contains('\0') {
             return notice(Notice::Binary);
         }
-        if over_byte_budget(content.len()) {
+        if budget.over_bytes(content.len()) {
             return notice(Notice::TooLarge);
         }
         let lines = lines(content);
-        if lines.len() > MAX_LINES {
+        if lines.len() > budget.lines {
             return notice(Notice::TooLarge);
         }
         let rows = hl
@@ -594,7 +611,8 @@ impl DiffCache {
         Self::default()
     }
 
-    /// The diff for `path`, keyed by both sides and `previous_path`, so a rename's header never leaks.
+    /// The diff for `path`, keyed by both sides, `previous_path` and `budget`, so a rename's
+    /// header never leaks and a new budget rebuilds.
     pub fn get(
         &mut self,
         path: String,
@@ -602,15 +620,26 @@ impl DiffCache {
         old: &str,
         new: &str,
         hl: &Highlighter,
+        budget: Budget,
     ) -> FileDiff {
-        let key = content_hash(previous_path.as_deref(), old, new);
-        self.get_or_build(path.clone(), key, || FileDiff::build(path, previous_path, old, new, hl))
+        let key = content_hash(previous_path.as_deref(), old, new, budget);
+        self.get_or_build(path.clone(), key, || {
+            FileDiff::build(path, previous_path, old, new, hl, budget)
+        })
     }
 
     /// The File view for `path`, under a `file:` key so it never evicts the path's diff.
-    pub fn get_file(&mut self, path: String, content: &str, hl: &Highlighter) -> FileDiff {
-        let key = content_hash(None, content, content);
-        self.get_or_build(format!("file:{path}"), key, || FileDiff::build_file(path, content, hl))
+    pub fn get_file(
+        &mut self,
+        path: String,
+        content: &str,
+        hl: &Highlighter,
+        budget: Budget,
+    ) -> FileDiff {
+        let key = content_hash(None, content, content, budget);
+        self.get_or_build(format!("file:{path}"), key, || {
+            FileDiff::build_file(path, content, hl, budget)
+        })
     }
 
     /// The entry under `cache_key` while its hash is `content_key`, else a fresh `build`.
@@ -634,17 +663,18 @@ impl DiffCache {
     }
 }
 
-fn content_hash(previous_path: Option<&str>, old: &str, new: &str) -> u64 {
+fn content_hash(previous_path: Option<&str>, old: &str, new: &str, budget: Budget) -> u64 {
     let mut h = DefaultHasher::new();
     previous_path.hash(&mut h);
     old.hash(&mut h);
     new.hash(&mut h);
+    budget.hash(&mut h);
     h.finish()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DiffCache, FileDiff, Notice, Row, SIMILAR_WINDOW, View, language_of};
+    use super::{Budget, DiffCache, FileDiff, Notice, Row, SIMILAR_WINDOW, View, language_of};
     use crate::highlight::Highlighter;
     use crate::theme;
 
@@ -661,7 +691,7 @@ mod tests {
         for i in 0..40 {
             writeln!(content, "line {i}").unwrap();
         }
-        let d = FileDiff::build_file("a.rs".into(), &content, &hl);
+        let d = FileDiff::build_file("a.rs".into(), &content, &hl, Budget::default());
         assert_eq!(d.view, View::File);
         assert_eq!(d.notice, None);
         assert_eq!(d.rows.len(), 40);
@@ -675,7 +705,7 @@ mod tests {
     #[test]
     fn file_view_degrades_on_binary() {
         let hl = Highlighter::new(mocha());
-        let d = FileDiff::build_file("blob.bin".into(), "a\0b", &hl);
+        let d = FileDiff::build_file("blob.bin".into(), "a\0b", &hl, Budget::default());
         assert_eq!(d.notice, Some(Notice::Binary));
         assert_eq!(d.view, View::File);
         assert!(d.rows.is_empty());
@@ -683,16 +713,42 @@ mod tests {
 
     fn build(old: &str, new: &str) -> FileDiff {
         let hl = Highlighter::new(mocha());
-        FileDiff::build("a.rs".into(), None, old, new, &hl)
+        FileDiff::build("a.rs".into(), None, old, new, &hl, Budget::default())
+    }
+
+    #[test]
+    fn either_budget_turns_a_file_into_the_too_large_notice() {
+        let hl = Highlighter::new(mocha());
+        let budget = Budget { lines: 3, bytes: 10 };
+        let fits = FileDiff::build("a.rs".into(), None, "a\n", "b\n", &hl, budget);
+        assert_eq!(fits.notice, None);
+        // The two sides count together: two lines each is four, over three.
+        let long = FileDiff::build("a.rs".into(), None, "a\nb\n", "a\nc\n", &hl, budget);
+        assert_eq!(long.notice, Some(Notice::TooLarge));
+        let wide = FileDiff::build_file("a.rs".into(), "0123456789x", &hl, budget);
+        assert_eq!(wide.notice, Some(Notice::TooLarge), "eleven bytes, over ten");
+        assert_eq!(wide.view, View::File);
+    }
+
+    #[test]
+    fn cache_keys_on_the_budget_so_a_new_one_rebuilds() {
+        let hl = Highlighter::new(mocha());
+        let mut cache = DiffCache::new();
+        let tight =
+            cache.get("a.rs".into(), None, "x\n", "y\n", &hl, Budget { lines: 1, bytes: 10 });
+        assert_eq!(tight.notice, Some(Notice::TooLarge));
+        let roomy = cache.get("a.rs".into(), None, "x\n", "y\n", &hl, Budget::default());
+        assert_eq!(roomy.notice, None);
     }
 
     #[test]
     fn cache_keys_on_previous_path_so_a_rename_and_a_plain_edit_differ() {
         let hl = Highlighter::new(mocha());
         let mut cache = DiffCache::new();
+        let budget = Budget::default();
         // Same path and content, one a rename: the plain edit must not get the rename's build.
-        let renamed = cache.get("f.rs".into(), Some("old.rs".into()), "x\n", "y\n", &hl);
-        let plain = cache.get("f.rs".into(), None, "x\n", "y\n", &hl);
+        let renamed = cache.get("f.rs".into(), Some("old.rs".into()), "x\n", "y\n", &hl, budget);
+        let plain = cache.get("f.rs".into(), None, "x\n", "y\n", &hl, budget);
         assert_eq!(renamed.previous_path.as_deref(), Some("old.rs"));
         assert_eq!(plain.previous_path, None);
     }
@@ -943,8 +999,8 @@ mod tests {
     fn cache_reuses_an_unchanged_build() {
         let hl = Highlighter::new(mocha());
         let mut cache = DiffCache::new();
-        let d1 = cache.get("a.rs".into(), None, "x\n", "y\n", &hl);
-        let d2 = cache.get("a.rs".into(), None, "x\n", "y\n", &hl);
+        let d1 = cache.get("a.rs".into(), None, "x\n", "y\n", &hl, Budget::default());
+        let d2 = cache.get("a.rs".into(), None, "x\n", "y\n", &hl, Budget::default());
         assert_eq!(d1, d2);
     }
 }

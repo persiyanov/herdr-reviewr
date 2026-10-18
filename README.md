@@ -236,6 +236,8 @@ toggle_direction = "down"
 auto_open = false
 github_host = "github.example.com"
 editor = "code -g {file}:{line}"
+max_file_bytes = 10_000_000
+max_file_lines = 250_000
 
 [keybindings]
 comment = ["c", "ㅊ"]
@@ -273,6 +275,19 @@ start:
 ```toml
 markdown_view = "rendered"
 ```
+
+### File size budgets
+
+A file over either budget shows a "too large" notice instead of its lines:
+
+```toml
+max_file_bytes = 10_000_000   # default: 2_000_000
+max_file_lines = 250_000      # default: 50_000
+```
+
+A diff counts its old and new sides together, so a changed file reaches each budget at about
+half its size. Each key takes a positive integer up to 1,000,000,000. reviewr builds a file's
+rows while the pane waits, so a raised budget can stall the pane for a moment on a huge file.
 
 ### Navigator position
 
@@ -515,7 +530,8 @@ The known constraints:
   number. reviewr flags a stale comment instead of dropping it.
 
 **Budgets**
-- Files over 2 MB or 50,000 lines show a "too large" notice. Binary files get no diff.
+- Files over 2 MB or 50,000 lines show a "too large" notice, unless you raise the
+  [file size budgets](#file-size-budgets). Binary files get no diff.
 
 ## Building from source
 

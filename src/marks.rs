@@ -554,7 +554,7 @@ pub(crate) fn open_details(
 #[cfg(test)]
 mod tests {
     use super::{DocMap, MarkMap, Place, Unit, derive, diff_lines, doc_map, open_details};
-    use crate::diff::{Bar, FileDiff, MarkerKind, Row};
+    use crate::diff::{Bar, Budget, FileDiff, MarkerKind, Row};
     use crate::highlight::Highlighter;
     use crate::markdown::render_expanded;
     use std::collections::{HashMap, HashSet};
@@ -563,7 +563,7 @@ mod tests {
     fn marks_of(old: &str, new: &str, open: &[&str]) -> (MarkMap, DocMap) {
         let t = crate::theme::resolve(Some("catppuccin"));
         let hl = Highlighter::new(t.syntax);
-        let diff = FileDiff::build("doc.md".into(), None, old, new, &hl);
+        let diff = FileDiff::build("doc.md".into(), None, old, new, &hl, Budget::default());
         let open: HashSet<String> = open.iter().map(|s| (*s).to_string()).collect();
         let map = |text: &str| doc_map(&render_expanded(text, 80, &hl, &t.palette, &open));
         let (new_map, old_map) = (map(new), map(old));
@@ -779,7 +779,7 @@ mod tests {
         let new = "Intro\n\n<details>\n<summary>More</summary>\n\nbody two\n\n</details>\n";
         let t = crate::theme::resolve(Some("catppuccin"));
         let hl = Highlighter::new(t.syntax);
-        let diff = FileDiff::build("doc.md".into(), None, old, new, &hl);
+        let diff = FileDiff::build("doc.md".into(), None, old, new, &hl, Budget::default());
         let lines: Vec<&Row> = diff_lines(&diff.rows).collect();
         let doc = crate::markdown::render(new, 80, &hl, &t.palette);
         let spots = super::change_spots(&lines);
