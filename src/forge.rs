@@ -87,6 +87,7 @@ fn login_hint(forge: crate::git::Forge, host: &str) -> String {
         crate::git::Forge::AzureDevOps => {
             "`az login` (or `az devops login` with a PAT)".to_string()
         }
+        crate::git::Forge::Gitea => "`tea login add`".to_string(),
     }
 }
 
@@ -94,7 +95,7 @@ fn login_hint(forge: crate::git::Forge, host: &str) -> String {
 fn extension_hint(forge: crate::git::Forge) -> Option<&'static str> {
     match forge {
         crate::git::Forge::AzureDevOps => Some("`az extension add --name azure-devops`"),
-        crate::git::Forge::GitHub | crate::git::Forge::GitLab => None,
+        crate::git::Forge::GitHub | crate::git::Forge::GitLab | crate::git::Forge::Gitea => None,
     }
 }
 
@@ -343,9 +344,21 @@ pub(crate) fn run_provider<E>(
     classify: impl FnOnce(&str) -> E,
     other: impl Fn(String) -> E,
 ) -> Result<String, E> {
+    run_provider_output(cmd, cancelled, not_found, classify, other).map(|ran| ran.stdout)
+}
+
+/// [`run_provider`], keeping stderr: `tea api` reports the HTTP status there and exits zero.
+pub(crate) fn run_provider_output<E>(
+    cmd: Command,
+    cancelled: &AtomicBool,
+    not_found: E,
+    classify: impl FnOnce(&str) -> E,
+    other: impl Fn(String) -> E,
+) -> Result<crate::proc::RunOutput, E> {
     // A fetch has no deadline of its own: the coordinator cancels one it superseded.
-    match crate::proc::run_tree(cmd, || cancelled.load(std::sync::atomic::Ordering::Acquire)) {
-        Ok(stdout) => Ok(stdout),
+    let stop = || cancelled.load(std::sync::atomic::Ordering::Acquire);
+    match crate::proc::run_tree_output(cmd, stop) {
+        Ok(ran) => Ok(ran),
         Err(RunError::NotFound) => Err(not_found),
         Err(RunError::Failed { stderr }) => Err(classify(&stderr)),
         Err(RunError::Io(error)) => Err(other(error)),
@@ -527,6 +540,9 @@ fn fetch_inner(
         crate::git::Forge::AzureDevOps => {
             return Ok(crate::azure_devops::fetch(repo, input, repository, cancelled));
         }
+        crate::git::Forge::Gitea => {
+            return Ok(crate::gitea::fetch(repo, input, repository, cancelled));
+        }
         crate::git::Forge::GitHub => {}
     }
     // A `gh pr checkout` pin outranks the lookup, unless the forge no longer resolves it.
@@ -674,12 +690,13 @@ struct FetchTarget<'a> {
 pub struct AssocPr {
     pub(crate) number: u64,
     pub(crate) head_oid: String,
-    /// Read only by Azure DevOps, whose lookup does not filter by branch.
+    /// Read only by Azure DevOps and Gitea, whose lookups do not filter by branch.
     pub(crate) head_ref: String,
     pub(crate) created_at: String,
     /// The history sort key: the merge or close time. Empty for an open PR.
     pub(crate) closed_at: String,
-    /// The full node when the lookup returned the whole pull request, as Azure DevOps does.
+    /// The full node when the lookup returned the whole pull request, as Azure DevOps and
+    /// Gitea do.
     pub(crate) raw: Option<Value>,
 }
 
