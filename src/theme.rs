@@ -288,6 +288,28 @@ mod tests {
         let lum = |c| contrast(c, Color::Rgb(0, 0, 0));
         assert!(lum(p.fill(Fill::Bar)) < lum(p.fill(Fill::Base)), "the bar is darker than base");
         assert!(lum(p.fill(Fill::Cursor)) < lum(p.fill(Fill::Bar)), "the ramp keeps darkening");
+        // The row under the pointer sits between the bar and the cursor, never off the ramp.
+        assert!(
+            lum(p.fill(Fill::Hover)) < lum(p.fill(Fill::Bar))
+                && lum(p.fill(Fill::Hover)) > lum(p.fill(Fill::Cursor)),
+            "the hover row is not between the bar and the cursor"
+        );
+    }
+
+    /// The row under the pointer always reads between the background and the cursor row.
+    #[test]
+    fn the_hover_row_sits_between_the_page_and_the_cursor() {
+        let lum = |c| contrast(c, Color::Rgb(0, 0, 0));
+        for name in NAMES {
+            let p = resolve(Some(name)).palette;
+            let (page, hover, cursor) =
+                (lum(p.fill(Fill::Base)), lum(p.fill(Fill::Hover)), lum(p.fill(Fill::Cursor)));
+            let (low, high) = if page < cursor { (page, cursor) } else { (cursor, page) };
+            assert!(
+                hover > low && hover < high,
+                "{name}: hover {hover:.3} is not between the page {page:.3} and the cursor {cursor:.3}"
+            );
+        }
     }
 
     #[test]

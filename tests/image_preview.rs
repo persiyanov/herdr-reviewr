@@ -10,7 +10,8 @@ use ratatui::backend::TestBackend;
 use ratatui_image::picker::Picker;
 
 fn png(width: u32, height: u32, rgb: [u8; 3]) -> Vec<u8> {
-    let image = image::RgbaImage::from_pixel(width, height, image::Rgba([rgb[0], rgb[1], rgb[2], 255]));
+    let image =
+        image::RgbaImage::from_pixel(width, height, image::Rgba([rgb[0], rgb[1], rgb[2], 255]));
     let mut out = std::io::Cursor::new(Vec::new());
     image.write_to(&mut out, image::ImageFormat::Png).unwrap();
     out.into_inner()
@@ -32,14 +33,17 @@ fn open(app: &mut App, name: &str) {
 }
 
 fn labels(app: &App) -> Vec<&'static str> {
-    app.image_view.as_ref().map(|view| view.sides.iter().map(|side| side.label).collect()).unwrap_or_default()
+    app.image_view
+        .as_ref()
+        .map(|view| view.sides.iter().map(|side| side.label).collect())
+        .unwrap_or_default()
 }
 
 fn screen(app: &App) -> String {
     let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
     terminal.draw(|f| ui::render(f, app)).unwrap();
     let buffer = terminal.backend().buffer().clone();
-    buffer.content().iter().map(|cell| cell.symbol()).collect()
+    buffer.content().iter().map(ratatui::buffer::Cell::symbol).collect()
 }
 
 /// Whether any cell is painted in `rgb` (as half-block foreground or background).

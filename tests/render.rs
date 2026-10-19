@@ -327,7 +327,9 @@ fn the_file_list_renders_as_a_directory_tree() {
     r.write("src/app.rs", "x2\n");
     r.write("src/ui.rs", "y2\n");
     r.write("Cargo.toml", "[package]\nname='z'\n");
-    let app = app_on(&r);
+    let mut app = app_on(&r);
+    // This test pins the navigator on the right: its assertions slice columns.
+    app.navigator_position = NavigatorPosition::Right;
 
     // Only the navigator: the diff header shows the full path too.
     let files_pane = right_column(&render(&app), 70);
@@ -348,6 +350,8 @@ fn an_expanded_directory_nests_its_children() {
     r.write("README.md", "hi\n");
     r.commit_all("init");
     let mut app = app_on(&r);
+    // This test pins the navigator on the right: its assertions slice columns.
+    app.navigator_position = NavigatorPosition::Right;
     enter_tab(&mut app, Tab::AllFiles);
     app.focus = Focus::Files;
     app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
@@ -570,6 +574,8 @@ const UNFOCUSED_CURSOR_BG: ratatui::style::Color = ratatui::style::Color::Rgb(0x
 fn the_diff_cursor_row_is_marked_from_either_pane() {
     // The diff cursor row fills like the file list's, softer when unfocused.
     let mut app = edited_app();
+    // This test pins the navigator on the right: its assertions slice columns.
+    app.navigator_position = NavigatorPosition::Right;
     app.focus = Focus::Diff;
     app.next_hunk();
     let cursor_y = |app: &App| 2 + app.diff_cursor as u16; // border at y=1, first row at y=2
@@ -590,7 +596,9 @@ fn the_diff_cursor_row_is_marked_from_either_pane() {
 
 #[test]
 fn the_selected_file_row_fills_with_the_shared_cursor_color() {
-    let app = edited_app(); // one file, file_cursor = 0, Files focused
+    let mut app = edited_app(); // one file, file_cursor = 0, Files focused
+    // This test pins the navigator on the right: its assertions slice columns.
+    app.navigator_position = NavigatorPosition::Right;
     let buf = render_buffer(&app);
     // Files pane: right 32% of 140 cols; its border is at y=1, first content row at y=2.
     let files_x0 = 140 - 140 * 32 / 100 + 1;
@@ -1154,7 +1162,9 @@ fn header_clicks_map_to_the_scope_chip() {
 
 #[test]
 fn file_and_diff_clicks_map_to_row_indices() {
-    let app = edited_app();
+    let mut app = edited_app();
+    // This test pins the navigator on the right: its assertions slice columns.
+    app.navigator_position = NavigatorPosition::Right;
     // Right pane: the first file row maps to index 0; clicking past the list misses.
     assert_eq!(ui::hit_file(AREA, &app, 120, 2, app.file_rows.len(), 0), Some(0));
     assert_eq!(ui::hit_file(AREA, &app, 120, 9, app.file_rows.len(), 0), None);
@@ -1640,6 +1650,8 @@ fn pr_bodies_render_as_markdown_and_the_description_row_pins_first() {
     r.write("x.rs", "y\n");
     r.commit_all("init");
     let mut app = app_on(&r);
+    // This test pins the navigator on the right: its assertions slice columns.
+    app.navigator_position = NavigatorPosition::Right;
     app.set_tab(Tab::Pr).unwrap();
     let place = herdr_reviewr::forge::FindingPlace::from_anchor(
         "x.rs:1",
@@ -1772,6 +1784,8 @@ fn pr_nav_clicks_map_the_description_and_comment_rows() {
     r.write("x.rs", "y\n");
     r.commit_all("init");
     let mut app = app_on(&r);
+    // This test pins the navigator on the right: its assertions slice columns.
+    app.navigator_position = NavigatorPosition::Right;
     app.set_tab(Tab::Pr).unwrap();
     let comment = |author: &str| Comment { author: author.into(), ..common::comment() };
     app.pr = PrView::Pr(Box::new(PrSnapshot {
@@ -1802,6 +1816,8 @@ fn pr_navigator_scroll_is_independent_and_preserved() {
     r.write("x.rs", "y\n");
     r.commit_all("init");
     let mut app = app_on(&r);
+    // This test pins the navigator on the right: its assertions slice columns.
+    app.navigator_position = NavigatorPosition::Right;
     app.set_tab(Tab::Pr).unwrap();
     app.navigator_position = NavigatorPosition::Bottom;
     let checks: Vec<Check> = (0..14)
@@ -1849,7 +1865,8 @@ fn pr_navigator_scroll_is_independent_and_preserved() {
     let before = render(&app);
     assert!(before.contains("check-00"));
     assert!(!before.contains("check-13"));
-    for _ in 0..5 {
+    // One line per notch: enough notches to walk past the checks to the comments.
+    for _ in 0..20 {
         handle_mouse(
             &mut app,
             MouseEvent {
@@ -1903,13 +1920,34 @@ fn pr_navigator_scroll_is_independent_and_preserved() {
     }
     assert_eq!(app.pr_selected_comment().map(|c| c.author.as_str()), Some(clicked_author.as_str()));
 
+    let top_author = |frame: &str| {
+        comments
+            .iter()
+            .map(|comment| format!("@{}", comment.author))
+            .find(|author| frame.contains(author))
+    };
+    // Land the click's reveal first, so what follows measures the refetch alone.
+    let _ = render(&app);
+    let landed = render(&app);
+    let before_refetch = top_author(&landed);
     app.apply_pr(PrView::Pr(Box::new(snapshot())));
     let refetched = render(&app);
-    assert!(refetched.contains("@author-00"), "a refetch preserves navigator scroll:\n{refetched}");
+    assert_eq!(
+        top_author(&refetched),
+        before_refetch,
+        "a refetch preserves navigator scroll:\n{refetched}"
+    );
 
     app.focus = Focus::Files;
-    handle_key(&mut app, KeyEvent::from(KeyCode::PageUp), area, &keymap).unwrap();
-    let paged = render(&app);
+    // Page keys walk the navigator back up, however deep the wheel left it.
+    let mut paged = String::new();
+    for _ in 0..10 {
+        handle_key(&mut app, KeyEvent::from(KeyCode::PageUp), area, &keymap).unwrap();
+        paged = render(&app);
+        if paged.contains("check-00") {
+            break;
+        }
+    }
     assert!(paged.contains("check-00"), "page keys scroll the focused navigator:\n{paged}");
     assert_eq!(app.pr_selected_comment().map(|c| c.author.as_str()), Some(clicked_author.as_str()));
 
@@ -4231,9 +4269,9 @@ fn a_row_shows_one_ref_by_what_matters_most() {
 }
 
 /// The default-right navigator's first inner column on the 140-wide test frame.
-const FILES_X0: u16 = 140 - 140 * 32 / 100 + 1;
-/// Its last inner column: the frame edge less the right border.
-const FILES_X1: u16 = 140 - 2;
+const FILES_X0: u16 = 1;
+/// Its last inner column: the seam less the navigator's border.
+const FILES_X1: u16 = 140 * 32 / 100 - 2;
 
 /// The files-pane row holding `token`: its y and its untrimmed inner text.
 fn files_row_at(buf: &Buffer, token: &str) -> (u16, String) {
@@ -4928,4 +4966,121 @@ fn the_line_field_paints_its_number_count_and_footer() {
     // The digits are a line, not a search: `row 1337` lights no match.
     let hl = app.palette().fill(Fill::Highlight);
     assert!(!render_buffer(&app).content.iter().any(|c| c.bg == hl), "no find highlight");
+}
+
+/// The row under the pointer is tinted; the cursor keeps its own, stronger fill.
+#[test]
+fn hovering_a_file_row_tints_it_and_never_moves_the_cursor() {
+    let r = Repo::init();
+    r.write("one.txt", "one\n");
+    r.write("two.txt", "two\n");
+    r.commit_all("init");
+    r.write("one.txt", "ONE\n");
+    r.write("two.txt", "TWO\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Files;
+    let hover_fill = app.palette().fill(Fill::Hover);
+    let inner = ui::files_inner_rect(AREA, &app);
+    let cursor = app.file_cursor;
+    let other = (0..app.file_rows.len()).find(|i| *i != cursor).expect("a second file row");
+    let row_y = |index: usize| inner.y + (index - app.file_scroll) as u16;
+
+    app.hover = Some((inner.x + 2, row_y(other)));
+    let painted = render_buffer(&app);
+    assert_eq!(
+        painted.cell((inner.x + 2, row_y(other))).unwrap().bg,
+        hover_fill,
+        "the row under the pointer is not tinted"
+    );
+    assert_eq!(
+        painted.cell((inner.x + 2, row_y(cursor))).unwrap().bg,
+        CURSOR_BG,
+        "the cursor row keeps its own fill"
+    );
+    assert_eq!(app.file_cursor, cursor, "hover moved the cursor");
+
+    // Hovering the cursor row leaves it looking like the cursor, not the pointer.
+    app.hover = Some((inner.x + 2, row_y(cursor)));
+    let painted = render_buffer(&app);
+    assert_eq!(
+        painted.cell((inner.x + 2, row_y(cursor))).unwrap().bg,
+        CURSOR_BG,
+        "the cursor wins over the hover"
+    );
+}
+
+/// The diff tints a context row under the pointer and leaves a change's own tint alone.
+#[test]
+fn a_hovered_diff_row_is_tinted_and_an_added_row_keeps_its_change_tint() {
+    let r = Repo::init();
+    r.write("a.rs", "one\ntwo\nthree\nfour\nfive\nsix\n");
+    r.commit_all("init");
+    r.write("a.rs", "one\ntwo\nTHREE\nfour\nfive\nsix\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    let hover_fill = app.palette().fill(Fill::Hover);
+    let added_fill = app.palette().fill(Fill::Added);
+    let heights = vec![1usize; app.visible.len()];
+    let read = ui::read_content_rect(AREA, &app);
+    let y_of = |app: &App, index: usize| {
+        (read.y..read.bottom())
+            .find(|y| {
+                ui::hit_diff(AREA, app, read.x + 1, *y, &heights, app.diff_scroll) == Some(index)
+            })
+            .unwrap_or_else(|| panic!("row {index} is not painted"))
+    };
+    // Plenty of context rows around the one changed line.
+    let context = app
+        .visible
+        .iter()
+        .enumerate()
+        .find(|(i, row)| row.marker() == ' ' && *i != app.diff_cursor)
+        .map(|(i, _)| i)
+        .expect("a context row off the cursor");
+    let added = app.visible.iter().position(|row| row.marker() == '+').expect("an added row");
+    let (context_y, added_y) = (y_of(&app, context), y_of(&app, added));
+
+    app.hover = Some((read.x + 2, context_y));
+    let painted = render_buffer(&app);
+    assert_eq!(
+        painted.cell((read.x + 2, context_y)).unwrap().bg,
+        hover_fill,
+        "the context row under the pointer is not tinted"
+    );
+
+    app.hover = Some((read.x + 2, added_y));
+    let painted = render_buffer(&app);
+    assert_eq!(
+        painted.cell((read.x + 2, added_y)).unwrap().bg,
+        added_fill,
+        "an added row lost its change tint under the pointer"
+    );
+}
+
+/// The PR navigator tints the selectable row under the pointer too.
+#[test]
+fn a_hovered_pr_navigator_row_is_tinted() {
+    use herdr_reviewr::forge::{PrSnapshot, PrView};
+    let mut app = edited_app();
+    app.set_tab(Tab::Pr).unwrap();
+    app.pr = PrView::Pr(Box::new(PrSnapshot {
+        comments: vec![common::comment(), common::comment()],
+        ..common::pr_snapshot()
+    }));
+    app.focus = Focus::Files;
+    let hover_fill = app.palette().fill(Fill::Hover);
+    // Put the PR cursor on the second comment, then hover the first.
+    app.pr_move(1);
+    let inner = ui::files_inner_rect(AREA, &app);
+    let row = (0..inner.height)
+        .map(|row| row as usize)
+        .find(|row| ui::pr_nav_cursor_at(&app, *row) == Some(0))
+        .expect("the first PR row");
+    app.hover = Some((inner.x + 2, inner.y + row as u16));
+    let painted = render_buffer(&app);
+    assert_eq!(
+        painted.cell((inner.x + 2, inner.y + row as u16)).unwrap().bg,
+        hover_fill,
+        "the PR row under the pointer is not tinted"
+    );
 }

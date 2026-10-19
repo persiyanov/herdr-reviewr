@@ -2335,6 +2335,14 @@ fn perform_click(
     Ok(())
 }
 
+/// How far one wheel notch scrolls: one line, in every pane. The page keys are the fast path.
+const STEP: isize = 1;
+
+/// A wheel notch's signed step: down is positive.
+fn delta_signed(m: MouseEvent, step: isize) -> isize {
+    if m.kind == MouseEventKind::ScrollDown { step } else { -step }
+}
+
 /// Map one mouse event onto `App`, hit-testing the painted frame's `keymap`.
 pub fn handle_mouse(
     app: &mut App,
@@ -2531,22 +2539,22 @@ fn dispatch_mouse(
             }
             // The wheel mid-drag scrolls its pane and extends the selection.
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp if app.text_drag().is_some() => {
-                let delta: isize = if m.kind == MouseEventKind::ScrollDown { 3 } else { -3 };
+                let delta = STEP;
                 if app.text_drag().map(|d| d.surface) == Some(crate::selection::Surface::PrNav) {
-                    app.pr_scroll_nav(delta);
+                    app.pr_scroll_nav(delta_signed(m, delta));
                 } else {
-                    app.pr_scroll_read(delta);
+                    app.pr_scroll_read(delta_signed(m, delta));
                 }
                 text_drag_set_extent(app, m, area);
             }
             MouseEventKind::ScrollDown if ui::in_files_pane(area, app, m.column, m.row) => {
-                app.pr_scroll_nav(3);
+                app.pr_scroll_nav(STEP);
             }
             MouseEventKind::ScrollUp if ui::in_files_pane(area, app, m.column, m.row) => {
-                app.pr_scroll_nav(-3);
+                app.pr_scroll_nav(-STEP);
             }
-            MouseEventKind::ScrollDown => app.pr_scroll_read(3),
-            MouseEventKind::ScrollUp => app.pr_scroll_read(-3),
+            MouseEventKind::ScrollDown => app.pr_scroll_read(STEP),
+            MouseEventKind::ScrollUp => app.pr_scroll_read(-STEP),
             _ => {}
         }
         return Ok(());
@@ -2600,7 +2608,7 @@ fn dispatch_mouse(
         MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
             if app.text_drag().is_some() || app.gutter_drag() =>
         {
-            let delta: isize = if m.kind == MouseEventKind::ScrollDown { 3 } else { -3 };
+            let delta = delta_signed(m, STEP);
             let files =
                 app.text_drag().map(|d| d.surface) == Some(crate::selection::Surface::Files);
             if files {
@@ -2620,13 +2628,13 @@ fn dispatch_mouse(
         }
         // The wheel scrolls the pane under it, never the cursor; h-scroll is keyboard-only.
         MouseEventKind::ScrollDown if ui::in_files_pane(area, app, m.column, m.row) => {
-            app.wheel_files(3);
+            app.wheel_files(STEP);
         }
         MouseEventKind::ScrollUp if ui::in_files_pane(area, app, m.column, m.row) => {
-            app.wheel_files(-3);
+            app.wheel_files(-STEP);
         }
-        MouseEventKind::ScrollDown => app.wheel_diff(3),
-        MouseEventKind::ScrollUp => app.wheel_diff(-3),
+        MouseEventKind::ScrollDown => app.wheel_diff(STEP),
+        MouseEventKind::ScrollUp => app.wheel_diff(-STEP),
         _ => {}
     }
     Ok(())
@@ -3487,7 +3495,7 @@ mod refresh_tests {
         std::fs::write(&path, "theme = \"nord\"\n").unwrap();
         let themed = plugin_config_in(dir.path()).unwrap();
         assert!(super::config_ends_gesture(&previous, Some(&themed)));
-        std::fs::write(&path, "theme = \"gruvbox\"\nnavigator_position = \"left\"\n").unwrap();
+        std::fs::write(&path, "theme = \"gruvbox\"\nnavigator_position = \"right\"\n").unwrap();
         let moved = plugin_config_in(dir.path()).unwrap();
         assert!(super::config_ends_gesture(&previous, Some(&moved)));
         assert!(super::config_ends_gesture(&previous, None));

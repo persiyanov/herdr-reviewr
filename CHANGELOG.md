@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Images show in review**: a changed `png`, `jpg`, `gif`, `webp` or `bmp` renders where its diff would be — before | after for a modified image, after only for an added one, before only for a deleted one, and the file itself in **All files**, scaled to fit with its size. `REVIEWR_IMAGES=off` turns it off; `halfblocks` forces half-blocks in a terminal without graphics.
+- **The pointer shows what it is over**: the row under the pointer is tinted in the file navigator, the `PR` navigator and the diff, without moving the cursor, focus or scroll.
+- **Clicks act, not just focus**: a click on a file row opens that file, a click on a folder folds it, and a click on a `PR` navigator row selects it.
+- **One line per wheel notch**: the navigator, the diff and the `PR` panes move a line at a time; `PgUp`/`PgDn` stay the fast path.
+
+### Changed
+- **The navigator starts on the left**, where the read pane's reading edge is; `navigator_position` still puts it anywhere else.
+
 ## [0.46.0] — 2026-10-06
 
 ### Changed

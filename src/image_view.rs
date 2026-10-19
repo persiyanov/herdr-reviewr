@@ -26,14 +26,11 @@ const MAX_SIDE: u32 = 2048;
 
 /// Whether `path` names an image reviewr can preview.
 pub fn is_image_path(path: &str) -> bool {
-    std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| {
-            ["png", "jpg", "jpeg", "gif", "webp", "bmp"]
-                .iter()
-                .any(|known| e.eq_ignore_ascii_case(known))
-        })
+    std::path::Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        ["png", "jpg", "jpeg", "gif", "webp", "bmp"]
+            .iter()
+            .any(|known| e.eq_ignore_ascii_case(known))
+    })
 }
 
 /// Which sides a change has: `(before, after)`. Added and untracked files are new only; a
@@ -107,6 +104,7 @@ impl ImageSide {
 }
 
 /// `1.2 MB`, `84 KB`, `512 B`.
+#[allow(clippy::cast_precision_loss)] // a display figure; 52 bits of mantissa is plenty
 pub fn human_size(bytes: usize) -> String {
     const KB: f64 = 1024.0;
     let b = bytes as f64;
@@ -130,20 +128,21 @@ pub fn render(frame: &mut Frame, view: &ImageView, area: Rect, dim: Style, stron
         .spacing(2)
         .split(area);
     for (side, column) in view.sides.iter().zip(columns.iter()) {
-        let rows = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(*column);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(side.label, strong))),
-            rows[0],
-        );
+        let rows =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+                .split(*column);
+        frame.render_widget(Paragraph::new(Line::from(Span::styled(side.label, strong))), rows[0]);
         if let Some(image) = &side.image {
-            frame.render_stateful_widget(StatefulImage::default(), rows[1], &mut *image.borrow_mut());
+            frame.render_stateful_widget(
+                StatefulImage::default(),
+                rows[1],
+                &mut *image.borrow_mut(),
+            );
         }
-        frame.render_widget(Paragraph::new(Line::from(Span::styled(side.info.clone(), dim))), rows[2]);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(side.info.clone(), dim))),
+            rows[2],
+        );
     }
 }
 
@@ -151,7 +150,7 @@ pub fn render(frame: &mut Frame, view: &ImageView, area: Rect, dim: Style, stron
 /// `REVIEWR_IMAGES=off` turns previews off; `halfblocks` forces half-blocks.
 pub fn picker() -> Option<Picker> {
     match std::env::var("REVIEWR_IMAGES").ok().as_deref() {
-        Some("off") | Some("0") => None,
+        Some("off" | "0") => None,
         Some("halfblocks") => Some(Picker::halfblocks()),
         _ => Some(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())),
     }

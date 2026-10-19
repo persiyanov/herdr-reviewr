@@ -230,7 +230,7 @@ The file accepts these keys:
 theme = "tokyo-night"
 default_scope = "branch"
 markdown_view = "rendered"
-navigator_position = "right"
+navigator_position = "left"
 toggle_placement = "overlay"
 toggle_direction = "down"
 auto_open = false
@@ -276,11 +276,11 @@ markdown_view = "rendered"
 
 ### Navigator position
 
-The navigator starts on the right. Set `navigator_position` to `right`, `bottom`, `left`, or
+The navigator starts on the left. Set `navigator_position` to `left`, `right`, `bottom`, or
 `top`, or press `p` to cycle clockwise:
 
 ```toml
-navigator_position = "bottom"
+navigator_position = "right"
 ```
 
 `<` grows, `>` shrinks, or drag the divider. `z` hides the navigator altogether and brings it

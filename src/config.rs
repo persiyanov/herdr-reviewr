@@ -88,9 +88,9 @@ pub enum MarkdownView {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NavigatorPosition {
     #[default]
-    Right,
-    Bottom,
     Left,
+    Bottom,
+    Right,
     Top,
 }
 
@@ -182,7 +182,7 @@ impl Default for PluginConfig {
             theme: crate::theme::DEFAULT.to_owned(),
             default_scope: crate::model::Scope::Uncommitted,
             markdown_view: MarkdownView::Source,
-            navigator_position: NavigatorPosition::Right,
+            navigator_position: NavigatorPosition::Left,
             toggle_placement: TogglePlacement::Split,
             toggle_direction: ToggleDirection::Right,
             auto_open: true,
@@ -735,7 +735,7 @@ mod tests {
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.theme(), "gruvbox");
         assert_eq!(config.default_scope(), Scope::Uncommitted);
-        assert_eq!(config.navigator_position(), NavigatorPosition::Right);
+        assert_eq!(config.navigator_position(), NavigatorPosition::Left);
         assert_eq!(config.toggle_placement(), TogglePlacement::Split);
         assert_eq!(config.toggle_direction(), ToggleDirection::Right);
         assert!(config.auto_open());

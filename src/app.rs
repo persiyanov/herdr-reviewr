@@ -876,7 +876,7 @@ impl App {
             painted_details: std::cell::RefCell::new(Vec::new()),
             pr_expanded_details: HashSet::new(),
             pr_read_max_scroll: std::cell::Cell::new(usize::MAX),
-            navigator_position: crate::config::NavigatorPosition::Right,
+            navigator_position: crate::config::NavigatorPosition::Left,
             navigator_side_pct: DEFAULT_SIDE_PCT,
             navigator_stack_pct: DEFAULT_STACK_PCT,
             navigator_hidden: false,
@@ -1317,13 +1317,13 @@ impl App {
             self.clear_open_view();
             return;
         };
-        self.open_path_in_tab(entry.path);
+        self.open_path_in_tab(&entry.path);
     }
 
     /// Open `path`: its diff in `Changes`, its content in `All files`.
-    fn open_path_in_tab(&mut self, path: String) {
+    fn open_path_in_tab(&mut self, path: &str) {
         match self.tab {
-            Tab::AllFiles => self.set_file_view(&path),
+            Tab::AllFiles => self.set_file_view(path),
             // `Changes` (the `PR` tab never opens a file in the read pane).
             _ => self.set_diff(path),
         }
@@ -1335,28 +1335,29 @@ impl App {
     }
 
     /// Build the diff for `path`, visible in the tree or not.
-    fn set_diff(&mut self, path: String) {
+    fn set_diff(&mut self, path: &str) {
         // Folds key by line number, so a different file starts with all collapsed.
-        if self.diff_path.as_deref() != Some(path.as_str()) {
+        if self.diff_path.as_deref() != Some(path) {
             self.expanded_folds.clear();
             self.open_fresh();
         }
-        self.diff_path = Some(path.clone());
-        let previous_path = self.rename_source(&path);
-        let (old, new) = match self.content_sides(&path) {
+        self.diff_path = Some(path.to_string());
+        let previous_path = self.rename_source(path);
+        let (old, new) = match self.content_sides(path) {
             Ok((old, new)) => {
-                self.diff = self.cache.get(path.clone(), previous_path, &old, &new, &self.highlighter);
+                self.diff =
+                    self.cache.get(path.to_string(), previous_path, &old, &new, &self.highlighter);
                 (old, new)
             }
             Err(notice) => {
-                self.diff = FileDiff::notice(path.clone(), previous_path, notice, View::Diff);
+                self.diff = FileDiff::notice(path.to_string(), previous_path, notice, View::Diff);
                 (String::new(), String::new())
             }
         };
         // The new side is the render input, the old side the marks' base; a notice holds none.
         let renders = self.markdown_file() && self.diff.notice.is_none();
         self.rendered.content = if renders { self.content(new, Some(old)) } else { None };
-        self.load_image_view(&path, false);
+        self.load_image_view(path, false);
         self.rebuild_visible();
         self.settle_read();
     }
@@ -1383,12 +1384,15 @@ impl App {
             let source = annotation.and_then(|a| a.previous_path.as_deref()).unwrap_or(path);
             let mut sides = Vec::new();
             if let (true, Some(ends)) = (has_old, ends) {
-                let bytes = git::blob(&self.repo, &ends.old, source).map_err(|_| "not readable".to_string());
+                let bytes = git::blob(&self.repo, &ends.old, source)
+                    .map_err(|_| "not readable".to_string());
                 sides.push(ImageSide::new("before", bytes, picker));
             }
             if has_new {
                 let bytes = match ends.and_then(|ends| ends.new.as_deref()) {
-                    Some(new) => git::blob(&self.repo, new, path).map_err(|_| "not readable".to_string()),
+                    Some(new) => {
+                        git::blob(&self.repo, new, path).map_err(|_| "not readable".to_string())
+                    }
                     None => worktree(path),
                 };
                 sides.push(ImageSide::new("after", bytes, picker));
@@ -3446,7 +3450,7 @@ impl App {
             && let Some(e) = self.entries.iter().find(|e| e.path == file).cloned()
         {
             self.reset_diff_view();
-            self.open_path_in_tab(e.path);
+            self.open_path_in_tab(&e.path);
             if let Some(fi) = self.file_row_of_path(&file) {
                 self.file_cursor = fi;
             }
@@ -6072,7 +6076,7 @@ mod tests {
         let open = |app: &mut App| {
             app.reload().unwrap();
             let before = git_commands();
-            app.set_diff("big.txt".to_string());
+            app.set_diff("big.txt");
             assert_eq!(git_commands() - before, 0, "the oversize file was read through git");
             assert_eq!(app.diff.notice, Some(crate::diff::Notice::TooLarge));
         };
@@ -6103,7 +6107,7 @@ mod tests {
         // A stale row's path has no diff at the landed ends.
         app.reload().unwrap();
         let before = git_commands();
-        app.set_diff("gone.txt".to_string());
+        app.set_diff("gone.txt");
         assert_eq!(git_commands() - before, 0, "a path outside the changeset was read");
     }
 
@@ -6121,7 +6125,7 @@ mod tests {
         app.reload().unwrap();
         // The landed ends name a commit git no longer has.
         app.changeset.ends = Some(crate::world::DiffEnds { old: "0".repeat(40), new: None });
-        app.set_diff("a.txt".to_string());
+        app.set_diff("a.txt");
         assert_eq!(app.diff.notice, Some(crate::diff::Notice::Unreadable));
         assert!(app.diff.rows.is_empty());
     }
@@ -6146,7 +6150,7 @@ mod tests {
             let locked = repo.join(locked);
             let restore = std::fs::metadata(&locked).unwrap().permissions();
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(mode)).unwrap();
-            app.set_diff(path.to_string());
+            app.set_diff(path);
             std::fs::set_permissions(&locked, restore).unwrap();
             assert_eq!(app.diff.notice, Some(crate::diff::Notice::Unreadable), "{path}");
         }
@@ -6164,7 +6168,7 @@ mod tests {
 
         let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
         app.reload().unwrap();
-        app.set_diff("moved.txt".to_string());
+        app.set_diff("moved.txt");
         assert_eq!(app.diff.notice, Some(crate::diff::Notice::TooLarge));
         assert_eq!(app.diff.previous_path.as_deref(), Some("big.txt"));
         assert_eq!(app.diff.view, crate::diff::View::Diff);
@@ -6187,7 +6191,7 @@ mod tests {
 
         let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
         app.reload().unwrap();
-        app.set_diff("link".to_string());
+        app.set_diff("link");
         assert_eq!(app.diff.notice, None);
         assert!(app.diff.rows.iter().any(|r| r.marker() == '+'));
     }
@@ -6212,7 +6216,7 @@ mod tests {
         let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
         let cost = |app: &mut App, path: &str| {
             let before = git_commands();
-            app.set_diff(path.to_string());
+            app.set_diff(path);
             git_commands() - before
         };
         app.reload().unwrap();

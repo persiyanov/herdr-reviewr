@@ -65,6 +65,8 @@ pub enum Fill {
     Bar,
     /// Inline code's chip in rendered markdown.
     Code,
+    /// The row under the pointer: a hint, weaker than the cursor and stronger than the bar.
+    Hover,
     /// The cursor row in an unfocused pane.
     CursorInactive,
     /// The cursor row in the focused pane.
@@ -84,10 +86,11 @@ pub enum Fill {
 }
 
 /// Every fill, in table order.
-pub const FILLS: [Fill; 12] = [
+pub const FILLS: [Fill; 13] = [
     Fill::Base,
     Fill::Bar,
     Fill::Code,
+    Fill::Hover,
     Fill::CursorInactive,
     Fill::Cursor,
     Fill::Selection,
@@ -103,7 +106,8 @@ pub const FILLS: [Fill; 12] = [
 /// so anything the UI stacks reads as a layer. Fills in one layer never stack.
 pub const LAYERS: [&[Fill]; 7] = [
     &[Fill::Base],
-    &[Fill::Bar, Fill::Code],
+    // A row's own surface: the pointer's row replaces the bar's, it never stacks on it.
+    &[Fill::Bar, Fill::Code, Fill::Hover],
     &[Fill::Added, Fill::Removed],
     &[Fill::AddedEmph, Fill::RemovedEmph],
     &[Fill::Cursor, Fill::CursorInactive],
@@ -413,6 +417,8 @@ fn recipe(p: &Primitives, hues: &Hues, fill: Fill) -> Recipe {
         Fill::Highlight => Recipe::Solid(hues.modified),
         Fill::Caret => Recipe::Solid(hues.accent),
         Fill::Bar | Fill::Code => tint(pole(p.cast), 0.045),
+        // Half the cursor's strength: a row under the pointer reads as a hint, not a cursor.
+        Fill::Hover => tint(pole(p.cast), 0.07),
         Fill::CursorInactive => tint(pole(p.cast), 0.09),
         Fill::Cursor => tint(pole(p.cast), 0.14),
         Fill::Selection => tint(saturated(hues.accent), if dark { 0.38 } else { 0.22 }),

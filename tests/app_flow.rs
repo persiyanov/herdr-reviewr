@@ -1742,6 +1742,8 @@ fn divider_drag_math_and_keyboard_clamps_follow_all_four_positions() {
 fn navigator_actions_cycle_remember_shares_and_respect_modes() {
     let r = edited_repo();
     let mut app = app_on(&r);
+    // This test pins the navigator on the right: its assertions slice columns.
+    app.navigator_position = NavigatorPosition::Right;
     let keymap = Keymap::default();
     app.focus = Focus::Diff;
     app.diff_cursor = row_with(&app, '+');
@@ -1795,6 +1797,8 @@ fn navigator_actions_cycle_remember_shares_and_respect_modes() {
 fn navigator_hide_toggles_full_width_and_respects_modes() {
     let r = edited_repo();
     let mut app = app_on(&r);
+    // This test pins the navigator on the right: its assertions slice columns.
+    app.navigator_position = NavigatorPosition::Right;
     let keymap = Keymap::default();
     let area = Rect::new(0, 0, 120, 40);
     app.focus = Focus::Files;
@@ -2013,6 +2017,8 @@ fn divider_drag_cancels_until_mouse_up() {
 fn navigator_config_changes_override_only_when_the_config_value_changes() {
     let r = edited_repo();
     let mut app = app_on(&r);
+    // This test pins the navigator on the right: its assertions slice columns.
+    app.navigator_position = NavigatorPosition::Right;
     let default = herdr_reviewr::config::PluginConfig::default();
     app.set_plugin_config(default.clone());
     app.cycle_navigator_position();
@@ -2026,11 +2032,12 @@ fn navigator_config_changes_override_only_when_the_config_value_changes() {
     );
 
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("config.toml"), "navigator_position = \"left\"\n").unwrap();
+    // A value the previous config did not carry: the session override gives way to it.
+    std::fs::write(dir.path().join("config.toml"), "navigator_position = \"right\"\n").unwrap();
     let changed = herdr_reviewr::config::plugin_config_in(dir.path()).unwrap();
     app.start_divider_drag();
     app.set_plugin_config(changed);
-    assert_eq!(app.navigator_position, NavigatorPosition::Left);
+    assert_eq!(app.navigator_position, NavigatorPosition::Right);
     assert!(app.divider_drag_cancelled(), "a config layout change cancels the old gesture");
 }
 
@@ -10463,4 +10470,130 @@ fn the_line_field_closes_when_its_file_or_tab_changes() {
     open_find(&mut app, &keymap);
     app.set_tab(Tab::Pr).unwrap();
     assert_eq!(app.mode, Mode::Normal, "the PR tab closes find");
+}
+
+/// A click on a file row opens that file; a click on a folder folds it.
+#[test]
+fn a_file_row_click_opens_it_and_a_folder_click_folds_it() {
+    let r = Repo::init();
+    r.write("dir/one.txt", "one\n");
+    r.write("dir/extra.txt", "extra\n");
+    r.write("two.txt", "two\n");
+    r.commit_all("init");
+    r.write("dir/one.txt", "ONE\n");
+    r.write("dir/extra.txt", "EXTRA\n");
+    r.write("two.txt", "TWO\n");
+    let mut app = app_on(&r);
+    let area = Rect::new(0, 0, 100, 40);
+    let heights = vec![1usize; app.visible.len()];
+    let keymap = Keymap::default();
+    let click = |app: &mut App, column: u16, row: u16| {
+        for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)]
+        {
+            handle_mouse(
+                app,
+                MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE },
+                area,
+                &heights,
+                &keymap,
+                &herdr_reviewr::export::Clipboard,
+            )
+            .unwrap();
+        }
+    };
+    let row_y = |app: &App, index: usize| {
+        let inner = herdr_reviewr::ui::files_inner_rect(area, app);
+        inner.y + (index - app.file_scroll) as u16
+    };
+
+    // Click a file: the cursor and the diff follow it.
+    let target = app.file_rows.iter().position(|row| row.name == "two.txt").unwrap_or_else(|| {
+        panic!("rows: {:?}", app.file_rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>())
+    });
+    app.focus = Focus::Diff;
+    let target_y = row_y(&app, target);
+    click(&mut app, 2, target_y);
+    assert_eq!(app.file_cursor, target, "the click moved the file cursor");
+    assert_eq!(app.focus, Focus::Files);
+    assert_eq!(app.diff_path.as_deref(), Some("two.txt"), "the clicked file opened");
+
+    // Click its folder: it folds, and the file rows below go with it.
+    let dir = app
+        .file_rows
+        .iter()
+        .position(|row| matches!(&row.kind, herdr_reviewr::file_list::RowKind::Dir { path, .. } if path == "dir"))
+        .unwrap();
+    let expanded = |app: &App| {
+        app.file_rows.iter().any(|row| {
+            matches!(&row.kind, herdr_reviewr::file_list::RowKind::Dir { path, expanded: true, .. } if path == "dir")
+        })
+    };
+    assert!(expanded(&app), "the folder starts open");
+    let before = app.file_rows.len();
+    let dir_y = row_y(&app, dir);
+    click(&mut app, 2, dir_y);
+    assert!(!expanded(&app), "the click folded the folder");
+    assert!(app.file_rows.len() < before, "its files left the list");
+}
+
+/// One wheel notch moves one line, in the navigator and in the read pane.
+#[test]
+fn one_wheel_notch_moves_one_line_in_both_panes() {
+    let r = Repo::init();
+    for i in 0..30 {
+        r.write(&format!("f{i:02}.txt"), &format!("line {i}\n"));
+    }
+    let body: String = (0..60).fold(String::new(), |mut s, i| {
+        use std::fmt::Write as _;
+        let _ = writeln!(s, "row {i}");
+        s
+    });
+    r.write("long.txt", &body);
+    r.commit_all("init");
+    r.write("long.txt", &body.replacen("row 30", "ROW 30", 1));
+    let mut app = app_on(&r);
+    let area = Rect::new(0, 0, 100, 14);
+    let heights = vec![1usize; app.visible.len()];
+    let keymap = Keymap::default();
+    let wheel = |app: &mut App, kind, column: u16, row: u16| {
+        handle_mouse(
+            app,
+            MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE },
+            area,
+            &heights,
+            &keymap,
+            &herdr_reviewr::export::Clipboard,
+        )
+        .unwrap();
+    };
+
+    // The navigator: one row per notch, never a jump.
+    let files = herdr_reviewr::ui::files_inner_rect(area, &app);
+    wheel(&mut app, MouseEventKind::ScrollDown, files.x + 1, files.y + 1);
+    assert_eq!(app.file_scroll, 1, "the file list moved one row");
+    wheel(&mut app, MouseEventKind::ScrollUp, files.x + 1, files.y + 1);
+    assert_eq!(app.file_scroll, 0, "and back one row");
+
+    // The read pane: the same.
+    let read = herdr_reviewr::ui::read_content_rect(area, &app);
+    wheel(&mut app, MouseEventKind::ScrollDown, read.x + 1, read.y + 1);
+    assert_eq!(app.diff_scroll, 1, "the diff moved one line");
+    wheel(&mut app, MouseEventKind::ScrollUp, read.x + 1, read.y + 1);
+    assert_eq!(app.diff_scroll, 0);
+}
+
+/// A fresh pane puts its navigator on the left, where herpi puts its sidebar.
+#[test]
+fn the_navigator_starts_on_the_left() {
+    let mut app = app_on(&edited_repo());
+    assert_eq!(app.navigator_position, NavigatorPosition::Left, "the default position");
+    let area = Rect::new(0, 0, 120, 40);
+    let files = herdr_reviewr::ui::files_inner_rect(area, &app);
+    let read = herdr_reviewr::ui::read_content_rect(area, &app);
+    assert!(files.x < read.x, "the file list is left of the read pane");
+    // The config still wins: an explicit right puts it back.
+    app.navigator_position = NavigatorPosition::Right;
+    let files = herdr_reviewr::ui::files_inner_rect(area, &app);
+    let read = herdr_reviewr::ui::read_content_rect(area, &app);
+    assert!(files.x > read.x, "an explicit position still moves it");
 }

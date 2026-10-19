@@ -960,7 +960,7 @@ pub(crate) fn painted_texts(app: &App, area: Rect) -> Vec<String> {
 
 /// The PR navigator's row texts, unelided, for copying.
 pub(crate) fn pr_nav_texts(app: &App) -> Vec<String> {
-    pr_nav_rows(app, usize::MAX, std::time::SystemTime::now())
+    pr_nav_rows(app, usize::MAX, std::time::SystemTime::now(), None)
         .iter()
         .map(|r| r.spans.iter().map(|s| s.content.as_ref()).collect::<String>().trim().to_string())
         .collect()
@@ -1495,6 +1495,16 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let width = inner.width as usize;
+    // The row under the pointer: a hint only, painted under the row, never a cursor. This
+    // pane draws into its own rect, so the hit test is local to it.
+    let hovered_row = app.hover.filter(|_| !app.mode.is_modal()).and_then(|(column, row)| {
+        let inner = inner_rect(area);
+        if !contains(inner, column, row) {
+            return None;
+        }
+        let index = (row - inner.y) as usize + app.file_scroll;
+        (index < app.file_rows.len()).then_some(index)
+    });
     // Window the rows to the scrolled-to viewport; `file_scroll` keeps the cursor on screen.
     let items: Vec<ListItem> = app
         .file_rows
@@ -1503,12 +1513,10 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
         .skip(app.file_scroll)
         .take(inner.height as usize)
         .map(|(i, row)| {
-            // The selected row fills with the cursor color, dimmed when the list is unfocused.
-            let on = match (i == app.file_cursor, app.focus == Focus::Files) {
-                (false, _) => Fill::Base,
-                (true, true) => Fill::Cursor,
-                (true, false) => Fill::CursorInactive,
-            };
+            // The selected row fills with the cursor color, dimmed when the list is unfocused;
+            // the pointer's row gets the softer hover fill, which the cursor always wins over.
+            let tint = if hovered_row == Some(i) { Fill::Hover } else { Fill::Base };
+            let on = row_fill(i == app.file_cursor, false, app.focus == Focus::Files, tint);
             let nest = "  ".repeat(row.depth);
             match &row.kind {
                 RowKind::Dir { expanded, has_change, .. } => {
@@ -1766,7 +1774,9 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     // herpi fork: an image file shows its sides where the diff would be.
-    if let Some(view) = app.image_view.as_ref().filter(|v| app.diff_path.as_deref() == Some(v.path.as_str())) {
+    if let Some(view) =
+        app.image_view.as_ref().filter(|v| app.diff_path.as_deref() == Some(v.path.as_str()))
+    {
         let dim = Style::default().fg(p.ink(Ink::TextMuted, Fill::Base));
         let strong = Style::default().fg(p.ink(Ink::Text, Fill::Base)).add_modifier(Modifier::BOLD);
         crate::image_view::render(frame, view, inner, dim, strong);
@@ -1978,7 +1988,8 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
     let num_ink = if commented { Ink::Comment } else { Ink::TextMuted };
     let highlight = match_style(pal);
     if let Row::Rendered { src, kind, .. } = row {
-        let on = row_fill(cursor, selected, focused, Fill::Base);
+        let tint = if hovered { Fill::Hover } else { Fill::Base };
+        let on = row_fill(cursor, selected, focused, tint);
         let (num_color, plus) = (pal.ink(num_ink, on), pal.ink(Ink::Comment, on));
         // Only the lead line is numbered; the bar cell shows the change mark.
         let num = if lead { src.to_string() } else { String::new() };
@@ -2038,7 +2049,8 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         } else {
             format!("  ⋯  {} unmodified lines", row.hidden())
         };
-        let on = row_fill(cursor, false, focused, Fill::Bar);
+        let tint = if hovered { Fill::Hover } else { Fill::Bar };
+        let on = row_fill(cursor, false, focused, tint);
         let mut line =
             Line::from(Span::styled(label, Style::default().fg(pal.ink(Ink::TextSecondary, on))));
         if let Some(pad) = width.checked_sub(line.width()).filter(|p| *p > 0) {
@@ -2057,6 +2069,9 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         '+' => ("▌", Ink::Added, Fill::Added),
         _ => (" ", Ink::Border, Fill::Base),
     };
+    // An added or removed row keeps its change tint under the pointer: the gutter `+` already
+    // says where the pointer is, and the tint is the row's meaning.
+    let tint = if hovered && tint == Fill::Base { Fill::Hover } else { tint };
     let on = row_fill(cursor, selected, focused, tint);
     let (bar_color, num_color) = (pal.mark(bar_ink, on), pal.ink(num_ink, on));
     let plus = pal.ink(Ink::Comment, on);
@@ -2154,6 +2169,15 @@ fn marker_ink(kind: crate::diff::MarkerKind) -> Ink {
 /// The fill a list row sits on: the cursor's on the cursor row, else the background.
 fn cursor_fill(on_cursor: bool) -> Fill {
     if on_cursor { Fill::Cursor } else { Fill::Base }
+}
+
+/// A row's fill in a list: the cursor wins over the pointer's hover, which wins over the page.
+fn list_fill(on_cursor: bool, hovered: bool) -> Fill {
+    match (on_cursor, hovered) {
+        (true, _) => Fill::Cursor,
+        (false, true) => Fill::Hover,
+        _ => Fill::Base,
+    }
 }
 
 /// A row's fill: cursor, else selection, else its own `tint`.
@@ -4118,7 +4142,8 @@ fn text_style(p: &Palette, on: Fill) -> Style {
     Style::default().fg(p.ink(Ink::Text, on))
 }
 
-/// A list row on the fill `on` its colors were resolved for, a cursor row bold full width.
+/// A list row on the fill `on` its colors were resolved for: a cursor row is bold and full
+/// width; the pointer's hover row gets the tint only.
 fn selectable_row(
     p: &Palette,
     mut spans: Vec<Span<'static>>,
@@ -4130,12 +4155,15 @@ fn selectable_row(
         if width > used {
             spans.push(Span::raw(" ".repeat(width - used)));
         }
+        let bold = matches!(on, Fill::Cursor | Fill::CursorInactive);
         for s in &mut spans {
             // A span's own background, like a match highlight, wins.
             if s.style.bg.is_none() {
                 s.style = s.style.bg(bg);
             }
-            s.style = s.style.add_modifier(Modifier::BOLD);
+            if bold {
+                s.style = s.style.add_modifier(Modifier::BOLD);
+            }
         }
     }
     ListItem::new(Line::from(spans))
@@ -4273,7 +4301,16 @@ fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = inner.width as usize;
-    let rows = pr_nav_rows(app, width, std::time::SystemTime::now());
+    // The selectable row under the pointer, by the index a click would select.
+    let hovered_cursor = app.hover.filter(|_| !app.mode.is_modal()).and_then(|(column, row)| {
+        let inner = inner_rect(area);
+        if !contains(inner, column, row) {
+            return None;
+        }
+        let display = (row - inner.y) as usize + app.pr_nav_scroll();
+        pr_nav_cursor_at(app, display)
+    });
+    let rows = pr_nav_rows(app, width, std::time::SystemTime::now(), hovered_cursor);
     let viewport = inner.height as usize;
     // Transitional frames retain the request until both a viewport and its selected row exist.
     let can_reveal = viewport > 0 && rows.iter().any(|row| row.cursor == Some(app.pr_cursor));
@@ -4288,7 +4325,8 @@ fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
         .take(viewport)
         .map(|row| {
             let selected = row.cursor == Some(app.pr_cursor);
-            selectable_row(p, row.spans, width, cursor_fill(selected))
+            let hovered = row.cursor.is_some() && row.cursor == hovered_cursor;
+            selectable_row(p, row.spans, width, list_fill(selected, hovered))
         })
         .collect();
     frame.render_widget(List::new(items), inner);
@@ -4301,12 +4339,18 @@ struct PrNavRow {
 }
 
 /// The complete PR navigator layout, shared by painting and click hit-testing.
-fn pr_nav_rows(app: &App, width: usize, now: std::time::SystemTime) -> Vec<PrNavRow> {
+fn pr_nav_rows(
+    app: &App,
+    width: usize,
+    now: std::time::SystemTime,
+    hovered: Option<usize>,
+) -> Vec<PrNavRow> {
     let Some(s) = app.pr_snapshot() else { return Vec::new() };
     let p = app.palette();
     let dim = Style::default().fg(p.ink(Ink::TextMuted, Fill::Base));
     // A row the cursor is on sits on the cursor fill, so its colors resolve there.
-    let on = |cursor: usize| cursor_fill(cursor == app.pr_cursor);
+    // A row's fill: the PR cursor, else the pointer's hover, else the page.
+    let on = |cursor: usize| list_fill(cursor == app.pr_cursor, hovered == Some(cursor));
     let mut rows = Vec::new();
     if app.pr_has_description() {
         rows.push(PrNavRow {
@@ -4750,7 +4794,7 @@ pub fn hit_pr_open(area: Rect, app: &App, col: u16, row: u16) -> bool {
 /// The cursor index a PR navigator row selects.
 #[must_use]
 pub fn pr_nav_cursor_at(app: &App, row: usize) -> Option<usize> {
-    pr_nav_rows(app, usize::MAX, std::time::SystemTime::now()).get(row)?.cursor
+    pr_nav_rows(app, usize::MAX, std::time::SystemTime::now(), None).get(row)?.cursor
 }
 
 /// The status glyph and its color for a check. Running and queued checks are yellow, like
