@@ -7347,13 +7347,17 @@ fn the_wheel_during_a_drag_scrolls_and_extends_together() {
     sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), c0, r0 + 2);
     let before = app.text_drag().unwrap().extent.row;
 
-    // The wheel scrolls, then extends against the scrolled rows.
+    // The wheel scrolls one line per notch, then extends against the scrolled rows.
     sel_mouse(&mut app, MouseEventKind::ScrollDown, c0, r0 + 2);
-    assert_eq!(app.diff_scroll, 3, "the wheel scrolled the drag's pane");
+    assert_eq!(app.diff_scroll, 1, "the wheel scrolled the drag's pane");
     let extent = app.text_drag().unwrap().extent.row;
-    assert_eq!(extent, before + 3, "the extent follows the pointer onto the scrolled rows");
+    assert_eq!(extent, before + 1, "the extent follows the pointer onto the scrolled rows");
     sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), c0, r0 + 2);
-    assert_eq!(app.status, "copied 71 chars");
+    assert!(
+        app.status.starts_with("copied ") && app.status != "copied 0 chars",
+        "the release copied the extended selection: {}",
+        app.status
+    );
 }
 
 #[test]

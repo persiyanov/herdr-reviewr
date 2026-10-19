@@ -1,10 +1,5 @@
-//! herpi fork: an image file previews as the image in the read pane.
-//!
-//! A binary file whose name says it is an image (`png`, `jpg`/`jpeg`, `gif`, `webp`, `bmp`)
-//! shows its sides where the diff would be: before | after for a modified image, after only
-//! for an added one, before only for a deleted one, and the file itself in `All files`. The
-//! image is drawn with the terminal's own graphics (kitty unicode placeholders) or colored
-//! half-blocks, through `ratatui-image`. Text files never come here.
+//! Image previews: a changed image's two sides, drawn with the terminal's graphics.
+//! `png`, `jpg`, `gif`, `webp` and `bmp` show where the diff would be; see `README.md`.
 
 use std::cell::RefCell;
 
