@@ -10601,3 +10601,49 @@ fn the_navigator_starts_on_the_left() {
     let read = herdr_reviewr::ui::read_content_rect(area, &app);
     assert!(files.x > read.x, "an explicit position still moves it");
 }
+
+/// A click on a PR navigator row selects that comment, on release like every other click.
+#[test]
+fn a_pr_navigator_click_selects_its_comment() {
+    use herdr_reviewr::forge::{PrSnapshot, PrView};
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    app.set_tab(herdr_reviewr::app::Tab::Pr).unwrap();
+    let comments = vec![
+        common::comment(),
+        herdr_reviewr::forge::Comment { author: "bo".into(), ..common::comment() },
+    ];
+    app.pr =
+        PrView::Pr(Box::new(PrSnapshot { comments: comments.clone(), ..common::pr_snapshot() }));
+    app.pr_move(1);
+    let area = Rect::new(0, 0, 100, 40);
+    let heights = vec![1usize; app.visible.len()];
+    let keymap = Keymap::default();
+    let inner = herdr_reviewr::ui::files_inner_rect(area, &app);
+    // The first comment is the row that selects cursor 0.
+    let row = (0..inner.height)
+        .map(|row| row as usize)
+        .find(|row| herdr_reviewr::ui::pr_nav_cursor_at(&app, *row) == Some(0))
+        .expect("the first comment's row");
+    for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)] {
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind,
+                column: inner.x + 2,
+                row: inner.y + row as u16,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+            &heights,
+            &keymap,
+            &herdr_reviewr::export::Clipboard,
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        app.pr_selected_comment().map(|c| c.author.as_str()),
+        Some("ann"),
+        "the click moved the PR cursor to the clicked comment"
+    );
+}
