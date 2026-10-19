@@ -3739,6 +3739,14 @@ impl App {
         });
     }
 
+    /// `Alt+Delete`: delete whitespace, then the word, after the caret.
+    pub fn input_delete_word_forward(&mut self) {
+        self.edit_input(|v, caret| {
+            let end = word_end(v, *caret);
+            v.drain(*caret..end);
+        });
+    }
+
     /// Delete from the start of the logical line to the caret (`Ctrl+U`).
     pub fn input_kill_to_start(&mut self) {
         self.edit_input(|v, caret| {

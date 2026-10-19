@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Alt edits in text fields**: `Alt+Backspace` deletes the word behind and `Alt+Delete` the word ahead, and other `Alt` chords no longer type their letter into comments, search or find.
+
 ## [0.48.0] — 2026-10-19
 
 ### Added

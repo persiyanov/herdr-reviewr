@@ -1648,9 +1648,11 @@ fn apply_text_edit(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bo
         Right => app.caret_right(),
         Home => app.caret_home(),
         End => app.caret_end(),
+        Delete if alt => app.input_delete_word_forward(),
+        Backspace if alt => app.input_delete_word(),
         Delete => app.input_delete_forward(),
         Backspace => app.input_backspace(),
-        Char(c) if !ctrl => app.input_push(c),
+        Char(c) if !ctrl && !alt => app.input_push(c),
         _ => {}
     }
 }
@@ -3593,5 +3595,71 @@ mod refresh_tests {
         assert_eq!(recovery_epoch, epoch);
         assert_eq!(target.theme(), "gruvbox");
         assert_eq!(recovered.plugin_config().unwrap().theme(), "gruvbox");
+    }
+}
+
+#[cfg(test)]
+mod text_edit_tests {
+    use super::apply_text_edit;
+    use crate::app::{App, Mode};
+    use crate::model::Scope;
+    use ratatui::crossterm::event::KeyCode;
+    use std::path::PathBuf;
+
+    fn composing(text: &str, caret: usize) -> App {
+        let mut app = App::new(PathBuf::from("."), Scope::Uncommitted, None);
+        app.mode = Mode::Composing { editing: None };
+        app.input = text.to_string();
+        app.caret = caret;
+        app
+    }
+
+    #[test]
+    fn alt_backspace_deletes_the_word_behind_the_caret() {
+        let mut app = composing("foo bar", 7);
+        apply_text_edit(&mut app, KeyCode::Backspace, false, true, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foo ", 4));
+    }
+
+    #[test]
+    fn alt_delete_deletes_the_word_ahead_of_the_caret() {
+        let mut app = composing("foo bar", 0);
+        apply_text_edit(&mut app, KeyCode::Delete, false, true, false);
+        assert_eq!((app.input.as_str(), app.caret), (" bar", 0));
+        let mut app = composing("foo   bar", 3);
+        apply_text_edit(&mut app, KeyCode::Delete, false, true, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foo", 3), "skips the gap, then the word");
+    }
+
+    #[test]
+    fn alt_letter_types_nothing_into_the_field() {
+        let mut app = composing("foo", 3);
+        apply_text_edit(&mut app, KeyCode::Char('d'), false, true, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foo", 3));
+    }
+
+    #[test]
+    fn ctrl_w_and_alt_word_jumps_still_work() {
+        let mut app = composing("foo bar", 7);
+        apply_text_edit(&mut app, KeyCode::Char('b'), false, true, false);
+        assert_eq!(app.caret, 4, "alt+b still jumps a word left");
+        apply_text_edit(&mut app, KeyCode::Char('f'), false, true, false);
+        assert_eq!(app.caret, 7, "alt+f still jumps a word right");
+        apply_text_edit(&mut app, KeyCode::Char('w'), true, false, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foo ", 4));
+    }
+
+    #[test]
+    fn plain_chars_backspace_and_delete_still_edit_one_char() {
+        let mut app = composing("foo", 3);
+        apply_text_edit(&mut app, KeyCode::Char('x'), false, false, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foox", 4));
+        apply_text_edit(&mut app, KeyCode::Backspace, false, false, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foo", 3));
+        apply_text_edit(&mut app, KeyCode::Delete, false, false, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foo", 3), "nothing ahead, nothing lost");
+        app.caret = 0;
+        apply_text_edit(&mut app, KeyCode::Delete, false, false, false);
+        assert_eq!((app.input.as_str(), app.caret), ("oo", 0));
     }
 }
