@@ -9,8 +9,8 @@ use common::Repo;
 use herdr_reviewr::git::{
     DiffSides, ResolvedBase, abbreviate_oid, all_files, changed_between, changed_from,
     checked_out_branch, default_branch_name, delete_base_pick, diff_sides, list_branches,
-    merge_base as merge_base_oid, read_base_pick, read_baseline_ref, resolve_base, resolve_commit,
-    snapshot_worktree, write_base_pick, write_baseline_ref,
+    merge_base as merge_base_oid, merge_base_checked, read_base_pick, read_baseline_ref,
+    resolve_base, resolve_commit, snapshot_worktree, write_base_pick, write_baseline_ref,
 };
 use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope};
 use herdr_reviewr::world::{WorldInput, build_changed};
@@ -915,6 +915,28 @@ fn branch_scope_equals_uncommitted_when_head_is_the_base() {
 
     let branch = changed_files(r.path(), Scope::Branch, Some("main")).unwrap();
     assert!(branch.iter().any(|f| f.path == "base.rs"), "branch is not empty at the base");
+}
+
+#[test]
+fn branch_scope_propagates_a_failed_merge_base_query() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+
+    let err = merge_base_checked(r.path(), "not-a-commit").unwrap_err();
+    assert!(err.to_string().contains("git merge-base failed"), "{err:#}");
+}
+
+#[test]
+fn branch_scope_is_empty_when_histories_have_no_common_ancestor() {
+    let r = Repo::init();
+    r.write("base.rs", "1\n");
+    r.commit_all("base");
+    let base = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+    r.git(&["checkout", "-q", "--orphan", "island"]);
+    r.git(&["commit", "-q", "--allow-empty", "-m", "island"]);
+
+    assert_eq!(merge_base_checked(r.path(), &base).unwrap(), None);
 }
 
 #[test]

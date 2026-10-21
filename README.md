@@ -29,6 +29,7 @@ comment on lines, and send the comments back.
 - **Four diff scopes** — uncommitted, branch, last turn, commits.
 - **Last-turn diff** — only what the agent's latest turn changed.
 - **Line comments** — on a line or a range, sent to the agent in one go.
+- **Reviewed files** — mark an exact file diff done, without hiding it.
 - **Text selection** — drag to copy, like an editor.
 - **File viewer** — any file in the worktree.
 - **Search** — files by name and code by content, powered by [fff](https://github.com/dmtrKovalenko/fff).
@@ -77,7 +78,8 @@ herdr-reviewr ~/some/repo
 2. **Focus the diff.** `Tab`.
 3. **Select lines.** `v`, then `j` / `k`, or drag the line numbers.
 4. **Comment.** `c`, type, `Enter`.
-5. **Send.** `s` puts every comment in the agent's input.
+5. **Mark reviewed.** `R` marks the current changed file with a `✓`; press it again to undo.
+6. **Send.** `s` puts every comment in the agent's input.
 
 The footer shows the next step. `?` lists every key.
 
@@ -127,6 +129,7 @@ Every key can be rebound ([Keybindings](#keybindings)).
 
 | Key | Action |
 | --- | --- |
+| `R` | Mark / unmark the current certifiable changed file as reviewed |
 | `v` | Select lines |
 | `c` | Comment |
 | `e` | Edit the comment, or open the file in your editor |
@@ -162,7 +165,7 @@ comment. Click files, tabs, and links. Scroll with the wheel.
 
 ## The three tabs
 
-- **Changes** — files the current scope changed.
+- **Changes** — files the current scope changed. Reviewed files carry a green `✓` and stay in the list.
 - **All files** — every file in the worktree. You can comment here too. Git-ignored files are dimmed.
 - **PR** — the branch's pull request (merge request on GitLab): state, checks, description, comments.
 
@@ -176,6 +179,14 @@ comment. Click files, tabs, and links. Scroll with the wheel.
 
 reviewr starts in **uncommitted** (`default_scope` changes that). Git-ignored files never show
 in **Changes**.
+
+Reviewed marks live only for the current session and are isolated by review context: each scope,
+base, and commit pick keeps its own marks. When a file's exact diff changes, including staged or
+unstaged content, mode, symlink target, or either comparison endpoint, its green `✓` becomes an
+orange `!` until `R` accepts the new diff. A mark is removed only when the file leaves the
+changeset. In a changed file, unchanged reviewed blocks stay subdued in source and rendered
+Markdown views while new or modified blocks keep their normal emphasis. reviewr never persists
+marks or writes them to Git.
 
 ## Configuration
 
@@ -275,6 +286,7 @@ keys help non-Latin layouts: bind the character your layout types on the same ke
 | `navigator-position` | `p` |
 | `navigator-hide` | `z` |
 | `navigator-grow` / `navigator-shrink` | `<` / `>` |
+| `toggle-reviewed` | `R` |
 | `select` | `v` |
 | `comment` | `c` |
 | `edit` / `delete` | `e` / `d` |
@@ -333,6 +345,8 @@ On Windows, point it at the plugin's own `bin` folder.
 - **Comments live only in the pane.** Closing it loses unsent ones. Send delivers all or none.
 - **Comments don't follow moved code.** reviewr marks them stale instead of dropping them.
 - **Files over 2 MB or 50,000 lines** aren't diffed. Neither are binary files.
+- **Reviewed marks live only in the pane**, separately for each scope, base, and commit pick.
+  A changed diff turns `✓` into `!`; unchanged reviewed edits stay subdued.
 
 ## Building from source
 
@@ -350,7 +364,7 @@ Toggle the pane off and on after every `just install`.
 
 ## Roadmap
 
-JSON export, marking files reviewed, more named keys, automatic light/dark theme, more themes (`kanagawa`,
+JSON export, more named keys, automatic light/dark theme, more themes (`kanagawa`,
 `vesper`, a dark `github`), a theme that follows the terminal, copying through the terminal.
 
 ## Sponsors

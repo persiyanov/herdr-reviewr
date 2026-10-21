@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use anyhow::{Context, Result, bail};
 
-use crate::model::{ChangeKind, ChangedFile};
+use crate::model::{ChangeKind, ChangedFile, FileIdentity, FileIdentityInput};
 
 /// Every git process reviewr runs, read-only on the real index (**No writes**).
 fn git_command(repo: &Path) -> std::process::Command {
@@ -1228,7 +1228,20 @@ pub fn ahead_behind_oids(
 
 /// The merge-base commit of the resolved base OID and `HEAD`
 pub fn merge_base(repo: &Path, base_oid: &str) -> Option<String> {
-    git_line(repo, &["merge-base", base_oid, "HEAD"])
+    merge_base_checked(repo, base_oid).ok().flatten()
+}
+
+/// The branch diff's merge base. Exit 1 means the histories are unrelated; every other
+/// failure aborts the refresh so it cannot replace the last good world with an empty one.
+pub fn merge_base_checked(repo: &Path, base_oid: &str) -> Result<Option<String>> {
+    let args = ["merge-base", base_oid, "HEAD"];
+    let found = git_tristate(repo, &args).map_err(|e| anyhow::anyhow!(e.0))?;
+    match found {
+        Some(oid) if oid.is_empty() => {
+            bail!(git_error(&args, "returned unexpected output", "empty stdout"))
+        }
+        other => Ok(other),
+    }
 }
 
 // --- diff sides: both read from one full-context `git diff`, so they match what git compares.
@@ -1861,6 +1874,13 @@ struct RepoSession {
     copy_file: Mutex<Option<PathBuf>>,
     counts: Mutex<Arc<Counts>>,
     sizes: Mutex<HashMap<String, u64>>,
+    object_format: OnceLock<ObjectFormat>,
+}
+
+#[derive(Clone, Copy)]
+enum ObjectFormat {
+    Sha1,
+    Sha256,
 }
 
 /// Every live session by worktree.
@@ -1925,7 +1945,7 @@ pub fn diff_base(head: Option<String>) -> String {
 /// The changeset from `base` to the worktree, untracked files included.
 pub fn changed_from(repo: &Path, base: &str) -> Result<Vec<ChangedFile>> {
     let out = IndexCopy::with(repo, |index| index.git(repo, &diff_args(&[base])))?;
-    assemble(repo, &out, true, None)
+    assemble(repo, &out, true, base, "worktree", None)
 }
 
 /// [`changed_from`] limited to `paths`, each a file or a directory.
@@ -1933,12 +1953,12 @@ pub fn changed_from_in(repo: &Path, base: &str, paths: &[String]) -> Result<Vec<
     let specs = literal_pathspecs(paths);
     let args = with_pathspecs(diff_args(&[base]), &specs);
     let out = IndexCopy::with(repo, |index| index.git(repo, &args))?;
-    assemble(repo, &out, true, Some(paths))
+    assemble(repo, &out, true, base, "worktree", Some(paths))
 }
 
 /// The changeset between two trees: `commits`, and `last-turn` against its snapshot.
 pub fn changed_between(repo: &Path, old: &str, new: &str) -> Result<Vec<ChangedFile>> {
-    assemble(repo, &git(repo, &diff_args(&[old, new]))?, false, None)
+    assemble(repo, &git(repo, &diff_args(&[old, new]))?, false, old, new, None)
 }
 
 /// [`changed_between`] limited to `paths`.
@@ -1950,7 +1970,7 @@ pub fn changed_between_in(
 ) -> Result<Vec<ChangedFile>> {
     let specs = literal_pathspecs(paths);
     let out = git(repo, &with_pathspecs(diff_args(&[old, new]), &specs))?;
-    assemble(repo, &out, false, Some(paths))
+    assemble(repo, &out, false, old, new, Some(paths))
 }
 
 /// One `git diff` per changeset: raw records, then line counts.
@@ -2185,6 +2205,8 @@ fn assemble(
     repo: &Path,
     out: &str,
     worktree: bool,
+    old_endpoint: &str,
+    new_endpoint: &str,
     paths: Option<&[String]>,
 ) -> Result<Vec<ChangedFile>> {
     let (rows, numstat) = parse_raw(out);
@@ -2193,9 +2215,38 @@ fn assemble(
         .iter()
         .flat_map(|row| [Some(row.old_oid.as_str()), (!worktree).then_some(row.new_oid.as_str())])
         .flatten()
+        .filter(|oid| !oid.bytes().all(|byte| byte == b'0'))
         .collect();
     let sizes = blob_sizes(repo, &blobs)?;
     let size = |oid: &str| sizes.get(oid).copied().unwrap_or(0);
+    let gitlinks = if worktree { live_gitlink_fingerprints(repo, &rows)? } else { HashMap::new() };
+    let untracked = if worktree {
+        let specs = literal_pathspecs(paths.unwrap_or_default());
+        let mut args = vec!["ls-files", "--others", "--exclude-standard", "-z"];
+        if paths.is_some() {
+            args = with_pathspecs(args, &specs);
+        }
+        git(repo, &args)?
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let live_paths: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.kind != ChangeKind::Deleted && row.new_mode != "160000")
+        .map(|row| row.path.as_str())
+        .collect();
+    let live =
+        if worktree { worktree_blob_identities(repo, &live_paths, true)? } else { HashMap::new() };
+    let untracked_paths: Vec<&str> = untracked.iter().map(String::as_str).collect();
+    let untracked_live = if worktree {
+        worktree_blob_identities(repo, &untracked_paths, false)?
+    } else {
+        HashMap::new()
+    };
     let mut seen = HashSet::new();
     let mut files = Vec::new();
     for row in rows {
@@ -2204,6 +2255,31 @@ fn assemble(
         }
         let verdict = counts.get(&row.path).copied().unwrap_or(Some((0, 0)));
         let (additions, deletions) = verdict.unwrap_or((0, 0));
+        let kind = row.kind;
+        let path = row.path.clone();
+        let previous_path = row.previous_path.clone();
+        let (new_mode, new_content) = if kind == ChangeKind::Deleted {
+            ("000000".to_string(), row.new_oid.clone())
+        } else if let Some(fingerprint) = gitlinks.get(&path) {
+            fingerprint.clone()
+        } else if worktree {
+            live.get(&path).cloned().unwrap_or_else(|| ("000000".to_string(), row.new_oid.clone()))
+        } else {
+            (row.new_mode.clone(), row.new_oid.clone())
+        };
+        let identity = FileIdentity::from_git(FileIdentityInput {
+            old_endpoint,
+            new_endpoint,
+            kind,
+            path: &path,
+            previous_path: previous_path.as_deref(),
+            old_mode: &row.old_mode,
+            new_mode: &new_mode,
+            old_content: &row.old_oid,
+            new_content: &new_content,
+            binary: verdict.is_none(),
+            live_new_side: worktree,
+        });
         files.push(ChangedFile {
             kind: row.kind,
             additions,
@@ -2213,19 +2289,13 @@ fn assemble(
             new_size: (!worktree).then(|| size(&row.new_oid)),
             path: row.path,
             previous_path: row.previous_path,
+            identity,
         });
     }
 
     if worktree {
-        // Untracked files are additions, by the same listing `all_files` uses.
-        let specs = literal_pathspecs(paths.unwrap_or_default());
-        let mut args = vec!["ls-files", "--others", "--exclude-standard", "-z"];
-        if paths.is_some() {
-            args = with_pathspecs(args, &specs);
-        }
-        let others = git(repo, &args)?;
         let new_paths: Vec<&str> =
-            others.split('\0').filter(|p| !p.is_empty() && !seen.contains(*p)).collect();
+            untracked.iter().map(String::as_str).filter(|path| !seen.contains(*path)).collect();
         // A failed attribute read costs the verdict, never the whole changeset.
         let undiffable = diff_unset(repo, &new_paths).unwrap_or_default();
         let mut buf = vec![0; 64 * 1024];
@@ -2243,19 +2313,35 @@ fn assemble(
             None => Counts::new(),
         };
         for path in new_paths {
-            let path = path.to_string();
-            if !seen.insert(path.clone()) {
+            if !seen.insert(path.to_string()) {
                 continue;
             }
             // An unset `diff` attribute counts no lines, as for a tracked path.
-            let additions = if undiffable.contains(path.as_str()) {
+            let additions = if undiffable.contains(path) {
                 None
             } else {
-                untracked_additions(repo, &path, &mut buf, &known, &mut fresh)
+                untracked_additions(repo, path, &mut buf, &known, &mut fresh)
             };
             let binary = additions.is_none();
-            files.push(ChangedFile {
+            let (new_mode, new_content) = untracked_live
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| ("000000".to_string(), "uncertified".to_string()));
+            let identity = FileIdentity::from_git(FileIdentityInput {
+                old_endpoint,
+                new_endpoint,
+                kind: ChangeKind::Untracked,
                 path,
+                previous_path: None,
+                old_mode: "000000",
+                new_mode: &new_mode,
+                old_content: "absent",
+                new_content: &new_content,
+                binary,
+                live_new_side: true,
+            });
+            files.push(ChangedFile {
+                path: path.to_string(),
                 kind: ChangeKind::Untracked,
                 additions: additions.unwrap_or(0),
                 deletions: 0,
@@ -2263,6 +2349,7 @@ fn assemble(
                 binary,
                 old_size: 0,
                 new_size: None,
+                identity,
             });
         }
         *session.counts.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(fresh);
@@ -2270,6 +2357,83 @@ fn assemble(
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(files)
+}
+
+/// Blob ids and filesystem modes for live paths, without writing objects.
+fn worktree_blob_identities(
+    repo: &Path,
+    paths: &[&str],
+    filtered: bool,
+) -> Result<HashMap<String, (String, String)>> {
+    let mut out = HashMap::with_capacity(paths.len());
+    let mut regular = Vec::new();
+    for &path in paths {
+        let Ok(metadata) = std::fs::symlink_metadata(repo.join(path)) else { continue };
+        if crate::diff::over_byte_budget(usize::try_from(metadata.len()).unwrap_or(usize::MAX)) {
+            continue;
+        }
+        let mode = worktree_mode(repo, path, true)?;
+        let stamp = IdentityStamp { stat: Stat::of(&metadata), mode: mode.clone() };
+        match mode.as_str() {
+            "000000" => {}
+            "120000" => {
+                let target = std::fs::read_link(repo.join(path))
+                    .with_context(|| format!("reading symlink target for {path:?}"))?;
+                let Some(target) = target.to_str() else { continue };
+                let oid = git_stdin(repo, &["hash-object", "--stdin"], target)?;
+                let oid = oid.trim();
+                remember_object_format(repo, oid)?;
+                if live_identity_stamp(repo, path)? != Some(stamp.clone()) {
+                    continue;
+                }
+                out.insert(path.to_string(), (mode, oid.to_string()));
+            }
+            _ => regular.push((path, mode, stamp)),
+        }
+    }
+    // Keep command lines bounded while preserving one output row per input path.
+    for chunk in regular.chunks(128) {
+        let filter_arg = if filtered { "--filters" } else { "--no-filters" };
+        let mut args = vec!["hash-object", filter_arg, "--"];
+        args.extend(chunk.iter().map(|(path, _, _)| *path));
+        let hashed = git(repo, &args).ok();
+        let oids = hashed.as_deref().map(str::lines).map(Iterator::collect::<Vec<_>>);
+        if let Some(oids) = oids.filter(|oids| oids.len() == chunk.len()) {
+            for ((path, mode, stamp), oid) in chunk.iter().zip(oids) {
+                remember_object_format(repo, oid)?;
+                if live_identity_stamp(repo, path)? == Some(stamp.clone()) {
+                    out.insert((*path).to_string(), (mode.clone(), oid.to_string()));
+                }
+            }
+            continue;
+        }
+        // One path can disappear while the batch is running. Retry separately so its siblings
+        // still get certified; an unreadable path stays absent from the identity map.
+        for (path, mode, stamp) in chunk {
+            let Ok(hashed) = git(repo, &["hash-object", filter_arg, "--", path]) else {
+                continue;
+            };
+            let mut lines = hashed.lines();
+            let Some(oid) = lines.next().filter(|_| lines.next().is_none()) else {
+                continue;
+            };
+            remember_object_format(repo, oid)?;
+            if live_identity_stamp(repo, path)? == Some(stamp.clone()) {
+                out.insert((*path).to_string(), (mode.clone(), oid.to_string()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn live_identity_stamp(repo: &Path, path: &str) -> Result<Option<IdentityStamp>> {
+    let metadata = match std::fs::symlink_metadata(repo.join(path)) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading metadata for {path:?}")),
+    };
+    let mode = worktree_mode(repo, path, false)?;
+    Ok(Some(IdentityStamp { stat: Stat::of(&metadata), mode }))
 }
 
 /// Of untracked `paths`, those whose `diff` attribute is unset, in one `check-attr -z`.
@@ -2299,6 +2463,12 @@ const BIG_FILE_THRESHOLD: u64 = 512 * 1024 * 1024;
 
 /// Line counts by repo-relative path and stat: what an untracked file held when counted.
 type Counts = HashMap<(String, Stat), Option<u32>>;
+
+#[derive(Clone, PartialEq, Eq)]
+struct IdentityStamp {
+    stat: Stat,
+    mode: String,
+}
 
 /// The stat fields git's index keys a file's content on: size, mtime, and ctime where kept.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -2432,9 +2602,194 @@ struct RawRow {
     path: String,
     /// The old path of a rename or copy, whose content is the old side.
     previous_path: Option<String>,
+    old_mode: String,
+    new_mode: String,
     /// Each side's blob, all zeros where the side is absent or is the worktree.
     old_oid: String,
     new_oid: String,
+}
+
+/// Exact live identities for changed submodules, using one status query for the set.
+fn live_gitlink_fingerprints(
+    repo: &Path,
+    rows: &[RawRow],
+) -> Result<HashMap<String, (String, String)>> {
+    let paths: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| (row.new_mode == "160000").then_some(row.path.as_str()))
+        .collect();
+    if paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let live = gitlink_live_states(repo, &paths)?;
+    let mut out = HashMap::with_capacity(paths.len());
+    for path in paths {
+        let row = rows.iter().find(|row| row.path == path).expect("path came from rows");
+        let head = live.heads[path].clone().unwrap_or_else(|| row.new_oid.clone());
+        let dirty = live.dirty.get(path).map_or("..", String::as_str);
+        out.insert(path.to_string(), ("160000".to_string(), gitlink_token(&head, dirty)));
+    }
+    Ok(out)
+}
+
+fn gitlink_token(head: &str, dirty: &str) -> String {
+    format!("gitlink:{head}:{dirty}")
+}
+
+/// Display text and identity for one selected live submodule.
+pub(crate) fn worktree_gitlink_content_identity(
+    repo: &Path,
+    path: &str,
+) -> Result<(String, String)> {
+    let live = gitlink_live_states(repo, &[path])?;
+    let head = live.heads[path]
+        .clone()
+        .with_context(|| format!("submodule {path:?} is not checked out"))?;
+    let dirty = live.dirty.get(path).map_or("..", String::as_str);
+    let suffix = if dirty == ".." { "" } else { "-dirty" };
+    Ok((format!("Subproject commit {head}{suffix}\n"), gitlink_token(&head, dirty)))
+}
+
+struct GitlinkLiveState {
+    heads: HashMap<String, Option<String>>,
+    dirty: HashMap<String, String>,
+}
+
+fn gitlink_live_states(repo: &Path, paths: &[&str]) -> Result<GitlinkLiveState> {
+    let read_heads = || {
+        paths
+            .iter()
+            .map(|path| Ok(((*path).to_string(), submodule_head(repo, path)?)))
+            .collect::<Result<HashMap<_, _>>>()
+    };
+    let before = read_heads()?;
+    let dirty = gitlink_dirty_states(repo, paths)?;
+    let after = read_heads()?;
+    if before != after {
+        bail!("a changed submodule moved while its identity was being read");
+    }
+    Ok(GitlinkLiveState { heads: after, dirty })
+}
+
+fn gitlink_dirty_states(repo: &Path, paths: &[&str]) -> Result<HashMap<String, String>> {
+    let mut args = vec![
+        "--no-optional-locks".to_string(),
+        "--literal-pathspecs".to_string(),
+        "status".to_string(),
+        "--porcelain=v2".to_string(),
+        "-z".to_string(),
+        "--untracked-files=all".to_string(),
+        "--ignore-submodules=none".to_string(),
+        "--".to_string(),
+    ];
+    args.extend(paths.iter().map(|path| (*path).to_string()));
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = git(repo, &refs)?;
+    let mut states = HashMap::new();
+    let mut records = out.split('\0');
+    while let Some(record) = records.next() {
+        let fields = if record.starts_with("1 ") {
+            record.splitn(9, ' ').collect::<Vec<_>>()
+        } else if record.starts_with("2 ") {
+            let fields = record.splitn(10, ' ').collect::<Vec<_>>();
+            let _original_path = records.next();
+            fields
+        } else if record.starts_with("u ") {
+            record.splitn(11, ' ').collect::<Vec<_>>()
+        } else {
+            continue;
+        };
+        let Some(submodule) = fields.get(2).copied().filter(|field| field.starts_with('S')) else {
+            continue;
+        };
+        let Some(path) = fields.last().copied() else { continue };
+        let mut flags = submodule.chars();
+        let _marker = flags.next();
+        let _commit_changed = flags.next();
+        states.insert(path.to_string(), flags.collect());
+    }
+    Ok(states)
+}
+
+fn submodule_head(repo: &Path, path: &str) -> Result<Option<String>> {
+    let checkout = repo.join(path);
+    match std::fs::symlink_metadata(checkout.join(".git")) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading submodule metadata for {path:?}"));
+        }
+    }
+    git_tristate(&checkout, &["rev-parse", "--verify", "-q", "HEAD"])
+        .map_err(|error| anyhow::anyhow!(error.0))
+}
+
+fn remember_object_format(repo: &Path, oid: &str) -> Result<()> {
+    let format = match oid.len() {
+        40 => ObjectFormat::Sha1,
+        64 => ObjectFormat::Sha256,
+        length => bail!("git returned an object id with unexpected length {length}"),
+    };
+    let _ = session(repo)?.object_format.set(format);
+    Ok(())
+}
+
+fn object_format(repo: &Path) -> Result<ObjectFormat> {
+    let session = session(repo)?;
+    if let Some(format) = session.object_format.get() {
+        return Ok(*format);
+    }
+    let name = git(repo, &["rev-parse", "--show-object-format"])?;
+    let format = match name.trim() {
+        "sha1" => ObjectFormat::Sha1,
+        "sha256" => ObjectFormat::Sha256,
+        other => bail!("unsupported Git object format {other:?}"),
+    };
+    let _ = session.object_format.set(format);
+    Ok(format)
+}
+
+/// The blob id for content Git has already projected into its stored form.
+pub(crate) fn blob_oid(repo: &Path, content: &str) -> Result<String> {
+    use sha1::Digest as _;
+
+    let header = format!("blob {}\0", content.len());
+    Ok(match object_format(repo)? {
+        ObjectFormat::Sha1 => {
+            let mut hash = sha1::Sha1::new();
+            hash.update(header.as_bytes());
+            hash.update(content.as_bytes());
+            hex::encode(hash.finalize())
+        }
+        ObjectFormat::Sha256 => {
+            let mut hash = sha2::Sha256::new();
+            hash.update(header.as_bytes());
+            hash.update(content.as_bytes());
+            hex::encode(hash.finalize())
+        }
+    })
+}
+
+/// The live side's Git mode without rereading its content.
+pub(crate) fn worktree_mode(repo: &Path, path: &str, allow_missing: bool) -> Result<String> {
+    let metadata = match std::fs::symlink_metadata(repo.join(path)) {
+        Ok(metadata) => metadata,
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok("000000".to_string());
+        }
+        Err(error) => return Err(error).with_context(|| format!("reading metadata for {path:?}")),
+    };
+    if metadata.file_type().is_symlink() {
+        return Ok("120000".to_string());
+    }
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o111 == 0 { "100644" } else { "100755" }
+    };
+    #[cfg(not(unix))]
+    let mode = "100644";
+    Ok(mode.to_string())
 }
 
 /// The raw records of a [`diff_args`] run, and the numstat records after them.
@@ -2451,7 +2806,7 @@ fn parse_raw(out: &str) -> (Vec<RawRow>, &str) {
         let mut next = rest;
         let Some(meta) = field(&mut next) else { break };
         let fields: Vec<&str> = meta[1..].split(' ').collect();
-        let [_, _, old_oid, new_oid, status] = fields[..] else { break };
+        let [old_mode, new_mode, old_oid, new_oid, status] = fields[..] else { break };
         let (kind, previous_path) = match status.chars().next() {
             Some('A') => (ChangeKind::Added, None),
             Some('D') => (ChangeKind::Deleted, None),
@@ -2469,6 +2824,8 @@ fn parse_raw(out: &str) -> (Vec<RawRow>, &str) {
             kind,
             path: path.to_string(),
             previous_path,
+            old_mode: old_mode.to_string(),
+            new_mode: new_mode.to_string(),
             old_oid: old_oid.to_string(),
             new_oid: new_oid.to_string(),
         });
@@ -2518,8 +2875,100 @@ mod tests {
         ChangeKind, Forge, ForgeHosts, RepoTarget, RepositoryIdentity, classify_remote,
         parse_numstat, parse_raw,
     };
+    use std::path::Path;
+    use std::process::Command;
 
     const NONE: ForgeHosts<'_> = ForgeHosts { github: None, gitlab: None, azure_devops: None };
+
+    fn test_git(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@herdr.test")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@herdr.test")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn plumbing_commit(repo: &Path, parent: Option<&str>, message: &str) -> String {
+        test_git(repo, &["add", "-A"]);
+        let tree = test_git(repo, &["write-tree"]);
+        let mut args = vec!["commit-tree", tree.as_str()];
+        if let Some(parent) = parent {
+            args.extend(["-p", parent]);
+        }
+        args.extend(["-m", message]);
+        let commit = test_git(repo, &args);
+        test_git(repo, &["update-ref", "HEAD", &commit]);
+        commit
+    }
+
+    #[test]
+    fn in_process_blob_ids_match_each_git_object_format() {
+        for format in ["sha1", "sha256"] {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = dir.path();
+            test_git(repo, &["init", "-q", "--object-format", format, "-b", "main"]);
+            let content = "Git stores UTF-8 bytes here: ✓\n";
+            std::fs::write(repo.join("blob.txt"), content).unwrap();
+            let expected = test_git(repo, &["hash-object", "blob.txt"]);
+            assert_eq!(super::blob_oid(repo, content).unwrap(), expected, "{format}");
+        }
+    }
+
+    #[test]
+    fn resolved_worktree_diff_stays_on_its_endpoint_after_head_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        test_git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.rs"), "one\n").unwrap();
+        let first = plumbing_commit(repo, None, "first");
+        let endpoint = first.clone();
+
+        std::fs::write(repo.join("a.rs"), "two\n").unwrap();
+        let second = plumbing_commit(repo, Some(&first), "second");
+        std::fs::write(repo.join("a.rs"), "three\n").unwrap();
+        let changes = super::changed_from(repo, &endpoint).unwrap();
+        let change = changes.iter().find(|change| change.path == "a.rs").unwrap();
+
+        assert_ne!(endpoint, second);
+        assert_eq!(change.identity.old_endpoint(), endpoint);
+    }
+
+    #[test]
+    fn submodule_head_resolves_refs_kept_in_a_common_git_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        test_git(&source, &["init", "-q", "-b", "main"]);
+        std::fs::write(source.join("a.rs"), "one\n").unwrap();
+        let commit = plumbing_commit(&source, None, "first");
+        test_git(&source, &["worktree", "add", "-q", "-b", "linked", "../dep"]);
+
+        assert_eq!(super::submodule_head(dir.path(), "dep").unwrap(), Some(commit));
+    }
+
+    #[test]
+    fn a_tracked_path_that_vanishes_during_assembly_keeps_an_uncertified_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        test_git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("gone.rs"), "old\n").unwrap();
+        let commit = plumbing_commit(repo, None, "first");
+        let oid = test_git(repo, &["rev-parse", &format!("{commit}:gone.rs")]);
+        std::fs::remove_file(repo.join("gone.rs")).unwrap();
+        let zero = "0".repeat(40);
+        let out = format!(":100644 100644 {oid} {zero} M\0gone.rs\01\t1\tgone.rs\0");
+        let files = super::assemble(repo, &out, true, "old", "worktree", None).unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert!(!files[0].identity.has_new_side());
+    }
 
     #[test]
     fn a_path_limited_build_merges_untracked_counts_and_never_shrinks_them() {

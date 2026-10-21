@@ -13,7 +13,7 @@ use ratatui::widgets::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Band, Focus, FooterAction, Mode, Tab};
+use crate::app::{App, Band, FileReviewState, Focus, FooterAction, Mode, Tab};
 use crate::config::NavigatorPosition;
 use crate::diff::{FileDiff, MarkerKind, Notice, RenderedKind, Row};
 use crate::file_list::RowKind;
@@ -551,7 +551,7 @@ pub fn read_point_at(
     let Slot::Code { row: li, seg } = *slots.get((row - pane.inner.y) as usize)? else {
         return None;
     };
-    let side = match &app.visible[li] {
+    let side = match app.visible.get(li)? {
         Visible::Pair(p) => {
             Some(side_at(&pane, col).filter(|&s| paints_on(app, &pane, p, seg, s))?)
         }
@@ -616,7 +616,7 @@ pub fn gutter_row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize>
         return None;
     };
     let in_gutter = |x0: usize| (x0..x0 + pane.prefix_w).contains(&(col as usize));
-    let hit = match &app.visible[li] {
+    let hit = match app.visible.get(li)? {
         Visible::Pair(p) => [Side::Old, Side::New].into_iter().any(|side| {
             paints_on(app, &pane, p, seg, side) && in_gutter(column(&pane, Some(side)).0)
         }),
@@ -1501,6 +1501,14 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
 const DIR_DOT: &str = "•";
 /// The columns every `All files` folder keeps for the dot, so names elide alike.
 const DIR_DOT_RESERVE: usize = 2;
+/// The fixed Changes-only column after Git status: a check and its trailing gap. Directory
+/// and unreviewed rows keep the same cells blank, so every path starts in the same column.
+const REVIEW_MARK: &str = "✓ ";
+const CHANGED_REVIEW_MARK: &str = "! ";
+
+fn review_mark_reserve() -> usize {
+    REVIEW_MARK.width().max(CHANGED_REVIEW_MARK.width())
+}
 
 fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
@@ -1548,14 +1556,20 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
                             .add_modifier(Modifier::BOLD)
                     };
                     // Elide the bare name, then add `/`: eliding `name/` would leave `…/`.
-                    let reserve = if app.tab == Tab::AllFiles { DIR_DOT_RESERVE } else { 0 };
+                    let review_reserve =
+                        if app.tab == Tab::Changes { review_mark_reserve() } else { 0 };
+                    let edge_reserve = if app.tab == Tab::AllFiles { DIR_DOT_RESERVE } else { 0 };
                     let lead = format!("{nest}{arrow}");
-                    let budget = width.saturating_sub(lead.width() + reserve + 1).max(1);
+                    let budget = width
+                        .saturating_sub(lead.width() + review_reserve + edge_reserve + 1)
+                        .max(1);
                     let name = format!("{}/", elide_head(&row.name, budget));
-                    let mut spans = vec![
-                        Span::styled(lead, Style::default().fg(p.ink(Ink::TextMuted, on))),
-                        Span::styled(name, name_style),
-                    ];
+                    let mut spans =
+                        vec![Span::styled(lead, Style::default().fg(p.ink(Ink::TextMuted, on)))];
+                    if review_reserve > 0 {
+                        spans.push(Span::raw(" ".repeat(review_reserve)));
+                    }
+                    spans.push(Span::styled(name, name_style));
                     // Only collapsed `All files` folders need the dot.
                     if app.tab == Tab::AllFiles && !expanded && *has_change {
                         let used: usize = spans.iter().map(Span::width).sum();
@@ -1570,12 +1584,15 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
                     let annotation = app.entries[*index].annotation.as_ref();
                     // No marker: two spaces align the name with sibling folders.
                     let indent = if annotation.is_some() { nest } else { format!("{nest}  ") };
+                    let reviewed = (app.tab == Tab::Changes)
+                        .then(|| app.file_review_state(&app.entries[*index].path));
                     file_row_item(
                         &FileRowSpec {
                             indent: &indent,
                             annotation,
                             name: &row.name,
                             ignored: row.ignored,
+                            reviewed,
                             emphasis: &[],
                         },
                         width,
@@ -1595,26 +1612,50 @@ struct FileRowSpec<'a> {
     annotation: Option<&'a ChangedFile>,
     name: &'a str,
     ignored: bool,
+    /// `Some` enables the Changes-only fixed review column and paints its state marker.
+    reviewed: Option<FileReviewState>,
     emphasis: &'a [(u32, u32)],
 }
 
 /// A file row: `<indent><marker> <name> <stats>`, a long name eliding its head.
 fn file_row_item(row: &FileRowSpec<'_>, width: usize, on: Fill, p: &Palette) -> ListItem<'static> {
-    let FileRowSpec { indent, annotation, name, ignored, emphasis } = *row;
+    let FileRowSpec { indent, annotation, name, ignored, reviewed, emphasis } = *row;
     let marker = annotation.map_or(String::new(), |a| format!("{} ", a.kind.marker()));
+    let review_mark = match reviewed {
+        Some(FileReviewState::Reviewed) => Some(REVIEW_MARK),
+        Some(FileReviewState::ReviewedButChanged) => Some(CHANGED_REVIEW_MARK),
+        Some(FileReviewState::Unreviewed) => Some("  "),
+        None => None,
+    };
     let (additions, deletions) = annotation.map_or((0, 0), |a| (a.additions, a.deletions));
     let stats = stats_str(additions, deletions);
     let gap = if stats.is_empty() { 0 } else { 2 };
-    let fixed = indent.width() + marker.width() + stats.width() + gap;
+    let fixed = indent.width()
+        + marker.width()
+        + review_mark.map_or(0, UnicodeWidthStr::width)
+        + stats.width()
+        + gap;
     let shown = elide_head(name, width.saturating_sub(fixed).max(1));
 
     let mut spans = vec![Span::styled(indent.to_string(), text_style(p, on))];
     if let Some(a) = annotation {
         spans.push(Span::styled(marker, Style::default().fg(kind_color(p, a.kind, on))));
     }
+    if let Some(mark) = review_mark {
+        let ink = match reviewed {
+            Some(FileReviewState::Reviewed) => Ink::Success,
+            Some(FileReviewState::ReviewedButChanged) => Ink::Warning,
+            _ => Ink::Text,
+        };
+        spans.push(Span::styled(mark, Style::default().fg(p.mark(ink, on))));
+    }
     // An ignored file dims its name, never its change marker.
     let muted = Style::default().fg(p.ink(Ink::TextMuted, on));
-    let base_style = if ignored { muted } else { text_style(p, on) };
+    let base_style = if ignored || reviewed == Some(FileReviewState::Reviewed) {
+        muted
+    } else {
+        text_style(p, on)
+    };
     let shown_spans = remap_emphasis(emphasis, name, &shown);
     if shown_spans.is_empty() {
         // Dim the parent directories, keep the basename bright.
@@ -1637,7 +1678,11 @@ fn file_row_item(row: &FileRowSpec<'_>, width: usize, on: Fill, p: &Palette) -> 
         let used: usize = spans.iter().map(Span::width).sum();
         let pad = width.saturating_sub(used + stats.width());
         spans.push(Span::raw(" ".repeat(pad)));
-        spans.extend(stats_spans(additions, deletions, p, on));
+        if reviewed == Some(FileReviewState::Reviewed) {
+            spans.push(Span::styled(stats, muted));
+        } else {
+            spans.extend(stats_spans(additions, deletions, p, on));
+        }
     }
     selectable_row(p, spans, width, on)
 }
@@ -1864,8 +1909,9 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
                         selected: selecting && row >= lo && row <= hi,
                         hovered: hovered_row == Some(row),
                         lead: app.is_rendered_lead(row),
+                        reviewed: false,
                     };
-                    row_cache = Some((row, render_visible(&app.visible[row], layout, state)));
+                    row_cache = Some((row, render_visible(app, &app.visible[row], layout, state)));
                 }
                 row_cache.as_ref().and_then(|(_, l)| l.get(seg).cloned()).unwrap_or_default()
             }
@@ -2028,9 +2074,20 @@ fn visible_code_width(v: &Visible) -> usize {
 }
 
 /// A painted row's display lines: a unified row, or a split row's halves beside a divider.
-fn render_visible(v: &Visible, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'static>> {
+fn render_visible(
+    app: &App,
+    v: &Visible,
+    layout: RowLayout<'_>,
+    state: RowState,
+) -> Vec<Line<'static>> {
     let p = match v {
-        Visible::Row(row) => return render_row(row, layout, state),
+        Visible::Row(row) => {
+            return render_row(
+                row,
+                layout,
+                RowState { reviewed: app.diff_row_reviewed(row), ..state },
+            );
+        }
         Visible::Pair(p) => p,
     };
     let (lw, rw) = half_widths(layout.width);
@@ -2040,7 +2097,11 @@ fn render_visible(v: &Visible, layout: RowLayout<'_>, state: RowState) -> Vec<Li
     // A half narrower than its gutter and one cell paints blank, so the divider holds its column.
     let half = |row: Option<&Row>, width: usize, numbered: Side| {
         let lines = row.map_or_else(Vec::new, |r| {
-            render_row(r, RowLayout { width, numbered, ..layout }, state)
+            render_row(
+                r,
+                RowLayout { width, numbered, ..layout },
+                RowState { reviewed: app.diff_row_reviewed(r), ..state },
+            )
         });
         let fit = |l: Line<'static>| if l.width() > width { blank(width) } else { l };
         lines.into_iter().map(fit).collect::<Vec<_>>()
@@ -2107,6 +2168,8 @@ struct RowState {
     hovered: bool,
     /// Whether a rendered row leads its block and so shows its line number.
     lead: bool,
+    /// Whether this changed row's complete base-anchored edit is still reviewed.
+    reviewed: bool,
 }
 
 /// A diff row's display lines: bar, number, tinted code, wrapped or h-scrolled.
@@ -2124,7 +2187,7 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         see,
         numbered,
     } = layout;
-    let RowState { commented, cursor, selected, hovered, lead } = state;
+    let RowState { commented, cursor, selected, hovered, lead, reviewed } = state;
     // A commented line's number wears your comment color; others are muted.
     let num_ink = if commented { Ink::Comment } else { Ink::TextMuted };
     let highlight = match_style(pal);
@@ -2133,10 +2196,15 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         let (num_color, plus) = (pal.ink(num_ink, on), pal.ink(Ink::Comment, on));
         // Only the lead line is numbered; the bar cell shows the change mark.
         let num = if lead { src.to_string() } else { String::new() };
+        let reviewed_ink = reviewed.then_some(Ink::TextMuted);
         let (bar, bar_color) = match kind {
             RenderedKind::Block { bar: None, .. } => (" ", pal.mark(Ink::Border, on)),
-            RenderedKind::Block { bar: Some(b), .. } => ("▌", pal.mark(bar_ink(*b), on)),
-            RenderedKind::Marker { kind, .. } => ("▌", pal.mark(marker_ink(*kind), on)),
+            RenderedKind::Block { bar: Some(b), .. } => {
+                ("▌", pal.mark(reviewed_ink.unwrap_or_else(|| bar_ink(*b)), on))
+            }
+            RenderedKind::Marker { kind, .. } => {
+                ("▌", pal.mark(reviewed_ink.unwrap_or_else(|| marker_ink(*kind)), on))
+            }
         };
         let mut spans = gutter_spans(bar, bar_color, &num, num_color, hovered, gutter_w, plus);
         let code_width = width.saturating_sub(gutter_prefix_width(gutter_w));
@@ -2148,7 +2216,9 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
                     .unwrap_or_default()
                     .into_iter()
                     .map(|mut sp| {
-                        if let Some(fg) = sp.style.fg {
+                        if reviewed {
+                            sp.style = sp.style.fg(pal.ink(Ink::TextMuted, on));
+                        } else if let Some(fg) = sp.style.fg {
                             // Syntax and markdown colors keep their legibility on the row's fill.
                             sp.style = sp.style.fg(pal.legible(fg, on));
                         }
@@ -2169,12 +2239,14 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
                 if let (Some(n), Some(b)) = (hides, bar) {
                     let note = format!("  · {n} changed {}", plural(*n, "line"));
                     let note = truncate_width(&note, code_width.saturating_sub(used));
-                    spans.push(Span::styled(note, Style::default().fg(pal.ink(bar_ink(*b), on))));
+                    let ink = reviewed_ink.unwrap_or_else(|| bar_ink(*b));
+                    spans.push(Span::styled(note, Style::default().fg(pal.ink(ink, on))));
                 }
             }
             RenderedKind::Marker { kind, lines, .. } => {
                 let text = truncate_width(&marker_text(*kind, *lines, see), code_width);
-                spans.push(Span::styled(text, Style::default().fg(pal.ink(marker_ink(*kind), on))));
+                let ink = reviewed_ink.unwrap_or_else(|| marker_ink(*kind));
+                spans.push(Span::styled(text, Style::default().fg(pal.ink(ink, on))));
             }
         }
         let mut out = Line::from(spans);
@@ -2203,18 +2275,19 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         .or_else(|| row.old_no())
         .filter(|&n| n > 0)
         .map_or(String::new(), |n| n.to_string());
-    let (bar, bar_ink, tint) = match row.marker() {
+    let (bar, change_ink, tint) = match row.marker() {
         '-' => ("▌", Ink::Removed, Fill::Removed),
         '+' => ("▌", Ink::Added, Fill::Added),
         _ => (" ", Ink::Border, Fill::Base),
     };
     let on = row_fill(cursor, selected, focused, tint);
+    let bar_ink = if reviewed { Ink::TextMuted } else { change_ink };
     let (bar_color, num_color) = (pal.mark(bar_ink, on), pal.ink(num_ink, on));
     let plus = pal.ink(Ink::Comment, on);
     let row_bg = pal.bg(on);
 
     // A cursor or selection fill wins over word emphasis.
-    let emph_on = !cursor && !selected;
+    let emph_on = !cursor && !selected && !reviewed;
     let emph = match row.marker() {
         '-' => Fill::RemovedEmph,
         _ => Fill::AddedEmph,
@@ -2225,7 +2298,11 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
     let mut cells = code_cells(row, emph_on, &hl_ranges, pal.ink(Ink::Text, on));
     // Dim syntax colors move back to their plain legibility on the row's fill or emphasis.
     for cell in cells.iter_mut().filter(|c| !c.hl) {
-        cell.fg = pal.legible(cell.fg, if cell.emph { emph } else { on });
+        cell.fg = if reviewed {
+            pal.ink(Ink::TextMuted, on)
+        } else {
+            pal.legible(cell.fg, if cell.emph { emph } else { on })
+        };
     }
 
     let prefix_w = gutter_prefix_width(gutter_w);
@@ -2804,6 +2881,10 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
     let hint = |action: K| app.keymap().hint(action).label();
     let (k, l): (String, &str) = match action {
         A::Comment => (hint(K::Comment), "comment"),
+        A::ToggleReviewed => (
+            hint(K::ToggleReviewed),
+            if app.current_file_reviewed() == Some(true) { "unreview" } else { "review" },
+        ),
         // One word for one gesture: `v` marks a range end in the diff and the commit picker alike.
         A::Select | A::CommitAnchor => (hint(K::Select), "select"),
         A::ClearSelection => ("esc".into(), "clear"),
@@ -3935,6 +4016,7 @@ fn render_search_results(
                         annotation: app.changed_annotation(path),
                         name: path,
                         ignored: false,
+                        reviewed: None,
                         emphasis: &[],
                     },
                     width,
@@ -3955,6 +4037,7 @@ fn render_search_results(
                         annotation: app.changed_annotation(&hit.path),
                         name: &hit.path,
                         ignored: false,
+                        reviewed: None,
                         emphasis: &hit.spans,
                     },
                     width,
@@ -4675,6 +4758,7 @@ fn push_finding_quote(
                 selected: false,
                 hovered: false,
                 lead: false,
+                reviewed: false,
             };
             lines.extend(render_row(row, layout, state));
         }

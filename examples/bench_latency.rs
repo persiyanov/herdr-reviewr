@@ -1,13 +1,17 @@
 //! Times the blocking calls behind a slow `scripts/bench_tui.py` number, against a real repo.
 //! Usage: `cargo run --release --example bench_latency -- <repo-path> [label]`
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use herdr_reviewr::app::Tab;
 use herdr_reviewr::diff::DiffCache;
 use herdr_reviewr::git;
 use herdr_reviewr::highlight::Highlighter;
+use herdr_reviewr::model::Scope;
 use herdr_reviewr::theme;
+use herdr_reviewr::world::{self, WorldInput};
 
 fn ms(f: impl FnOnce()) -> f64 {
     let t = Instant::now();
@@ -50,6 +54,22 @@ fn main() {
             if let Some(base) = base.and_then(|b| git::merge_base(&repo, b.oid())) {
                 git::changed_from(&repo, &base).unwrap();
             }
+        }),
+    );
+    let changes_input = WorldInput {
+        repo: repo.clone(),
+        tab: Tab::Changes,
+        scope: Scope::Uncommitted,
+        base: None,
+        base_epoch: 0,
+        turn_baseline: None,
+        commit_pick: None,
+        toggled_dirs: HashSet::new(),
+    };
+    row(
+        "world snapshot, Changes (incl. identities)",
+        sample(5, || {
+            world::build(&changes_input).unwrap();
         }),
     );
     let all = git::all_files(&repo).unwrap();
