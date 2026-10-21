@@ -71,7 +71,7 @@ fn an_unusable_upstream_falls_back_to_origin() {
     repo.git(&["remote", "add", "upstream", repo.path().to_str().unwrap()]);
     assert_target(&selected().repository, "github.com", "acme", "widgets");
 
-    repo.git(&["remote", "set-url", "upstream", "https://bitbucket.org/other/widgets.git"]);
+    repo.git(&["remote", "set-url", "upstream", "https://codeberg.org/other/widgets.git"]);
     assert_target(&selected().repository, "github.com", "acme", "widgets");
 
     // A GitLab upstream is a recognized forge repository, so it wins target selection
@@ -602,7 +602,7 @@ fn an_empty_merge_branch_is_no_head() {
 #[test]
 fn a_push_url_on_an_unsupported_host_falls_back_to_the_fetch_url() {
     let repo = worktree();
-    repo.git(&["remote", "set-url", "--push", "origin", "https://bitbucket.org/owner/mirror.git"]);
+    repo.git(&["remote", "set-url", "--push", "origin", "https://codeberg.org/owner/mirror.git"]);
     assert_eq!(heads(&repo), ["owner/repo:work"]);
 }
 

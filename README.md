@@ -44,7 +44,7 @@ reviewr never edits your files, never sends on its own, and never posts to your 
 - **herdr ≥ 0.9.3** and **git**.
 - A terminal with **24-bit color**.
 - **macOS, Linux, or Windows.**
-- For the PR tab only: **`gh`**, **`glab`**, or **`az`** (with the `azure-devops` extension), logged in.
+- For the PR tab only: **`gh`**, **`glab`**, **`az`** (with the `azure-devops` extension), or **[`bkt`](https://github.com/avivsinai/bitbucket-cli)**, logged in.
 
 ## Install
 
@@ -293,11 +293,21 @@ keys help non-Latin layouts: bind the character your layout types on the same ke
 
 A key is one character or a `ctrl+` / `alt+` chord. `Tab`, `Esc`, and `Enter` are fixed.
 
-### GitHub, GitLab, and Azure DevOps
+### GitHub, GitLab, Azure DevOps, and Bitbucket Cloud
 
 The PR tab reads the `upstream` remote, else `origin`, so forks work. Self-hosted servers need
 `github_host`, `gitlab_host`, or `azure_devops_host`, matching the remote's hostname exactly.
 SSH aliases like `github.com-work` don't match.
+
+Bitbucket Cloud goes through [`bkt`](https://github.com/avivsinai/bitbucket-cli). Sign in and
+give it a context for your workspace:
+
+```bash
+bkt auth login https://bitbucket.org --kind cloud
+bkt context create <name> --host api.bitbucket.org --workspace <workspace>
+```
+
+reviewr names that context on every read, so an active Data Center context is never used.
 
 ### Pane placement
 
@@ -326,8 +336,10 @@ On Windows, point it at the plugin's own `bin` folder.
   comments stay.
 - **last turn shows all of a turn or nothing.** If the agent writes the instant a turn starts,
   the scope shows nothing for that turn and says why.
-- **The PR tab** supports GitHub, GitLab, and Azure DevOps only. A merged or closed PR shows as
-  history. Each comment list shows its newest 100.
+- **The PR tab** supports GitHub, GitLab, Azure DevOps, and Bitbucket Cloud only. A merged or
+  closed PR shows as history. Each comment list shows its newest 100.
+- **Bitbucket Cloud shows no merge blocker or outdated comment**: its API reports neither. Sync
+  with the PR head shows only once that commit is fetched.
 - **A background pane** catches up 30 seconds after a change, or at once when shown.
 - **A rename can pair with the wrong file** until you press `r`.
 - **Comments live only in the pane.** Closing it loses unsent ones. Send delivers all or none.

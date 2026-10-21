@@ -159,6 +159,7 @@ pub enum Forge {
     GitHub,
     GitLab,
     AzureDevOps,
+    BitbucketCloud,
 }
 
 /// The per-forge display vocabulary — the CLI, noun, and reference table in
@@ -169,13 +170,14 @@ impl Forge {
             Self::GitHub => "GitHub",
             Self::GitLab => "GitLab",
             Self::AzureDevOps => "Azure DevOps",
+            Self::BitbucketCloud => "Bitbucket",
         }
     }
 
     /// The forge's full noun: the word its users say.
     pub fn noun(self) -> &'static str {
         match self {
-            Self::GitHub | Self::AzureDevOps => "pull request",
+            Self::GitHub | Self::AzureDevOps | Self::BitbucketCloud => "pull request",
             Self::GitLab => "merge request",
         }
     }
@@ -183,7 +185,7 @@ impl Forge {
     /// The forge's noun abbreviation: `PR` on GitHub, `MR` on GitLab.
     pub fn abbr(self) -> &'static str {
         match self {
-            Self::GitHub | Self::AzureDevOps => "PR",
+            Self::GitHub | Self::AzureDevOps | Self::BitbucketCloud => "PR",
             Self::GitLab => "MR",
         }
     }
@@ -191,7 +193,7 @@ impl Forge {
     /// The reference sigil before a number: `#226` on GitHub, `!42` on GitLab.
     pub fn sigil(self) -> char {
         match self {
-            Self::GitHub | Self::AzureDevOps => '#',
+            Self::GitHub | Self::AzureDevOps | Self::BitbucketCloud => '#',
             Self::GitLab => '!',
         }
     }
@@ -202,6 +204,7 @@ impl Forge {
             Self::GitHub => "gh",
             Self::GitLab => "glab",
             Self::AzureDevOps => "az",
+            Self::BitbucketCloud => "bkt",
         }
     }
 }
@@ -219,7 +222,7 @@ pub struct ForgeHosts<'a> {
 pub struct RepoTarget {
     forge: Forge,
     host: String,
-    /// `[owner, name]`, a GitLab namespace path, or `[organization, project, repository]`.
+    /// `[owner, name]`, `[workspace, slug]`, a GitLab namespace path, or `[organization, project, repository]`.
     path: Vec<String>,
 }
 
@@ -234,7 +237,7 @@ impl RepoTarget {
     pub(crate) fn with_path(forge: Forge, host: &str, segments: &[&str]) -> Option<Self> {
         let host = host.to_ascii_lowercase();
         let valid_len = match forge {
-            Forge::GitHub => segments.len() == 2,
+            Forge::GitHub | Forge::BitbucketCloud => segments.len() == 2,
             // A `-` segment means a pasted browse link, not a deep namespace.
             Forge::GitLab => segments.len() >= 2 && !segments.contains(&"-"),
             // Always `[organization, project, repository]`, shaped by `ado_canonicalize`.
@@ -263,7 +266,7 @@ impl RepoTarget {
         &self.host
     }
 
-    /// The first path segment: GitHub's owner, Azure DevOps' organization.
+    /// The first path segment: GitHub's owner, Bitbucket's workspace, Azure DevOps' organization.
     pub fn owner(&self) -> &str {
         &self.path[0]
     }
@@ -359,6 +362,8 @@ fn classify_remote(url: &str, hosts: &ForgeHosts<'_>) -> RepositoryIdentity {
             let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
             RepoTarget::with_path(forge, &host, &segments)
         }),
+        // `altssh.bitbucket.org` is the same forge behind port 443.
+        Forge::BitbucketCloud => RepoTarget::with_path(forge, "bitbucket.org", &segments),
         _ => RepoTarget::with_path(forge, &host, &segments),
     };
     match target {
@@ -381,6 +386,9 @@ pub(crate) fn forge_for_host(host: &str, hosts: &ForgeHosts<'_>) -> Option<Forge
         || hosts.azure_devops == Some(host)
     {
         return Some(Forge::AzureDevOps);
+    }
+    if host == "bitbucket.org" || host == "altssh.bitbucket.org" {
+        return Some(Forge::BitbucketCloud);
     }
     None
 }
@@ -933,6 +941,17 @@ fn frontier_names(
 /// Whether `commit` is an ancestor of (or equal to) `of`.
 fn is_ancestor(repo: &Path, commit: &str, of: &str) -> Result<bool, GitFail> {
     Ok(git_tristate(repo, &["merge-base", "--is-ancestor", commit, of])?.is_some())
+}
+
+/// A forge's abbreviated commit id in full; `None` when it is missing or ambiguous here.
+pub(crate) fn full_oid(repo: &Path, abbreviated: &str) -> Option<String> {
+    // Only hex, so a branch named like the id can never answer for it.
+    if abbreviated.len() < 7 || !abbreviated.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let commit = format!("{abbreviated}^{{commit}}");
+    let out = run_git(repo, &["rev-parse", "--verify", "--quiet", &commit]).ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Whether `head` contains `commit`; an unfetched commit is not contained.
@@ -2717,6 +2736,44 @@ mod tests {
     }
 
     #[test]
+    fn bitbucket_cloud_remotes_are_one_repository_on_one_canonical_host() {
+        let repo = RepositoryIdentity::Repository(
+            RepoTarget::with_path(Forge::BitbucketCloud, "bitbucket.org", &["team", "app"])
+                .unwrap(),
+        );
+        for url in [
+            "https://bitbucket.org/team/app.git",
+            "https://user@bitbucket.org/team/app",
+            "git@bitbucket.org:team/app.git",
+            "ssh://git@altssh.bitbucket.org:443/team/app.git",
+        ] {
+            assert_eq!(classify_remote(url, &NONE), repo, "{url}");
+        }
+        assert_eq!(
+            classify_remote("https://bitbucket.org/team", &NONE),
+            RepositoryIdentity::Malformed("bitbucket.org".to_string())
+        );
+        assert_eq!(
+            classify_remote("https://bitbucket.org/team/project/app", &NONE),
+            RepositoryIdentity::Malformed("bitbucket.org".to_string())
+        );
+    }
+
+    #[test]
+    fn an_abbreviated_commit_id_expands_only_when_it_names_a_commit_here() {
+        let (repo, git) = crate::test_support::test_repo();
+        std::fs::write(repo.path().join("f.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let head = super::head_oid(repo.path()).unwrap();
+        assert_eq!(super::full_oid(repo.path(), &head[..12]), Some(head.clone()));
+        assert_eq!(super::full_oid(repo.path(), "0123456789ab"), None);
+        // A ref name is never an id, even when it resolves.
+        assert_eq!(super::full_oid(repo.path(), "HEAD"), None);
+        assert_eq!(super::full_oid(repo.path(), ""), None);
+    }
+
+    #[test]
     fn repository_identity_parses_github_and_enterprise_remote_forms() {
         let repo = |host: &str, owner: &str, name: &str| {
             RepositoryIdentity::Repository(RepoTarget::new(host, owner, name).unwrap())
@@ -2834,8 +2891,8 @@ mod tests {
             RepositoryIdentity::Unsupported("gitlab.com-work".to_string())
         );
         assert_eq!(
-            classify_remote("https://bitbucket.org/owner/repo", &NONE),
-            RepositoryIdentity::Unsupported("bitbucket.org".to_string())
+            classify_remote("https://codeberg.org/owner/repo", &NONE),
+            RepositoryIdentity::Unsupported("codeberg.org".to_string())
         );
         assert_eq!(
             classify_remote("https://github.com/owner", &NONE),

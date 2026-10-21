@@ -87,6 +87,9 @@ fn login_hint(forge: crate::git::Forge, host: &str) -> String {
         crate::git::Forge::AzureDevOps => {
             "`az login` (or `az devops login` with a PAT)".to_string()
         }
+        crate::git::Forge::BitbucketCloud => {
+            format!("`bkt auth login https://{host} --kind cloud`")
+        }
     }
 }
 
@@ -94,7 +97,9 @@ fn login_hint(forge: crate::git::Forge, host: &str) -> String {
 fn extension_hint(forge: crate::git::Forge) -> Option<&'static str> {
     match forge {
         crate::git::Forge::AzureDevOps => Some("`az extension add --name azure-devops`"),
-        crate::git::Forge::GitHub | crate::git::Forge::GitLab => None,
+        crate::git::Forge::GitHub
+        | crate::git::Forge::GitLab
+        | crate::git::Forge::BitbucketCloud => None,
     }
 }
 
@@ -526,6 +531,9 @@ fn fetch_inner(
         }
         crate::git::Forge::AzureDevOps => {
             return Ok(crate::azure_devops::fetch(repo, input, repository, cancelled));
+        }
+        crate::git::Forge::BitbucketCloud => {
+            return Ok(crate::bitbucket_cloud::fetch(repo, input, repository, cancelled));
         }
         crate::git::Forge::GitHub => {}
     }
@@ -1463,9 +1471,8 @@ mod tests {
         assert_eq!(gated(&missing), PrView::NeedsForgeRemote);
 
         let mut unsupported = input("head", &["feat"]);
-        unsupported.repository =
-            crate::git::RepositoryIdentity::Unsupported("bitbucket.org".into());
-        assert_eq!(gated(&unsupported), PrView::UnsupportedHost("bitbucket.org".into()));
+        unsupported.repository = crate::git::RepositoryIdentity::Unsupported("codeberg.org".into());
+        assert_eq!(gated(&unsupported), PrView::UnsupportedHost("codeberg.org".into()));
 
         let repo = crate::git::RepositoryIdentity::Repository(
             crate::git::RepoTarget::new("github.com", "owner", "repo").unwrap(),

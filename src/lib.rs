@@ -3,6 +3,7 @@
 pub mod actions;
 pub mod app;
 pub mod azure_devops;
+pub mod bitbucket_cloud;
 pub mod browser;
 pub mod config;
 pub mod diff;
