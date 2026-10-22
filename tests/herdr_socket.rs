@@ -302,6 +302,146 @@ fn every_focus_report_reaches_the_pane_even_unchanged() {
     assert!(!next_session(&rx).visible, "herdr says hidden again, and the pane hears it");
 }
 
+fn tab_focused(tab: &str, workspace: &str) -> Value {
+    json!({"event": "tab.focused", "data": {"type": "tab_focused", "tab_id": tab, "workspace_id": workspace}})
+}
+
+fn workspace_focused(workspace: &str) -> Value {
+    json!({"event": "workspace.focused", "data": {"type": "workspace_focused", "workspace_id": workspace}})
+}
+
+/// Connect, and return once the read after subscribing landed and its reports drained.
+fn connect_settled(fake: &FakeHerdr) -> (Connection, Receiver<HerdrEvent>, tempfile::TempDir) {
+    let repo = tempfile::tempdir().unwrap();
+    let (c, rx) = connect(fake, repo.path());
+    next_session(&rx);
+    wait_subscribed(fake, 1);
+    let _ = events_within(&rx, Duration::from_millis(300));
+    (c, rx, repo)
+}
+
+fn sessions_within(rx: &Receiver<HerdrEvent>, window: Duration) -> Vec<Session> {
+    events_within(rx, window)
+        .into_iter()
+        .filter_map(|e| match e {
+            HerdrEvent::Session(s) => Some(s),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_hidden_pane_reads_nothing_when_focus_moves_between_other_tabs() {
+    let fake = FakeHerdr::start("0.9.3");
+    fake.set_focus("w1:t9");
+    let (_c, rx, _repo) = connect_settled(&fake);
+    let before = fake.state().snapshots;
+    fake.set_focus("w2:t3");
+    fake.push(&[tab_focused("w2:t3", "w2"), workspace_focused("w2")]);
+    fake.set_focus("w1:t9");
+    fake.push(&[tab_focused("w1:t9", "w1")]);
+    assert!(sessions_within(&rx, Duration::from_millis(400)).is_empty(), "nothing to report");
+    assert_eq!(fake.state().snapshots - before, 0, "and no session read");
+}
+
+#[test]
+fn a_hidden_pane_shows_when_focus_arrives_at_its_tab() {
+    let fake = FakeHerdr::start("0.9.3");
+    fake.set_focus("w2:t3");
+    let (_c, rx, _repo) = connect_settled(&fake);
+    fake.set_focus("w1:t1");
+    fake.push(&[tab_focused("w1:t1", "w1")]);
+    assert!(next_session(&rx).visible, "its own tab gained focus");
+}
+
+#[test]
+fn a_hidden_pane_shows_when_focus_arrives_at_its_workspace() {
+    let fake = FakeHerdr::start("0.9.3");
+    fake.set_focus("w2:t3");
+    let (_c, rx, _repo) = connect_settled(&fake);
+    fake.set_focus("w1:t1");
+    fake.push(&[workspace_focused("w1")]);
+    assert!(next_session(&rx).visible, "its workspace, on its tab, gained focus");
+}
+
+#[test]
+fn a_visible_pane_hides_when_focus_leaves_its_tab() {
+    let fake = FakeHerdr::start("0.9.3");
+    let (_c, rx, _repo) = connect_settled(&fake);
+    fake.set_focus("w2:t3");
+    fake.push(&[tab_focused("w2:t3", "w2")]);
+    assert!(!next_session(&rx).visible, "focus moved to another workspace's tab");
+    let before = fake.state().snapshots;
+    fake.set_focus("w1:t1");
+    fake.push(&[workspace_focused("w1")]);
+    assert!(next_session(&rx).visible, "and back through its workspace");
+    assert_eq!(fake.state().snapshots - before, 1, "one read for the return");
+}
+
+#[test]
+fn a_moved_hidden_pane_shows_at_once_when_focus_reaches_its_new_tab() {
+    let fake = FakeHerdr::start("0.9.3");
+    fake.set_focus("w2:t3");
+    let (_c, rx, _repo) = connect_settled(&fake);
+    let mut moved = session("w3:t5");
+    moved["panes"][0] = json!({"pane_id": "w3:p7", "terminal_id": "term_me", "tab_id": "w3:t5", "workspace_id": "w3"});
+    fake.set_snapshot(moved);
+    let sent = Instant::now();
+    fake.emit(&["pane.moved"]);
+    fake.push(&[tab_focused("w3:t5", "w3")]);
+    assert!(next_session(&rx).visible, "its new tab gained focus");
+    // Every pane settles at least 150ms: a report sooner came from the focus event itself.
+    assert!(sent.elapsed() < Duration::from_millis(140), "shown at once: {:?}", sent.elapsed());
+}
+
+#[test]
+fn a_focus_event_without_its_ids_still_reads() {
+    let fake = FakeHerdr::start("0.9.3");
+    fake.set_focus("w2:t3");
+    let (_c, rx, _repo) = connect_settled(&fake);
+    let before = fake.state().snapshots;
+    fake.push(&[json!({"event": "tab.focused", "data": {"type": "tab_focused"}})]);
+    assert!(!next_session(&rx).visible, "read, and still hidden");
+    fake.push(&[json!({"event": "workspace.focused", "data": {"type": "workspace_focused"}})]);
+    assert!(!next_session(&rx).visible, "read again");
+    assert_eq!(fake.state().snapshots - before, 2, "one read for each");
+}
+
+#[test]
+fn a_burst_of_layout_events_reads_the_session_once() {
+    let fake = FakeHerdr::start("0.9.3");
+    let (_c, rx, _repo) = connect_settled(&fake);
+    let before = fake.state().snapshots;
+    fake.emit(&["pane.created", "tab.moved"]);
+    std::thread::sleep(Duration::from_millis(50));
+    fake.emit(&["pane.closed", "pane.moved", "workspace.moved"]);
+    std::thread::sleep(Duration::from_millis(40));
+    assert_eq!(fake.state().snapshots - before, 0, "the burst settles before any read");
+    let sessions = sessions_within(&rx, Duration::from_millis(1500));
+    assert_eq!(sessions.len(), 1, "one report for the burst");
+    assert_eq!(fake.state().snapshots - before, 1, "from one read");
+}
+
+#[test]
+fn a_detected_agent_reads_at_once_and_serves_the_burst_before_it() {
+    let fake = FakeHerdr::start("0.9.3");
+    let (_c, rx, _repo) = connect_settled(&fake);
+    let before = fake.state().snapshots;
+    fake.emit(&["pane.created", "tab.moved"]);
+    std::thread::sleep(Duration::from_millis(30));
+    let detected = Instant::now();
+    fake.emit(&["pane.agent_detected"]);
+    next_session(&rx);
+    // Every pane settles at least 150ms: a report sooner came from the detection itself.
+    assert!(
+        detected.elapsed() < Duration::from_millis(140),
+        "read at once: {:?}",
+        detected.elapsed()
+    );
+    assert!(sessions_within(&rx, Duration::from_millis(1500)).is_empty(), "no settle read after");
+    assert_eq!(fake.state().snapshots - before, 1, "one read for the whole burst");
+}
+
 #[test]
 fn a_moved_pane_keeps_its_identity_through_its_terminal() {
     let fake = FakeHerdr::start("0.9.3");
@@ -582,6 +722,58 @@ fn a_new_member_swaps_the_subscription_and_closes_the_old_one() {
     // A status on the new subscription still counts.
     fake.push(&[status("w1:p3", "working"), status("w1:p3", "idle")]);
     assert!(turn_until(&rx, |t| t.ended).ended, "the new member's turn is tracked");
+}
+
+#[test]
+fn a_detected_agent_is_subscribed_without_waiting_for_the_settle() {
+    let (_r, root) = agent_repo();
+    let fake = FakeHerdr::start("0.9.3");
+    fake.set_snapshot(session_with_agent(&root, "idle"));
+    let (_c, _rx) = connect_for(&fake, &root);
+    let mut two = session_with_agent(&root, "idle");
+    two["agents"].as_array_mut().unwrap().push(agent("w1:p3", root.to_str().unwrap(), "working"));
+    fake.set_snapshot(two);
+    let detected = Instant::now();
+    fake.emit(&["pane.agent_detected"]);
+    let subscribed = wait_subscribed(&fake, 2);
+    assert!(detected.elapsed() < Duration::from_millis(140), "at once: {:?}", detected.elapsed());
+    let last = subscribed.last().unwrap().as_array().unwrap();
+    assert!(last.iter().any(|s| s["pane_id"] == "w1:p3"), "the new agent's status is subscribed");
+}
+
+#[test]
+fn every_layout_event_updates_the_members_once_settled() {
+    let (_r, root) = agent_repo();
+    let cwd = root.to_str().unwrap();
+    let fake = FakeHerdr::start("0.9.3");
+    fake.set_snapshot(session_with_agent(&root, "idle"));
+    let (_c, _rx) = connect_for(&fake, &root);
+    let with = |extra: Option<&str>| {
+        let mut s = session_with_agent(&root, "idle");
+        if let Some(pane) = extra {
+            s["agents"].as_array_mut().unwrap().push(agent(pane, cwd, "idle"));
+        }
+        s
+    };
+    let steps = [
+        ("pane.created", Some("w1:p3")),
+        ("pane.closed", None),
+        ("pane.moved", Some("w1:p4")),
+        ("pane.agent_detected", None),
+    ];
+    for (n, (event, member)) in steps.into_iter().enumerate() {
+        fake.set_snapshot(with(member));
+        fake.emit(&[event]);
+        let subscribed = wait_subscribed(&fake, n + 2);
+        let panes: Vec<&str> = subscribed[n + 1]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["pane_id"].as_str())
+            .collect();
+        let expected: Vec<&str> = std::iter::once("w1:p2").chain(member).collect();
+        assert_eq!(panes, expected, "{event} updates the members");
+    }
 }
 
 #[test]

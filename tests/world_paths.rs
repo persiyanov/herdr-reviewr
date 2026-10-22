@@ -8,7 +8,7 @@ use std::sync::mpsc;
 
 use common::Repo;
 use herdr_reviewr::app::{App, Tab};
-use herdr_reviewr::model::{CommitPick, Scope};
+use herdr_reviewr::model::{ChangeKind, CommitPick, Scope};
 use herdr_reviewr::wake::{Waker, channel};
 use herdr_reviewr::world::{self, Refresh, WorldCompletion, WorldInput, WorldJob, WorldSnapshot};
 
@@ -146,7 +146,13 @@ fn input_for(r: &Repo, scope: Scope, tab: Tab) -> WorldInput {
 
 /// Walk every step in one scope and tab, each path-limited landing checked against a full build.
 fn path_limited_equals_full(scope: Scope, tab: Tab) {
+    path_limited_equals_full_under(scope, tab, "true");
+}
+
+/// [`path_limited_equals_full`] under `renames` set in the repo, where it beats the machine's own.
+fn path_limited_equals_full_under(scope: Scope, tab: Tab, renames: &str) {
     let r = fixture();
+    r.git(&["config", "diff.renames", renames]);
     if scope == Scope::LastTurn {
         let tree = r.git(&["rev-parse", "HEAD^{tree}"]).trim().to_string();
         herdr_reviewr::git::write_baseline_ref(r.path(), &tree).unwrap();
@@ -170,6 +176,10 @@ fn path_limited_equals_full(scope: Scope, tab: Tab) {
         let ends = |s: &WorldSnapshot| s.changeset.ends.clone();
         assert_eq!(ends(&scoped), ends(&full), "{scope:?}/{tab:?} {name}: the ends");
         assert_eq!(scoped.entries, full.entries, "{scope:?}/{tab:?} {name}: the navigator");
+        if renames == "copies" {
+            assert!(scoped.touched.is_none(), "{scope:?}/{tab:?} {name}: copies build in full");
+            continue;
+        }
         let batch: BTreeSet<String> = batch.iter().map(|p| (*p).to_string()).collect();
         let touched = scoped.touched.unwrap_or_else(|| panic!("{scope:?}/{tab:?} {name}: by path"));
         assert!(touched.is_superset(&batch), "{scope:?}/{tab:?} {name}: re-read {touched:?}");
@@ -204,6 +214,37 @@ fn last_turn_changes_tab() {
 #[test]
 fn last_turn_all_files_tab() {
     path_limited_equals_full(Scope::LastTurn, Tab::AllFiles);
+}
+
+#[test]
+fn a_users_copy_detection_never_splits_a_path_limited_build_from_a_full_one() {
+    let scopes = [Scope::Uncommitted, Scope::Branch, Scope::LastTurn, Scope::Commits];
+    for scope in scopes {
+        for tab in [Tab::Changes, Tab::AllFiles] {
+            path_limited_equals_full_under(scope, tab, "copies");
+        }
+    }
+}
+
+#[test]
+fn under_copies_a_batch_naming_only_a_copy_still_finds_its_modified_source() {
+    let r = Repo::init();
+    r.git(&["config", "diff.renames", "copies"]);
+    let old = "one\ntwo\nthree\nfour\nfive\nsix\n";
+    r.write("orig.txt", old);
+    r.commit_all("init");
+    r.write("orig.txt", &format!("{old}seven\n"));
+    let mut worker = Worker::on(&r);
+    let input = input_for(&r, Scope::Uncommitted, Tab::Changes);
+    worker.run(&input, Refresh::Full);
+    r.write("copy.txt", "one\ntwo\nTHREE\nfour\nfive\nsix\n");
+    r.git(&["add", "copy.txt"]);
+    let (built_for, scoped) = worker.run(&input, paths(&["copy.txt"]));
+    let scoped = scoped.expect("the batch re-reads");
+    let full = world::build(&built_for).unwrap();
+    let copy = &scoped.changeset.files["copy.txt"];
+    assert_eq!((copy.kind, copy.previous_path.as_deref()), (ChangeKind::Copied, Some("orig.txt")));
+    assert_eq!(scoped.changeset.files, full.changeset.files, "the same as a full build");
 }
 
 #[test]

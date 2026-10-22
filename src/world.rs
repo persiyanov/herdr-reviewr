@@ -251,12 +251,16 @@ fn rename_partners(
 }
 
 /// Re-read only `paths` against `last`, a build of the same input, widened to rename partners.
-/// `None` when that reaches past the cap: only a full build is right.
+/// `None` when that reaches past the cap, or git finds copies: only a full build is right.
 fn rebuild_paths(
     input: &WorldInput,
     last: &WorldSnapshot,
     paths: &BTreeSet<String>,
 ) -> Option<Result<WorldSnapshot>> {
+    // A copy's source can be any file the diff modifies, which no narrow read can name.
+    if git::finds_copies(&input.repo) {
+        return None;
+    }
     let (fresh, ends) = match read_paths(input, last, paths)? {
         Ok(read) => read,
         Err(e) => return Some(Err(e)),
