@@ -25,18 +25,17 @@ const HEALTHY: Duration = Duration::from_mins(1);
 /// How many times in a row a subscribe follows the members moving under it before it settles
 /// for the next session event.
 const FOLLOWS: u32 = 3;
-/// The events that can change what reviewr reads from the session. Every one triggers a
-/// fresh snapshot.
-const EVENTS: &[&str] = &[
-    "tab.focused",
-    "workspace.focused",
-    "tab.moved",
-    "pane.moved",
-    "workspace.moved",
-    "pane.created",
-    "pane.closed",
-    "pane.agent_detected",
-];
+/// The focus events: one reads the session only when its payload may move this pane's visibility.
+const FOCUS: &[&str] = &["tab.focused", "workspace.focused"];
+/// The events that may change the members or this pane's place: a burst of them reads once.
+const LAYOUT: &[&str] =
+    &["tab.moved", "pane.moved", "workspace.moved", "pane.created", "pane.closed"];
+/// A new agent reads at once, so a turn it starts right away is watched from its first status.
+const DETECTED: &str = "pane.agent_detected";
+/// How long a layout event waits for the rest of its burst before the session is read.
+const SETTLE: Duration = Duration::from_millis(150);
+/// The most a pane adds to [`SETTLE`], by its id, so many panes do not read at once.
+const SPREAD_MS: u64 = 1000;
 
 /// What reviewr reads from the session.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,6 +86,7 @@ impl Connection {
         let (me, rx) = mpsc::channel();
         let queue = me.clone();
         std::thread::Builder::new().name("herdr".into()).spawn(move || {
+            let settle = settle_for(&pane_id);
             let mut thread = Thread {
                 socket,
                 pane_id,
@@ -96,6 +96,9 @@ impl Connection {
                 members: Vec::new(),
                 subscribed: Vec::new(),
                 membership_retry: None,
+                settle,
+                read_due: None,
+                place: Place::default(),
                 tx,
                 rx,
                 me: queue,
@@ -130,6 +133,14 @@ struct Agent {
     heard: bool,
 }
 
+/// Where the last snapshot put this pane, which decides whether a focus event can move it.
+#[derive(Debug, Default)]
+struct Place {
+    tab: Option<String>,
+    workspace: Option<String>,
+    visible: bool,
+}
+
 /// A subscription and the tag its reader stamps on every line.
 struct Live {
     /// Held only: dropping it closes the connection.
@@ -152,6 +163,11 @@ struct Thread {
     subscribed: Vec<String>,
     /// When to resolve the members again, after a member's directory would not resolve.
     membership_retry: Option<(Instant, Backoff)>,
+    /// How long this pane lets a burst of layout events settle before it reads the session.
+    settle: Duration,
+    /// When to read the session for the layout events heard since the last read.
+    read_due: Option<Instant>,
+    place: Place,
     /// Where reports go: the frame loop.
     tx: crate::wake::Sender<HerdrEvent>,
     rx: mpsc::Receiver<Msg>,
@@ -285,7 +301,8 @@ impl Thread {
         *live = Some(Instant::now());
         logln!("herdr {version} connected");
         loop {
-            let deadline = self.membership_retry.map(|(at, _)| at);
+            let deadline =
+                self.membership_retry.map(|(at, _)| at).into_iter().chain(self.read_due).min();
             let first = match deadline {
                 Some(at) => {
                     match self.rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
@@ -299,7 +316,7 @@ impl Thread {
                     Err(_) => return Outcome::Gone,
                 },
             };
-            // A retry deadline that passed asks for the session again.
+            // A retry or settle deadline that passed asks for the session again.
             let mut session_changed = first.is_none();
             // What arrived together folds in order, and its writes are checked once.
             let mut burst: Vec<Msg> = first.into_iter().collect();
@@ -374,7 +391,19 @@ impl Thread {
             }
             return Ok(false);
         }
-        Ok(value.get("event").is_some())
+        let Some(event) = value["event"].as_str() else { return Ok(value.get("event").is_some()) };
+        if FOCUS.contains(&event) {
+            // A pending layout read means this pane's place may already be stale.
+            return Ok(
+                self.read_due.is_some() || focus_may_move(event, &value["data"], &self.place)
+            );
+        }
+        if LAYOUT.contains(&event) {
+            self.read_due.get_or_insert(at + self.settle);
+            return Ok(false);
+        }
+        // `DETECTED` lands here too: a read now, which also serves any settle pending.
+        Ok(true)
     }
 
     /// Subscribe to the session events and the members' statuses; `old` closes only once the new
@@ -386,8 +415,12 @@ impl Thread {
         }
         loop {
             let watched = self.members.clone();
-            let mut subscriptions: Vec<Value> =
-                EVENTS.iter().map(|e| json!({ "type": e })).collect();
+            let mut subscriptions: Vec<Value> = FOCUS
+                .iter()
+                .chain(LAYOUT)
+                .chain([&DETECTED])
+                .map(|e| json!({ "type": e }))
+                .collect();
             subscriptions.extend(
                 watched
                     .iter()
@@ -470,9 +503,12 @@ impl Thread {
     /// Read the session, report it, and fold the agents' statuses. A member keeps the status an
     /// event on the live subscription gave it, which no snapshot read after it can be newer than.
     fn read_and_report(&mut self) -> Result<(), Outcome> {
+        self.read_due = None;
         let result = self.request("session.snapshot").map_err(Outcome::Lost)?;
-        let (session, agents) =
+        let (session, tab, agents) =
             read_session(&result["snapshot"], &self.pane_id, &mut self.terminal);
+        let workspace = session.me.as_ref().and_then(|m| m.workspace.clone());
+        self.place = Place { tab, workspace, visible: session.visible };
         self.tx.send(HerdrEvent::Session(session)).map_err(|_| Outcome::Gone)?;
         // No list, or an entry herdr shaped unexpectedly that may be a member: hold, and read again.
         let Some(sampled) = agents else {
@@ -555,13 +591,32 @@ impl Thread {
     }
 }
 
-/// The session as reviewr reads it, and its agents but this pane, by pane. This pane is found by
-/// `terminal` once known, else by `pane_id`, which then names its terminal.
+/// Whether focus may arrive at this pane or leave it; a payload or place that cannot tell says yes.
+fn focus_may_move(event: &str, data: &Value, place: &Place) -> bool {
+    let (focused, mine) = match event {
+        "tab.focused" => (data["tab_id"].as_str(), place.tab.as_deref()),
+        _ => (data["workspace_id"].as_str(), place.workspace.as_deref()),
+    };
+    match (focused, mine) {
+        (Some(focused), Some(mine)) => place.visible || focused == mine,
+        _ => true,
+    }
+}
+
+/// [`SETTLE`] plus this pane's share of [`SPREAD_MS`], fixed by its id.
+fn settle_for(pane_id: &str) -> Duration {
+    use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+    let hash = BuildHasherDefault::<DefaultHasher>::default().hash_one(pane_id);
+    SETTLE + Duration::from_millis(hash % SPREAD_MS)
+}
+
+/// The session as reviewr reads it, this pane's tab, and its agents but this pane, by pane. This
+/// pane is found by `terminal` once known, else by `pane_id`, which then names its terminal.
 pub(crate) fn read_session(
     snapshot: &Value,
     pane_id: &str,
     terminal: &mut Option<String>,
-) -> (Session, Option<crate::herdr::Sampled>) {
+) -> (Session, Option<String>, Option<crate::herdr::Sampled>) {
     let panes = snapshot["panes"].as_array().cloned().unwrap_or_default();
     let mine = panes.iter().find(|p| match terminal.as_deref() {
         Some(t) => p["terminal_id"].as_str() == Some(t),
@@ -578,9 +633,10 @@ pub(crate) fn read_session(
         (Some(p), Some(tab)) => p["tab_id"].as_str() == Some(tab),
         _ => true,
     };
+    let tab = mine.and_then(|p| field(p, "tab_id"));
     let agents =
         crate::herdr::samples_of(&snapshot["agents"], me.as_ref().and_then(|m| m.pane.as_deref()));
-    (Session { me, visible }, agents)
+    (Session { me, visible }, tab, agents)
 }
 
 fn parse_version(version: &str) -> Option<semver::Version> {
@@ -589,8 +645,62 @@ fn parse_version(version: &str) -> Option<semver::Version> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_version, read_session};
+    use super::{
+        Place, SETTLE, SPREAD_MS, focus_may_move, parse_version, read_session, settle_for,
+    };
     use serde_json::json;
+    use std::time::Duration;
+
+    fn place(visible: bool) -> Place {
+        Place { tab: Some("w1:t1".into()), workspace: Some("w1".into()), visible }
+    }
+
+    #[test]
+    fn a_hidden_pane_reads_only_when_focus_arrives_at_its_tab_or_workspace() {
+        let hidden = place(false);
+        let tab =
+            |id: &str, ws: &str| json!({"type": "tab_focused", "tab_id": id, "workspace_id": ws});
+        assert!(!focus_may_move("tab.focused", &tab("w2:t3", "w2"), &hidden), "another workspace");
+        assert!(
+            !focus_may_move("tab.focused", &tab("w1:t2", "w1"), &hidden),
+            "another tab beside it"
+        );
+        assert!(focus_may_move("tab.focused", &tab("w1:t1", "w1"), &hidden), "its own tab");
+        let ws = |id: &str| json!({"type": "workspace_focused", "workspace_id": id});
+        assert!(!focus_may_move("workspace.focused", &ws("w2"), &hidden), "another workspace");
+        assert!(focus_may_move("workspace.focused", &ws("w1"), &hidden), "its own workspace");
+    }
+
+    #[test]
+    fn a_visible_pane_reads_on_every_focus_move() {
+        let visible = place(true);
+        let tab = json!({"type": "tab_focused", "tab_id": "w2:t3", "workspace_id": "w2"});
+        assert!(focus_may_move("tab.focused", &tab, &visible), "focus leaves its tab");
+        let ws = json!({"type": "workspace_focused", "workspace_id": "w2"});
+        assert!(focus_may_move("workspace.focused", &ws, &visible), "focus leaves its workspace");
+    }
+
+    #[test]
+    fn a_focus_event_that_cannot_be_settled_reads() {
+        let hidden = place(false);
+        let bare = json!({"type": "tab_focused"});
+        assert!(focus_may_move("tab.focused", &bare, &hidden), "no tab id");
+        assert!(focus_may_move("workspace.focused", &bare, &hidden), "no workspace id");
+        let elsewhere = json!({"tab_id": "w2:t3", "workspace_id": "w2"});
+        let unknown = Place { visible: false, ..Place::default() };
+        assert!(focus_may_move("tab.focused", &elsewhere, &unknown), "its own tab unknown");
+        assert!(focus_may_move("workspace.focused", &elsewhere, &unknown), "its workspace unknown");
+    }
+
+    #[test]
+    fn panes_settle_for_different_spans_within_the_spread() {
+        let spans: Vec<Duration> = (1..=20).map(|n| settle_for(&format!("w{n}:p1"))).collect();
+        let most = SETTLE + Duration::from_millis(SPREAD_MS);
+        assert!(spans.iter().all(|s| (SETTLE..most).contains(s)), "{spans:?}");
+        assert_eq!(settle_for("w1:p1"), settle_for("w1:p1"), "one pane's span is fixed");
+        let distinct: std::collections::BTreeSet<_> = spans.iter().collect();
+        assert!(distinct.len() > 10, "panes spread out: {spans:?}");
+    }
 
     fn snapshot(focused_tab: &str, my_tab: &str, my_pane: &str) -> serde_json::Value {
         json!({
@@ -610,12 +720,13 @@ mod tests {
     #[test]
     fn this_pane_is_visible_exactly_when_its_tab_is_the_focused_one() {
         let mut terminal = None;
-        let (s, agents) =
+        let (s, tab, agents) =
             read_session(&snapshot("w1:t1", "w1:t1", "w1:p1"), "w1:p1", &mut terminal);
         assert!(s.visible);
+        assert_eq!(tab.as_deref(), Some("w1:t1"), "this pane's own tab");
         assert_eq!(terminal.as_deref(), Some("term_me"), "the first snapshot names the terminal");
         assert_eq!(agents.map(|a| a.agents.len()), Some(1), "the agent beside it, never this pane");
-        let (s, _) = read_session(&snapshot("w1:t2", "w1:t1", "w1:p1"), "w1:p1", &mut terminal);
+        let (s, _, _) = read_session(&snapshot("w1:t2", "w1:t1", "w1:p1"), "w1:p1", &mut terminal);
         assert!(!s.visible, "another tab is on screen");
     }
 
@@ -623,7 +734,7 @@ mod tests {
     fn a_snapshot_with_no_focused_tab_keeps_the_pane_live() {
         let mut snap = snapshot("w1:t1", "w1:t1", "w1:p1");
         snap["focused_tab_id"] = serde_json::Value::Null;
-        let (s, _) = read_session(&snap, "w1:p1", &mut None);
+        let (s, _, _) = read_session(&snap, "w1:p1", &mut None);
         assert!(s.visible, "unknown visibility never hides the pane");
     }
 
@@ -631,7 +742,7 @@ mod tests {
     fn a_moved_pane_is_found_by_its_terminal() {
         let mut terminal = Some("term_me".to_string());
         let moved = snapshot("w2:t5", "w2:t5", "w2:p9");
-        let (s, _) = read_session(&moved, "w1:p1", &mut terminal);
+        let (s, _, _) = read_session(&moved, "w1:p1", &mut terminal);
         let me = s.me.expect("found after the move");
         assert_eq!((me.pane.as_deref(), me.workspace.as_deref()), (Some("w2:p9"), Some("w2")));
         assert!(s.visible, "visibility follows the new tab");

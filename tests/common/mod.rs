@@ -54,6 +54,10 @@ impl Repo {
         repo.git(&["init", "-q", "-b", "main"]);
         // Pin `init.defaultBranch` so the machine's global config never steers a test.
         repo.git(&["config", "init.defaultBranch", "no-such-default"]);
+        // A global tag-signing default would refuse the lightweight tags tests make.
+        repo.git(&["config", "tag.gpgSign", "false"]);
+        // A global `diff.renames=copies` would turn every refresh into a full build.
+        repo.git(&["config", "diff.renames", "true"]);
         repo
     }
 

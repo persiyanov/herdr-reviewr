@@ -1953,6 +1953,18 @@ pub fn changed_between_in(
     assemble(repo, &out, false, Some(paths))
 }
 
+/// Whether git's effective config finds copies; a read that fails says yes, so the build goes full.
+pub fn finds_copies(repo: &Path) -> bool {
+    match run_git(repo, &["config", "--get", "diff.renames"]) {
+        Ok(out) if out.status.code() == Some(1) => false,
+        Ok(out) if out.status.success() => {
+            let value = String::from_utf8_lossy(&out.stdout).trim().to_ascii_lowercase();
+            matches!(value.as_str(), "copies" | "copy")
+        }
+        _ => true,
+    }
+}
+
 /// One `git diff` per changeset: raw records, then line counts.
 fn diff_args<'a>(ends: &[&'a str]) -> Vec<&'a str> {
     let mut args = vec!["diff"];
@@ -2520,6 +2532,24 @@ mod tests {
     };
 
     const NONE: ForgeHosts<'_> = ForgeHosts { github: None, gitlab: None, azure_devops: None };
+
+    #[test]
+    fn copies_are_found_from_gits_effective_config() {
+        let (dir, git) = crate::test_support::test_repo();
+        let mut probe = std::process::Command::new("git");
+        probe.arg("-C").arg(dir.path()).args(["config", "--get", "diff.renames"]);
+        let unset = probe.output().unwrap().status.code();
+        if unset == Some(1) {
+            assert!(!super::finds_copies(dir.path()), "git's default finds renames only");
+        }
+        for (value, copies) in [("true", false), ("false", false), ("copies", true), ("Copy", true)]
+        {
+            git(&["config", "diff.renames", value]);
+            assert_eq!(super::finds_copies(dir.path()), copies, "diff.renames={value}");
+        }
+        let gone = dir.path().join("no-such-repo");
+        assert!(super::finds_copies(&gone), "a read that fails builds in full");
+    }
 
     #[test]
     fn a_path_limited_build_merges_untracked_counts_and_never_shrinks_them() {

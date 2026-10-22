@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **No herdr stall on a tab switch**: a reviewr pane reads herdr's session only when focus arrives at its own tab or workspace, or leaves it. A burst of panes or tabs that open, close or move causes one read, and the panes spread their reads over about a second. A new agent still reads at once, so a turn it starts right away is tracked. Before, every pane read on every switch, and with many panes open herdr stopped taking keys for most of a second.
+  Thanks [@mikebronner](https://github.com/mikebronner) ([#147](https://github.com/persiyanov/herdr-reviewr/issues/147)).
+- **Copies keep their source with `diff.renames = copies`**: a refresh of a few paths could list a copied file as added, with no source, where a full build listed it as copied from the file it came from. With copies on, every refresh now reads the whole changeset, so it costs more in a large repo.
+
 ## [0.48.0] — 2026-10-19
 
 ### Added
