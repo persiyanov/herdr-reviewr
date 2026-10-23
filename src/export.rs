@@ -2,12 +2,42 @@
 
 use anyhow::Result;
 
+use crate::forge;
 use crate::herdr;
 use crate::model::Comment;
 
 /// One comment as its export block: location, snippet, then text.
 pub fn format_comment(comment: &Comment) -> String {
     format!("{}\n{}\n{}", comment.location(), comment.lines, normalize_text(&comment.text))
+}
+
+/// Format one PR thread with its URL, location, snippet, and attributed comments and replies.
+pub fn format_pr_thread(snapshot: &forge::PrSnapshot, comment: &forge::Comment) -> String {
+    let mut parts = vec![snapshot.url.clone()];
+    if let Some(place) = &comment.place {
+        parts.push(pr_thread_location(place));
+    }
+    if let Some(snippet) = &comment.snippet {
+        parts.push(snippet.trim_end_matches('\n').to_string());
+    }
+    parts.push(format!("Comment by {}:\n{}", comment.author, normalize_text(&comment.body)));
+    for reply in &comment.replies {
+        parts.push(format!("Reply by {}:\n{}", reply.author, normalize_text(&reply.body)));
+    }
+    parts.join("\n\n")
+}
+
+/// A finding's place as the local comment's own `location()` reads it: range, then side.
+fn pr_thread_location(place: &forge::FindingPlace) -> String {
+    let range = match place.range {
+        Some((a, b)) if a == b => format!("{}:{a}", place.path),
+        Some((a, b)) => format!("{}:{a}-{b}", place.path),
+        None => place.path.clone(),
+    };
+    match place.side {
+        Some(crate::model::Side::Old) => format!("{range} (removed)"),
+        _ => range,
+    }
 }
 
 /// Comment text without blank lines, which would read as the separator between comments.
@@ -44,9 +74,8 @@ pub trait ExportTarget {
     fn failure_message(&self, error: &anyhow::Error, copy: &str) -> String;
 }
 
-/// The status for a failed send to `agent`: the cause first, since a narrow pane keeps only the
-/// line's start, then the way out.
-pub fn send_failure(error: &herdr::SendError, agent: Option<&str>, copy: &str) -> String {
+/// The send failure's cause first, followed by a copy hint only where that action exists.
+pub fn send_failure(error: &herdr::SendError, agent: Option<&str>, copy: Option<&str>) -> String {
     use herdr::{HerdrError as H, SendError as S};
     let cause = match error {
         S::AtPrompt(name) => return format!("answer {name}'s prompt first"),
@@ -56,7 +85,25 @@ pub fn send_failure(error: &herdr::SendError, agent: Option<&str>, copy: &str) -
         S::Herdr(H::Unanswered) => "herdr didn't answer".to_string(),
         S::Herdr(H::Refused(_) | H::Unreadable) => "herdr refused the send".to_string(),
     };
-    format!("{cause}, press {copy} to copy")
+    match copy {
+        Some(copy) => format!("{cause}, press {copy} to copy"),
+        None => cause,
+    }
+}
+
+/// Explain a typed send failure, falling back to a generic failure for unknown errors.
+pub(crate) fn agent_send_failure(
+    error: &anyhow::Error,
+    agent: Option<&str>,
+    copy: Option<&str>,
+) -> String {
+    error.downcast_ref().map_or_else(
+        || match copy {
+            Some(copy) => format!("send failed, press {copy} to copy"),
+            None => "send failed".to_string(),
+        },
+        |error| send_failure(error, agent, copy),
+    )
 }
 
 pub(crate) fn counted_comments(count: usize) -> String {
@@ -188,10 +235,7 @@ impl ExportTarget for Agent {
 
     /// Every send failure is a [`herdr::SendError`]; anything else only says the send failed.
     fn failure_message(&self, error: &anyhow::Error, copy: &str) -> String {
-        error.downcast_ref().map_or_else(
-            || format!("send failed, press {copy} to copy"),
-            |error| send_failure(error, Some(&self.name), copy),
-        )
+        agent_send_failure(error, Some(&self.name), Some(copy))
     }
 
     /// An agent at a prompt refuses: the picker's rows can be minutes old.
@@ -205,7 +249,10 @@ impl ExportTarget for Agent {
 
 #[cfg(test)]
 mod tests {
-    use super::{Agent, Clipboard, ExportTarget, format_comment, format_review, send_failure};
+    use super::{
+        Agent, Clipboard, ExportTarget, agent_send_failure, format_comment, format_review,
+        send_failure,
+    };
     use crate::model::{Comment, Side};
 
     #[cfg(not(windows))]
@@ -260,7 +307,8 @@ mod tests {
         }
         // Before any agent is chosen, a gone pane names no one.
         let gone = S::Herdr(H::PaneGone);
-        assert_eq!(send_failure(&gone, None, "y"), "the agent closed, press y to copy");
+        assert_eq!(send_failure(&gone, None, Some("y")), "the agent closed, press y to copy");
+
         #[cfg(not(windows))]
         {
             let missing = anyhow::Error::from(super::clipboard::NoTool);
@@ -280,6 +328,26 @@ mod tests {
                 .context("writing the Windows clipboard");
             assert_eq!(Clipboard.failure_message(&busy, "y"), "copy failed");
         }
+    }
+
+    /// A send with no copy action to fall back to states the cause alone.
+    #[test]
+    fn a_send_with_no_copy_action_states_the_cause_alone() {
+        use crate::herdr::{HerdrError as H, SendError as S};
+        let rows = [
+            (S::Herdr(H::PaneGone), "release-bot closed"),
+            (S::AtPrompt("codex".into()), "answer codex's prompt first"),
+            (S::NoAgent, "no agent in this workspace"),
+        ];
+        for (error, line) in rows {
+            assert_eq!(send_failure(&error, Some("release-bot"), None), line, "{error:?}");
+        }
+        let error = anyhow::Error::from(S::NoAgent);
+        assert_eq!(
+            agent_send_failure(&error, Some("release-bot"), None),
+            "no agent in this workspace"
+        );
+        assert_eq!(agent_send_failure(&anyhow::anyhow!("boom"), None, None), "send failed");
     }
 
     fn comment(file: &str, side: Side, start: u32, end: u32, lines: &str, text: &str) -> Comment {

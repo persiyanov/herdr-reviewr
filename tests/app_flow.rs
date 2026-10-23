@@ -968,6 +968,32 @@ fn the_footer_offers_scope_everywhere_on_a_file_tab() {
 }
 
 #[test]
+fn the_pr_footer_offers_send_only_with_a_thread_focused() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{PrSnapshot, PrView};
+
+    let has_send = |a: &App| a.footer_bands().iter().any(|&(x, _)| x == FooterAction::SendPr);
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+
+    // A resolved PR with a body and no comments opens on the description: nothing to send.
+    app.pr = PrView::Pr(Box::new(PrSnapshot {
+        number: 7,
+        body: "the description".into(),
+        comments: vec![common::comment()],
+        ..common::pr_snapshot()
+    }));
+    assert!(app.pr_on_description());
+    assert!(!has_send(&app), "the description row offers no PR send");
+
+    // A thread focused offers `s send thread`.
+    app.pr_move(1);
+    assert_eq!(app.pr_selected_comment().map(|c| c.author.clone()), Some(common::comment().author));
+    assert!(has_send(&app), "a focused thread offers the PR send");
+}
+
+#[test]
 fn the_pr_footer_offers_open_for_any_resolved_pr() {
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::forge::{PrSnapshot, PrView};

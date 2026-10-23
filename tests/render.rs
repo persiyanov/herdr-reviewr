@@ -3187,6 +3187,37 @@ fn the_picker_titles_the_count_and_aligns_the_dim_trail_in_one_column() {
     assert!(rows[2].contains("working · 3"), "{:?}", rows[2]);
 }
 
+/// A pending `PR` send titles the picker by itself, never the local comment count.
+#[test]
+fn the_picker_titles_a_pr_thread_send_by_itself_never_the_local_count() {
+    let rows = || {
+        vec![
+            agent_row("w8:p1", "claude", "idle", "Grip Outreach"),
+            agent_row("w8:p2", "release-bot", "idle", "Grip Outreach Campaign"),
+        ]
+    };
+
+    // No local comments at all: still "send thread to", never "send 0 comments to".
+    let mut app = edited_app();
+    app.pr_pending_send = Some("PR #7: fix widget\nhttps://example/pr/7".to_string());
+    app.open_picker(rows());
+    let out = render(&app);
+    assert!(out.contains("send thread to"), "{out}");
+    assert!(!out.contains("send 0 comments to"), "{out}");
+    app.close_picker();
+
+    // Local comments present too: the PR send still titles itself, not the local count.
+    let mut app = edited_app();
+    for text in ["one", "two", "three"] {
+        write_comment(&mut app, text);
+    }
+    app.pr_pending_send = Some("PR #7: fix widget\nhttps://example/pr/7".to_string());
+    app.open_picker(rows());
+    let out = render(&app);
+    assert!(out.contains("send thread to"), "{out}");
+    assert!(!out.contains("send 3 comments to"), "{out}");
+}
+
 #[test]
 fn the_picker_numbers_only_the_rows_a_digit_key_can_reach() {
     let mut app = edited_app();

@@ -2842,6 +2842,7 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
             "scope",
         ),
         A::Send => return (hint(K::Send), format!("send {}", app.store.len())),
+        A::SendPr => return (hint(K::Send), "send thread".to_string()),
         A::List => (hint(K::Comments), "comments"),
         A::Copy => (hint(K::Copy), "copy"),
         A::QuitDiscard => {
@@ -3290,7 +3291,11 @@ fn picker_trail(app: &App, row: &AgentChoice) -> String {
     format!("{}{tab}{last}", row.state)
 }
 
+/// The picker's title: a pending `PR` send names itself, never the local comment count.
 fn picker_title(app: &App) -> String {
+    if app.pr_pending_send.is_some() {
+        return "send thread to".to_string();
+    }
     let n = app.store.len();
     let noun = if n == 1 { "comment" } else { "comments" };
     format!("send {n} {noun} to")

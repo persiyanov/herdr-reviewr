@@ -478,3 +478,305 @@ fn a_send_without_a_socket_refuses_as_herdr_not_answering() {
     assert_eq!(app.status, "herdr didn't answer, press y to copy");
     assert_eq!(app.store.len(), 1, "a refusal keeps every comment");
 }
+
+/// Set up a PR tab with two threads: the first is the one a `PR` send must deliver.
+fn pr_app() -> (Repo, App) {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{Comment, PrSnapshot, PrView};
+    let (repo, mut app) = app();
+    app.set_tab(Tab::Pr).unwrap();
+    let first = Comment { author: "ann".into(), body: "needs tests".into(), ..common::comment() };
+    let second = Comment {
+        author: "bob".into(),
+        body: "neighbor thread, never sent".into(),
+        anchor: "other".into(),
+        created_at: "2026-06-27T09:00:00Z".into(),
+        ..common::comment()
+    };
+    app.pr = PrView::Pr(Box::new(PrSnapshot {
+        number: 7,
+        title: "Fix widget".into(),
+        url: "https://github.com/o/r/pull/7".into(),
+        comments: vec![first, second],
+        ..common::pr_snapshot()
+    }));
+    assert_eq!(app.pr_selected_comment().map(|c| c.author.as_str()), Some("ann"));
+    (repo, app)
+}
+
+/// `s` on the `PR` tab: one agent sends the focused thread directly, several open the picker.
+#[test]
+fn pr_thread_send_dispatches_one_agent_directly_and_several_through_the_picker() {
+    if !in_child() {
+        let dir = run_in_child(
+            "pr_thread_send_dispatches_one_agent_directly_and_several_through_the_picker",
+            true,
+        );
+        assert!(herdr_calls(dir.path()).contains("agent focus"), "the child delivered no send");
+        return;
+    }
+
+    let fake_dir = fixture_dir();
+    let socket = FakeSocket::serve(&socket_path());
+    let (_repo, mut app) = pr_app();
+    let keymap = Keymap::default();
+    let area = Rect::new(0, 0, 80, 24);
+    fs::write(
+        fake_dir.join("tabs.json"),
+        r#"{"result":{"tabs":[{"tab_id":"w8:t1","label":"Grip"}]}}"#,
+    )
+    .unwrap();
+
+    // A local draft comment, present through every case below: a `PR` send must never take it.
+    write_comment(&mut app, "local draft");
+
+    // Several agents: the picker opens over both, just as a local send would.
+    agents(&fake_dir, TWO_AGENTS);
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    assert_eq!(app.mode, Mode::Picker, "several agents open the picker");
+    assert_eq!(app.store.len(), 1, "opening the picker never touches local comments");
+
+    // The payload sent on `enter` must still be the thread that was focused at `s`.
+    app.pr_move(1);
+    assert_eq!(app.pr_selected_comment().map(|c| c.author.as_str()), Some("bob"));
+
+    press(&mut app, KeyCode::Enter, area, &keymap);
+    assert_eq!(app.mode, Mode::Normal, "the picker closes whatever the outcome");
+    assert_eq!(app.status, "sent 1 comment to claude");
+    assert_eq!(app.last_sent_pane.as_deref(), Some("w8:p1"));
+    assert_eq!(app.store.len(), 1, "the local draft survives a successful PR send");
+    let sent = socket.requests().last().unwrap().clone();
+    assert!(sent.contains("https://github.com/o/r/pull/7"), "{sent}");
+    assert!(sent.contains("needs tests"), "the first thread was sent: {sent}");
+    assert!(!sent.contains("neighbor thread"), "the neighbor thread must stay put: {sent}");
+
+    // One agent: `s` sends the focused thread with no picker.
+    app.pr_move(-1);
+    agents(&fake_dir, ONE_AGENT);
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    assert_eq!(app.mode, Mode::Normal, "one agent sends directly");
+    assert_eq!(app.status, "sent 1 comment to claude");
+    assert_eq!(app.store.len(), 1, "a direct PR send never touches local comments");
+    let sent = socket.requests().last().unwrap().clone();
+    assert!(sent.contains("needs tests"), "{sent}");
+}
+
+/// No thread focused — the description row, or nothing at all — sends nothing and opens no picker.
+#[test]
+fn pr_send_with_no_thread_focused_takes_no_action() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{PrSnapshot, PrView};
+    if !in_child() {
+        let dir = run_in_child("pr_send_with_no_thread_focused_takes_no_action", true);
+        assert_eq!(herdr_calls(dir.path()), "", "no thread selected calls herdr for nothing");
+        return;
+    }
+
+    agents(&fixture_dir(), ONE_AGENT);
+    let (_repo, mut app) = app();
+    app.set_tab(Tab::Pr).unwrap();
+    app.pr = PrView::Pr(Box::new(PrSnapshot {
+        body: "the description".into(),
+        ..common::pr_snapshot()
+    }));
+    assert!(app.pr_on_description(), "an only row with a body opens on the description");
+    let keymap = Keymap::default();
+    let area = Rect::new(0, 0, 80, 24);
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    assert_eq!(app.mode, Mode::Normal, "no picker opens off a thread");
+    assert_eq!(app.status, "no thread selected");
+}
+
+/// A failed `PR` send reports the same cause a local send would, with no copy hint.
+#[test]
+fn a_failed_pr_send_reports_the_failure_with_no_copy_hint_and_keeps_local_comments_and_selection() {
+    if !in_child() {
+        let dir = run_in_child(
+            "a_failed_pr_send_reports_the_failure_with_no_copy_hint_and_keeps_local_comments_and_selection",
+            true,
+        );
+        assert!(herdr_calls(dir.path()).contains("agent list"), "the child asked herdr nothing");
+        return;
+    }
+
+    let socket = FakeSocket::serve(&socket_path());
+    agents(&fixture_dir(), ONE_AGENT);
+    let (_repo, mut app) = pr_app();
+    let keymap = Keymap::default();
+    let area = Rect::new(0, 0, 80, 24);
+    write_comment(&mut app, "local draft");
+
+    socket.reply(Reply::PaneGone);
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    assert_eq!(app.mode, Mode::Normal);
+    // No copy hint: the `PR` tab has no copy action to fall back to.
+    assert_eq!(app.status, "claude closed");
+    assert_eq!(app.store.len(), 1, "a failed PR send keeps the local draft");
+    assert_eq!(
+        app.pr_selected_comment().map(|c| c.author.as_str()),
+        Some("ann"),
+        "selection holds"
+    );
+    assert_eq!(app.last_sent_pane, None, "a failed send arms nothing");
+
+    // No agent in the workspace refuses the same way a local send's refusal does.
+    agents(&fixture_dir(), r#"{"result":{"agents":[]}}"#);
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    assert_eq!(app.mode, Mode::Normal, "an empty workspace opens no picker");
+    assert_eq!(app.status, "no agent in this workspace");
+    assert_eq!(app.store.len(), 1);
+}
+
+/// Canceling the picker on a `PR` send discards the payload; local comments stay untouched.
+#[test]
+fn canceling_the_pr_picker_discards_the_payload_and_keeps_local_comments() {
+    if !in_child() {
+        let dir = run_in_child(
+            "canceling_the_pr_picker_discards_the_payload_and_keeps_local_comments",
+            true,
+        );
+        assert!(
+            herdr_calls(dir.path()).contains("agent focus"),
+            "the trailing local send still delivered"
+        );
+        return;
+    }
+
+    let fake_dir = fixture_dir();
+    FakeSocket::serve(&socket_path());
+    let (_repo, mut app) = pr_app();
+    let keymap = Keymap::default();
+    let area = Rect::new(0, 0, 80, 24);
+    fs::write(
+        fake_dir.join("tabs.json"),
+        r#"{"result":{"tabs":[{"tab_id":"w8:t1","label":"Grip"}]}}"#,
+    )
+    .unwrap();
+    write_comment(&mut app, "local draft");
+
+    agents(&fake_dir, TWO_AGENTS);
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    assert_eq!(app.mode, Mode::Picker);
+    assert!(app.pr_pending_send.is_some(), "the picker opened with a pending payload");
+    press(&mut app, KeyCode::Esc, area, &keymap);
+    assert_eq!(app.mode, Mode::Normal, "esc cancels the picker");
+    assert!(app.pr_pending_send.is_none(), "a canceled pick drops the pending payload");
+    assert_eq!(app.store.len(), 1, "the local draft was never touched");
+
+    // A normal local send afterwards still works: the discarded PR payload never leaks into it.
+    app.set_tab(herdr_reviewr::app::Tab::Changes).unwrap();
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    assert_eq!(app.mode, Mode::Picker);
+    assert!(app.pr_pending_send.is_none(), "a local send opens the picker with no PR payload");
+    press(&mut app, KeyCode::Enter, area, &keymap);
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.store.is_empty(), "the local send consumed the local draft, not a PR thread");
+    assert_eq!(app.status, "sent 1 comment to claude");
+}
+
+#[test]
+fn a_pr_thread_leads_with_the_pr_url_then_the_root_comment() {
+    use herdr_reviewr::export::format_pr_thread;
+    let snapshot = herdr_reviewr::forge::PrSnapshot {
+        url: "https://github.com/o/r/pull/7".into(),
+        ..common::pr_snapshot()
+    };
+    let comment = herdr_reviewr::forge::Comment { body: "looks wrong".into(), ..common::comment() };
+    let text = format_pr_thread(&snapshot, &comment);
+    assert_eq!(text, "https://github.com/o/r/pull/7\n\nComment by ann:\nlooks wrong");
+}
+
+#[test]
+fn a_pr_thread_includes_the_location_and_snippet_only_when_present() {
+    use herdr_reviewr::export::format_pr_thread;
+    use herdr_reviewr::forge::FindingPlace;
+    use herdr_reviewr::model::Side;
+    let snapshot = herdr_reviewr::forge::PrSnapshot {
+        url: "https://github.com/o/r/pull/7".into(),
+        ..common::pr_snapshot()
+    };
+    let comment = herdr_reviewr::forge::Comment {
+        body: "looks wrong".into(),
+        place: Some(FindingPlace {
+            path: "a.rs".into(),
+            range: Some((10, 12)),
+            side: Some(Side::New),
+        }),
+        snippet: Some("-old\n+new\n".into()),
+        ..common::comment()
+    };
+    let text = format_pr_thread(&snapshot, &comment);
+    assert_eq!(
+        text,
+        "https://github.com/o/r/pull/7\n\na.rs:10-12\n\n-old\n+new\n\nComment by ann:\nlooks wrong"
+    );
+}
+
+#[test]
+fn a_removed_side_location_marks_itself_like_a_local_comment() {
+    use herdr_reviewr::export::format_pr_thread;
+    use herdr_reviewr::forge::FindingPlace;
+    use herdr_reviewr::model::Side;
+    let snapshot = herdr_reviewr::forge::PrSnapshot {
+        url: "https://github.com/o/r/pull/7".into(),
+        ..common::pr_snapshot()
+    };
+    let comment = herdr_reviewr::forge::Comment {
+        place: Some(FindingPlace {
+            path: "a.rs".into(),
+            range: Some((38, 38)),
+            side: Some(Side::Old),
+        }),
+        ..common::comment()
+    };
+    let text = format_pr_thread(&snapshot, &comment);
+    assert!(text.contains("a.rs:38 (removed)"), "{text}");
+}
+
+#[test]
+fn a_pr_thread_orders_its_replies_after_the_root() {
+    use herdr_reviewr::export::format_pr_thread;
+    use herdr_reviewr::forge::Reply;
+    let snapshot = herdr_reviewr::forge::PrSnapshot {
+        url: "https://github.com/o/r/pull/7".into(),
+        ..common::pr_snapshot()
+    };
+    let comment = herdr_reviewr::forge::Comment {
+        body: "looks wrong".into(),
+        replies: vec![
+            Reply {
+                author: "bob".into(),
+                author_is_bot: false,
+                body: "fixed in a follow-up".into(),
+                created_at: "2026-06-27T11:00:00Z".into(),
+            },
+            Reply {
+                author: "ann".into(),
+                author_is_bot: false,
+                body: "thanks".into(),
+                created_at: "2026-06-27T12:00:00Z".into(),
+            },
+        ],
+        ..common::comment()
+    };
+    let text = format_pr_thread(&snapshot, &comment);
+    assert_eq!(
+        text,
+        "https://github.com/o/r/pull/7\n\nComment by ann:\nlooks wrong\n\nReply by bob:\nfixed in a follow-up\n\nReply by ann:\nthanks"
+    );
+}
+
+#[test]
+fn a_pr_thread_drops_blank_lines_from_every_body_like_a_local_comment() {
+    use herdr_reviewr::export::format_pr_thread;
+    let snapshot = herdr_reviewr::forge::PrSnapshot {
+        url: "https://github.com/o/r/pull/7".into(),
+        ..common::pr_snapshot()
+    };
+    let comment = herdr_reviewr::forge::Comment {
+        body: "first line\n\n  \nsecond line\n".into(),
+        ..common::comment()
+    };
+    let text = format_pr_thread(&snapshot, &comment);
+    assert_eq!(text, "https://github.com/o/r/pull/7\n\nComment by ann:\nfirst line\nsecond line");
+}

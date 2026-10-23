@@ -535,6 +535,8 @@ pub enum FooterAction {
     Split,
     Scope,
     Send,
+    /// The `PR` tab's `send`, naming the thread it addresses rather than a count.
+    SendPr,
     List,
     Copy,
     /// The quit question's answer that quits, naming the comments still pending.
@@ -714,6 +716,8 @@ pub struct App {
     pub picker_over: Mode,
     /// The agent of the last successful send, which arms the picker.
     pub last_sent_pane: Option<String>,
+    /// A PR thread's text, captured when `send` is pressed and held until the agent is chosen.
+    pub pr_pending_send: Option<String>,
     /// The base picker's rows, filter, and highlight while `Mode::BasePick` is open
     pub base_picker: Option<BasePicker>,
     pub mode: Mode,
@@ -909,6 +913,7 @@ impl App {
             picker_cursor: 0,
             picker_over: Mode::Normal,
             last_sent_pane: None,
+            pr_pending_send: None,
             base_picker: None,
             mode: Mode::Normal,
             input: String::new(),
@@ -4657,6 +4662,9 @@ impl App {
             if self.pr_snapshot().is_some() {
                 out.push((A::OpenPr, Primary));
             }
+            if self.pr_selected_comment().is_some() {
+                out.push((A::SendPr, Send));
+            }
             out.push((A::Search, Go));
             out.push((A::TogglePane, Go));
             out.push((A::NavigatorPosition, Go));
@@ -4830,8 +4838,34 @@ impl App {
         match herdr::send_target(&self.herdr.ids) {
             Ok(SendTarget::One(agent)) => self.export_to_agent(&agent),
             Ok(SendTarget::Many(rows)) => self.open_picker(rows),
-            Err(e) => self.status = crate::export::send_failure(&e, None, &self.copy_key()),
+            Err(e) => {
+                self.status = crate::export::send_failure(&e, None, Some(&self.copy_key()));
+            }
         }
+    }
+
+    /// The `PR` tab's `Send`: one agent gets the focused thread directly, several open the picker.
+    pub fn send_pr_thread(&mut self) {
+        let Some(text) = self.pr_send_payload() else {
+            self.status = "no thread selected".to_string();
+            return;
+        };
+        match herdr::send_target(&self.herdr.ids) {
+            Ok(SendTarget::One(agent)) => self.export_pr_to_agent(&agent, &text),
+            Ok(SendTarget::Many(rows)) => {
+                self.pr_pending_send = Some(text);
+                self.open_picker(rows);
+            }
+            // The `PR` tab has no copy action to fall back to.
+            Err(e) => self.status = crate::export::send_failure(&e, None, None),
+        }
+    }
+
+    /// The focused `PR` thread as its one-shot export text, or `None` off a thread row.
+    fn pr_send_payload(&self) -> Option<String> {
+        let snapshot = self.pr_snapshot()?;
+        let comment = self.pr_selected_comment()?;
+        Some(crate::export::format_pr_thread(snapshot, comment))
     }
 
     /// The copy key as its hint shows it, the way out of a failed send.
@@ -4851,13 +4885,14 @@ impl App {
         self.mode = Mode::Picker;
     }
 
-    /// Close the picker onto the view it opened over.
+    /// Close the picker onto the view it opened over; clears any pending PR send.
     pub fn close_picker(&mut self) {
         if self.mode == Mode::Picker {
             self.mode = std::mem::replace(&mut self.picker_over, Mode::Normal);
         }
         self.picker_rows.clear();
         self.picker_cursor = 0;
+        self.pr_pending_send = None;
     }
 
     pub fn picker_move(&mut self, delta: isize) {
@@ -4876,8 +4911,13 @@ impl App {
     /// Send to the highlighted agent and close either way; a failure keeps the comments.
     pub fn picker_pick(&mut self) {
         let Some(agent) = self.picker_rows.get(self.picker_cursor).cloned() else { return };
+        // Keep the selected thread's text before closing the picker clears it.
+        let pr_text = self.pr_pending_send.take();
         self.close_picker();
-        self.export_to_agent(&agent);
+        match pr_text {
+            Some(text) => self.export_pr_to_agent(&agent, &text),
+            None => self.export_to_agent(&agent),
+        }
     }
 
     /// Whether the base picker opens: a file tab without `--base`.
@@ -5156,6 +5196,24 @@ impl App {
         let target = Agent { pane: agent.pane_id.clone(), name: agent.name.clone() };
         if self.export(&target) {
             self.last_sent_pane = Some(agent.pane_id.clone());
+        }
+    }
+
+    /// Send the selected PR thread without consuming local comments.
+    fn export_pr_to_agent(&mut self, agent: &AgentChoice, text: &str) {
+        let target = Agent { pane: agent.pane_id.clone(), name: agent.name.clone() };
+        logln!("export pr thread -> {} ::\n{text}", target.label());
+        match target.export(text) {
+            Ok(()) => {
+                self.last_sent_pane = Some(agent.pane_id.clone());
+                self.status = target.success_message(1);
+                logln!("export pr thread OK");
+            }
+            Err(e) => {
+                // The `PR` tab has no copy action, so its failure names no way out.
+                self.status = crate::export::agent_send_failure(&e, Some(&agent.name), None);
+                logln!("export pr thread ERR: {e:#}");
+            }
         }
     }
 

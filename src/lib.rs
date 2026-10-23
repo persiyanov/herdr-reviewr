@@ -1856,6 +1856,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             (Some(K::NavigatorShrink), _) => app.resize_navigator(-4),
             (Some(K::Down), _) => app.pr_move(1),
             (Some(K::Up), _) => app.pr_move(-1),
+            (Some(K::Send), _) => app.send_pr_thread(),
             (Some(K::Keys), _) => app.toggle_keys(),
             (_, Esc) => app.escape(),
             (_, Tab) => app.toggle_focus(),

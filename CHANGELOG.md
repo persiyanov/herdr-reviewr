@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Send a PR thread**: on the `PR` tab, `s` sends the focused comment thread — its replies included — straight to an agent, through the same send and picker as your own comments.
+
 ## [0.48.0] — 2026-10-19
 
 ### Added

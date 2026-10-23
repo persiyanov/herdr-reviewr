@@ -155,6 +155,7 @@ The usual editing keys work: arrows, `Home` / `End`, `Ctrl+A` / `Ctrl+E`, `Alt+b
 | `j` `k` | Move through description and comments |
 | `PageUp` `PageDown` | Scroll |
 | `o` | Open in browser |
+| `s` | Send the focused comment thread to the agent |
 | `r` | Refresh |
 
 **Mouse:** drag to copy, double-click a word, triple-click a line. Click or drag line numbers to
