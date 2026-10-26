@@ -1924,7 +1924,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::NavigatorGrow => app.resize_navigator(4),
             K::NavigatorShrink => app.resize_navigator(-4),
             K::ScopeUncommitted => app.set_scope(Scope::Uncommitted)?,
-            K::ScopeBranch => app.set_scope(Scope::Branch)?,
+            K::ScopeBranch => app.branch_key()?,
             K::ScopeLastTurn => app.set_scope(Scope::LastTurn)?,
             K::ScopeCommits => app.set_scope(Scope::Commits)?,
             K::BasePick => app.open_base_picker(),

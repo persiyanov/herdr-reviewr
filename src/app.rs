@@ -4984,8 +4984,50 @@ impl App {
         };
         let Some(choice) = choice else { return Ok(()) };
         self.close_base_picker();
-        let write = git::write_base_pick(&self.repo, choice.name());
-        if let Err(e) = write {
+        self.apply_base_pick(choice.name())
+    }
+
+    /// `b`: enter `branch`, or flip its base between the default branch and the open PR's base.
+    pub fn branch_key(&mut self) -> Result<()> {
+        if self.scope != Scope::Branch || self.composing() || !self.base_pick_available() {
+            return self.set_scope(Scope::Branch);
+        }
+        self.ensure_config_ready()?;
+        let default = match git::default_branch_name(&self.repo) {
+            Ok(Some(default)) => default,
+            Ok(None) => {
+                self.status = "no default branch to compare against".into();
+                return Ok(());
+            }
+            Err(e) => {
+                self.status = e.0;
+                return Ok(());
+            }
+        };
+        let current = self.branch_base.winner.as_ref().map(|w| w.name().to_string());
+        let target = match self.parent_base(&default) {
+            Some(parent) if current.as_deref() != Some(parent.as_str()) => parent,
+            None if current.as_deref() == Some(default.as_str()) => {
+                self.status = format!("no open PR on another base: comparing against {default}");
+                return Ok(());
+            }
+            _ => default,
+        };
+        self.apply_base_pick(&target)?;
+        self.status = format!("base: {target}");
+        Ok(())
+    }
+
+    /// The branch this one stacks on: the open PR's base, never a guess.
+    fn parent_base(&self, default: &str) -> Option<String> {
+        self.pr_snapshot()
+            .filter(|s| s.state == forge::PrState::Open && s.base_ref != default)
+            .map(|s| s.base_ref.clone())
+    }
+
+    /// Save `name` as this worktree's base and rebuild `branch` against it.
+    fn apply_base_pick(&mut self, name: &str) -> Result<()> {
+        if let Err(e) = git::write_base_pick(&self.repo, name) {
             self.status = e.0;
             return Ok(());
         }
