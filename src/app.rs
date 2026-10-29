@@ -694,7 +694,7 @@ pub struct App {
     pub reveal_files: bool,
     /// Set by navigation, never the wheel, to reveal `diff_cursor` next frame.
     pub reveal_diff: bool,
-    /// Set by `goto_line`: center a cursor that landed off screen, not nudge it to the edge.
+    /// Set by jumps (`:N`, find, a search pick): center a cursor that landed off screen.
     pub reveal_center: bool,
     /// Set by a relayout: the screen lines above the cursor the next frame keeps.
     keep_above: Option<usize>,
@@ -4508,7 +4508,7 @@ impl App {
             FindHit::Visible(v) => self.diff_cursor = v,
             FindHit::Folded { new_no } => self.diff_cursor = self.land_on_line(new_no, Side::New),
         }
-        self.reveal_diff = true;
+        self.reveal_center = true;
     }
 
     /// Find's query; `None` for the line field, whose digits are no search.
@@ -4678,7 +4678,7 @@ impl App {
                 (line.saturating_sub(1) as usize).min(last)
             };
         }
-        self.reveal_diff = true;
+        self.reveal_center = true;
         Ok(())
     }
 
