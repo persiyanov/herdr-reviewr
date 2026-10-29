@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Find and search land mid-pane**: a find step or a search pick that lands off screen now centers the match, as `:N` does, instead of leaving it on the pane's edge.
+
 ## [0.49.0] — 2026-10-29
 
 ### Added
