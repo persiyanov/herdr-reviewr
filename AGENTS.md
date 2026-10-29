@@ -57,7 +57,7 @@ The runtime is a single-threaded frame loop (`event_loop` in `src/lib.rs`): draw
 
 ## QA install — putting a local build into the user's herdr panes
 
-The user tests builds in real herdr panes. The panes run the GitHub-installed plugin's binary at `~/.config/herdr/plugins/github/persiyanov.reviewr-<hash>/bin/herdr-reviewr`, NOT anything in this worktree. Full procedure: `docs/qa-install.md`. Short form:
+The user tests builds in real herdr panes. The panes run the GitHub-installed plugin's binary at `<plugin_root>/bin/herdr-reviewr` (`herdr plugin list --json`; under `~/.config/herdr/plugins/github-installations/` since herdr 0.9.5), NOT anything in this worktree. Full procedure: `docs/qa-install.md`. Short form:
 
 ```
 just qa-install

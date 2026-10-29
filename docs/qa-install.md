@@ -3,7 +3,9 @@
 How to run a locally built `herdr-reviewr` inside the real herdr panes. Follow it exactly. Every
 step exists because skipping it has broken a session before.
 
-The installed plugin lives at `~/.config/herdr/plugins/github/persiyanov.reviewr-<hash>/`. Its
+The installed plugin lives at the `plugin_root` that `herdr plugin list --json` reports
+(`~/.config/herdr/plugins/github-installations/persiyanov.reviewr-<hash>/<n>-0/checkout/` since
+herdr 0.9.5, `~/.config/herdr/plugins/github/persiyanov.reviewr-<hash>/` before). Its
 pane and its actions run `bin/herdr-reviewr` from that directory, as its `herdr-plugin.toml`
 says. QA means swapping those two files and restarting the panes. herdr rereads the manifest on
 every plugin call, so a manifest change takes effect on the next keypress, with no herdr
