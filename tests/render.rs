@@ -4298,6 +4298,29 @@ fn a_wide_glyph_author_keeps_the_age_column() {
 }
 
 #[test]
+fn the_commit_picker_paints_the_rev_line_while_typing() {
+    let (_r, mut app, shas) = commits_app();
+    app.open_commit_picker();
+    app.commit_picker_begin_rev();
+    // The field routes through the active-field editor, caret and all.
+    for c in "HEAD~1".chars() {
+        app.input_push(c);
+    }
+    let out = dump(&render_buffer(&app));
+    assert!(!out.contains("rev: type a revision"), "the typed text replaces it:\n{out}");
+    assert!(out.contains("HEAD~1"), "the typed rev paints:\n{out}");
+    assert!(out.contains(short(&shas[3])), "the rows still paint below:\n{out}");
+    let footer = footer_line(&out);
+    assert!(footer.contains("enter open") && footer.contains("esc cancel"), "{footer}");
+
+    // Empty, the line is a placeholder instead.
+    app.commit_picker_rev_cancel();
+    app.commit_picker_begin_rev();
+    let out = render(&app);
+    assert!(out.contains("rev: type a revision"), "{out}");
+}
+
+#[test]
 fn the_picker_trail_counts_comments_and_a_tall_list_says_more() {
     let (r, mut app, shas) = commits_app();
     // A comment on `two`.

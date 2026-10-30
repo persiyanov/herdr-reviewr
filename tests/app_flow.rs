@@ -7646,6 +7646,129 @@ fn every_other_key_is_inert_inside_the_commit_picker() {
     assert_eq!(picker(&app).cursor, 3, "ctrl+d pages too");
 }
 
+/// Open the rev field, type `text`, and submit it, the way a user types a hash.
+fn type_rev(app: &mut App, keymap: &Keymap, text: &str) {
+    press(app, keymap, KeyCode::Char('H'));
+    for c in text.chars() {
+        press(app, keymap, KeyCode::Char(c));
+    }
+    press(app, keymap, KeyCode::Enter);
+}
+
+#[test]
+fn a_typed_hash_reviews_that_commit_alone() {
+    let (r, shas) = commits_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    press(&mut app, &keymap, KeyCode::Char('G'));
+    // A full sha.
+    type_rev(&mut app, &keymap, &shas[1]);
+    assert_eq!(app.mode, Mode::Normal, "the pick closes the picker");
+    assert_eq!(app.scope, Scope::Commits);
+    assert_eq!(app.commit_pick, Some(herdr_reviewr::model::CommitPick::single(&shas[1])));
+    assert_eq!(changed_paths(&app), ["one.rs"], "the commit alone, no worktree edit");
+    let status = app.pick_status.as_ref().expect("the verdict lands with the changeset");
+    assert_eq!(status.verdict, herdr_reviewr::world::PickVerdict::Live);
+    assert_eq!(status.subject, "one");
+
+    // A short sha and a relative name resolve to the same full commit.
+    for rev in [&shas[2][..7], "HEAD~1"] {
+        press(&mut app, &keymap, KeyCode::Char('G'));
+        type_rev(&mut app, &keymap, rev);
+        assert_eq!(
+            app.commit_pick,
+            Some(herdr_reviewr::model::CommitPick::single(&shas[2])),
+            "{rev} resolves"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_revision_says_so_and_keeps_the_picker_and_the_field() {
+    let (r, shas) = commits_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    press(&mut app, &keymap, KeyCode::Char('G'));
+    type_rev(&mut app, &keymap, "deadbeef");
+    assert_eq!(app.mode, Mode::CommitPick, "a miss stays in the picker");
+    assert_eq!(app.status, "no such commit: deadbeef");
+    assert!(picker(&app).rev_input.is_some(), "the field keeps its text");
+    assert!(app.commit_pick.is_none(), "nothing is picked");
+
+    // `esc` drops only the field: the picker stays and the rows keep working.
+    press(&mut app, &keymap, KeyCode::Esc);
+    assert!(picker(&app).rev_input.is_none());
+    assert_eq!(app.mode, Mode::CommitPick);
+    press(&mut app, &keymap, KeyCode::Char('j'));
+    press(&mut app, &keymap, KeyCode::Enter);
+    assert_eq!(app.commit_pick, Some(herdr_reviewr::model::CommitPick::single(&shas[2])));
+
+    // An empty field submits nothing, so a stray `enter` cannot close the picker.
+    press(&mut app, &keymap, KeyCode::Char('G'));
+    press(&mut app, &keymap, KeyCode::Char('H'));
+    press(&mut app, &keymap, KeyCode::Enter);
+    assert_eq!(app.mode, Mode::CommitPick);
+    assert!(picker(&app).rev_input.is_some());
+}
+
+#[test]
+fn a_typed_commit_off_the_listed_history_becomes_the_pick_row() {
+    let (r, shas) = commits_repo();
+    // A commit on a side branch, outside the listed history of `main`.
+    r.git(&["checkout", "-q", "-b", "side", &shas[0]]);
+    r.write("side.rs", "s\n");
+    r.commit_all("side");
+    let side = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+    r.git(&["checkout", "-q", "-f", "main"]);
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    press(&mut app, &keymap, KeyCode::Char('G'));
+    assert_eq!(picker(&app).rows.len(), 4, "only `main`'s commits are listed");
+    type_rev(&mut app, &keymap, &side);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.scope, Scope::Commits);
+    assert_eq!(app.commit_pick, Some(herdr_reviewr::model::CommitPick::single(&side)));
+    let status = app.pick_status.as_ref().expect("the verdict lands");
+    assert_eq!(status.verdict, herdr_reviewr::world::PickVerdict::OffBranch);
+    assert!(changed_paths(&app).contains(&"side.rs".to_string()));
+
+    // Reopening shows the unlisted pick as the row above the list.
+    press(&mut app, &keymap, KeyCode::Char('G'));
+    let cp = picker(&app);
+    assert_eq!(cp.pick_row.as_ref(), app.commit_pick.as_ref());
+    assert!(cp.is_pick_row(0));
+}
+
+#[test]
+fn typing_a_rev_shows_its_bar_and_survives_a_relist() {
+    let (r, _) = commits_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    press(&mut app, &keymap, KeyCode::Char('G'));
+    assert!(
+        app.footer_bands().iter().any(|&(a, _)| a == FooterAction::PickRev),
+        "the picker advertises the rev key"
+    );
+    press(&mut app, &keymap, KeyCode::Char('H'));
+    for c in "HEAD".chars() {
+        press(&mut app, &keymap, KeyCode::Char(c));
+    }
+    let bands = app.footer_bands();
+    assert_eq!(bands[0].0, FooterAction::PickCommitRun, "`enter` reviews the typed rev");
+    assert!(
+        !bands.iter().any(|&(a, _)| a == FooterAction::CommitAnchor),
+        "no anchors while typing"
+    );
+
+    // A relist under a moved `HEAD` keeps the typing over the fresh rows.
+    r.write("four.rs", "4\n");
+    r.commit_all("four");
+    common::land_world(&mut app);
+    assert_eq!(app.mode, Mode::CommitPick);
+    assert_eq!(picker(&app).rev_input.as_ref().map(|r| r.text.as_str()), Some("HEAD"));
+    assert_eq!(picker(&app).rows.len(), 5, "the relist saw the new commit");
+}
+
 #[test]
 fn an_off_branch_pick_keeps_painting_as_a_row_above_the_list() {
     let (r, shas) = commits_repo();
@@ -7898,15 +8021,19 @@ fn a_poll_under_the_open_picker_reconciles_by_sha() {
 }
 
 #[test]
-fn a_resolved_base_lists_the_commits_over_its_merge_base() {
+fn the_picker_lists_recent_history_even_under_a_base() {
     let (r, shas) = commits_repo();
     r.set_origin_default("main", &shas[1]);
     let mut app = app_on(&r);
     let keymap = Keymap::default();
     press(&mut app, &keymap, KeyCode::Char('G'));
-    assert_eq!(picker(&app).title, "commits · 2 over main");
+    assert_eq!(picker(&app).title, "commits · last 50");
     let listed: Vec<&str> = picker(&app).rows.iter().map(|r| r.sha.as_str()).collect();
-    assert_eq!(listed, [shas[3].as_str(), shas[2].as_str()], "newest first, the base excluded");
+    assert_eq!(
+        listed,
+        [shas[3].as_str(), shas[2].as_str(), shas[1].as_str(), shas[0].as_str()],
+        "newest first, the base's older commits included"
+    );
 }
 
 #[test]

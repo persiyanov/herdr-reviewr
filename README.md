@@ -103,6 +103,7 @@ Every key can be rebound ([Keybindings](#keybindings)).
 | `u` `b` `t` `g` | Scope: uncommitted / branch / last turn / commits |
 | `B` | Pick the base branch |
 | `G` | Pick commits |
+| `H` | In the commit picker, type any revision (hash, tag, `HEAD~2`) |
 | `W` | Switch to another worktree of this repo |
 | `j` `k` · `↑` `↓` | Move |
 | `]` `[` | Next / previous change |
@@ -174,7 +175,9 @@ comment. Click files, tabs, and links. Scroll with the wheel.
 - **branch** — everything since the branch left its base, commits included. The base is the
   default branch until you pick another ([Base branch](#base-branch)).
 - **last turn** — changes since the agent's latest turn started.
-- **commits** — one commit or a range, picked with `G`.
+- **commits** — one commit or a range, picked with `G`. Inside the picker, `H` types any
+  revision — a hash, a short hash, a tag, or `HEAD~2`, including commits the list doesn't show
+  (say, one on another branch).
 
 reviewr starts in **uncommitted** (`default_scope` changes that). Git-ignored files never show
 in **Changes**.
@@ -269,7 +272,7 @@ keys help non-Latin layouts: bind the character your layout types on the same ke
 | `next-hunk` / `prev-hunk` | `]` / `[` |
 | `next-file` / `prev-file` | `f` / `F` |
 | `scope-uncommitted` / `scope-branch` / `scope-last-turn` / `scope-commits` | `u` / `b` / `t` / `g` |
-| `base-pick` / `commit-pick` | `B` / `G` |
+| `base-pick` / `commit-pick` / `pick-rev` | `B` / `G` / `H` |
 | `worktree-pick` | `W` |
 | `tab-changes` / `tab-all-files` / `tab-pr` | `1` / `2` / `3` |
 | `wrap` | `w` |

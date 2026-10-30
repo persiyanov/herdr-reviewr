@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Type any revision in the commit picker**: `H` opens a rev field that takes a hash, a short
+  hash, a tag, or `HEAD~2`, including commits the list doesn't show (say, one on another branch).
+- **Breaking: `H` is a new default key.** A `[keybindings]` config that already uses `H` now collides and must move it.
+
+### Changed
+- **The commit picker lists the last 50 commits of `HEAD` under any base.** Before, on a feature branch it listed only the commits past the base, often just one, so older commits on `main` could not be reached from the list.
+
 ## [0.49.0] — 2026-10-29
 
 ### Added

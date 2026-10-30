@@ -1884,7 +1884,20 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
 
     // Commit picker: move, `select` anchors, `enter` picks, `esc` unanchors or closes.
     if app.mode == Mode::CommitPick {
+        // Typing a revision owns the keyboard, the way the base picker's filter does:
+        // `esc` drops the field, `enter` reviews the typed commit, the rest edits the text.
+        if app.commit_picker.as_ref().is_some_and(|cp| cp.rev_input.is_some()) {
+            let alt = key.modifiers.contains(KeyModifiers::ALT);
+            let word = alt || ctrl;
+            match key.code {
+                Esc => app.commit_picker_rev_cancel(),
+                Enter => app.commit_picker_rev_submit()?,
+                code => apply_text_edit(app, code, ctrl, alt, word),
+            }
+            return Ok(());
+        }
         match (action, key.code) {
+            (Some(K::PickRev), _) => app.commit_picker_begin_rev(),
             (_, Esc) => app.commit_picker_escape(),
             (_, Enter) => app.commit_picker_pick()?,
             (Some(K::Down), _) => app.commit_picker_move(1),
@@ -2007,8 +2020,9 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::Find => app.open_find(),
             K::GotoLine => app.open_line(),
             K::Keys => app.toggle_keys(),
-            // Inert here; `quit-discard` only answers the quit question.
-            K::Delete | K::OpenPr | K::QuitDiscard => {}
+            // Inert here; `pick-rev` only types into the commit picker, `quit-discard` only
+            // answers the quit question.
+            K::Delete | K::OpenPr | K::QuitDiscard | K::PickRev => {}
         }
         return Ok(());
     }

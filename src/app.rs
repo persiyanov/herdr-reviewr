@@ -269,6 +269,13 @@ impl WorktreePicker {
     }
 }
 
+/// The typed revision field: the text and the caret, a char index.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RevInput {
+    pub text: String,
+    pub caret: usize,
+}
+
 /// The open commit picker; a refresh re-lists its rows, reconciled by sha.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitPicker {
@@ -276,6 +283,8 @@ pub struct CommitPicker {
     pub rows: Vec<git::CommitRow>,
     /// An unlisted current pick, painted as one row above the list.
     pub pick_row: Option<CommitPick>,
+    /// The revision being typed, or `None` while moving the highlight.
+    pub rev_input: Option<RevInput>,
     /// The highlighted row, an index into the visible view (`pick_row` first when present).
     pub cursor: usize,
     /// The anchor row, an index into the visible view, never the pick row.
@@ -621,6 +630,8 @@ pub enum FooterAction {
     CommitPick,
     /// The commit picker's bar.
     PickCommitRun,
+    /// Type a revision into the commit picker.
+    PickRev,
     MoveCommitRow,
     CommitAnchor,
     CloseCommitPicker,
@@ -3688,7 +3699,13 @@ impl App {
             Mode::WorktreePick => {
                 self.worktree_picker.as_mut().map(|w| (&mut w.query, &mut w.caret))
             }
-            Mode::Normal | Mode::List | Mode::Picker | Mode::CommitPick => None,
+            // Only while a revision is being typed; moving the highlight edits nothing.
+            Mode::CommitPick => self
+                .commit_picker
+                .as_mut()
+                .and_then(|cp| cp.rev_input.as_mut())
+                .map(|r| (&mut r.text, &mut r.caret)),
+            Mode::Normal | Mode::List | Mode::Picker => None,
         }
     }
 
@@ -3824,8 +3841,10 @@ impl App {
         let mut norm = text.replace("\r\n", "\n").replace('\r', "\n");
         match self.mode {
             Mode::Search | Mode::Find => norm = norm.replace('\n', " "),
-            // No branch or worktree name holds a newline.
-            Mode::BasePick | Mode::WorktreePick => norm.retain(|c| c != '\n'),
+            // No branch, worktree or commit name holds a newline.
+            Mode::BasePick | Mode::WorktreePick | Mode::CommitPick => {
+                norm.retain(|c| c != '\n');
+            }
             _ => {}
         }
         let norm: Vec<char> = norm.chars().collect();
@@ -4749,14 +4768,19 @@ impl App {
                 ];
             }
             Mode::CommitPick => {
-                // Nothing listed: only the exit.
+                // Typing a revision: `enter` reviews it, `esc` returns to the rows.
+                if self.commit_picker.as_ref().is_some_and(|cp| cp.rev_input.is_some()) {
+                    return vec![(A::PickCommitRun, Primary), (A::CloseCommitPicker, Do)];
+                }
+                // Nothing listed: only the exit and the rev entry that reaches any commit.
                 if self.commit_picker.as_ref().is_none_or(CommitPicker::is_empty) {
-                    return vec![(A::CloseCommitPicker, Primary)];
+                    return vec![(A::CloseCommitPicker, Primary), (A::PickRev, Do)];
                 }
                 let mut out = vec![
                     (A::PickCommitRun, Primary),
                     (A::CloseCommitPicker, Do),
                     (A::MoveCommitRow, Do),
+                    (A::PickRev, Do),
                 ];
                 // The pick row takes no anchor, so `v` is not offered on it.
                 if self.commit_picker.as_ref().is_some_and(|cp| !cp.is_pick_row(cp.cursor)) {
@@ -5300,25 +5324,24 @@ impl App {
         self.mode = Mode::CommitPick;
     }
 
-    /// The commit picker's rows and title, the last 50 without a merge-base.
+    /// The commit picker's rows and title: always the last 50 commits of `HEAD`, so older
+    /// history on the base branch stays reachable.
     fn list_commit_rows(&self) -> Result<CommitPicker, String> {
         let head = git::head_oid(&self.repo);
-        let base = git::resolve_base(&self.repo, self.base.as_deref())
-            .map_err(|e| e.0)?
-            .status
-            .winner
-            .and_then(|b| git::merge_base(&self.repo, b.oid()).map(|mb| (b, mb)))
-            // On the base branch itself the range is empty: the last 50 is the universe.
-            .filter(|(_, mb)| head.as_deref() != Some(mb.as_str()));
-        let rows = git::list_commits(&self.repo, base.as_ref().map(|(_, mb)| mb.as_str()))
-            .map_err(|e| e.to_string())?;
+        let rows = git::list_commits(&self.repo, None).map_err(|e| e.to_string())?;
         // Only an unborn repository lists nothing.
-        let title = match &base {
-            Some((b, _)) => format!("commits · {} over {}", rows.len(), b.name()),
-            None => "commits · last 50".to_string(),
-        };
+        let title = "commits · last 50".to_string();
         let empty = "no commits yet".to_string();
-        Ok(CommitPicker { rows, pick_row: None, cursor: 0, anchor: None, title, empty, head })
+        Ok(CommitPicker {
+            rows,
+            pick_row: None,
+            rev_input: None,
+            cursor: 0,
+            anchor: None,
+            title,
+            empty,
+            head,
+        })
     }
 
     /// Close the commit picker; the scope stays.
@@ -5366,6 +5389,11 @@ impl App {
         let Some(pick) = self.commit_picker.as_ref().and_then(CommitPicker::picked) else {
             return Ok(());
         };
+        self.apply_commit_pick(pick)
+    }
+
+    /// Take `pick` as the world's input: close the picker, rebuild, and reveal the files.
+    fn apply_commit_pick(&mut self, pick: CommitPick) -> Result<()> {
         self.close_commit_picker();
         self.commit_pick = Some(pick);
         // The old status describes the old shas.
@@ -5375,6 +5403,53 @@ impl App {
         self.rebase_changes()?;
         self.reveal_files = true;
         Ok(())
+    }
+
+    /// Start typing a revision into the picker; a stale status goes, so the field reads alone.
+    pub fn commit_picker_begin_rev(&mut self) {
+        let Some(cp) = self.commit_picker.as_mut() else { return };
+        if cp.rev_input.is_none() {
+            cp.rev_input = Some(RevInput::default());
+            self.status = String::new();
+        }
+    }
+
+    /// `esc` while typing: drop the field, back to moving the highlight.
+    pub fn commit_picker_rev_cancel(&mut self) {
+        if let Some(cp) = self.commit_picker.as_mut() {
+            cp.rev_input = None;
+        }
+    }
+
+    /// `enter` while typing: resolve the revision and review that commit alone; a miss says so
+    /// and stays in the picker.
+    pub fn commit_picker_rev_submit(&mut self) -> Result<()> {
+        let Some(text) = self
+            .commit_picker
+            .as_ref()
+            .and_then(|cp| cp.rev_input.as_ref())
+            .map(|r| r.text.trim().to_string())
+        else {
+            return Ok(());
+        };
+        if text.is_empty() {
+            return Ok(());
+        }
+        match git::resolve_commit(&self.repo, &text) {
+            Ok(Some(oid)) => {
+                self.commit_picker.as_mut().expect("checked above").rev_input = None;
+                self.apply_commit_pick(CommitPick::single(&oid))
+            }
+            // An unknown name and an ambiguous prefix both miss; say so and keep the field.
+            Ok(None) => {
+                self.status = format!("no such commit: {text}");
+                Ok(())
+            }
+            Err(e) => {
+                self.status = e.0;
+                Ok(())
+            }
+        }
     }
 
     /// Once `HEAD` moved, re-list the picker and reconcile by sha (Continuity); else nothing.
@@ -5421,6 +5496,8 @@ impl App {
         }
         fresh.cursor = cursor;
         fresh.anchor = anchor;
+        // An in-flight rev entry survives the relist: the typing continues over fresh rows.
+        fresh.rev_input = old.rev_input;
         self.commit_picker = Some(fresh);
     }
 
@@ -6057,6 +6134,7 @@ mod tests {
         old.commit_picker = Some(super::CommitPicker {
             rows: vec![row("a"), row("b"), row("c")],
             pick_row: None,
+            rev_input: None,
             cursor: 0,
             anchor: Some(2),
             title: "commits · last 50".to_string(),

@@ -2929,6 +2929,7 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
             return ("enter".into(), if n > 1 { format!("open {n}") } else { "open".into() });
         }
         A::MoveCommitRow => (format!("{} {}", hint(K::Down), hint(K::Up)), "move"),
+        A::PickRev => (hint(K::PickRev), "rev"),
         A::CloseCommitPicker => {
             let anchored = app.commit_picker.as_ref().is_some_and(|cp| cp.anchor.is_some());
             ("esc".into(), if anchored { "clear" } else { "cancel" })
@@ -3808,6 +3809,8 @@ fn now_unix() -> u64 {
 
 fn commit_picker_popup(area: Rect, app: &App, parts: &[CommitRowParts]) -> Rect {
     let Some(cp) = &app.commit_picker else { return Rect::default() };
+    // The rev-entry line takes one row of its own, like a filtered menu's filter.
+    let rev_line = usize::from(cp.rev_input.is_some());
     let author_w = commit_author_width(parts);
     let widest = parts
         .iter()
@@ -3825,7 +3828,15 @@ fn commit_picker_popup(area: Rect, app: &App, parts: &[CommitRowParts]) -> Rect 
         })
         .max()
         .unwrap_or(0);
-    menu_popup(area, app, widest, &cp.title, cp.len().max(1) + 2)
+    menu_popup(area, app, widest, &cp.title, cp.len().max(1) + 2 + rev_line)
+}
+
+/// The rows' area under the rev-entry line, when one is open; the whole inner otherwise.
+fn commit_list_area(cp: &crate::app::CommitPicker, inner: Rect) -> Rect {
+    match &cp.rev_input {
+        Some(_) => Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner },
+        None => inner,
+    }
 }
 
 /// The rows the list shows, leaving one for `… N more` when clipped.
@@ -3845,13 +3856,18 @@ fn render_commit_picker(frame: &mut Frame, app: &App, area: Rect) {
     if inner.height == 0 {
         return;
     }
+    // A rev entry owns the first row, the way a filtered menu's filter does.
+    let rows_area = match &cp.rev_input {
+        Some(rev) => menu_filter(frame, p, inner, (&rev.text, rev.caret), "rev: type a revision"),
+        None => inner,
+    };
     if cp.is_empty() {
-        menu_note(frame, p, inner, &format!(" {}", cp.empty));
+        menu_note(frame, p, rows_area, &format!(" {}", cp.empty));
         return;
     }
-    let width = inner.width as usize;
-    let rows = commit_picker_rows(cp, inner.height as usize);
-    let first = commit_picker_scroll(cp, inner.height as usize);
+    let width = rows_area.width as usize;
+    let rows = commit_picker_rows(cp, rows_area.height as usize);
+    let first = commit_picker_scroll(cp, rows_area.height as usize);
     let last = cp.len().min(first + rows);
     let author_w = commit_author_width(&parts);
     let mut items: Vec<ListItem> = (first..last)
@@ -3897,17 +3913,18 @@ fn render_commit_picker(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(p.ink(Ink::TextMuted, Fill::Base)),
         ))));
     }
-    frame.render_widget(List::new(items), inner);
+    frame.render_widget(List::new(items), rows_area);
 }
 
 /// The commit-picker row under the pointer.
 pub fn hit_commit_picker_row(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
     let cp = app.commit_picker.as_ref()?;
     let inner = picker_inner(commit_picker_popup(area, app, &commit_row_parts(app, cp)));
-    let first = commit_picker_scroll(cp, inner.height as usize);
+    let rows_area = commit_list_area(cp, inner);
+    let first = commit_picker_scroll(cp, rows_area.height as usize);
     // The `… more` line is not a row: a click on it is inert.
-    let shown = cp.len().min(first + commit_picker_rows(cp, inner.height as usize));
-    menu_hit(inner, 0, first, shown, col, row)
+    let shown = cp.len().min(first + commit_picker_rows(cp, rows_area.height as usize));
+    menu_hit(rows_area, 0, first, shown, col, row)
 }
 
 // --- Search screen -------------------------------------------------------
