@@ -21,7 +21,7 @@ hex = "0.4"
 # as the search screen, over a plain string list.
 neo_frizbee = "0.13.3"
 # Already in the tree through fff-search. The watcher reads raw events: a debouncer crate ticks forever.
-notify = "=9.0.0-rc.5"
+notify = "=9.0.0-rc.6"
 # Already in the tree. Reads herdr's version against the minimum it needs.
 semver = "1.0.28"
 # Already in the tree through fff-search, which walks with it. Walks a folder that appears into the
