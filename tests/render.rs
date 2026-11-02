@@ -4500,21 +4500,22 @@ fn a_folder_whose_only_change_has_no_row_wears_no_dot() {
 }
 
 #[test]
-fn a_collapsed_changes_folder_wears_no_dot_and_reserves_nothing() {
-    // `Changes` paints no dot.
+fn a_changes_folder_wears_its_line_sums_instead_of_the_dot() {
     let r = dotted_repo();
     r.write("src/app.rs", "x2\n"); // two changed files keep `src/` a directory row
     let mut app = app_on(&r);
+    assert!(files_row(&app, "src/").ends_with("+2 −2"), "{:?}", files_row(&app, "src/"));
     app.focus = Focus::Files;
     app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
     app.collapse_dir();
-    assert!(!files_row(&app, "src/").contains('•'), "no dot on Changes");
+    let row = files_row(&app, "src/");
+    assert!(!row.contains('•') && row.ends_with("+2 −2"), "collapsed, still sums: {row:?}");
     let wide = "n".repeat((FILES_X1 - FILES_X0) as usize - 2); // `▸ ` + name + `/` fills the row
     r.write(&format!("{wide}/a.rs"), "a\n");
     r.write(&format!("{wide}/b.rs"), "b\n");
     app.reload().unwrap();
     let row = files_row(&app, &wide[..20]);
-    assert_eq!(row, format!("▾ {wide}/"), "the exact-fit name is whole on Changes");
+    assert_eq!(row, format!("▾ …{}/  +2", &wide[5..]), "the sums elide the name on Changes");
     enter_tab(&mut app, Tab::AllFiles);
     assert!(dot_at_edge(&app, "…"), "{:?}", files_row(&app, "…"));
     assert_eq!(

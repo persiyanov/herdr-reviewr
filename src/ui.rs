@@ -1539,7 +1539,7 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
             };
             let nest = "  ".repeat(row.depth);
             match &row.kind {
-                RowKind::Dir { expanded, has_change, .. } => {
+                RowKind::Dir { expanded, has_change, additions, deletions, .. } => {
                     let arrow = if *expanded { "▾ " } else { "▸ " };
                     // A git-ignored directory recedes into a dim, unbolded row.
                     let name_style = if row.ignored {
@@ -1549,22 +1549,33 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
                             .fg(p.ink(Ink::TextSecondary, on))
                             .add_modifier(Modifier::BOLD)
                     };
-                    // Elide the bare name, then add `/`: eliding `name/` would leave `…/`.
-                    let reserve = if app.tab == Tab::AllFiles { DIR_DOT_RESERVE } else { 0 };
+                    // `Changes` folders show their line sums, `All files` ones the dot.
+                    let all_files = app.tab == Tab::AllFiles;
+                    let stats = stats_str(*additions, *deletions);
+                    let reserve = if all_files {
+                        DIR_DOT_RESERVE
+                    } else if stats.is_empty() {
+                        0
+                    } else {
+                        stats.width() + STATS_GAP
+                    };
                     let lead = format!("{nest}{arrow}");
                     let budget = width.saturating_sub(lead.width() + reserve + 1).max(1);
+                    // Elide the bare name, then add `/`: eliding `name/` would leave `…/`.
                     let name = format!("{}/", elide_head(&row.name, budget));
                     let mut spans = vec![
                         Span::styled(lead, Style::default().fg(p.ink(Ink::TextMuted, on))),
                         Span::styled(name, name_style),
                     ];
-                    // Only collapsed `All files` folders need the dot.
-                    if app.tab == Tab::AllFiles && !expanded && *has_change {
-                        let used: usize = spans.iter().map(Span::width).sum();
-                        spans.push(Span::raw(" ".repeat(width.saturating_sub(used + 1))));
-                        // Modified's hue, the neutral one.
-                        let hue = kind_color(p, ChangeKind::Modified, on);
-                        spans.push(Span::styled(DIR_DOT, Style::default().fg(hue)));
+                    if all_files {
+                        if !expanded && *has_change {
+                            // Modified's hue, the neutral one.
+                            let hue = kind_color(p, ChangeKind::Modified, on);
+                            let dot = Span::styled(DIR_DOT, Style::default().fg(hue));
+                            push_at_end(&mut spans, width, vec![dot]);
+                        }
+                    } else if !stats.is_empty() {
+                        push_at_end(&mut spans, width, stats_spans(*additions, *deletions, p, on));
                     }
                     selectable_row(p, spans, width, on)
                 }
@@ -1606,7 +1617,7 @@ fn file_row_item(row: &FileRowSpec<'_>, width: usize, on: Fill, p: &Palette) -> 
     let marker = annotation.map_or(String::new(), |a| format!("{} ", a.kind.marker()));
     let (additions, deletions) = annotation.map_or((0, 0), |a| (a.additions, a.deletions));
     let stats = stats_str(additions, deletions);
-    let gap = if stats.is_empty() { 0 } else { 2 };
+    let gap = if stats.is_empty() { 0 } else { STATS_GAP };
     let fixed = indent.width() + marker.width() + stats.width() + gap;
     let shown = elide_head(name, width.saturating_sub(fixed).max(1));
 
@@ -1636,12 +1647,19 @@ fn file_row_item(row: &FileRowSpec<'_>, width: usize, on: Fill, p: &Palette) -> 
         }));
     }
     if !stats.is_empty() {
-        let used: usize = spans.iter().map(Span::width).sum();
-        let pad = width.saturating_sub(used + stats.width());
-        spans.push(Span::raw(" ".repeat(pad)));
-        spans.extend(stats_spans(additions, deletions, p, on));
+        push_at_end(&mut spans, width, stats_spans(additions, deletions, p, on));
     }
     selectable_row(p, spans, width, on)
+}
+
+/// The least space between a file list name and its line stats.
+const STATS_GAP: usize = 2;
+
+/// Pad `spans` so `tail` ends at column `width`, then append `tail`.
+fn push_at_end(spans: &mut Vec<Span<'static>>, width: usize, tail: Vec<Span<'static>>) {
+    let used: usize = spans.iter().chain(&tail).map(Span::width).sum();
+    spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
+    spans.extend(tail);
 }
 
 /// The `+a −d` stats text, a zero side dropped.

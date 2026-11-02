@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Folder line totals**: on the Changes tab, each folder row shows the added and removed lines of everything beneath it, `+12 −6`, so you can see where a change is big before you open it.
+
 ## [0.49.0] — 2026-10-29
 
 ### Added
