@@ -52,3 +52,7 @@ command = ["bin/herdr-reviewr", "--action", "auto-open"]
 [[events]]
 on = "worktree.opened"
 command = ["bin/herdr-reviewr", "--action", "auto-open"]
+
+# Relaunch reviewr in the panes a server restart brought back as shells (`restore`, src/actions.rs).
+[[startup]]
+command = ["bin/herdr-reviewr", "--action", "restore"]

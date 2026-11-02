@@ -188,6 +188,33 @@ fn corrected_config_recovers_on_the_next_invocation() {
 }
 
 #[test]
+fn restore_relaunches_only_labelled_shells_that_no_agent_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    panes(
+        dir.path(),
+        &json!([
+            {"pane_id": "w1:p1", "label": "reviewr"},
+            {"pane_id": "w1:p2", "label": "reviewr"},
+            {"pane_id": "w2:p3", "label": "reviewr", "agent": "claude"},
+            {"pane_id": "w2:p4", "label": "reviewr", "agent_session": {"value": "id"}},
+            {"pane_id": "w2:p5"},
+        ]),
+    );
+    procinfo(dir.path(), "w1:p2", &json!([review_ui()]));
+
+    // A startup hook runs outside any workspace.
+    let output = action("restore", dir.path()).env_remove("HERDR_WORKSPACE_ID").output().unwrap();
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let runs: Vec<String> = herdr_calls(dir.path())
+        .lines()
+        .filter(|l| l.starts_with("pane run"))
+        .map(Into::into)
+        .collect();
+    assert_eq!(runs, [format!("pane run w1:p1 '{}'", reviewr_bin())]);
+}
+
+#[test]
 fn an_unknown_action_refuses_before_any_herdr_call() {
     let dir = tempfile::tempdir().unwrap();
 
@@ -196,7 +223,7 @@ fn an_unknown_action_refuses_before_any_herdr_call() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         stderr(&output),
-        "reviewr: unknown action 'frobnicate' (toggle | open | close | auto-open)\n"
+        "reviewr: unknown action 'frobnicate' (toggle | open | close | auto-open | restore)\n"
     );
     assert!(output.stdout.is_empty());
     assert!(herdr_calls(dir.path()).is_empty());

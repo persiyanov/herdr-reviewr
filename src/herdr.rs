@@ -222,16 +222,29 @@ pub(crate) struct PaneEntry {
     #[serde(default, deserialize_with = "non_empty")]
     pub(crate) foreground_cwd: Option<String>,
     #[serde(default, deserialize_with = "non_empty")]
-    label: Option<String>,
+    pub(crate) label: Option<String>,
     /// The agent herdr detects in the pane; absent for a shell or a plugin pane.
     #[serde(default, deserialize_with = "non_empty")]
     pub(crate) agent: Option<String>,
+    /// Whether herdr resumes an agent session here after a restart, before any agent is detected.
+    #[serde(default, rename = "agent_session", deserialize_with = "present")]
+    pub(crate) has_agent_session: bool,
+}
+
+/// Whether the field holds anything but `null`, whatever its shape.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Option::<serde::de::IgnoredAny>::deserialize(d).map(|value| value.is_some())
 }
 
 impl PaneList {
     /// The panes in workspace `ws`.
     pub(crate) fn of(ws: &str) -> Result<Self, HerdrError> {
         answer(&call(&["pane", "list", "--workspace", ws])?)
+    }
+
+    /// The panes in every workspace.
+    pub(crate) fn all() -> Result<Self, HerdrError> {
+        answer(&call(&["pane", "list"])?)
     }
 
     /// The entry for pane `pane`, if the snapshot lists it.
@@ -358,6 +371,11 @@ pub(crate) fn open_plugin_pane(open: &PaneOpen) -> Result<OpenedPane, HerdrError
 /// Close pane `pane` by id with `pane close`, which reaches any pane.
 pub(crate) fn close_pane(pane: &str) -> Result<(), HerdrError> {
     call(&["pane", "close", pane]).map(drop)
+}
+
+/// Type `command` and Enter into pane `pane`'s shell with `pane run`.
+pub(crate) fn run_in_pane(pane: &str, command: &str) -> Result<(), HerdrError> {
+    call(&["pane", "run", pane, command]).map(drop)
 }
 
 /// Set tab `tab`'s label.
@@ -1184,6 +1202,15 @@ mod tests {
         assert_eq!(label("w1:p2"), None);
         assert_eq!(label("w1:p3"), None, "empty label reads as none");
         assert_eq!(label("w9:p9"), None, "unknown pane reads as none");
+    }
+
+    #[test]
+    fn an_agent_session_counts_in_any_shape_and_null_or_absent_does_not() {
+        let json = r#"{"result":{"panes":[{"pane_id":"p1","agent_session":{"value":"id"}},{"pane_id":"p2","agent_session":"id"},{"pane_id":"p3","agent_session":null},{"pane_id":"p4"}]}}"#;
+        let list: super::PaneList = super::answer(json).unwrap();
+        let has = |pane: &str| list.pane(pane).unwrap().has_agent_session;
+        assert!(has("p1") && has("p2"));
+        assert!(!has("p3") && !has("p4"));
     }
 
     #[test]

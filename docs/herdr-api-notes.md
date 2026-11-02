@@ -101,8 +101,14 @@ The direct-run mode rides on four calls plus the plain-pane env, all confirmed l
   `pane process-info` and plain `pane close` (verified live, 0.7.5). The actions key their
   converge-vs-refuse branches on that code.
 - **`herdr pane rename <id> [LABEL]... [--clear]`** sets and clears a pane's label. The binary
-  stamps its own pane `reviewr` at startup and clears it on a normal exit — display only,
-  nothing reads it back.
+  stamps its own pane `reviewr` at startup and clears it on a normal exit. Only the `restore`
+  startup hook reads it back: a label that survived means a server restart killed reviewr.
+- **Server restart** (verified live, 0.9.5): herdr restores every pane but agent panes as a
+  fresh shell in its saved cwd, and with `[experimental] pane_history` replays its last screen,
+  so a reviewr pane shows a stale diff with nothing behind it. A manifest `[[startup]]` command
+  (herdr 0.7.5+) runs once after the restore. `pane list` without `--workspace` lists every
+  workspace's panes, and an entry carries `agent_session` while herdr still has to resume an
+  agent there. `pane run <id> <command>` types the command and Enter into the pane's shell.
 - **`herdr plugin config-dir <plugin_id>`** prints the plugin's config directory
   (`~/.config/herdr/plugins/config/persiyanov.reviewr`). The binary falls back to it when
   `HERDR_PLUGIN_CONFIG_DIR` is unset, so a hand-launched pane reads the same `config.toml`.
