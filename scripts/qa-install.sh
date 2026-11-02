@@ -6,16 +6,12 @@ set -euo pipefail
 NEW="target/release/herdr-reviewr"
 MANIFEST="herdr-plugin.toml"
 
-# Locate the managed plugin install. Exactly one is expected.
-shopt -s nullglob
-roots=("$HOME"/.config/herdr/plugins/github/persiyanov.reviewr-*)
-shopt -u nullglob
-[ ${#roots[@]} -eq 1 ] || {
-  echo "qa-install: expected one installed plugin, found ${#roots[@]}:" >&2
-  printf '  %s\n' "${roots[@]:-none}" >&2
+# The install herdr runs, as it reports it: older installs can linger in other plugin folders.
+ROOT=$(herdr plugin list --plugin persiyanov.reviewr --json |
+  python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["plugins"][0]["plugin_root"])' 2>/dev/null) || {
+  echo "qa-install: herdr reports no installed persiyanov.reviewr" >&2
   exit 1
 }
-ROOT="${roots[0]}"
 BIN="$ROOT/bin/herdr-reviewr"
 
 # herdr rereads the installed manifest on every plugin call, so it is renamed into place and

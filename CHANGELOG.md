@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **reviewr panes come back after a herdr server restart.** herdr restores them as plain shells, where `pane_history` replays the last diff as if it were live. A startup hook now relaunches reviewr in each of them. macOS and Linux only.
+
 ## [0.49.0] — 2026-10-29
 
 ### Added

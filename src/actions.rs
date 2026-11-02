@@ -68,8 +68,12 @@ fn refused(why: impl Into<String>) -> Stop {
 /// Run the action `name` and return the process exit code.
 pub fn run(name: &str) -> i32 {
     crate::log::init();
+    if name == "restore" {
+        restore();
+        return 0;
+    }
     let Some(action) = Action::parse(name) else {
-        eprintln!("reviewr: unknown action '{name}' (toggle | open | close | auto-open)");
+        eprintln!("reviewr: unknown action '{name}' (toggle | open | close | auto-open | restore)");
         return 1;
     };
     match act(action) {
@@ -325,6 +329,47 @@ fn close_all(existing: &[&str], ws: &str) -> Result<String, Stop> {
     Ok(format!("closed {} in {ws}", existing.join(" ")))
 }
 
+/// The startup hook: relaunch reviewr in every pane a server restart brought back as a shell.
+fn restore() {
+    if cfg!(windows) {
+        logln!("restore: skipped, `pane run` types into PowerShell");
+        return;
+    }
+    let Ok(panes) = PaneList::all() else {
+        logln!("restore refused: herdr pane list failed");
+        return;
+    };
+    let Ok(exe) = env::current_exe() else {
+        logln!("restore refused: own binary path unreadable");
+        return;
+    };
+    let command = shell_quote(&exe.to_string_lossy());
+    // A clean exit clears the label, so a labelled pane holding no agent lost reviewr to the restart.
+    let labelled: Vec<&str> = panes
+        .panes
+        .iter()
+        .filter(|entry| entry.label.as_deref() == Some(herdr::LABEL))
+        .filter(|entry| entry.agent.is_none() && !entry.has_agent_session)
+        .map(|entry| entry.pane_id.as_str())
+        .collect();
+    for (pane, probe) in per_pane(&labelled, runs_review_ui) {
+        match probe {
+            Some(Ok(PaneRun::Other)) => match herdr::run_in_pane(pane, &command) {
+                Ok(()) => logln!("restore: relaunched in {pane}"),
+                Err(error) => logln!("restore: pane run failed in {pane}: {error:?}"),
+            },
+            Some(Ok(PaneRun::Review | PaneRun::Gone)) => {}
+            Some(Err(error)) => logln!("restore: pane {pane} not probed: {error:?}"),
+            None => logln!("restore: pane {pane} not probed: its thread never ran"),
+        }
+    }
+}
+
+/// `text` as one POSIX shell word.
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
 /// How long an open waits for its pane to read as reviewr: a cold Windows open, with room.
 const VISIBLE_BOUND: Duration = Duration::from_secs(6);
 
@@ -490,5 +535,16 @@ fn repoint_launch_links() {
         {
             let _ = std::fs::remove_file(&fresh);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_quote;
+
+    #[test]
+    fn a_quoted_path_is_one_shell_word_even_with_an_apostrophe() {
+        assert_eq!(shell_quote("/a b/bin"), "'/a b/bin'");
+        assert_eq!(shell_quote("/it's/bin"), r"'/it'\''s/bin'");
     }
 }
