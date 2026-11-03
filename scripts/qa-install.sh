@@ -6,16 +6,23 @@ set -euo pipefail
 NEW="target/release/herdr-reviewr"
 MANIFEST="herdr-plugin.toml"
 
-# Locate the managed plugin install. Exactly one is expected.
+# Locate the managed plugin install. Exactly one is expected. The layout differs by herdr
+# version: the older one keeps the plugin in plugins/github/<id>-<hash>/, the newer one a
+# checkout in plugins/github-installations/<id>-<hash>/<rev>/checkout/.
 shopt -s nullglob
 roots=("$HOME"/.config/herdr/plugins/github/persiyanov.reviewr-*)
+roots+=("$HOME"/.config/herdr/plugins/github-installations/*/*/checkout)
 shopt -u nullglob
-[ ${#roots[@]} -eq 1 ] || {
-  echo "qa-install: expected one installed plugin, found ${#roots[@]}:" >&2
-  printf '  %s\n' "${roots[@]:-none}" >&2
+installs=()
+for root in "${roots[@]}"; do
+  [ -x "$root/bin/herdr-reviewr" ] && [ -f "$root/$MANIFEST" ] && installs+=("$root")
+done
+[ ${#installs[@]} -eq 1 ] || {
+  echo "qa-install: expected one installed plugin, found ${#installs[@]}:" >&2
+  printf '  %s\n' "${installs[@]:-none}" >&2
   exit 1
 }
-ROOT="${roots[0]}"
+ROOT="${installs[0]}"
 BIN="$ROOT/bin/herdr-reviewr"
 
 # herdr rereads the installed manifest on every plugin call, so it is renamed into place and

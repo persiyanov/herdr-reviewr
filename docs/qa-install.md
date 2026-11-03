@@ -3,11 +3,12 @@
 How to run a locally built `herdr-reviewr` inside the real herdr panes. Follow it exactly. Every
 step exists because skipping it has broken a session before.
 
-The installed plugin lives at `~/.config/herdr/plugins/github/persiyanov.reviewr-<hash>/`. Its
-pane and its actions run `bin/herdr-reviewr` from that directory, as its `herdr-plugin.toml`
-says. QA means swapping those two files and restarting the panes. herdr rereads the manifest on
-every plugin call, so a manifest change takes effect on the next keypress, with no herdr
-restart.
+The installed plugin lives at `~/.config/herdr/plugins/github/persiyanov.reviewr-<hash>/`, or,
+on the newer herdr, at `~/.config/herdr/plugins/github-installations/<id>-<hash>/<rev>/checkout/`.
+`scripts/qa-install.sh` finds either layout and requires exactly one install. Its pane and its
+actions run `bin/herdr-reviewr` from that directory, as its `herdr-plugin.toml` says. QA means
+swapping those two files and restarting the panes. herdr rereads the manifest on every plugin
+call, so a manifest change takes effect on the next keypress, with no herdr restart.
 
 ## The one command
 
