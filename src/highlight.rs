@@ -198,6 +198,21 @@ mod tests {
     }
 
     #[test]
+    fn the_onig_only_grammars_highlight_javascript_and_powershell() {
+        // The fancy-regex dumps leave these out, so a swapped regex engine shows up here.
+        for (ext, want) in [
+            ("js", "JavaScript (Babel)"),
+            ("jsx", "JavaScript (Babel)"),
+            ("mjs", "JavaScript (Babel)"),
+            ("cjs", "JavaScript (Babel)"),
+            ("ps1", "PowerShell"),
+        ] {
+            let found = super::syntaxes().find_syntax_by_extension(ext).map(|s| s.name.as_str());
+            assert_eq!(found, Some(want), ".{ext}");
+        }
+    }
+
+    #[test]
     fn bundled_syntax_themes_all_parse() {
         // Each bundled theme must load: a failed load would yield one plain span.
         for name in [
