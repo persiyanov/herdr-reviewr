@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- **reviewr's git calls run no program the repo's config names**: no `core.fsmonitor` hook and no git hooks (`reference-transaction`, `post-index-change`), so a planted `.git/config` or hook no longer runs when a pane opens.
+
 ## [0.49.0] — 2026-10-29
 
 ### Added
