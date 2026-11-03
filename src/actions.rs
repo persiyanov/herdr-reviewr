@@ -102,6 +102,8 @@ pub fn run(name: &str) -> i32 {
 fn act(action: Action) -> Result<Option<String>, Stop> {
     // The whole config validates before any workspace read or pane write.
     let config = crate::config::plugin_config_from_herdr().map_err(Stop::Config)?;
+    // The same tool search the pane will use, so an action's git and herdr resolve alike.
+    crate::proc::set_config_dirs(config.path());
 
     #[cfg(unix)]
     repoint_launch_links();

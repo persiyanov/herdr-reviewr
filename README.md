@@ -204,6 +204,7 @@ auto_open = false
 editor = "code -g {file}:{line}"
 url_opener = "browser-bridge --new-tab {url}"
 review_prefix = "Fix each comment, then run the tests."
+path = ["/home/linuxbrew/.linuxbrew/bin"]   # extra tool dirs, absolute
 github_host = "github.example.com"
 gitlab_host = "git.corp.example"
 azure_devops_host = "tfs.corp.example"
@@ -251,6 +252,17 @@ open at the right line. A terminal editor takes the pane until you quit. For any
 Links open with `open`, `xdg-open`, or the Windows default browser. Under `herdr --remote`, set
 `url_opener` to something that reaches your browser. The URL is passed as one argument, never
 through a shell, so don't use `ssh host open {url}`.
+
+### Tool paths
+
+`git`, `gh`, `glab`, `az` and the clipboard tools resolve through `/opt/homebrew/bin`,
+`/usr/local/bin`, `/usr/bin` and `/bin`, then the pane's `PATH`, then `path`, then Homebrew's
+Linux prefixes (`/home/linuxbrew/.linuxbrew/bin`, `~/.linuxbrew/bin`, `$HOMEBREW_PREFIX/bin`).
+The editor and `url_opener` try the pane's `PATH` first. Add a `path` entry when a tool lives
+somewhere none of those name — useful when herdr was started by a `remote-client-bridge` or a
+service, which never sources `~/.bashrc` and so never adds your Homebrew or shim dirs. Each entry
+must be absolute. A tool the pane's own `PATH` already provides still wins over Homebrew's
+prefixes, so a Homebrew `git` never displaces the one the pane was using.
 
 ### Review prefix
 

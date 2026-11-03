@@ -283,6 +283,8 @@ fn app_for(cfg: &Config, initial_config: &Result<PluginConfig, config::PluginCon
 
 /// Build a fresh working reviewr pane only after the plugin configuration has validated.
 fn ready_app(cfg: &Config, plugin_config: PluginConfig) -> App {
+    // Applied first: the repo root below is the first tool this pane runs.
+    crate::proc::set_config_dirs(plugin_config.path());
     let repo = repo_root(cfg);
     let scope = plugin_config.default_scope();
     logln!("start repo={} base={:?} scope={}", repo.display(), cfg.base, scope.name());
@@ -1642,6 +1644,8 @@ fn apply_plugin_config_observation(
 ) -> bool {
     match observed {
         Ok(next) => {
+            // Before any later spawn, and before the recovery worker's own git reads.
+            crate::proc::set_config_dirs(next.path());
             let recovering = app.plugin_config().is_none();
             let changed = app.plugin_config().is_some_and(|current| current != &next);
             if recovering {

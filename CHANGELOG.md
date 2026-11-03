@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`path`**: a list of absolute directories searched for `git`, `gh`, `glab`, `az`, the clipboard
+  tools and the editor. It takes effect on the next spawn and applies to actions too, so a tool
+  in a directory the environment never names can still be used.
+
+### Fixed
+- **A Homebrew-installed `gh` is found**: the PR tab resolves `gh` (and `glab`, `az`) when they
+  live in Homebrew on Linux, where `gh` installs to `/home/linuxbrew/.linuxbrew/bin` or
+  `~/.linuxbrew/bin`. A herdr server started from a non-interactive shell — a
+  `remote-client-bridge`, a service — never sources `~/.bashrc`, so the Homebrew dir never joins
+  its `PATH`; reviewr now searches those prefixes (`$HOMEBREW_PREFIX/bin` too) after the
+  inherited `PATH`. A tool the pane's `PATH` already names still wins, so a Homebrew `git` never
+  displaces the pane's own.
+
 ## [0.49.0] — 2026-10-29
 
 ### Added

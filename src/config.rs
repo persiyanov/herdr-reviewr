@@ -60,7 +60,7 @@ impl Config {
     }
 }
 
-const PLUGIN_CONFIG_KEYS: [&str; 15] = [
+const PLUGIN_CONFIG_KEYS: [&str; 16] = [
     "theme",
     "default_scope",
     "markdown_view",
@@ -75,6 +75,7 @@ const PLUGIN_CONFIG_KEYS: [&str; 15] = [
     "editor",
     "url_opener",
     "review_prefix",
+    "path",
     "keybindings",
 ];
 
@@ -185,6 +186,7 @@ pub struct PluginConfig {
     editor: Option<String>,
     url_opener: Option<String>,
     review_prefix: Option<String>,
+    path: Vec<PathBuf>,
     keymap: crate::keymap::Keymap,
 }
 
@@ -205,6 +207,7 @@ impl Default for PluginConfig {
             editor: None,
             url_opener: None,
             review_prefix: None,
+            path: Vec::new(),
             keymap: crate::keymap::Keymap::default(),
         }
     }
@@ -279,6 +282,12 @@ impl PluginConfig {
     /// Text that heads every exported review, as written.
     pub fn review_prefix(&self) -> Option<&str> {
         self.review_prefix.as_deref()
+    }
+
+    /// Extra directories searched for `git`, `gh`, `glab`, `az` and the editor, after the
+    /// inherited `PATH` and before Homebrew's prefixes.
+    pub fn path(&self) -> &[PathBuf] {
+        &self.path
     }
 
     /// The resolved keymap: the defaults with this snapshot's `[keybindings]` applied.
@@ -496,6 +505,9 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         }
         config.url_opener = Some(command.to_owned());
     }
+    if let Some(value) = table.get("path") {
+        config.path = parse_tool_paths(path, value)?;
+    }
     if let Some(value) = table.get("review_prefix") {
         let prefix = value
             .as_str()
@@ -611,6 +623,26 @@ fn parse_keybindings(
     Keymap::resolve(&overrides).map_err(|detail| {
         PluginConfigError::new(path, format!("invalid value for `keybindings`: {detail}"))
     })
+}
+
+/// `path`: directories searched for tools, each absolute so a search never reads the cwd.
+fn parse_tool_paths(path: &Path, value: &toml::Value) -> Result<Vec<PathBuf>, PluginConfigError> {
+    let expected = "a list of absolute directories";
+    let Some(values) = value.as_array() else {
+        return Err(value_error(path, value, "path", expected));
+    };
+    let mut dirs = Vec::with_capacity(values.len());
+    for entry in values {
+        let Some(text) = entry.as_str() else {
+            return Err(value_error(path, entry, "path", expected));
+        };
+        let dir = Path::new(text);
+        if !dir.is_absolute() {
+            return Err(value_error(path, entry, "path", expected));
+        }
+        dirs.push(dir.to_path_buf());
+    }
+    Ok(dirs)
 }
 
 fn string_value<'a>(
@@ -833,6 +865,35 @@ mod tests {
         std::fs::write(&path, "theme = \"tokyo-night\"\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.editor(), None);
+    }
+
+    #[test]
+    fn path_lists_absolute_directories() {
+        use std::path::PathBuf;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "path = [\"/opt/corp/tools/bin\", \"/home/me/bin\"]\n").unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(
+            config.path(),
+            [PathBuf::from("/opt/corp/tools/bin"), PathBuf::from("/home/me/bin")]
+        );
+
+        // Unset or empty, no directory is added to the search.
+        std::fs::write(&path, "path = []\n").unwrap();
+        assert!(super::plugin_config_in(dir.path()).unwrap().path().is_empty());
+        std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+        assert!(super::plugin_config_in(dir.path()).unwrap().path().is_empty());
+
+        // A bare string, a relative entry, a non-string and an empty entry are invalid.
+        for text in
+            ["path = \"/opt/bin\"\n", "path = [\"rel/bin\"]\n", "path = [1]\n", "path = [\"\"]\n"]
+        {
+            std::fs::write(&path, text).unwrap();
+            let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+            assert!(error.contains("`path`"), "{text}: {error}");
+            assert!(error.contains("absolute directories"), "{text}: {error}");
+        }
     }
 
     #[test]

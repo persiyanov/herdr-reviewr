@@ -136,6 +136,19 @@ herdr plugin pane close <pane_id>
 On macOS and Linux reviewr prepends the common host bin dirs when it resolves `git` and `herdr`
 (`src/proc.rs`), so a stripped `PATH` cannot hide them. Windows has no such dirs to trust.
 
+**Homebrew's Linux prefixes come last**: `/home/linuxbrew/.linuxbrew/bin`, `$HOME/.linuxbrew/bin`,
+and `$HOMEBREW_PREFIX/bin`, searched after the inherited `PATH` so they only ever widen the search.
+A herdr server started from a non-interactive shell (a `remote-client-bridge`, a service) never
+sources `~/.bashrc`, so its `PATH` lacks the Homebrew dir where `gh`, `glab` or `az` lives;
+reviewr finds them anyway. They follow the inherited `PATH` on purpose: Homebrew on Linux can ship
+its own `git`, and a pane whose `PATH` already names a tool must keep using that one.
+
+**`path` in config.toml names what the guesses miss**: a list of absolute dirs, searched after
+the inherited `PATH` and before Homebrew's prefixes. `proc::set_config_dirs` applies it in
+`ready_app` (before the pane's first `git`) and on every valid config observation, and an action
+applies it before its first tool runs. The built `PATH` is cached per process and rebuilt when
+the config reloads, so a saved `path` applies to the next spawn, not the one in flight.
+
 - **Action context** (`HERDR_PLUGIN_CONTEXT_JSON`): `workspace_id`, `tab_id`, `focused_pane_id`,
   `focused_pane_cwd`, `worktree:{repo_root, checkout_path, ...}`. The open action reviews the
   first repo among the focused pane's live cwd, its `focused_pane_cwd`, the agent panes' cwds, the
