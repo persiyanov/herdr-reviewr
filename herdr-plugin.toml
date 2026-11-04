@@ -1,6 +1,6 @@
 id = "persiyanov.reviewr"
 name = "reviewr"
-version = "0.49.0"
+version = "0.49.1"
 # 0.9.3 adds the socket reads the herdr connection relies on (`session.snapshot`, live subscriptions,
 # the move events); 0.9.0 resolves pane commands against the plugin root (docs/herdr-api-notes.md).
 min_herdr_version = "0.9.3"
