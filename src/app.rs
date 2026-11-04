@@ -2669,7 +2669,8 @@ impl App {
         }
         let target = if self.composing() { self.compose_row() } else { self.diff_cursor };
         let target = target.min(self.visible.len() - 1);
-        self.diff_scroll = keep_in_view(target, self.diff_scroll, heights, viewport);
+        let off = self.plugin_config().map_or(0, crate::config::PluginConfig::scrolloff);
+        self.diff_scroll = keep_in_view_off(target, self.diff_scroll, heights, viewport, off);
     }
 
     /// Center the cursor's row by display heights when it sits off screen.
@@ -5570,6 +5571,24 @@ fn keep_in_view(cursor: usize, scroll: usize, heights: &[usize], viewport: usize
     top
 }
 
+/// [`keep_in_view`] that also keeps `off` lines above and below `cursor`, capped at half the pane.
+fn keep_in_view_off(
+    cursor: usize,
+    scroll: usize,
+    heights: &[usize],
+    viewport: usize,
+    off: usize,
+) -> usize {
+    if viewport == 0 || heights.is_empty() || off == 0 {
+        return keep_in_view(cursor, scroll, heights, viewport);
+    }
+    let cursor = cursor.min(heights.len() - 1);
+    let off = off.min(viewport.saturating_sub(heights[cursor]) / 2);
+    let below = off.min(heights[cursor + 1..].iter().sum());
+    let top = keep_in_view(cursor, scroll, heights, viewport - below);
+    top.min(top_leaving(heights, cursor, off))
+}
+
 /// Clamp a scroll so the window shows no blank tail.
 fn bound(scroll: usize, total: usize, viewport: usize) -> usize {
     scroll.min(total.saturating_sub(viewport))
@@ -5873,6 +5892,24 @@ mod tests {
     use crate::test_support::test_repo;
     use crate::world::{PickStatus, PickVerdict};
     use std::path::PathBuf;
+
+    #[test]
+    fn scrolloff_keeps_lines_around_the_cursor_and_centers_when_large() {
+        use super::keep_in_view_off as k;
+        let h = [1; 100];
+        // Off is 0: the minimal scroll, unchanged.
+        assert_eq!(k(30, 0, &h, 20, 0), 11);
+        // Moving down keeps 8 lines below; moving up keeps 8 above.
+        assert_eq!(k(30, 0, &h, 20, 8), 19);
+        assert_eq!(k(30, 40, &h, 20, 8), 22);
+        // Inside the margin band nothing scrolls.
+        assert_eq!(k(30, 20, &h, 20, 8), 20);
+        // A huge off centers: 10 above, 9 below in a 20-line pane.
+        assert_eq!(k(30, 0, &h, 20, 999), 20);
+        assert_eq!(k(31, 20, &h, 20, 999), 21);
+        // At the top there is nothing above to keep.
+        assert_eq!(k(2, 0, &h, 20, 999), 0);
+    }
 
     #[test]
     fn a_pr_settled_highlight_survives_a_kept_snapshot_and_blanks_on_a_replace() {

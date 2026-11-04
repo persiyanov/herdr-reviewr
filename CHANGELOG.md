@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`scrolloff`**: keeps that many lines above and below the diff cursor as it moves, like vim's `scrolloff`. A large value (`999`) keeps the cursor centered. Default `0`, the old behavior.
+
 ## [0.49.0] — 2026-10-29
 
 ### Added

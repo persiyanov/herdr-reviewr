@@ -60,7 +60,7 @@ impl Config {
     }
 }
 
-const PLUGIN_CONFIG_KEYS: [&str; 15] = [
+const PLUGIN_CONFIG_KEYS: [&str; 16] = [
     "theme",
     "default_scope",
     "markdown_view",
@@ -69,6 +69,7 @@ const PLUGIN_CONFIG_KEYS: [&str; 15] = [
     "toggle_placement",
     "toggle_direction",
     "auto_open",
+    "scrolloff",
     "github_host",
     "gitlab_host",
     "azure_devops_host",
@@ -179,6 +180,7 @@ pub struct PluginConfig {
     toggle_placement: TogglePlacement,
     toggle_direction: ToggleDirection,
     auto_open: bool,
+    scrolloff: usize,
     github_host: Option<String>,
     gitlab_host: Option<String>,
     azure_devops_host: Option<String>,
@@ -199,6 +201,7 @@ impl Default for PluginConfig {
             toggle_placement: TogglePlacement::Split,
             toggle_direction: ToggleDirection::Right,
             auto_open: true,
+            scrolloff: 0,
             github_host: None,
             gitlab_host: None,
             azure_devops_host: None,
@@ -244,6 +247,11 @@ impl PluginConfig {
 
     pub fn auto_open(&self) -> bool {
         self.auto_open
+    }
+
+    /// Lines kept above and below the diff cursor, as vim's `scrolloff`; a large value centers it.
+    pub fn scrolloff(&self) -> usize {
+        self.scrolloff
     }
 
     pub fn github_host(&self) -> Option<&str> {
@@ -455,6 +463,12 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
     if let Some(value) = table.get("auto_open") {
         config.auto_open =
             value.as_bool().ok_or_else(|| value_error(path, value, "auto_open", "a boolean"))?;
+    }
+    if let Some(value) = table.get("scrolloff") {
+        config.scrolloff = value
+            .as_integer()
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| value_error(path, value, "scrolloff", "a non-negative integer"))?;
     }
     if let Some(value) = table.get("github_host") {
         config.github_host = Some(parse_forge_host(path, "github_host", value)?);
@@ -892,6 +906,8 @@ mod tests {
             ("toggle_placement = \"left\"\n", "`toggle_placement`"),
             ("toggle_direction = \"left\"\n", "`toggle_direction`"),
             ("auto_open = \"yes\"\n", "`auto_open`"),
+            ("scrolloff = -1\n", "`scrolloff`"),
+            ("scrolloff = \"8\"\n", "`scrolloff`"),
             ("github_host = \"https://github.example.com\"\n", "`github_host`"),
             ("editor = \"\"\n", "`editor`"),
             ("editor = \"   \"\n", "`editor`"),
