@@ -33,7 +33,7 @@ palette = { version = "0.7.7", default-features = false, features = ["std"] }
 # herdr and the forge CLIs run in a process group (unix) or job object (Windows), so ending a
 # run ends its whole tree, `az.cmd`'s python included.
 process-wrap = { version = "10.0.1", default-features = false, features = ["std", "process-group", "job-object"] }
-pulldown-cmark = { version = "0.13.5", default-features = false }
+pulldown-cmark = { version = "0.13.6", default-features = false }
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
