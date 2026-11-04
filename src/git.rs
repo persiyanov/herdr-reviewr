@@ -2264,8 +2264,8 @@ fn all_files_listed(repo: &Path, specs: &[String]) -> Result<Vec<WorktreeEntry>>
         "--others",
         "--ignored",
         "--exclude-standard",
+        // `--no-empty-directory` would also drop an ignored dir under an untracked one.
         "--directory",
-        "--no-empty-directory",
         "-z",
     ]);
     for (path, is_dir) in ignored_entries(repo, &ignored)? {

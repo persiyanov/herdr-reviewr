@@ -1563,6 +1563,21 @@ fn all_files_lists_tracked_untracked_and_ignored_dirs_collapsed() {
 }
 
 #[test]
+fn all_files_lists_an_ignored_dir_under_an_untracked_dir() {
+    let r = Repo::init();
+    r.write(".gitignore", "notes/library/\n");
+    r.commit_all("init");
+    r.write("notes/index.md", "n\n"); // untracked parent, not ignored
+    r.write("notes/library/vendor/page.md", "v\n"); // ignored, only a subdir directly inside
+
+    let files = all_files(r.path()).unwrap();
+    let by = |p: &str| files.iter().find(|e| e.path == p);
+    assert!(by("notes/index.md").is_some_and(|e| !e.ignored), "untracked file listed");
+    assert!(by("notes/library").is_some_and(|e| e.ignored && e.is_dir), "ignored dir listed");
+    assert!(!files.iter().any(|e| e.path.starts_with("notes/library/")), "and not walked");
+}
+
+#[test]
 fn list_ignored_dir_returns_immediate_children_only() {
     use herdr_reviewr::git::list_ignored_dir;
     let r = Repo::init();
