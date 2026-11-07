@@ -3214,7 +3214,7 @@ impl App {
         }
         if let Some(row) = hunk_row(&self.visible, Some(self.diff_cursor), forward) {
             self.diff_cursor = row;
-            self.reveal_diff(Reveal::Edge);
+            self.reveal_diff(Reveal::Center);
             return;
         }
         let Some(armed) = armed else {
@@ -3236,7 +3236,7 @@ impl App {
         // Land on a hunk of the rows now on screen.
         self.diff_cursor = hunk_row(&self.visible, None, forward).unwrap_or(0);
         self.reveal_files = true;
-        self.reveal_diff(Reveal::Edge);
+        self.reveal_diff(Reveal::Center);
     }
 
     /// The nearest file row that way with a hunk, so a crossing always lands on a change.
@@ -4356,7 +4356,7 @@ impl App {
         self.focus = Focus::Diff;
         self.select_anchor = None; // a comment jump is navigation, not a selection extend
         self.diff_cursor = row;
-        self.reveal_diff(Reveal::Edge);
+        self.reveal_diff(Reveal::Center);
         self.target_comment_card(ci);
     }
 
@@ -4611,7 +4611,7 @@ impl App {
             FindHit::Visible(v) => self.diff_cursor = v,
             FindHit::Folded { new_no } => self.diff_cursor = self.land_on_line(new_no, Side::New),
         }
-        self.reveal_diff(Reveal::Edge);
+        self.reveal_diff(Reveal::Center);
     }
 
     /// Find's query; `None` for the line field, whose digits are no search.

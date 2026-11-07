@@ -10496,6 +10496,70 @@ fn goto_line_centers_an_off_screen_line_and_keeps_an_on_screen_one() {
     assert_eq!(app.diff_scroll, 49);
 }
 
+/// Hunk steps, comment jumps and find steps land mid-pane on an off-screen target, as `:N`
+/// does, and leave the view still when the target is already on screen.
+#[test]
+fn jumps_center_an_off_screen_target_and_keep_an_on_screen_one() {
+    use std::fmt::Write as _;
+    let r = Repo::init();
+    let mut text = String::new();
+    for i in 1..=120 {
+        writeln!(text, "line {i}").unwrap();
+    }
+    r.write("long.rs", &text);
+    r.commit_all("init");
+    let edited = text
+        .replace("line 5\n", "line 5\nEDIT A\n")
+        .replace("line 60\n", "line 60\nEDIT B\n")
+        .replace("line 110\n", "line 110\nEDIT C\n");
+    r.write("long.rs", &edited);
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    let row_of = |app: &App, needle: &str| {
+        app.visible.iter().rposition(|v| v.text().contains(needle)).unwrap()
+    };
+    // 4 rows above and 5 below in a 10-row pane, short of a blank tail past the last row.
+    let centered = |app: &App, row: usize| row.saturating_sub(4).min(app.visible.len() - 10);
+    comment_on(&mut app, '+', "first");
+    app.diff_cursor = row_of(&app, "EDIT C");
+    app.start_comment();
+    app.input_push('c');
+    app.submit_comment();
+    (app.diff_cursor, app.diff_scroll) = (0, 0);
+    settle_frame(&mut app, 10);
+
+    // A hunk step past the pane.
+    app.next_hunk();
+    app.next_hunk();
+    assert_eq!(cursor_text(&app), "EDIT B");
+    settle_frame(&mut app, 10);
+    assert_eq!(app.diff_scroll, centered(&app, row_of(&app, "EDIT B")), "a hunk step centers");
+
+    // A comment jump past the pane.
+    app.jump_comment(1);
+    assert_eq!(cursor_text(&app), "EDIT C");
+    settle_frame(&mut app, 10);
+    assert_eq!(app.diff_scroll, centered(&app, row_of(&app, "EDIT C")), "a comment jump centers");
+
+    // A find step back above the pane.
+    open_find(&mut app, &keymap);
+    find_type(&mut app, &keymap, "EDIT A");
+    press(&mut app, &keymap, KeyCode::Enter);
+    assert_eq!(cursor_text(&app), "EDIT A");
+    settle_frame(&mut app, 10);
+    assert_eq!(app.diff_scroll, centered(&app, row_of(&app, "EDIT A")), "a find step centers");
+    press(&mut app, &keymap, KeyCode::Esc);
+
+    // With every row on screen, no jump moves the view.
+    let tall = app.visible.len();
+    (app.diff_cursor, app.diff_scroll) = (0, 0);
+    for jump in [App::next_hunk as fn(&mut App), |app: &mut App| app.jump_comment(1)] {
+        jump(&mut app);
+        settle_frame(&mut app, tall);
+        assert_eq!(app.diff_scroll, 0, "an on-screen target leaves the view still");
+    }
+}
+
 /// Rendered markdown lands on the block holding the line; a line inside a collapsed `<details>`
 /// opens it.
 #[test]
