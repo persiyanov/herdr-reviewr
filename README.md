@@ -78,7 +78,7 @@ herdr-reviewr ~/some/repo
 2. **Focus the diff.** `Tab`.
 3. **Select lines.** `v`, then `j` / `k`, or drag the line numbers.
 4. **Comment.** `c`, type, `Enter`.
-5. **Send.** `s` puts every comment in the agent's input.
+5. **Send.** `s` puts every comment in the input of the agent beside reviewr. `S` picks another.
 
 The footer shows the next step, and the worktree you're on at its right. `?` lists every key.
 
@@ -139,7 +139,8 @@ Every key can be rebound ([Keybindings](#keybindings)).
 | `d` | Delete comment |
 | `n` `N` | Next / previous comment |
 | `l` | List comments |
-| `s` | Send comments to the agent |
+| `s` | Send comments to the agent beside reviewr, or pick one |
+| `S` | Pick the agent, then send |
 | `y` | Copy comments |
 | `esc` | Clear selection |
 
@@ -297,7 +298,8 @@ keys help non-Latin layouts: bind the character your layout types on the same ke
 | `find` | `ctrl+f` |
 | `goto-line` | `:` |
 | `keys` | `?` |
-| `send` | `s`, `S` |
+| `send` | `s` |
+| `send-to` | `S` |
 | `copy` | `y`, `Y` |
 | `open-pr` | `o` |
 | `refresh` | `r` |
@@ -318,6 +320,10 @@ An SSH alias like `github.com-work` resolves through your ssh config to the host
 The toggle opens reviewr right of your agent. `toggle_placement` changes that: `overlay` covers
 the tab, `zoomed` fills it, `tab` opens a new one.
 
+Each tab gets its own reviewr; with `tab` placement, each worktree gets its own reviewr tab. The
+toggle closes your reviewr when you can see it, takes you to it when you can't, and opens one when
+there's none. `close` closes yours.
+
 reviewr opens on its own in a new worktree's workspace, with `split` or `tab` only, and leaves
 your agent focused. `auto_open = false` turns that off.
 
@@ -337,7 +343,7 @@ On Windows, point it at the plugin's own `bin` folder.
 - **Network drives send no file events.** macOS and Linux check every five seconds. On Windows,
   press `r`.
 - **Send needs an agent in the workspace**, and refuses one at a permission prompt. Your
-  comments stay.
+  comments stay. With several agents, it goes to the only one in reviewr's tab, else it asks.
 - **last turn shows all of a turn or nothing.** If the agent writes the instant a turn starts,
   the scope shows nothing for that turn and says why.
 - **The PR tab** supports GitHub, GitLab, and Azure DevOps only. A merged or closed PR shows as

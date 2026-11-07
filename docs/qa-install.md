@@ -57,8 +57,8 @@ times tells you which panes are still old.
 The plugin's `open` and `toggle` actions act on the **focused workspace**, whatever
 `HERDR_WORKSPACE_ID` says. Scripting them from outside herdr stacks every new pane into
 whichever workspace happens to be focused. Closing is safe
-(`herdr plugin action invoke close --plugin persiyanov.reviewr` sweeps the focused workspace's
-reviewr panes), but opening is not. After the swap, tell the user: press the reviewr toggle in
+(`herdr plugin action invoke close --plugin persiyanov.reviewr` closes the focused tab's
+reviewr), but opening is not. After the swap, tell the user: press the reviewr toggle in
 each space you want on the new build. Do not automate it.
 
 The Windows VM below is the one exception: no user sits at its herdr, so a script opens panes

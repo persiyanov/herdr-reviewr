@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Toggle, open and close act on your own reviewr**: the one in the focused tab, or with `tab` placement your worktree's reviewr tab. Toggle closes a reviewr you can see, takes you to one you can't, and opens one if there's none.
+  Thanks [@jmoreno-blr](https://github.com/jmoreno-blr) ([#114](https://github.com/persiyanov/herdr-reviewr/issues/114)).
+- **Send goes straight to the agent beside reviewr**; with none or several in its tab, the picker opens as before.
+  Thanks [@black-snow](https://github.com/black-snow) ([#160](https://github.com/persiyanov/herdr-reviewr/issues/160)).
+- **The agent picker names agents by their pane's label**, so several Claude Code panes no longer all read `claude`.
+  Thanks [@199nishikawa](https://github.com/199nishikawa) ([#133](https://github.com/persiyanov/herdr-reviewr/pull/133)).
+- **Breaking: `S` opens the agent picker** (`send-to`) instead of sending. A config that binds `S` to `send` now collides and must move it.
+
+### Added
+- **A collapsed folder in Changes shows its line totals**, `+N −M` for everything inside it.
+  Thanks [@Zahlii](https://github.com/Zahlii) ([#161](https://github.com/persiyanov/herdr-reviewr/pull/161)).
+
+### Fixed
+- **reviewr no longer opens garbled.** A new pane loads the repo in the background, so herdr's resize right after the open repaints at once, and the file list reads "loading…" until the repo is in.
+
 ## [0.51.0] — 2026-11-07
 
 ### Added
