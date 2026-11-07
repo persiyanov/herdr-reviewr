@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`switch-pane` rebinds the pane switch**, `tab` by default, so `h` or any other key can move between the file list and the diff.
+  Thanks [@ianptkcs](https://github.com/ianptkcs) ([#89](https://github.com/persiyanov/herdr-reviewr/issues/89)).
+- **`scrolloff` keeps lines of context around the diff cursor**: 3 by default, `0` for the old edge, `999` to stay mid-pane.
+  Thanks [@AnteWall](https://github.com/AnteWall) ([#166](https://github.com/persiyanov/herdr-reviewr/pull/166)).
+
+### Changed
+- **Find steps, hunk steps and comment jumps center a target off screen**, as `:N` and search picks do.
+  Thanks [@spion](https://github.com/spion) ([#156](https://github.com/persiyanov/herdr-reviewr/pull/156)).
+
+### Fixed
+- **alt+backspace, alt+delete and alt+d delete a word in every text field**, the `:` line field included, and other alt chords no longer type a letter.
+  Thanks [@reobin](https://github.com/reobin) ([#145](https://github.com/persiyanov/herdr-reviewr/pull/145)).
+
 ## [0.50.1] — 2026-11-07
 
 ### Security
