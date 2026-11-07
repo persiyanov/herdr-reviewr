@@ -6,10 +6,17 @@ set -euo pipefail
 NEW="target/release/herdr-reviewr"
 MANIFEST="herdr-plugin.toml"
 
-# Locate the managed plugin install. Exactly one is expected.
-shopt -s nullglob
-roots=("$HOME"/.config/herdr/plugins/github/persiyanov.reviewr-*)
-shopt -u nullglob
+# Locate the GitHub install through herdr, which moved its checkout in 0.9.5. Exactly one is expected.
+listed=$(herdr plugin list --json 2>/dev/null) || {
+  echo "qa-install: herdr did not answer 'plugin list'; start herdr first" >&2
+  exit 1
+}
+roots=()
+while IFS= read -r root; do roots+=("$root"); done < <(printf '%s' "$listed" | python3 -c '
+import json, sys
+for plugin in json.load(sys.stdin)["result"]["plugins"]:
+    if plugin["plugin_id"] == "persiyanov.reviewr" and (plugin.get("source") or {}).get("kind") == "github":
+        print(plugin["plugin_root"])')
 [ ${#roots[@]} -eq 1 ] || {
   echo "qa-install: expected one installed plugin, found ${#roots[@]}:" >&2
   printf '  %s\n' "${roots[@]:-none}" >&2
