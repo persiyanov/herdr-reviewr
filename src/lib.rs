@@ -89,7 +89,7 @@ pub fn run() -> Result<()> {
 /// Review until quit, restarting on each switch's pick in the same pane.
 fn review(screen: &mut Screen, cfg: &mut Config, app: &mut App) -> Result<()> {
     let mut _session = git::lease_session(&app.repo);
-    enter_repo(app);
+    enter_repo(cfg, app);
     paint_then_request_load(&mut screen.terminal, app)?;
     // An old command line hears what changed instead of quietly doing something else.
     if let Some(note) = &cfg.removed_flag {
@@ -101,7 +101,7 @@ fn review(screen: &mut Screen, cfg: &mut Config, app: &mut App) -> Result<()> {
         event_loop(screen, app, cfg, &mut open_editors)?;
         let Some(switched) = switched_app(cfg, app) else { return Ok(()) };
         *app = switched;
-        enter_repo(app);
+        enter_repo(cfg, app);
         // The old worktree's session ends once its workers finish too.
         _session = git::lease_session(&app.repo);
         paint_then_request_load(&mut screen.terminal, app)?;
@@ -311,7 +311,9 @@ pub fn switched_app(cfg: &mut Config, old: &mut App) -> Option<App> {
 
 /// Work in the reviewed repo: herdr reports a pane's folder from its process, and the actions
 /// match a `tab`-placement reviewr to a worktree by it.
-fn enter_repo(app: &App) {
+fn enter_repo(cfg: &mut Config, app: &App) {
+    // A relative `cfg.repo` would name another folder from inside, so a recovery rereads this one.
+    cfg.repo.clone_from(&app.repo);
     if let Err(e) = std::env::set_current_dir(&app.repo) {
         logln!("chdir to {} failed: {e}", app.repo.display());
     }
@@ -3837,6 +3839,13 @@ mod startup_tests {
         app.load_failed();
         terminal.draw(|f| crate::ui::render(f, &app)).unwrap();
         assert!(screen(&terminal).contains("load failed, r retries"));
+        // It names the key the reviewer bound.
+        let config_dir = tempfile::tempdir().unwrap();
+        let toml = "[keybindings]\nrefresh = [\"R\"]\n";
+        std::fs::write(config_dir.path().join("config.toml"), toml).unwrap();
+        app.set_plugin_config(crate::config::plugin_config_in(config_dir.path()).unwrap());
+        terminal.draw(|f| crate::ui::render(f, &app)).unwrap();
+        assert!(screen(&terminal).contains("load failed, R retries"));
 
         // The worker's snapshot lands like any refresh, and the list fills.
         app.reconcile_world(crate::world::build(&app.world_input()).unwrap());
