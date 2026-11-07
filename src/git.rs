@@ -19,6 +19,8 @@ fn git_command(repo: &Path) -> std::process::Command {
         // Single-threaded, so a refresh's wall time bounds its CPU (the pacing budget's measure).
         .args(["-c", "diff.autoRefreshIndex=false", "-c", "core.preloadIndex=false"])
         .args(["-c", "index.threads=1"])
+        // No fsmonitor program or git hook the repo's config names runs unasked.
+        .args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"])
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env_remove("GIT_DIFF_OPTS");
     cmd
