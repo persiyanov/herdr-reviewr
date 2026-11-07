@@ -1807,7 +1807,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // Bound keys resolve through the keymap; the rest fall to the fixed `tab` and `esc`.
+    // Bound keys resolve through the keymap; the rest fall to the fixed `esc`.
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let code = match key.code {
         Char(c) => Some(keymap::KeyCode::Char(c)),
@@ -1817,6 +1817,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         Down => Some(keymap::KeyCode::Down),
         PageUp => Some(keymap::KeyCode::PageUp),
         PageDown => Some(keymap::KeyCode::PageDown),
+        Tab => Some(keymap::KeyCode::Tab),
         _ => None,
     };
     let action = code.and_then(|code| keymap.action_for(crate::keymap::Key { ctrl, alt, code }));
@@ -1924,7 +1925,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             (Some(K::Up), _) => app.pr_move(-1),
             (Some(K::Keys), _) => app.toggle_keys(),
             (_, Esc) => app.escape(),
-            (_, Tab) => app.toggle_focus(),
+            (Some(K::SwitchPane), _) => app.toggle_focus(),
             (Some(K::PageDown), _) if app.focus == Focus::Files => app.pr_scroll_nav(PAGE),
             (Some(K::PageUp), _) if app.focus == Focus::Files => app.pr_scroll_nav(-PAGE),
             (Some(K::PageDown), _) => app.pr_scroll_read(PAGE),
@@ -1978,6 +1979,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::PageUp => app.move_cursor(-PAGE)?,
             K::HalfDown => app.move_cursor(HALF_PAGE)?,
             K::HalfUp => app.move_cursor(-HALF_PAGE)?,
+            K::SwitchPane => app.toggle_focus(),
             K::NextHunk => app.next_hunk(),
             K::PrevHunk => app.prev_hunk(),
             K::NextFile => app.next_file(),
@@ -2018,11 +2020,9 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    match key.code {
-        Tab => app.toggle_focus(),
-        // `esc` peels one layer: selection, armed crossing, footer expansion.
-        Esc => app.escape(),
-        _ => {}
+    // `esc` peels one layer: selection, armed crossing, footer expansion.
+    if key.code == Esc {
+        app.escape();
     }
     Ok(())
 }

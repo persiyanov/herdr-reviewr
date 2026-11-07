@@ -276,6 +276,7 @@ keys help non-Latin layouts: bind the character your layout types on the same ke
 | `down` / `up` | `j` / `k` |
 | `next-hunk` / `prev-hunk` | `]` / `[` |
 | `next-file` / `prev-file` | `f` / `F` |
+| `switch-pane` | `tab` |
 | `scope-uncommitted` / `scope-branch` / `scope-last-turn` / `scope-commits` | `u` / `b` / `t` / `g` |
 | `base-pick` / `commit-pick` | `B` / `G` |
 | `worktree-pick` | `W` |
@@ -302,7 +303,8 @@ keys help non-Latin layouts: bind the character your layout types on the same ke
 | `quit` | `q` |
 | `quit-discard` | `Q` |
 
-A key is one character or a `ctrl+` / `alt+` chord. `Tab`, `Esc`, and `Enter` are fixed.
+A key is one character, a named key (`tab`, `left`, `right`, `up`, `down`, `pageup`, `pagedown`),
+or a `ctrl+` / `alt+` chord. `Esc` and `Enter` are fixed.
 
 ### GitHub, GitLab, and Azure DevOps
 

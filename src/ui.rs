@@ -2883,7 +2883,8 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::ExpandDir => (hint(K::Expand), "expand"),
         A::CollapseDir => (hint(K::Collapse), "collapse"),
         A::TogglePane => {
-            return ("tab".into(), if app.focus == Focus::Files { "diff" } else { "files" }.into());
+            let to = if app.focus == Focus::Files { "diff" } else { "files" };
+            return (hint(K::SwitchPane), to.into());
         }
         A::Rendered => {
             (hint(K::Rendered), if app.rendered_active() { "source" } else { "rendered" })

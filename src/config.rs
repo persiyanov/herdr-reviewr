@@ -1112,6 +1112,27 @@ mod tests {
     }
 
     #[test]
+    fn switch_pane_rebinds_and_tab_is_a_key_name() {
+        use crate::keymap::{Action, Key, KeyCode};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let tab = Key::named(KeyCode::Tab);
+        assert_eq!(PluginConfig::default().keymap().action_for(tab), Some(Action::SwitchPane));
+
+        // `l` is `comments` by default, so taking it names both.
+        std::fs::write(&path, "[keybindings]\nswitch-pane = [\"l\"]\n").unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("`switch-pane`") && error.contains("`comments`"), "{error}");
+
+        // A freed `tab` can serve another action.
+        std::fs::write(&path, "[keybindings]\nswitch-pane = [\"h\"]\nnext-file = [\"tab\"]\n")
+            .unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.keymap().action_for(Key::plain('h')), Some(Action::SwitchPane));
+        assert_eq!(config.keymap().action_for(tab), Some(Action::NextFile));
+    }
+
+    #[test]
     fn legacy_navigator_actions_resolve_to_canonical_actions() {
         use crate::keymap::{Action, Key};
         let dir = tempfile::tempdir().unwrap();

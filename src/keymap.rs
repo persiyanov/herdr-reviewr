@@ -17,6 +17,7 @@ pub enum Action {
     PageDown,
     HalfUp,
     HalfDown,
+    SwitchPane,
     ScopeUncommitted,
     ScopeBranch,
     ScopeLastTurn,
@@ -64,12 +65,13 @@ pub enum KeyCode {
     Down,
     PageUp,
     PageDown,
+    Tab,
 }
 
 impl KeyCode {
     /// Every named key, the one list `by_name` and `names` derive from.
-    const NAMED: [KeyCode; 6] =
-        [Self::Left, Self::Right, Self::Up, Self::Down, Self::PageUp, Self::PageDown];
+    const NAMED: [KeyCode; 7] =
+        [Self::Left, Self::Right, Self::Up, Self::Down, Self::PageUp, Self::PageDown, Self::Tab];
 
     /// The config spelling: the bare character, or the named key's lowercase name
     fn name(self) -> String {
@@ -81,6 +83,7 @@ impl KeyCode {
             Self::Down => "down".into(),
             Self::PageUp => "pageup".into(),
             Self::PageDown => "pagedown".into(),
+            Self::Tab => "tab".into(),
         }
     }
 
@@ -94,6 +97,7 @@ impl KeyCode {
             Self::Down => "↓".into(),
             Self::PageUp => "PageUp".into(),
             Self::PageDown => "PageDown".into(),
+            Self::Tab => "tab".into(),
         }
     }
 
@@ -153,7 +157,7 @@ impl Key {
 }
 
 /// Every action with its config name and default keys, the one table the keymap derives from.
-const ACTIONS: [(Action, &str, &[Key]); 46] = [
+const ACTIONS: [(Action, &str, &[Key]); 47] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -166,6 +170,7 @@ const ACTIONS: [(Action, &str, &[Key]); 46] = [
     (Action::PageDown, "page-down", &[Key::named(KeyCode::PageDown)]),
     (Action::HalfUp, "half-up", &[Key::ctrl('u')]),
     (Action::HalfDown, "half-down", &[Key::ctrl('d')]),
+    (Action::SwitchPane, "switch-pane", &[Key::named(KeyCode::Tab)]),
     (Action::ScopeUncommitted, "scope-uncommitted", &[Key::plain('u')]),
     (Action::ScopeBranch, "scope-branch", &[Key::plain('b')]),
     (Action::ScopeLastTurn, "scope-last-turn", &[Key::plain('t')]),

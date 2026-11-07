@@ -10582,6 +10582,44 @@ fn line_field_repo() -> Repo {
     r
 }
 
+/// `tab` switches panes by default; `switch-pane` rebinds it, and a rebound letter still types.
+#[test]
+fn switch_pane_toggles_focus_and_rebinds() {
+    let r = line_field_repo();
+    let mut app = app_on(&r);
+    let defaults = Keymap::default();
+    app.focus = Focus::Files;
+    press(&mut app, &defaults, KeyCode::Tab);
+    assert_eq!(app.focus, Focus::Diff);
+    press(&mut app, &defaults, KeyCode::Tab);
+    assert_eq!(app.focus, Focus::Files);
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "[keybindings]\nswitch-pane = [\"h\"]\n")
+        .unwrap();
+    let config = herdr_reviewr::config::plugin_config_in(dir.path()).unwrap();
+    let keymap = config.keymap().clone();
+    app.set_plugin_config(config);
+    press(&mut app, &keymap, KeyCode::Char('h'));
+    assert_eq!(app.focus, Focus::Diff);
+    press(&mut app, &keymap, KeyCode::Tab);
+    assert_eq!(app.focus, Focus::Diff, "the rebind frees tab");
+
+    // The PR tab switches panes on the same key.
+    press(&mut app, &keymap, KeyCode::Char('3'));
+    let before = app.focus;
+    press(&mut app, &keymap, KeyCode::Char('h'));
+    assert_ne!(app.focus, before, "the PR tab follows the binding");
+    press(&mut app, &keymap, KeyCode::Char('1'));
+
+    // In the comment box, `h` is text.
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|row| row.new_no().is_some()).unwrap();
+    press(&mut app, &keymap, KeyCode::Char('c'));
+    press(&mut app, &keymap, KeyCode::Char('h'));
+    assert_eq!(app.input, "h");
+}
+
 /// Every text field takes the same readline edits; each types only what it accepts.
 #[test]
 fn every_text_field_takes_the_word_edits() {
