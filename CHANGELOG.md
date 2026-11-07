@@ -15,6 +15,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Thanks [@jfmainville](https://github.com/jfmainville) ([#132](https://github.com/persiyanov/herdr-reviewr/pull/132)).
 - **The PR tab finds the pull request behind an SSH host alias**, such as `git@github-work:owner/repo.git` for a second GitHub account. reviewr reads the real host from your ssh config, as `gh` does.
   Thanks [@csjoshc](https://github.com/csjoshc) ([#169](https://github.com/persiyanov/herdr-reviewr/issues/169)).
+- **The PR tab finds a `gh`, `glab`, or `az` installed by Homebrew on Linux**, even when herdr's server started without your shell's `PATH`.
+  Thanks [@baozich](https://github.com/baozich) ([#165](https://github.com/persiyanov/herdr-reviewr/pull/165)).
 
 ## [0.50.0] — 2026-11-07
 
