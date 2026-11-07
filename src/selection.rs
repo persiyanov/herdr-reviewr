@@ -268,7 +268,13 @@ mod tests {
             FileRow {
                 depth: 0,
                 name: "sub".into(),
-                kind: RowKind::Dir { path: "sub".into(), expanded: true, has_change: false },
+                kind: RowKind::Dir {
+                    path: "sub".into(),
+                    expanded: true,
+                    has_change: false,
+                    additions: 0,
+                    deletions: 0,
+                },
                 ignored: false,
             },
             FileRow {
