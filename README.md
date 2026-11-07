@@ -91,6 +91,10 @@ type = "plugin_action"
 command = "persiyanov.reviewr.toggle"
 ```
 
+On Windows, `cmd` is the Windows key, and Windows takes `cmd+r` first. Use another key, such as
+`prefix+f`. A key for a remote machine goes in that machine's `config.toml`, because custom commands
+belong to the server where the panes run. Choose **reload config** in herdr's menu to apply it.
+
 ## Controls
 
 Every key can be rebound ([Keybindings](#keybindings)).
