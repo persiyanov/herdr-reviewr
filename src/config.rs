@@ -60,7 +60,10 @@ impl Config {
     }
 }
 
-const PLUGIN_CONFIG_KEYS: [&str; 16] = [
+/// Lines a keyboard move keeps between the diff cursor and the pane's edges, unless configured.
+pub const DEFAULT_SCROLLOFF: usize = 3;
+
+const PLUGIN_CONFIG_KEYS: [&str; 17] = [
     "theme",
     "default_scope",
     "markdown_view",
@@ -70,6 +73,7 @@ const PLUGIN_CONFIG_KEYS: [&str; 16] = [
     "toggle_direction",
     "auto_open",
     "follow_file_across_tabs",
+    "scrolloff",
     "github_host",
     "gitlab_host",
     "azure_devops_host",
@@ -181,6 +185,7 @@ pub struct PluginConfig {
     toggle_direction: ToggleDirection,
     auto_open: bool,
     follow_file_across_tabs: bool,
+    scrolloff: usize,
     github_host: Option<String>,
     gitlab_host: Option<String>,
     azure_devops_host: Option<String>,
@@ -202,6 +207,7 @@ impl Default for PluginConfig {
             toggle_direction: ToggleDirection::Right,
             auto_open: true,
             follow_file_across_tabs: true,
+            scrolloff: DEFAULT_SCROLLOFF,
             github_host: None,
             gitlab_host: None,
             azure_devops_host: None,
@@ -252,6 +258,11 @@ impl PluginConfig {
     /// Whether a switch between `Changes` and `All files` opens the file and line left.
     pub fn follow_file_across_tabs(&self) -> bool {
         self.follow_file_across_tabs
+    }
+
+    /// Lines kept above and below the diff cursor, as vim's `scrolloff`; a large value centers it.
+    pub fn scrolloff(&self) -> usize {
+        self.scrolloff
     }
 
     pub fn github_host(&self) -> Option<&str> {
@@ -468,6 +479,12 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         config.follow_file_across_tabs = value
             .as_bool()
             .ok_or_else(|| value_error(path, value, "follow_file_across_tabs", "a boolean"))?;
+    }
+    if let Some(value) = table.get("scrolloff") {
+        config.scrolloff = value
+            .as_integer()
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| value_error(path, value, "scrolloff", "a non-negative integer"))?;
     }
     if let Some(value) = table.get("github_host") {
         config.github_host = Some(parse_forge_host(path, "github_host", value)?);
@@ -909,6 +926,8 @@ mod tests {
             ("toggle_direction = \"left\"\n", "`toggle_direction`"),
             ("auto_open = \"yes\"\n", "`auto_open`"),
             ("follow_file_across_tabs = \"no\"\n", "`follow_file_across_tabs`"),
+            ("scrolloff = -1\n", "`scrolloff`"),
+            ("scrolloff = \"8\"\n", "`scrolloff`"),
             ("github_host = \"https://github.example.com\"\n", "`github_host`"),
             ("editor = \"\"\n", "`editor`"),
             ("editor = \"   \"\n", "`editor`"),

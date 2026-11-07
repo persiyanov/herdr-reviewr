@@ -209,6 +209,7 @@ toggle_placement = "overlay"        # split | overlay | zoomed | tab
 toggle_direction = "down"           # right | down, for split
 auto_open = false
 follow_file_across_tabs = false
+scrolloff = 0                       # lines kept around the diff cursor, 3 by default; 999 centers
 editor = "code -g {file}:{line}"
 url_opener = "browser-bridge --new-tab {url}"
 review_prefix = "Fix each comment, then run the tests."

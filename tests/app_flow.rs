@@ -36,7 +36,7 @@ fn edited_repo() -> Repo {
 /// Reveal and bound the diff scroll as the loop does, one display row per row.
 fn clamp(app: &mut App, viewport: usize) {
     let heights = vec![1usize; app.visible.len()];
-    app.reveal_diff_cursor(&heights, viewport);
+    app.reveal_diff_cursor(&heights, viewport, 0);
     app.bound_diff_scroll(&heights, viewport);
 }
 
@@ -10558,6 +10558,68 @@ fn jumps_center_an_off_screen_target_and_keep_an_on_screen_one() {
         settle_frame(&mut app, tall);
         assert_eq!(app.diff_scroll, 0, "an on-screen target leaves the view still");
     }
+}
+
+/// A keyboard step keeps `scrolloff` lines around the cursor: 3 by default, 0 for the edge,
+/// 999 for the middle. A click or a drag on an edge row leaves the rows where they are.
+#[test]
+fn scrolloff_keeps_context_around_keyboard_steps_only() {
+    use herdr_reviewr::app::Tab;
+    use std::fmt::Write as _;
+    let r = Repo::init();
+    let mut text = String::new();
+    for i in 1..=60 {
+        writeln!(text, "line {i}").unwrap();
+    }
+    r.write("long.rs", &text);
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    let row = app
+        .file_rows
+        .iter()
+        .position(|f| f.file_index().is_some_and(|i| app.entries[i].path == "long.rs"))
+        .unwrap();
+    app.select_file(row).unwrap();
+    app.focus = Focus::Diff;
+    let step = |app: &mut App, delta: isize, times: usize| {
+        for _ in 0..times {
+            app.move_cursor(delta).unwrap();
+        }
+        settle_frame(app, 10);
+        (app.diff_cursor, app.diff_scroll)
+    };
+    let with = |app: &mut App, toml: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), toml).unwrap();
+        app.set_plugin_config(herdr_reviewr::config::plugin_config_in(dir.path()).unwrap());
+        (app.diff_cursor, app.diff_scroll) = (0, 0);
+    };
+
+    // By default three lines stay below, then above.
+    (app.diff_cursor, app.diff_scroll) = (0, 0);
+    assert_eq!(step(&mut app, 1, 6), (6, 0));
+    assert_eq!(step(&mut app, 1, 1), (7, 1), "the view moves with three lines still below");
+    assert_eq!(step(&mut app, 1, 10), (17, 11));
+    assert_eq!(step(&mut app, -1, 4), (13, 10), "three lines stay above");
+
+    // A click on the bottom row, and a drag through it, scroll nothing.
+    (app.diff_cursor, app.diff_scroll) = (25, 20);
+    app.start_gutter_drag(29);
+    settle_frame(&mut app, 10);
+    assert_eq!((app.diff_cursor, app.diff_scroll), (29, 20), "a click keeps the rows in place");
+    app.drag_select_to(28);
+    settle_frame(&mut app, 10);
+    assert_eq!(app.diff_scroll, 20, "a drag keeps the rows in place");
+    app.select_anchor = None;
+
+    // `scrolloff = 0` is the edge; 999 holds the cursor mid-pane.
+    with(&mut app, "scrolloff = 0\n");
+    assert_eq!(step(&mut app, 1, 9), (9, 0));
+    assert_eq!(step(&mut app, 1, 1), (10, 1));
+    with(&mut app, "scrolloff = 999\n");
+    assert_eq!(step(&mut app, 1, 5), (5, 0));
+    assert_eq!(step(&mut app, 1, 2), (7, 2), "five lines above, four below");
 }
 
 /// Rendered markdown lands on the block holding the line; a line inside a collapsed `<details>`
