@@ -265,11 +265,6 @@ mod tests {
         // Before any agent is chosen, a gone pane names no one.
         let gone = S::Herdr(H::PaneGone);
         assert_eq!(send_failure(&gone, None, "y"), "the agent closed, press y to copy");
-        // Without a selected row, the prompt refusal keeps the name reported by readiness.
-        assert_eq!(
-            send_failure(&S::AtPrompt("codex".into()), None, "y"),
-            "answer codex's prompt first"
-        );
         #[cfg(not(windows))]
         {
             let missing = anyhow::Error::from(super::clipboard::NoTool);

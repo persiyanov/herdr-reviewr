@@ -240,14 +240,6 @@ impl PaneList {
         answer(&call(&["pane", "list", "--workspace", ws])?)
     }
 
-    /// This snapshot's non-empty pane labels, keyed by pane id.
-    fn labels(&self) -> HashMap<String, String> {
-        self.panes
-            .iter()
-            .filter_map(|pane| Some((pane.pane_id.clone(), pane.label.clone()?)))
-            .collect()
-    }
-
     /// The entry for pane `pane`, if the snapshot lists it.
     pub(crate) fn pane(&self, pane: &str) -> Option<&PaneEntry> {
         self.panes.iter().find(|entry| entry.pane_id == pane)
@@ -471,20 +463,16 @@ pub fn send_target(ids: &PaneIds, choose: bool) -> Result<SendTarget, SendError>
     let agents = agent_list()?;
     // Candidates: agents in our workspace other than our pane, in herdr's own order.
     let picked = candidates(&agents, ws, me);
-    match picked.len() {
-        0 => Err(SendError::NoAgent),
-        // The sole-agent send shows no row, so only a choice among several pays for the lookups.
-        1 if !choose => Ok(SendTarget::One(picked[0].choice(&HashMap::new(), &HashMap::new()))),
-        _ => {
-            // Both lookups are best effort, so they share one wait instead of adding a second.
-            let (tabs, panes) = std::thread::scope(|scope| {
-                let tabs = scope.spawn(|| tab_labels(ws));
-                let panes = scope.spawn(|| ws.and_then(|ws| PaneList::of(ws).ok()));
-                (tabs.join().unwrap_or_default(), panes.join().ok().flatten())
-            });
-            Ok(target_among(&picked, &tabs, panes.as_ref(), me, choose))
-        }
+    if picked.is_empty() {
+        return Err(SendError::NoAgent);
     }
+    // Both lookups are best effort, so they share one wait instead of adding a second.
+    let (tabs, panes) = std::thread::scope(|scope| {
+        let tabs = scope.spawn(|| tab_labels(ws));
+        let panes = scope.spawn(|| ws.and_then(|ws| PaneList::of(ws).ok()));
+        (tabs.join().unwrap_or_default(), panes.join().ok().flatten())
+    });
+    Ok(target_among(&picked, &tabs, panes.as_ref(), me, choose))
 }
 
 /// The only agent in reviewr's own tab sends, unless the reviewer chose to pick; else the picker.
@@ -495,36 +483,39 @@ fn target_among(
     me: Option<&str>,
     choose: bool,
 ) -> SendTarget {
-    let labels = panes.map(PaneList::labels).unwrap_or_default();
     let my_tab = me.and_then(|me| panes?.pane(me)?.tab_id.as_deref());
     let mut beside = picked.iter().filter(|agent| Some(agent.tab_id.as_str()) == my_tab);
-    if !choose && let (Some(agent), None) = (beside.next(), beside.next()) {
-        return SendTarget::One(agent.choice(tabs, &labels));
+    let lone = match picked {
+        [only] => Some(only),
+        _ => match (beside.next(), beside.next()) {
+            (Some(agent), None) => Some(agent),
+            _ => None,
+        },
+    };
+    match lone.filter(|_| !choose) {
+        Some(agent) => SendTarget::One(agent.choice(tabs, panes)),
+        None => SendTarget::Many(picked.iter().map(|agent| agent.choice(tabs, panes)).collect()),
     }
-    SendTarget::Many(picked.iter().map(|agent| agent.choice(tabs, &labels)).collect())
 }
 
 impl AgentPane {
-    /// This pane as a picker row.
-    fn choice(
-        &self,
-        tabs: &HashMap<String, String>,
-        panes: &HashMap<String, String>,
-    ) -> AgentChoice {
+    /// This pane as a picker row, named by its pane's label when `panes` has one.
+    fn choice(&self, tabs: &HashMap<String, String>, panes: Option<&PaneList>) -> AgentChoice {
+        let label = panes.and_then(|panes| panes.pane(&self.pane_id)?.label.as_deref());
         AgentChoice {
             pane_id: self.pane_id.clone(),
-            name: self.row_name(panes.get(&self.pane_id).map(String::as_str)),
+            name: self.row_name(label),
             state: self.row_state(),
             tab: tabs.get(&self.tab_id).cloned().unwrap_or_default(),
         }
     }
 
-    /// The agent's name, else its pane label, display agent, kind, or pane id; empty names fall through.
+    /// The agent's name, else its pane label, display agent, kind, or pane id.
     fn row_name(&self, pane_label: Option<&str>) -> String {
         [self.name.as_deref(), pane_label, self.display_agent.as_deref(), self.agent.as_deref()]
             .into_iter()
             .flatten()
-            .find(|name| !name.is_empty())
+            .next()
             .unwrap_or(&self.pane_id)
             .to_owned()
     }
@@ -986,7 +977,7 @@ mod tests {
         ws: Option<&str>,
         me: Option<&str>,
         tabs: &HashMap<String, String>,
-        panes: &HashMap<String, String>,
+        panes: Option<&super::PaneList>,
     ) -> Vec<AgentChoice> {
         super::candidates(agents, ws, me)
             .into_iter()
@@ -1021,6 +1012,8 @@ mod tests {
             }
         };
 
+        // A lone agent takes the send wherever it sits, named by its pane's label.
+        assert_eq!(target(&[&codex], Some(&panes)), "one w1:p2 docs");
         // The agent beside reviewr takes the send, named by its pane's label.
         assert_eq!(target(&[&claude, &codex], Some(&panes)), "one w1:p1 api-refactor");
         // Two beside it, or none, and the picker opens over every agent.
@@ -1144,18 +1137,12 @@ mod tests {
         // A pane label outranks the display agent, since the border shows it.
         assert_eq!(displayed.row_name(Some("wiki-revision")), "wiki-revision");
         assert_eq!(displayed.row_name(None), "Claude");
-        // An empty pane label falls through like an absent one.
-        assert_eq!(displayed.row_name(Some("")), "Claude");
         let cleared = named("w8:p1", "w8:t1", "w8", None);
         // `--clear` leaves the key present and null, which falls through like an absent one.
         assert_eq!(cleared.row_name(None), "claude");
-        // An empty pane label still lets the agent kind name the row.
-        assert_eq!(cleared.row_name(Some("")), "claude");
         let anonymous = AgentPane { agent: None, ..agent("w8:p1", "w8:t1", "w8") };
         // With no kind either, the pane id keeps the row and the success line from going blank.
         assert_eq!(anonymous.row_name(None), "w8:p1");
-        // An empty pane label must not hide the pane id fallback.
-        assert_eq!(anonymous.row_name(Some("")), "w8:p1");
         // An empty name parses as no name, so it falls through too.
         let emptied = r#"{"result":{"agents":[{"agent":"codex","agent_status":"idle","pane_id":"w8:p2","tab_id":"w8:t1","workspace_id":"w8","name":"","display_agent":""}]}}"#;
         let parsed = super::parse_agents(emptied).unwrap();
@@ -1185,8 +1172,11 @@ mod tests {
         let mut tabs = HashMap::new();
         tabs.insert("w8:t1".to_string(), "Grip Outreach".to_string());
         // w8:t2 has no label, so that row shows its state alone.
-        let panes = HashMap::from([("w8:p1".into(), "wiki-revision".into())]);
-        let rows = rows(&agents, Some("w8"), Some("w8:p9"), &tabs, &panes);
+        let panes: super::PaneList = serde_json::from_value(serde_json::json!({"panes": [
+            {"pane_id": "w8:p1", "label": "wiki-revision"}, {"pane_id": "w8:p2", "label": ""}
+        ]}))
+        .unwrap();
+        let rows = rows(&agents, Some("w8"), Some("w8:p9"), &tabs, Some(&panes));
         assert_eq!(
             rows,
             vec![
@@ -1214,7 +1204,7 @@ mod tests {
             non_agent_pane("w3:p4", "w3:t1", "w3"),
             agent("w3:p5", "w3:t1", "w3"),
         ];
-        let rows_of = |ws| rows(&agents, ws, Some("w3:p5"), &HashMap::new(), &HashMap::new());
+        let rows_of = |ws| rows(&agents, ws, Some("w3:p5"), &HashMap::new(), None);
         let picked: Vec<_> = rows_of(Some("w3")).iter().map(|r| r.pane_id.clone()).collect();
         assert_eq!(picked, ["w3:p1"]);
         // No workspace id means no candidates — never every agent on the machine.
@@ -1316,14 +1306,6 @@ mod tests {
             HerdrError::Refused(Some("internal".into()))
         );
         assert_eq!(super::error_code("plain words"), None);
-    }
-
-    #[test]
-    fn a_pane_list_parses_to_labels_and_unlabelled_or_empty_panes_are_dropped() {
-        let json = r#"{"result":{"panes":[{"pane_id":"w7:p14","label":"s19-wiki-revision"},{"pane_id":"w7:p15"},{"pane_id":"w7:p16","label":""},{"pane_id":"w7:p17","label":null}]}}"#;
-        let panes = super::answer::<super::PaneList>(json).unwrap();
-        let labels = panes.labels();
-        assert_eq!(labels, HashMap::from([("w7:p14".into(), "s19-wiki-revision".into())]));
     }
 
     #[test]

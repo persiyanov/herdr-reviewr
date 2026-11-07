@@ -24,5 +24,5 @@ reviewr runs live beside a working agent, so every action must feel instant and 
 - Opening the commit picker reads its commit list inline, the same way and for the same reason. While the picker is open, a refresh that moved `HEAD` re-lists inline too, so the rows a keystroke is about to pick are never stale. A refresh that left `HEAD` alone spawns nothing.
 - `e` with no `editor` key, `$VISUAL` or `$EDITOR` reads git's `core.editor` inline on each press, so a fixed config is heard without a restart. One `git config` on a keypress the reviewer makes by hand.
 - Opening the worktree picker (`W`) reads `git worktree list` inline, measured at ~12ms on 25 worktrees, for the base picker's reason. The clone's common dir it lists from is read once per session, with the git dir.
-- Switching worktrees restarts the pane in-process and loads the pick as startup does: paint first, then one synchronous load.
+- Switching worktrees restarts the pane in-process and loads the pick as startup does: paint first, then the world worker loads it while the loop keeps answering keys and resizes.
 - Checking a non-empty base-picker query that matches no row as a git revision runs after a 150ms pause, or immediately on Enter. Same class as opening the picker: the row must exist before the next keystroke can pick it.

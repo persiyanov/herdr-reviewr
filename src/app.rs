@@ -48,6 +48,16 @@ enum DividerDrag {
     Cancelled,
 }
 
+/// The first world build's outcome, which an empty list reports instead of "no changes".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WorldLoad {
+    /// Still building; the refresh glyph lights past its delay.
+    Pending,
+    Landed,
+    /// The build failed before any landed.
+    Failed,
+}
+
 /// How a frame shows the read cursor, weakest first: one event's strongest request wins.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Reveal {
@@ -604,6 +614,8 @@ pub enum FooterAction {
     Split,
     Scope,
     Send,
+    /// `send-to`: pick the agent, shown in the `?` bands beside `send`.
+    SendTo,
     List,
     Copy,
     /// The quit question's answer that quits, naming the comments still pending.
@@ -832,8 +844,8 @@ pub struct App {
     pub pr_pending: Option<RefreshKind>,
     /// The world refresh to dispatch after the frame paints.
     pub world_request: Option<crate::world::WorldRequest>,
-    /// Whether a world snapshot has landed; before one, the lists read "loading…", not "no changes".
-    pub world_landed: bool,
+    /// Whether the first world build landed: until it does, no list claims "no changes".
+    pub world_load: WorldLoad,
     /// The search overlay's state while `mode == Mode::Search`, `None` otherwise.
     pub search: Option<SearchOverlay>,
     /// A query to dispatch after the frame paints.
@@ -1018,7 +1030,7 @@ impl App {
             reveal_pr_nav: std::cell::Cell::new(true),
             pr_pending: None,
             world_request: None,
-            world_landed: false,
+            world_load: WorldLoad::Pending,
             search: None,
             search_dirty: false,
             search_track: None,
@@ -1309,7 +1321,7 @@ impl App {
         self.ensure_config_ready()?;
         // Outside a git repo, a file tab shows an empty state rather than failing.
         if self.tab.is_file_tab() && !git::is_repo(&self.repo) {
-            self.world_landed = true;
+            self.world_load = WorldLoad::Landed;
             self.checkout = None;
             self.read_checkout = None;
             self.entries.clear();
@@ -1322,7 +1334,8 @@ impl App {
             }
             return Ok(());
         }
-        let snapshot = crate::world::build(&self.world_input())?;
+        let snapshot =
+            crate::world::build(&self.world_input()).inspect_err(|_| self.load_failed())?;
         self.reconcile_world(snapshot);
         Ok(())
     }
@@ -1362,7 +1375,7 @@ impl App {
 
     /// Reconcile a snapshot into the view (Continuity); whether the file view took it, as `PR` never does.
     pub fn reconcile_world(&mut self, snapshot: crate::world::WorldSnapshot) -> bool {
-        self.world_landed = true;
+        self.world_load = WorldLoad::Landed;
         // A path-limited build carries its checkout rather than reading it.
         if snapshot.touched.is_none() {
             self.read_checkout.clone_from(&snapshot.checkout);
@@ -2726,6 +2739,13 @@ impl App {
             None => {}
         }
         self.bound_diff_scroll(heights, viewport);
+    }
+
+    /// A world build failed: before any landed, the lists say so instead of staying blank.
+    pub fn load_failed(&mut self) {
+        if self.world_load == WorldLoad::Pending {
+            self.world_load = WorldLoad::Failed;
+        }
     }
 
     /// Ask the next frame to show the read cursor; the strongest request in one event wins.
@@ -4995,6 +5015,7 @@ impl App {
         // `send` closes row 1 once a comment exists.
         if !self.store.is_empty() {
             out.push((A::Send, Send));
+            out.push((A::SendTo, Do));
         }
 
         // The `go` band: keys that work anywhere, never repeating row 1.

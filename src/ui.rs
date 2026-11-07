@@ -14,7 +14,7 @@ use ratatui::widgets::{
 use unicode_truncate::UnicodeTruncateStr;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Band, Focus, FooterAction, Mode, Question, Tab};
+use crate::app::{App, Band, Focus, FooterAction, Mode, Question, Tab, WorldLoad};
 use crate::config::NavigatorPosition;
 use crate::diff::{FileDiff, MarkerKind, Notice, RenderedKind, Row};
 use crate::file_list::RowKind;
@@ -1412,7 +1412,7 @@ fn base_parts(app: &App, keymap: &Keymap, width: u16) -> Option<(String, String,
 
 /// The header suffix: the changed-file count and line totals, measured by display width.
 fn header_suffix(app: &App) -> String {
-    if !app.world_landed {
+    if app.world_load != WorldLoad::Landed {
         return String::new();
     }
     let (added, removed) = app.changed_totals();
@@ -1516,7 +1516,8 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
     if app.file_rows.is_empty() {
         let gone = app.commits_gone_message();
         let msg = match app.tab {
-            _ if !app.world_landed => "loading…",
+            _ if app.world_load == WorldLoad::Pending => "",
+            _ if app.world_load == WorldLoad::Failed => "load failed, r retries",
             Tab::AllFiles => "no files",
             Tab::Changes if app.awaiting_turn() => app.turn_wait_message(),
             Tab::Changes if app.commits_gone() => gone.as_str(),
@@ -1557,13 +1558,7 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
                     let all_files = app.tab == Tab::AllFiles;
                     let stats =
                         if *expanded { String::new() } else { stats_str(*additions, *deletions) };
-                    let reserve = if all_files {
-                        DIR_DOT_RESERVE
-                    } else if stats.is_empty() {
-                        0
-                    } else {
-                        stats.width() + STATS_GAP
-                    };
+                    let reserve = if all_files { DIR_DOT_RESERVE } else { stats_reserve(&stats) };
                     let lead = format!("{nest}{arrow}");
                     let budget = width.saturating_sub(lead.width() + reserve + 1).max(1);
                     // Elide the bare name, then add `/`: eliding `name/` would leave `…/`.
@@ -1622,8 +1617,7 @@ fn file_row_item(row: &FileRowSpec<'_>, width: usize, on: Fill, p: &Palette) -> 
     let marker = annotation.map_or(String::new(), |a| format!("{} ", a.kind.marker()));
     let (additions, deletions) = annotation.map_or((0, 0), |a| (a.additions, a.deletions));
     let stats = stats_str(additions, deletions);
-    let gap = if stats.is_empty() { 0 } else { STATS_GAP };
-    let fixed = indent.width() + marker.width() + stats.width() + gap;
+    let fixed = indent.width() + marker.width() + stats_reserve(&stats);
     let shown = elide_head(name, width.saturating_sub(fixed).max(1));
 
     let mut spans = vec![Span::styled(indent.to_string(), text_style(p, on))];
@@ -1659,6 +1653,11 @@ fn file_row_item(row: &FileRowSpec<'_>, width: usize, on: Fill, p: &Palette) -> 
 
 /// The least space between a file list name and its line stats.
 const STATS_GAP: usize = 2;
+
+/// The columns a row's line stats take, with their gap; none without stats.
+fn stats_reserve(stats: &str) -> usize {
+    if stats.is_empty() { 0 } else { stats.width() + STATS_GAP }
+}
 
 /// Pad `spans` so `tail` ends at column `width`, then append `tail`.
 fn push_at_end(spans: &mut Vec<Span<'static>>, width: usize, tail: Vec<Span<'static>>) {
@@ -1804,7 +1803,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         // `All files` is no diff, so its copy avoids diff words.
         let gone = app.commits_gone_message();
         let msg = match app.tab {
-            _ if !app.world_landed => "",
+            _ if app.world_load != WorldLoad::Landed => "",
             Tab::AllFiles => match app.diff.notice {
                 Some(notice) => notice.message(),
                 None if app.diff_path.is_some() => "empty file",
@@ -2928,6 +2927,7 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
             "scope",
         ),
         A::Send => return (hint(K::Send), format!("send {}", app.store.len())),
+        A::SendTo => (hint(K::SendTo), "pick agent"),
         A::List => (hint(K::Comments), "comments"),
         A::Copy => (hint(K::Copy), "copy"),
         A::QuitDiscard => {

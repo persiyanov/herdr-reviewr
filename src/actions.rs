@@ -140,23 +140,22 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
     let existing = reviewr_panes(&panes)
         .ok_or_else(|| refused(format!("herdr pane process-info failed in {ws}")))?;
 
-    // The event opens a fresh workspace's first reviewr, so any reviewr there is enough.
-    if action == Action::AutoOpen {
-        if !existing.is_empty() {
-            return Ok(Some(format!("already open ({}) in {ws}", existing.join(" "))));
-        }
-        return open(action, &config, &target, &panes).map(Some);
-    }
+    let mine = if action == Action::AutoOpen {
+        // The event opens a fresh workspace's first reviewr, so any reviewr there is enough.
+        if existing.is_empty() { Mine::None(None) } else { Mine::Here(existing) }
+    } else {
+        mine(&existing, &panes, &target, config.toggle_placement())
+    };
     // Toggle closes a reviewr you can see, shows one you can't, and opens one if there's none.
-    match (action, mine(&existing, &panes, &target, &config)) {
+    match (action, mine) {
         (Action::Toggle | Action::Close, Mine::Here(here)) => close_all(&here, ws).map(Some),
         (_, Mine::Here(here)) => Ok(Some(format!("already open ({}) in {ws}", here.join(" ")))),
         (Action::Close, Mine::Elsewhere { pane, .. }) => close_all(&[pane], ws).map(Some),
         (_, Mine::Elsewhere { pane, tab }) => herdr::focus_tab(&tab)
             .map(|()| Some(format!("showed {pane} in {ws}")))
             .map_err(|_| refused(format!("herdr tab focus failed for {tab} in {ws}"))),
-        (Action::Close, Mine::None) => Ok(Some(format!("nothing open in {ws}"))),
-        (_, Mine::None) => open(action, &config, &target, &panes).map(Some),
+        (Action::Close, Mine::None(_)) => Ok(Some(format!("nothing open in {ws}"))),
+        (_, Mine::None(cwd)) => open(action, &config, &target, &panes, cwd).map(Some),
     }
 }
 
@@ -165,11 +164,9 @@ enum Mine<'p> {
     /// In the focused tab, so on screen.
     Here(Vec<&'p str>),
     /// With `tab` placement, the focused worktree's reviewr tab, off screen.
-    Elsewhere {
-        pane: &'p str,
-        tab: String,
-    },
-    None,
+    Elsewhere { pane: &'p str, tab: String },
+    /// No reviewr of yours; the review folder, when the search already read it.
+    None(Option<String>),
 }
 
 /// The focused tab's reviewr panes, else with `tab` placement the reviewr tab for the review dir.
@@ -177,7 +174,7 @@ fn mine<'p>(
     existing: &[&'p str],
     panes: &PaneList,
     target: &Target,
-    config: &PluginConfig,
+    placement: TogglePlacement,
 ) -> Mine<'p> {
     let tab_of = |pane: &str| panes.pane(pane).and_then(|entry| entry.tab_id.as_deref());
     // Without a focused tab from herdr, every reviewr counts as on screen, as before tabs did.
@@ -188,12 +185,13 @@ fn mine<'p>(
     if !here.is_empty() {
         return Mine::Here(here);
     }
-    if config.toggle_placement() != TogglePlacement::Tab {
-        return Mine::None;
+    if placement != TogglePlacement::Tab {
+        return Mine::None(None);
     }
     // A reviewr tab belongs to the worktree it reviews; an unreadable dir matches none.
+    let Ok(cwd) = review_dir(target, panes) else { return Mine::None(None) };
     let worktree = |dir: &str| crate::git::toplevel(Path::new(dir));
-    let Some(root) = review_dir(target, panes).ok().and_then(worktree) else { return Mine::None };
+    let Some(root) = worktree(cwd) else { return Mine::None(None) };
     existing
         .iter()
         .copied()
@@ -203,7 +201,7 @@ fn mine<'p>(
             let tab = entry.tab_id.clone()?;
             (worktree(dir).as_ref() == Some(&root)).then_some(Mine::Elsewhere { pane, tab })
         })
-        .unwrap_or(Mine::None)
+        .unwrap_or_else(|| Mine::None(Some(cwd.to_owned())))
 }
 
 /// The review binary's name, which identifies a reviewr pane and names its launch links.
@@ -393,9 +391,13 @@ fn open(
     config: &PluginConfig,
     target: &Target,
     panes: &PaneList,
+    cwd: Option<String>,
 ) -> Result<String, Stop> {
     let ws = target.ws.as_str();
-    let cwd = review_dir(target, panes)?;
+    let cwd = match cwd {
+        Some(cwd) => cwd,
+        None => review_dir(target, panes)?.to_owned(),
+    };
 
     let plugin = herdr::plugin_id();
     let placement = config.toggle_placement();
@@ -416,7 +418,8 @@ fn open(
         TogglePlacement::Overlay => herdr::Spot::Overlay,
     };
     // A manual open takes focus. The event never does.
-    let open = herdr::PaneOpen { plugin: &plugin, spot, cwd, focus: action != Action::AutoOpen };
+    let open =
+        herdr::PaneOpen { plugin: &plugin, spot, cwd: &cwd, focus: action != Action::AutoOpen };
     let opened =
         herdr::open_plugin_pane(&open).map_err(|_| refused("herdr plugin pane open failed"))?;
 

@@ -78,7 +78,8 @@ herdr-reviewr ~/some/repo
 2. **Focus the diff.** `Tab`.
 3. **Select lines.** `v`, then `j` / `k`, or drag the line numbers.
 4. **Comment.** `c`, type, `Enter`.
-5. **Send.** `s` puts every comment in the input of the agent beside reviewr. `S` picks another.
+5. **Send.** `s` puts every comment in the agent's input: the only agent, or the one beside
+   reviewr. `S` lets you pick.
 
 The footer shows the next step, and the worktree you're on at its right. `?` lists every key.
 

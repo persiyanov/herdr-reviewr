@@ -89,7 +89,8 @@ pub fn run() -> Result<()> {
 /// Review until quit, restarting on each switch's pick in the same pane.
 fn review(screen: &mut Screen, cfg: &mut Config, app: &mut App) -> Result<()> {
     let mut _session = git::lease_session(&app.repo);
-    paint_then_load(&mut screen.terminal, app)?;
+    enter_repo(app);
+    paint_then_request_load(&mut screen.terminal, app)?;
     // An old command line hears what changed instead of quietly doing something else.
     if let Some(note) = &cfg.removed_flag {
         app.status.clone_from(note);
@@ -100,9 +101,10 @@ fn review(screen: &mut Screen, cfg: &mut Config, app: &mut App) -> Result<()> {
         event_loop(screen, app, cfg, &mut open_editors)?;
         let Some(switched) = switched_app(cfg, app) else { return Ok(()) };
         *app = switched;
+        enter_repo(app);
         // The old worktree's session ends once its workers finish too.
         _session = git::lease_session(&app.repo);
-        paint_then_load(&mut screen.terminal, app)?;
+        paint_then_request_load(&mut screen.terminal, app)?;
     }
 }
 
@@ -305,9 +307,17 @@ pub fn switched_app(cfg: &mut Config, old: &mut App) -> Option<App> {
     Some(app)
 }
 
+/// Work in the reviewed repo: herdr reports a pane's folder from its process, and the actions
+/// match a `tab`-placement reviewr to a worktree by it.
+fn enter_repo(app: &App) {
+    if let Err(e) = std::env::set_current_dir(&app.repo) {
+        logln!("chdir to {} failed: {e}", app.repo.display());
+    }
+}
+
 /// Paint, then hand the first load to the world worker: a hung `git` never leaves a blank pane
 /// (issue #4), and the loop answers a resize while it loads (herdr resizes a fresh pane).
-fn paint_then_load<B: ratatui::backend::Backend>(
+fn paint_then_request_load<B: ratatui::backend::Backend>(
     terminal: &mut ratatui::Terminal<B>,
     app: &mut App,
 ) -> Result<()>
@@ -748,6 +758,7 @@ pub fn land_world_completion(
         }
         Some(Err(e)) => {
             app.status = format!("refresh failed: {e}");
+            app.load_failed();
             Landing::Failed(completion.refresh)
         }
         None => Landing::Landed,
@@ -1054,6 +1065,7 @@ fn event_loop(
                         Err(mpsc::TryRecvError::Disconnected) if world_live.running.is_some() => {
                             world_live.running = None;
                             app.status = "refresh worker unavailable".to_string();
+                            app.load_failed();
                             break;
                         }
                         Err(_) => break,
@@ -1191,6 +1203,7 @@ fn event_loop(
                 if world_tx.send(job).is_err() {
                     // A dead worker must not pin the in-flight marker.
                     app.status = "refresh worker unavailable".to_string();
+                    app.load_failed();
                     world_live.running = None;
                 }
             }
@@ -1833,10 +1846,15 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             Some(K::QuitDiscard) if quit => app.should_quit = true,
             Some(K::WorktreePick) if !quit => app.switch_discarding(),
             Some(K::Quit) if quit => {}
-            Some(action @ (K::Send | K::SendTo)) => {
+            Some(K::Send) => {
                 app.close_worktree_picker();
                 app.question = None;
-                app.send_to_agent(action == K::SendTo);
+                app.send_to_agent(false);
+            }
+            Some(K::SendTo) => {
+                app.close_worktree_picker();
+                app.question = None;
+                app.send_to_agent(true);
             }
             Some(K::Copy) => {
                 app.close_worktree_picker();
@@ -3785,7 +3803,7 @@ mod text_edit_tests {
 
 #[cfg(test)]
 mod startup_tests {
-    use super::paint_then_load;
+    use super::paint_then_request_load;
     use crate::app::App;
     use crate::model::Scope;
     use ratatui::Terminal;
@@ -3796,7 +3814,7 @@ mod startup_tests {
     }
 
     #[test]
-    fn the_first_paint_reads_loading_and_hands_the_load_to_the_worker() {
+    fn the_first_paint_claims_nothing_and_hands_the_load_to_the_worker() {
         let (dir, git) = crate::test_support::test_repo();
         std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
         git(&["add", "-A"]);
@@ -3805,18 +3823,22 @@ mod startup_tests {
         let mut app = App::new(dir.path().to_path_buf(), Scope::Uncommitted, None);
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
 
-        paint_then_load(&mut terminal, &mut app).unwrap();
+        paint_then_request_load(&mut terminal, &mut app).unwrap();
         let first = screen(&terminal);
-        assert!(first.contains("loading…"), "{first}");
         assert!(!first.contains("no changes") && !first.contains("0 changed"), "{first}");
         assert!(app.entries.is_empty(), "nothing loads before the frame loop runs");
         let request = app.world_request.clone().expect("the first load is requested");
         assert!(!request.background && request.refresh.is_full());
 
-        // The worker's snapshot lands like any refresh, and the list replaces the loading line.
+        // A failed first build says so, rather than leaving the list blank.
+        app.load_failed();
+        terminal.draw(|f| crate::ui::render(f, &app)).unwrap();
+        assert!(screen(&terminal).contains("load failed, r retries"));
+
+        // The worker's snapshot lands like any refresh, and the list fills.
         app.reconcile_world(crate::world::build(&app.world_input()).unwrap());
         terminal.draw(|f| crate::ui::render(f, &app)).unwrap();
         let loaded = screen(&terminal);
-        assert!(loaded.contains("a.txt") && !loaded.contains("loading…"), "{loaded}");
+        assert!(loaded.contains("a.txt") && !loaded.contains("load failed"), "{loaded}");
     }
 }
