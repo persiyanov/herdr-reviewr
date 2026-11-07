@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.51.0] — 2026-11-07
+
 ### Added
 - **`switch-pane` rebinds the pane switch**, `tab` by default, so `h` or any other key can move between the file list and the diff.
   Thanks [@ianptkcs](https://github.com/ianptkcs) ([#89](https://github.com/persiyanov/herdr-reviewr/issues/89)).
