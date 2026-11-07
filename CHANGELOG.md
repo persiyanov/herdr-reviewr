@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.50.1] — 2026-11-07
+
 ### Security
 - **reviewr's git calls run no fsmonitor program and no git hooks**, so a planted `.git/config` or hook no longer runs when a pane refreshes.
   Thanks [@mitja-kleider](https://github.com/mitja-kleider) ([#163](https://github.com/persiyanov/herdr-reviewr/pull/163)).
