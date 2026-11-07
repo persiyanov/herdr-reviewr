@@ -1685,6 +1685,17 @@ const HALF_PAGE: isize = 8;
 
 /// Apply one readline-style key to the active text field; `word` moves by word.
 fn apply_text_edit(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bool) {
+    if !edit_command(app, code, ctrl, alt, word)
+        && let KeyCode::Char(c) = code
+        && !ctrl
+        && !alt
+    {
+        app.input_push(c);
+    }
+}
+
+/// The caret moves and deletes every text field shares, readline's; `false` when `code` is none.
+fn edit_command(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bool) -> bool {
     use KeyCode::{Backspace, Char, Delete, End, Home, Left, Right};
     match code {
         Char('w') if ctrl => app.input_delete_word(),
@@ -1695,19 +1706,19 @@ fn apply_text_edit(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bo
         // `Alt+b`/`Alt+f` survive multiplexers that strip modified arrows.
         Char('b') if alt => app.caret_word_left(),
         Char('f') if alt => app.caret_word_right(),
+        Char('d') | Delete if alt => app.input_delete_word_forward(),
         Left if word => app.caret_word_left(),
         Right if word => app.caret_word_right(),
         Left => app.caret_left(),
         Right => app.caret_right(),
         Home => app.caret_home(),
         End => app.caret_end(),
-        Delete if alt => app.input_delete_word_forward(),
         Backspace if alt => app.input_delete_word(),
         Delete => app.input_delete_forward(),
         Backspace => app.input_backspace(),
-        Char(c) if !ctrl && !alt => app.input_push(c),
-        _ => {}
+        _ => return false,
     }
+    true
 }
 
 /// Map one key press onto `App` through the painted frame's `keymap`.
@@ -1770,24 +1781,16 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // Line field: digits or `$` edit, Enter jumps, Esc closes, the rest is inert.
+    // Line field: digits or `$` type, the shared edits edit, Enter jumps, Esc closes.
     if app.line_open() {
-        let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             Esc => app.close_find(),
             Enter => app.line_go(),
-            Char(c @ ('0'..='9' | '$')) if plain => app.line_type(c),
-            code @ (KeyCode::Backspace
-            | KeyCode::Delete
-            | KeyCode::Left
-            | KeyCode::Right
-            | KeyCode::Home
-            | KeyCode::End)
-                if plain =>
-            {
-                apply_text_edit(app, code, false, false, false);
+            Char(c @ ('0'..='9' | '$')) if !ctrl && !alt => app.line_type(c),
+            code => {
+                edit_command(app, code, ctrl, alt, alt || ctrl);
             }
-            _ => {}
         }
         return Ok(());
     }
@@ -3735,12 +3738,16 @@ mod text_edit_tests {
         let mut app = composing("foo   bar", 3);
         apply_text_edit(&mut app, KeyCode::Delete, false, true, false);
         assert_eq!((app.input.as_str(), app.caret), ("foo", 3), "skips the gap, then the word");
+        // `alt+d` is readline's name for the same delete.
+        let mut app = composing("foo bar", 3);
+        apply_text_edit(&mut app, KeyCode::Char('d'), false, true, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foo", 3));
     }
 
     #[test]
     fn alt_letter_types_nothing_into_the_field() {
         let mut app = composing("foo", 3);
-        apply_text_edit(&mut app, KeyCode::Char('d'), false, true, false);
+        apply_text_edit(&mut app, KeyCode::Char('x'), false, true, false);
         assert_eq!((app.input.as_str(), app.caret), ("foo", 3));
     }
 

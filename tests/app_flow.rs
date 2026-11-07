@@ -10582,6 +10582,60 @@ fn line_field_repo() -> Repo {
     r
 }
 
+/// Every text field takes the same readline edits; each types only what it accepts.
+#[test]
+fn every_text_field_takes_the_word_edits() {
+    let r = line_field_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    let chord = |app: &mut App, code: KeyCode, modifiers: KeyModifiers| {
+        handle_key(app, KeyEvent::new(code, modifiers), Rect::new(0, 0, 120, 40), &keymap).unwrap();
+    };
+    let field = |app: &App| -> String {
+        match &app.mode {
+            Mode::Composing { .. } => app.input.clone(),
+            Mode::Search => app.search.as_ref().unwrap().query.clone(),
+            Mode::Find => app.find.as_ref().unwrap().query.clone(),
+            Mode::BasePick => app.base_picker.as_ref().unwrap().query.clone(),
+            mode => panic!("no text field in {mode:?}"),
+        }
+    };
+    let opens: [(&str, KeyCode, KeyModifiers); 4] = [
+        ("composer", KeyCode::Char('c'), KeyModifiers::NONE),
+        ("search", KeyCode::Char('/'), KeyModifiers::NONE),
+        ("find", KeyCode::Char('f'), KeyModifiers::CONTROL),
+        ("base picker", KeyCode::Char('B'), KeyModifiers::NONE),
+    ];
+    for (name, code, modifiers) in opens {
+        app.focus = Focus::Diff;
+        app.diff_cursor = app.visible.iter().position(|row| row.new_no().is_some()).unwrap();
+        chord(&mut app, code, modifiers);
+        assert_ne!(app.mode, Mode::Normal, "{name} opens");
+        find_type(&mut app, &keymap, "ab cd");
+        chord(&mut app, KeyCode::Backspace, KeyModifiers::ALT);
+        assert_eq!(field(&app), "ab ", "{name}: alt+backspace");
+        find_type(&mut app, &keymap, "ef");
+        chord(&mut app, KeyCode::Char('b'), KeyModifiers::ALT);
+        chord(&mut app, KeyCode::Char('d'), KeyModifiers::ALT);
+        assert_eq!(field(&app), "ab ", "{name}: alt+b, then alt+d");
+        chord(&mut app, KeyCode::Char('x'), KeyModifiers::ALT);
+        chord(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(field(&app), "", "{name}: alt+x types nothing, ctrl+w deletes");
+        chord(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.mode, Mode::Normal, "{name} closes");
+    }
+
+    // The line field types digits only, and edits like the rest.
+    press(&mut app, &keymap, KeyCode::Char(':'));
+    find_type(&mut app, &keymap, "12x");
+    assert_eq!(field(&app), "12");
+    chord(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+    assert_eq!(field(&app), "", "ctrl+w");
+    find_type(&mut app, &keymap, "34");
+    chord(&mut app, KeyCode::Backspace, KeyModifiers::ALT);
+    assert_eq!(field(&app), "", "alt+backspace");
+}
+
 /// The line field's event table: open, type, edit, jump, close, `:0`/`:$`, and what a refresh,
 /// a tab switch, and an invalid config do to it.
 #[test]
