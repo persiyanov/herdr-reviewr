@@ -140,18 +140,70 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
     let existing = reviewr_panes(&panes)
         .ok_or_else(|| refused(format!("herdr pane process-info failed in {ws}")))?;
 
-    if !existing.is_empty() {
-        return match action {
-            Action::Close | Action::Toggle => close_all(&existing, ws).map(Some),
-            Action::Open | Action::AutoOpen => {
-                Ok(Some(format!("already open ({}) in {ws}", existing.join(" "))))
-            }
-        };
+    // The event opens a fresh workspace's first reviewr, so any reviewr there is enough.
+    if action == Action::AutoOpen {
+        if !existing.is_empty() {
+            return Ok(Some(format!("already open ({}) in {ws}", existing.join(" "))));
+        }
+        return open(action, &config, &target, &panes).map(Some);
     }
-    if action == Action::Close {
-        return Ok(Some(format!("nothing open in {ws}")));
+    // Toggle closes a reviewr you can see, shows one you can't, and opens one if there's none.
+    match (action, mine(&existing, &panes, &target, &config)) {
+        (Action::Toggle | Action::Close, Mine::Here(here)) => close_all(&here, ws).map(Some),
+        (_, Mine::Here(here)) => Ok(Some(format!("already open ({}) in {ws}", here.join(" ")))),
+        (Action::Close, Mine::Elsewhere { pane, .. }) => close_all(&[pane], ws).map(Some),
+        (_, Mine::Elsewhere { pane, tab }) => herdr::focus_tab(&tab)
+            .map(|()| Some(format!("showed {pane} in {ws}")))
+            .map_err(|_| refused(format!("herdr tab focus failed for {tab} in {ws}"))),
+        (Action::Close, Mine::None) => Ok(Some(format!("nothing open in {ws}"))),
+        (_, Mine::None) => open(action, &config, &target, &panes).map(Some),
     }
-    open(action, &config, &target, &panes).map(Some)
+}
+
+/// The reviewr an explicit action acts on.
+enum Mine<'p> {
+    /// In the focused tab, so on screen.
+    Here(Vec<&'p str>),
+    /// With `tab` placement, the focused worktree's reviewr tab, off screen.
+    Elsewhere {
+        pane: &'p str,
+        tab: String,
+    },
+    None,
+}
+
+/// The focused tab's reviewr panes, else with `tab` placement the reviewr tab for the review dir.
+fn mine<'p>(
+    existing: &[&'p str],
+    panes: &PaneList,
+    target: &Target,
+    config: &PluginConfig,
+) -> Mine<'p> {
+    let tab_of = |pane: &str| panes.pane(pane).and_then(|entry| entry.tab_id.as_deref());
+    // Without a focused tab from herdr, every reviewr counts as on screen, as before tabs did.
+    let here: Vec<&str> = match target.tab.as_deref() {
+        Some(focused) => existing.iter().copied().filter(|p| tab_of(p) == Some(focused)).collect(),
+        None => existing.to_vec(),
+    };
+    if !here.is_empty() {
+        return Mine::Here(here);
+    }
+    if config.toggle_placement() != TogglePlacement::Tab {
+        return Mine::None;
+    }
+    // A reviewr tab belongs to the worktree it reviews; an unreadable dir matches none.
+    let worktree = |dir: &str| crate::git::toplevel(Path::new(dir));
+    let Some(root) = review_dir(target, panes).ok().and_then(worktree) else { return Mine::None };
+    existing
+        .iter()
+        .copied()
+        .find_map(|pane| {
+            let entry = panes.pane(pane)?;
+            let dir = entry.foreground_cwd.as_deref().or(entry.cwd.as_deref())?;
+            let tab = entry.tab_id.clone()?;
+            (worktree(dir).as_ref() == Some(&root)).then_some(Mine::Elsewhere { pane, tab })
+        })
+        .unwrap_or(Mine::None)
 }
 
 /// The review binary's name, which identifies a reviewr pane and names its launch links.
@@ -218,6 +270,8 @@ struct Target {
     focused: Option<String>,
     /// The workspace's cwd, the last candidate.
     workspace_cwd: Option<String>,
+    /// The focused tab, whose reviewr is the one on screen.
+    tab: Option<String>,
 }
 
 impl Target {
@@ -235,6 +289,7 @@ impl Target {
                     .or_else(|| text(&event, "/data/worktree/path")),
                 focused: None,
                 workspace_cwd: None,
+                tab: None,
             });
         }
         let context: Value = var("HERDR_PLUGIN_CONTEXT_JSON")
@@ -247,6 +302,7 @@ impl Target {
             cwd: text(&context, "/focused_pane_cwd"),
             focused: text(&context, "/focused_pane_id"),
             workspace_cwd: text(&context, "/workspace_cwd"),
+            tab: text(&context, "/tab_id"),
         })
     }
 }
@@ -339,6 +395,52 @@ fn open(
     panes: &PaneList,
 ) -> Result<String, Stop> {
     let ws = target.ws.as_str();
+    let cwd = review_dir(target, panes)?;
+
+    let plugin = herdr::plugin_id();
+    let placement = config.toggle_placement();
+    // A split or zoomed open attaches to the focused pane, else the workspace's first pane.
+    let attach = || {
+        target
+            .pane
+            .as_deref()
+            .or_else(|| panes.panes.first().map(|entry| entry.pane_id.as_str()))
+            .ok_or_else(|| refused(format!("no pane to attach to in {ws}")))
+    };
+    let spot = match placement {
+        TogglePlacement::Split => {
+            herdr::Spot::Split { target: attach()?, direction: config.toggle_direction() }
+        }
+        TogglePlacement::Zoomed => herdr::Spot::Zoomed { target: attach()? },
+        TogglePlacement::Tab => herdr::Spot::Tab { workspace: ws },
+        TogglePlacement::Overlay => herdr::Spot::Overlay,
+    };
+    // A manual open takes focus. The event never does.
+    let open = herdr::PaneOpen { plugin: &plugin, spot, cwd, focus: action != Action::AutoOpen };
+    let opened =
+        herdr::open_plugin_pane(&open).map_err(|_| refused("herdr plugin pane open failed"))?;
+
+    // Name a fresh tab after the plugin; cosmetic, so its failure is ignored.
+    if placement == TogglePlacement::Tab
+        && let Some(tab) = opened.tab_id.as_deref()
+    {
+        let _ = herdr::rename_tab(tab, herdr::LABEL);
+        // herdr#4283: a focused tab open leaves the client on the old tab.
+        if open.focus && herdr::focus_tab(tab).is_err() {
+            logln!("focusing tab {tab} failed");
+        }
+    }
+
+    let success = format!("opened {} ({}) in {ws}", opened.pane_id, placement.as_str());
+    match launch(&opened.pane_id) {
+        Launch::Running => Ok(success),
+        Launch::Unseen => Ok(format!("{success}, not yet seen running")),
+        Launch::Exited => Err(refused(format!("pane {} exited at launch in {ws}", opened.pane_id))),
+    }
+}
+
+/// The folder an open reviews: the first candidate in a worktree, never a plugin's checkout.
+fn review_dir<'a>(target: &'a Target, panes: &'a PaneList) -> Result<&'a str, Stop> {
     // The focused pane's live cwd, its launch cwd, the agent panes', the other panes', the workspace's.
     let live = target
         .focused
@@ -384,47 +486,7 @@ fn open(
             .collect();
         return Err(refused(format!("no repo to review: {}", rejected.join(", "))));
     };
-
-    let plugin = herdr::plugin_id();
-    let placement = config.toggle_placement();
-    // A split or zoomed open attaches to the focused pane, else the workspace's first pane.
-    let attach = || {
-        target
-            .pane
-            .as_deref()
-            .or_else(|| panes.panes.first().map(|entry| entry.pane_id.as_str()))
-            .ok_or_else(|| refused(format!("no pane to attach to in {ws}")))
-    };
-    let spot = match placement {
-        TogglePlacement::Split => {
-            herdr::Spot::Split { target: attach()?, direction: config.toggle_direction() }
-        }
-        TogglePlacement::Zoomed => herdr::Spot::Zoomed { target: attach()? },
-        TogglePlacement::Tab => herdr::Spot::Tab { workspace: ws },
-        TogglePlacement::Overlay => herdr::Spot::Overlay,
-    };
-    // A manual open takes focus. The event never does.
-    let open = herdr::PaneOpen { plugin: &plugin, spot, cwd, focus: action != Action::AutoOpen };
-    let opened =
-        herdr::open_plugin_pane(&open).map_err(|_| refused("herdr plugin pane open failed"))?;
-
-    // Name a fresh tab after the plugin; cosmetic, so its failure is ignored.
-    if placement == TogglePlacement::Tab
-        && let Some(tab) = opened.tab_id.as_deref()
-    {
-        let _ = herdr::rename_tab(tab, herdr::LABEL);
-        // herdr#4283: a focused tab open leaves the client on the old tab.
-        if open.focus && herdr::focus_tab(tab).is_err() {
-            logln!("focusing tab {tab} failed");
-        }
-    }
-
-    let success = format!("opened {} ({}) in {ws}", opened.pane_id, placement.as_str());
-    match launch(&opened.pane_id) {
-        Launch::Running => Ok(success),
-        Launch::Unseen => Ok(format!("{success}, not yet seen running")),
-        Launch::Exited => Err(refused(format!("pane {} exited at launch in {ws}", opened.pane_id))),
-    }
+    Ok(cwd)
 }
 
 /// Whether `dir` sits in a worktree; a `.git` dir or bare repository does not.

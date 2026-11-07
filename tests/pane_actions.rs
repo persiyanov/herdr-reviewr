@@ -1593,3 +1593,105 @@ fn a_failed_plugin_list_still_opens_on_the_focused_pane() {
         herdr_calls(dir.path())
     );
 }
+
+/// `w1:p1` is the focused pane in tab `w1:t1`, working in `cwd`.
+fn tab_context(cwd: &Path) -> String {
+    json!({"tab_id": "w1:t1", "focused_pane_id": "w1:p1", "focused_pane_cwd": cwd}).to_string()
+}
+
+#[test]
+fn split_toggle_acts_on_the_focused_tabs_reviewr_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repo::init();
+    let pane =
+        |id: &str, tab: &str| json!({"pane_id": id, "tab_id": tab, "foreground_cwd": repo.path()});
+    // An agent in tab 1, and a reviewr beside another agent in tab 2.
+    panes(
+        dir.path(),
+        &json!([pane("w1:p1", "w1:t1"), pane("w1:p2", "w1:t2"), pane("w1:p3", "w1:t2")]),
+    );
+    procinfo(dir.path(), "w1:p3", &json!([review_ui()]));
+    let context = tab_context(repo.path());
+
+    let output = run_with_context("toggle", dir.path(), &context);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let calls = herdr_calls(dir.path());
+    assert!(calls.contains("plugin pane open"), "toggle opens one in tab 1: {calls}");
+    assert!(!calls.contains("pane close"), "tab 2's reviewr stays: {calls}");
+
+    // `close` in tab 1 leaves tab 2's reviewr alone too.
+    reset(dir.path());
+    let output = run_with_context("close", dir.path(), &context);
+    assert_eq!(stdout(&output), "reviewr: nothing open in workspace-1\n");
+    assert!(!herdr_calls(dir.path()).contains("pane close"));
+
+    // A reviewr in the focused tab is on screen: toggle closes it and nothing else.
+    reset(dir.path());
+    panes(
+        dir.path(),
+        &json!([pane("w1:p1", "w1:t1"), pane("w1:p4", "w1:t1"), pane("w1:p3", "w1:t2")]),
+    );
+    procinfo(dir.path(), "w1:p4", &json!([review_ui()]));
+    let output = run_with_context("toggle", dir.path(), &context);
+    assert_eq!(stdout(&output), "reviewr: closed w1:p4 in workspace-1\n");
+    assert!(!herdr_calls(dir.path()).contains("pane close w1:p3"));
+}
+
+#[test]
+fn tab_placement_shows_the_worktrees_reviewr_tab_then_closes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("config.toml"), "toggle_placement = \"tab\"\n").unwrap();
+    let (mine, other) = (Repo::init(), Repo::init());
+    // Tab 1: an agent on `mine`. Tab 3: `mine`'s reviewr. Tab 4: `other`'s reviewr.
+    panes(
+        dir.path(),
+        &json!([
+            {"pane_id": "w1:p1", "tab_id": "w1:t1", "foreground_cwd": mine.path(), "agent": "claude"},
+            {"pane_id": "w1:p5", "tab_id": "w1:t3", "foreground_cwd": mine.path()},
+            {"pane_id": "w1:p6", "tab_id": "w1:t4", "foreground_cwd": other.path()},
+        ]),
+    );
+    procinfo(dir.path(), "w1:p5", &json!([review_ui()]));
+    procinfo(dir.path(), "w1:p6", &json!([review_ui()]));
+
+    // Off screen: the first press takes you to it.
+    let output = run_with_context("toggle", dir.path(), &tab_context(mine.path()));
+    assert_eq!(stdout(&output), "reviewr: showed w1:p5 in workspace-1\n");
+    let calls = herdr_calls(dir.path());
+    assert!(calls.lines().any(|l| l == "tab focus w1:t3"), "{calls}");
+    assert!(!calls.contains("pane close") && !calls.contains("plugin pane open"), "{calls}");
+
+    // On its tab, the next press closes it.
+    reset(dir.path());
+    let on_it = json!({"tab_id": "w1:t3", "focused_pane_id": "w1:p5"}).to_string();
+    let output = run_with_context("toggle", dir.path(), &on_it);
+    assert_eq!(stdout(&output), "reviewr: closed w1:p5 in workspace-1\n");
+
+    // `close` closes your worktree's reviewr tab from anywhere, and only that one.
+    reset(dir.path());
+    let output = run_with_context("close", dir.path(), &tab_context(mine.path()));
+    assert_eq!(stdout(&output), "reviewr: closed w1:p5 in workspace-1\n");
+    assert!(!herdr_calls(dir.path()).contains("pane close w1:p6"));
+}
+
+#[test]
+fn tab_placement_opens_a_reviewr_tab_for_a_worktree_without_one() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("config.toml"), "toggle_placement = \"tab\"\n").unwrap();
+    let (mine, other) = (Repo::init(), Repo::init());
+    panes(
+        dir.path(),
+        &json!([
+            {"pane_id": "w1:p1", "tab_id": "w1:t1", "foreground_cwd": mine.path(), "agent": "claude"},
+            {"pane_id": "w1:p6", "tab_id": "w1:t4", "foreground_cwd": other.path()},
+        ]),
+    );
+    procinfo(dir.path(), "w1:p6", &json!([review_ui()]));
+
+    let output = run_with_context("toggle", dir.path(), &tab_context(mine.path()));
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let calls = herdr_calls(dir.path());
+    assert!(open_call(dir.path()).contains("--placement tab"), "{calls}");
+    assert!(!calls.contains("tab focus w1:t4") && !calls.contains("pane close"), "{calls}");
+}

@@ -221,6 +221,12 @@ pub(crate) struct PaneEntry {
     /// The live foreground process's cwd, which can differ from the launch cwd.
     #[serde(default, deserialize_with = "non_empty")]
     pub(crate) foreground_cwd: Option<String>,
+    /// The launch cwd, where a pane started.
+    #[serde(default, deserialize_with = "non_empty")]
+    pub(crate) cwd: Option<String>,
+    /// The tab the pane sits in.
+    #[serde(default, deserialize_with = "non_empty")]
+    pub(crate) tab_id: Option<String>,
     #[serde(default, deserialize_with = "non_empty")]
     label: Option<String>,
     /// The agent herdr detects in the pane; absent for a shell or a plugin pane.
