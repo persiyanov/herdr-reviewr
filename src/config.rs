@@ -60,7 +60,7 @@ impl Config {
     }
 }
 
-const PLUGIN_CONFIG_KEYS: [&str; 15] = [
+const PLUGIN_CONFIG_KEYS: [&str; 16] = [
     "theme",
     "default_scope",
     "markdown_view",
@@ -69,6 +69,7 @@ const PLUGIN_CONFIG_KEYS: [&str; 15] = [
     "toggle_placement",
     "toggle_direction",
     "auto_open",
+    "follow_file_across_tabs",
     "github_host",
     "gitlab_host",
     "azure_devops_host",
@@ -179,6 +180,7 @@ pub struct PluginConfig {
     toggle_placement: TogglePlacement,
     toggle_direction: ToggleDirection,
     auto_open: bool,
+    follow_file_across_tabs: bool,
     github_host: Option<String>,
     gitlab_host: Option<String>,
     azure_devops_host: Option<String>,
@@ -199,6 +201,7 @@ impl Default for PluginConfig {
             toggle_placement: TogglePlacement::Split,
             toggle_direction: ToggleDirection::Right,
             auto_open: true,
+            follow_file_across_tabs: true,
             github_host: None,
             gitlab_host: None,
             azure_devops_host: None,
@@ -244,6 +247,11 @@ impl PluginConfig {
 
     pub fn auto_open(&self) -> bool {
         self.auto_open
+    }
+
+    /// Whether a switch between `Changes` and `All files` opens the file and line left.
+    pub fn follow_file_across_tabs(&self) -> bool {
+        self.follow_file_across_tabs
     }
 
     pub fn github_host(&self) -> Option<&str> {
@@ -455,6 +463,11 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
     if let Some(value) = table.get("auto_open") {
         config.auto_open =
             value.as_bool().ok_or_else(|| value_error(path, value, "auto_open", "a boolean"))?;
+    }
+    if let Some(value) = table.get("follow_file_across_tabs") {
+        config.follow_file_across_tabs = value
+            .as_bool()
+            .ok_or_else(|| value_error(path, value, "follow_file_across_tabs", "a boolean"))?;
     }
     if let Some(value) = table.get("github_host") {
         config.github_host = Some(parse_forge_host(path, "github_host", value)?);
@@ -778,6 +791,7 @@ mod tests {
         assert_eq!(config.toggle_placement(), TogglePlacement::Split);
         assert_eq!(config.toggle_direction(), ToggleDirection::Right);
         assert!(config.auto_open());
+        assert!(config.follow_file_across_tabs());
         assert_eq!(config.github_host(), None);
         assert_eq!(config.url_opener(), None);
         assert_eq!(config.markdown_view(), MarkdownView::Source);
@@ -796,6 +810,7 @@ mod tests {
                 "toggle_placement = \"overlay\"\n",
                 "toggle_direction = \"down\"\n",
                 "auto_open = false\n",
+                "follow_file_across_tabs = false\n",
                 "github_host = \"GitHub.Example.COM\"\n",
                 "markdown_view = \"rendered\"\n",
                 "diff_view = \"split\"\n",
@@ -811,6 +826,7 @@ mod tests {
         assert_eq!(config.toggle_placement(), TogglePlacement::Overlay);
         assert_eq!(config.toggle_direction(), ToggleDirection::Down);
         assert!(!config.auto_open());
+        assert!(!config.follow_file_across_tabs());
         assert_eq!(config.github_host(), Some("github.example.com"));
     }
 
@@ -892,6 +908,7 @@ mod tests {
             ("toggle_placement = \"left\"\n", "`toggle_placement`"),
             ("toggle_direction = \"left\"\n", "`toggle_direction`"),
             ("auto_open = \"yes\"\n", "`auto_open`"),
+            ("follow_file_across_tabs = \"no\"\n", "`follow_file_across_tabs`"),
             ("github_host = \"https://github.example.com\"\n", "`github_host`"),
             ("editor = \"\"\n", "`editor`"),
             ("editor = \"   \"\n", "`editor`"),

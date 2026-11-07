@@ -6,7 +6,9 @@ use std::cell::RefCell;
 use std::path::Path;
 
 use anyhow::Result;
-use common::{FakeTarget, Repo, UnifiedRow as _, app_on, app_on_rendered, enter_tab, typed};
+use common::{
+    FakeTarget, Repo, UnifiedRow as _, app_on, app_on_config, app_on_rendered, enter_tab, typed,
+};
 use herdr_reviewr::app::{App, Band, Focus, FooterAction, Mode, Tab};
 use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::diff::{Bar, MarkerKind, RenderedKind, Row};
@@ -3106,7 +3108,7 @@ fn a_tab_switch_paints_the_stashed_frame_and_requests_its_refresh() {
 }
 
 #[test]
-fn switching_tabs_restores_each_tab_selection() {
+fn unfollowed_tabs_restore_each_tab_selection() {
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::diff::View;
     let r = Repo::init();
@@ -3114,7 +3116,7 @@ fn switching_tabs_restores_each_tab_selection() {
     r.write("README.md", "# hi\n");
     r.commit_all("init");
     r.write("src/app.rs", "fn main() { run() }\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_config(&r, "follow_file_across_tabs = false\n");
     let changes_open = app.diff_path.clone();
     assert_eq!(changes_open.as_deref(), Some("src/app.rs"));
 
@@ -3136,6 +3138,262 @@ fn switching_tabs_restores_each_tab_selection() {
     enter_tab(&mut app, Tab::AllFiles);
     assert_eq!(app.diff_path.as_deref(), Some("README.md"));
     assert_eq!(app.diff.view, View::File);
+}
+
+/// `line 1` through `line n`, one per line.
+fn numbered(n: usize) -> String {
+    use std::fmt::Write as _;
+    let mut body = String::new();
+    for i in 1..=n {
+        writeln!(body, "line {i}").unwrap();
+    }
+    body
+}
+
+#[test]
+fn a_tab_switch_carries_the_open_file_and_line_both_ways() {
+    use herdr_reviewr::diff::View;
+    let r = Repo::init();
+    r.write("README.md", "# hi\n");
+    r.write("src/lib.rs", &numbered(40));
+    r.commit_all("init");
+    r.write("src/lib.rs", &numbered(40).replace("line 30\n", "LINE 30\n"));
+    let mut app = app_on(&r);
+    assert_eq!(app.diff_path.as_deref(), Some("src/lib.rs"));
+    app.focus = Focus::Diff;
+    app.diff_cursor = row_with(&app, '+');
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(30));
+
+    // All files opens the same file at the same line, its folder open, over its own first file.
+    enter_tab(&mut app, Tab::AllFiles);
+    assert_eq!(app.diff_path.as_deref(), Some("src/lib.rs"));
+    assert_eq!(app.diff.view, View::File);
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(30));
+    assert_eq!(app.current_entry().map(|e| e.path.as_str()), Some("src/lib.rs"));
+    assert_eq!(app.focus, Focus::Diff, "focus keeps its side");
+
+    // Back to Changes from a line its diff folds away: the fold opens.
+    app.goto_line(5);
+    enter_tab(&mut app, Tab::Changes);
+    assert_eq!(app.diff.view, View::Diff);
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(5));
+
+    // A file Changes doesn't list leaves Changes on its own file and line.
+    enter_tab(&mut app, Tab::AllFiles);
+    app.select_file(file_row_of(&app, "README.md").unwrap()).unwrap();
+    enter_tab(&mut app, Tab::Changes);
+    assert_eq!(app.diff_path.as_deref(), Some("src/lib.rs"));
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(5));
+
+    // A PR detour carries the file left in the file tab.
+    app.set_tab(Tab::Pr).unwrap();
+    enter_tab(&mut app, Tab::AllFiles);
+    assert_eq!(app.diff_path.as_deref(), Some("src/lib.rs"));
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(5));
+}
+
+#[test]
+fn a_tab_switch_carries_a_file_the_other_tab_has_not_listed_yet() {
+    use herdr_reviewr::diff::View;
+    let r = Repo::init();
+    r.write("a.rs", "a\n");
+    r.write("b.rs", "b\n");
+    r.commit_all("init");
+    r.write("a.rs", "a2\n");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    enter_tab(&mut app, Tab::Changes);
+
+    // Born while All files was away: its stash lacks the file, so the switch lists it.
+    r.write("new.rs", "n\n");
+    common::land_world(&mut app);
+    app.select_file(file_row_of(&app, "new.rs").unwrap()).unwrap();
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert!(app.world_request.is_some(), "a return paints its stash and refreshes behind");
+    assert_eq!(app.diff_path.as_deref(), Some("new.rs"));
+    assert_eq!(app.current_entry().map(|e| e.path.as_str()), Some("new.rs"));
+    common::land_world(&mut app);
+    assert_eq!(app.diff_path.as_deref(), Some("new.rs"), "the landing keeps the carried file");
+
+    // Changed while Changes was away: the changeset holds it, the stash does not.
+    r.write("b.rs", "b2\n");
+    common::land_world(&mut app);
+    app.select_file(file_row_of(&app, "b.rs").unwrap()).unwrap();
+    app.set_tab(Tab::Changes).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("b.rs"));
+    assert_eq!(app.diff.view, View::Diff);
+    assert_eq!(app.current_entry().map(|e| e.path.as_str()), Some("b.rs"));
+}
+
+#[test]
+fn a_deleted_file_leaves_all_files_on_its_own_place() {
+    let r = Repo::init();
+    r.write("a.rs", "a\n");
+    r.write("gone.rs", "g\n");
+    r.commit_all("init");
+    r.write("a.rs", "a2\n");
+    std::fs::remove_file(r.path_buf().join("gone.rs")).unwrap();
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+    enter_tab(&mut app, Tab::Changes);
+    app.select_file(file_row_of(&app, "gone.rs").unwrap()).unwrap();
+    enter_tab(&mut app, Tab::AllFiles);
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+}
+
+#[test]
+fn a_commits_diff_carries_its_file_but_not_its_line() {
+    let r = Repo::init();
+    r.write("a.rs", "a\n");
+    r.write("f.rs", &numbered(10));
+    r.commit_all("base");
+    let edited = numbered(10).replace("line 8\n", "LINE 8\n");
+    r.write("f.rs", &edited);
+    r.commit_all("edit");
+    // Five lines on top in the worktree: the commit's line 8 is the worktree's 13.
+    r.write("f.rs", &format!("{}{edited}", "top\n".repeat(5)));
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    press(&mut app, &keymap, KeyCode::Char('g'));
+    press(&mut app, &keymap, KeyCode::Enter);
+    assert_eq!(app.scope, Scope::Commits);
+    assert_eq!(app.diff_path.as_deref(), Some("f.rs"));
+    app.focus = Focus::Diff;
+    app.diff_cursor = row_with(&app, '+');
+    let left = app.diff_cursor;
+
+    // The commit's numbers aren't the worktree's: All files opens the file at its top.
+    enter_tab(&mut app, Tab::AllFiles);
+    assert_eq!(app.diff_path.as_deref(), Some("f.rs"));
+    assert_eq!(app.diff_cursor, 0);
+
+    // And a worktree line means nothing in the commit's diff: Changes keeps its own line.
+    app.goto_line(13);
+    enter_tab(&mut app, Tab::Changes);
+    assert_eq!(app.diff_cursor, left);
+}
+
+#[test]
+fn a_tab_switch_carries_a_rendered_block() {
+    let r = Repo::init();
+    r.write("doc.md", "# Title\n\npara one\n\npara two\n");
+    r.commit_all("init");
+    r.write("doc.md", "# Title\n\npara one edited\n\npara two\n");
+    let mut app = app_on_rendered(&r);
+    assert!(app.rendered_active());
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|row| row.text() == "para two").unwrap();
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(app.rendered_active());
+    assert_eq!(app.visible[app.diff_cursor].text(), "para two");
+}
+
+#[test]
+fn a_tab_switch_lands_the_line_on_the_file_as_it_is_now() {
+    let r = Repo::init();
+    r.write("f.rs", &numbered(10));
+    r.commit_all("init");
+    r.write("f.rs", &numbered(10).replace("line 2\n", "LINE 2\n"));
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    enter_tab(&mut app, Tab::Changes);
+
+    // All files' stash holds the 10-line copy; the agent grew the file since.
+    r.write("f.rs", &numbered(40).replace("line 2\n", "LINE 2\n"));
+    common::land_world(&mut app);
+    app.goto_line(30);
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(30), "the switch frame");
+    common::land_world(&mut app);
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(30), "and after the refresh");
+}
+
+#[test]
+fn a_scope_change_on_all_files_leaves_the_carried_line_to_land() {
+    let r = Repo::init();
+    r.write("a.rs", &numbered(40));
+    r.commit_all("base");
+    r.set_origin_default("main", "main");
+    r.git(&["checkout", "-b", "feature"]);
+    r.write("a.rs", &numbered(40).replace("line 5\n", "LINE 5\n"));
+    r.commit_all("feature edit");
+    r.write(
+        "a.rs",
+        &numbered(40).replace("line 5\n", "LINE 5\n").replace("line 30\n", "LINE 30\n"),
+    );
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    app.goto_line(30);
+
+    // The scope change snaps Changes' own place to the top; the carry lands over it.
+    app.set_scope(Scope::Branch).unwrap();
+    enter_tab(&mut app, Tab::Changes);
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(30));
+}
+
+#[test]
+fn a_tab_switch_into_changes_opens_a_collapsed_folder() {
+    let r = Repo::init();
+    r.write("src/a.rs", "a\n");
+    r.write("src/b.rs", "b\n");
+    r.commit_all("init");
+    r.write("src/a.rs", "a2\n");
+    r.write("src/b.rs", "b2\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Files;
+    app.file_cursor = app.file_rows.iter().position(|row| row.dir_path() == Some("src")).unwrap();
+    app.collapse_dir();
+    assert!(file_row_of(&app, "src/b.rs").is_none(), "src/ is collapsed in Changes");
+
+    enter_tab(&mut app, Tab::AllFiles);
+    app.select_file(file_row_of(&app, "src/b.rs").unwrap()).unwrap();
+    enter_tab(&mut app, Tab::Changes);
+    assert_eq!(app.diff_path.as_deref(), Some("src/b.rs"));
+    assert_eq!(app.current_entry().map(|e| e.path.as_str()), Some("src/b.rs"));
+}
+
+#[test]
+fn a_round_trip_on_the_same_line_keeps_a_selection() {
+    let r = Repo::init();
+    r.write("f.rs", &numbered(10));
+    r.commit_all("init");
+    r.write("f.rs", &numbered(10).replace("line 5\n", "LINE 5\n"));
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    let plus = row_with(&app, '+');
+    app.select_anchor = Some(plus - 2);
+    app.diff_cursor = plus;
+
+    enter_tab(&mut app, Tab::AllFiles);
+    assert_eq!(app.select_anchor, None, "a selection stays in the tab it was made in");
+    enter_tab(&mut app, Tab::Changes);
+    assert_eq!(app.diff_cursor, plus);
+    assert_eq!(app.select_anchor, Some(plus - 2), "the line didn't move, so nothing else did");
+}
+
+#[test]
+fn a_find_band_stays_open_over_the_carried_file() {
+    let r = Repo::init();
+    r.write("README.md", "# Title\n");
+    r.commit_all("init");
+    r.write("a.rs", "let x = 0;\nlet total = 1;\n");
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    enter_tab(&mut app, Tab::AllFiles);
+    app.select_file(file_row_of(&app, "README.md").unwrap()).unwrap();
+    enter_tab(&mut app, Tab::Changes);
+    app.focus = Focus::Diff;
+    open_find(&mut app, &keymap);
+    find_type(&mut app, &keymap, "total");
+
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+    assert_eq!(app.mode, Mode::Find, "the band searches the carried file");
+    app.diff_cursor = 0;
+    app.find_step(1);
+    assert_eq!(app.visible[app.diff_cursor].text(), "let total = 1;");
 }
 
 #[test]
@@ -3528,7 +3786,8 @@ fn changing_scope_on_all_files_snaps_the_changes_diff_to_the_top() {
     r.commit_all("feature edit"); // a.rs differs from base → changed in branch scope
     r.write("a.rs", &body.replace("line 5", "LINE 5").replace("line 30", "LINE 30")); // uncommitted
 
-    let mut app = app_on(&r); // Uncommitted scope; a.rs open in Changes
+    // Uncommitted scope; a.rs open in Changes, its place left behind by the switch.
+    let mut app = app_on_config(&r, "follow_file_across_tabs = false\n");
     app.focus = Focus::Diff;
     app.diff_cursor = 2;
     app.diff_scroll = 1;
@@ -4390,6 +4649,7 @@ fn m_flips_between_rendered_and_source_at_the_same_block() {
     r.write("edit.md", "# Doc\n\nalpha\n\ngamma\n"); // delete "beta" and its blank line
     let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
+    app.select_file(file_row_of(&app, "doc.md").unwrap()).unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
     app.focus = Focus::Diff;
     app.diff_cursor = app.visible.iter().position(|row| row.text() == "para two").unwrap();
@@ -5127,12 +5387,14 @@ mod search_overlay {
         assert!(app.rendered_active(), "the markdown file stays rendered");
         assert_eq!(app.visible[app.diff_cursor].text(), "second para with the needle");
 
-        // A file pick lands at the top, as for any file.
+        // A file pick of the open file keeps its place, as a tree click does.
+        let at = app.diff_cursor;
         open(&mut app, &keymap);
         land_search_completion(&mut app, done(2, results(vec![file_hit("doc.md")], Vec::new())), 2);
         press(&mut app, &keymap, KeyCode::Enter);
         assert!(app.rendered_active());
-        assert_eq!(app.diff_cursor, 0);
+        assert_eq!(app.diff_cursor, at);
+        assert_ne!(at, 0, "the place kept is not the top");
     }
 
     #[test]
@@ -5158,6 +5420,45 @@ mod search_overlay {
         let row = &app.file_rows[app.file_cursor];
         let idx = row.file_index().expect("the selection lands on the file's row");
         assert_eq!(app.entries[idx].path, "src/deep/a.rs");
+    }
+
+    #[test]
+    fn a_pick_the_tree_has_not_listed_yet_stays_through_the_refresh() {
+        let repo = Repo::init();
+        repo.write("a.rs", "fn a() {}\n");
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        enter_tab(&mut app, Tab::Changes);
+
+        // Born after All files' last visit: the pick lists it before the refresh does.
+        repo.write("new.rs", "fn n() {}\n");
+        open(&mut app, &keymap);
+        land_search_completion(&mut app, done(1, results(vec![file_hit("new.rs")], Vec::new())), 1);
+        press(&mut app, &keymap, KeyCode::Enter);
+        assert_eq!(app.diff_path.as_deref(), Some("new.rs"));
+        assert_eq!(app.current_entry().map(|e| e.path.as_str()), Some("new.rs"));
+        common::land_world(&mut app);
+        assert_eq!(app.diff_path.as_deref(), Some("new.rs"), "the refresh keeps the pick");
+    }
+
+    #[test]
+    fn a_code_hit_inside_closed_details_opens_them() {
+        let repo = Repo::init();
+        let doc = "# T\n\n<details>\n<summary>More</summary>\n\nhidden needle\n\n</details>\n";
+        repo.write("doc.md", doc);
+        repo.commit_all("c");
+        let keymap = default_keymap().clone();
+        let mut app = app_on_rendered(&repo);
+        enter_tab(&mut app, Tab::AllFiles);
+        open(&mut app, &keymap);
+        let hit = code_hit("doc.md", 6, "hidden needle");
+        land_search_completion(&mut app, done(1, results(Vec::new(), vec![hit])), 1);
+        press(&mut app, &keymap, KeyCode::Tab);
+        press(&mut app, &keymap, KeyCode::Enter);
+        assert!(app.rendered_active());
+        assert_eq!(app.visible[app.diff_cursor].text(), "hidden needle");
     }
 
     #[test]
@@ -8260,7 +8561,8 @@ fn a_tab_switch_keeps_a_find_band_the_new_view_can_search() {
     r.write("README.md", "# Title\n\ntotal\n");
     r.commit_all("init");
     r.write("a.rs", "let total = 1;\n");
-    let mut app = app_on_rendered(&r);
+    let mut app =
+        app_on_config(&r, "markdown_view = \"rendered\"\nfollow_file_across_tabs = false\n");
     let keymap = Keymap::default();
     enter_tab(&mut app, Tab::AllFiles); // visit once: README.md opens rendered
     assert!(app.rendered_active());

@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Switching between Changes and All files keeps your file and line** when the other tab lists the file.
+  `follow_file_across_tabs = false` gives each tab its own place, as before.
+- **Picking the open file in search keeps your place**, as a click in the file tree does.
+
+### Fixed
+- **A search hit inside a collapsed `<details>` opens it** and lands on its line.
+- **A search pick of a file created moments ago stays open** when the file tree catches up.
+
 ## [0.49.1] — 2026-11-04
 
 ### Fixed

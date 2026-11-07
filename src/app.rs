@@ -2779,12 +2779,18 @@ impl App {
         self.pr_pending = self.pr_pending.max(Some(kind));
     }
 
-    /// Switch to `tab`, restoring its place as left; a refresh lands behind (Continuity).
+    /// Switch to `tab`: the file left follows when the config asks and the tab lists it.
     pub fn set_tab(&mut self, tab: Tab) -> Result<()> {
+        self.switch_tab(tab, true)
+    }
+
+    /// Switch to `tab`: its place as left, or the file and line left if `follow` and the config agree.
+    fn switch_tab(&mut self, tab: Tab, follow: bool) -> Result<()> {
         self.ensure_config_ready()?;
         if self.tab == tab || self.composing() {
             return Ok(());
         }
+        let follow = follow && self.config_snapshot().follow_file_across_tabs();
         // The line field was typed for the tab it opened over; the PR tab draws no band at all.
         if self.line_open() || (tab == Tab::Pr && self.mode == Mode::Find) {
             self.close_find();
@@ -2798,7 +2804,11 @@ impl App {
             return Ok(());
         }
         // Bring the tab's state into the live fields if the stash holds it.
+        let mut carried = None;
         if self.active_file_tab != tab {
+            if follow {
+                carried = self.carried_to(tab);
+            }
             self.swap_active_with_stash();
             self.active_file_tab = tab;
             // Follow a markdown choice flipped while away.
@@ -2808,11 +2818,24 @@ impl App {
                 self.relayout();
             }
         }
+        if let Some((path, _)) = &carried {
+            self.point_at(path);
+        }
         // A return paints its stash and refreshes behind; a first visit loads before the frame.
         if self.tab_visited {
             self.request_world_refresh(true);
+            // The stash may hold an older copy of the carried file.
+            if carried.is_some() {
+                self.reload_open_view();
+            }
         } else {
             self.reload()?;
+        }
+        // A file gone before the load landed leaves the line unlanded.
+        if let Some((path, Some(n))) = carried
+            && self.diff_path.as_deref() == Some(path.as_str())
+        {
+            self.land_worktree_line(n);
         }
         self.settle_tab_entry();
         // A find band opened over the other tab's file does not search this one's.
@@ -2821,6 +2844,51 @@ impl App {
         }
         self.reveal_files = true; // pull the restored cursor back into view
         Ok(())
+    }
+
+    /// The open file and its worktree line, when file tab `tab` lists that file.
+    fn carried_to(&self, tab: Tab) -> Option<(String, Option<u32>)> {
+        let path = self.diff_path.clone()?;
+        // `All files` lists every file on disk; `Changes`, the scope's changeset.
+        let listed = match tab {
+            Tab::AllFiles => self.repo.join(&path).is_file(),
+            Tab::Changes => self.changeset.files.contains_key(&path),
+            Tab::Pr => false,
+        };
+        listed.then(|| (path, self.worktree_line()))
+    }
+
+    /// Put the tree cursor on `path`, its folders open, listing it if this tab's list predates it.
+    fn point_at(&mut self, path: &str) {
+        let mut changed = false;
+        let mut dir = path;
+        while let Some((parent, _)) = dir.rsplit_once('/') {
+            changed |= self.set_dir_expanded(parent, true);
+            dir = parent;
+        }
+        // The refresh behind lands the true list; this row stands in until it does.
+        if !self.entries.iter().any(|e| e.path == path) {
+            let annotation = self.changeset.files.get(path).cloned();
+            let at = self.entries.partition_point(|e| e.path.as_str() < path);
+            let entry = Entry { path: path.to_string(), annotation, ignored: false, is_dir: false };
+            self.entries.insert(at, entry);
+            changed = true;
+        }
+        if changed {
+            self.rebuild_file_rows();
+        }
+        if let Some(row) = self.file_row_of_path(path) {
+            self.file_cursor = row;
+        }
+        self.reveal_files = true;
+    }
+
+    /// Land on worktree line `n`; a cursor already on it keeps its place and selection.
+    fn land_worktree_line(&mut self, n: u32) {
+        if self.worktree_numbered() && self.worktree_line() != Some(n) {
+            self.clear_selection();
+            self.land_line(n);
+        }
     }
 
     /// Focus the tree when the read pane is empty, so the keys aren't trapped.
@@ -3609,36 +3677,41 @@ impl App {
         if self.mode != Mode::Normal {
             return None;
         }
-        let (path, numbered) = if self.focus == Focus::Files {
+        let (path, line) = if self.focus == Focus::Files {
             // The selected navigator file at its start. A directory row names no file.
-            (self.current_entry()?.path.clone(), false)
+            (self.current_entry()?.path.clone(), 1)
         } else {
             // A press must not abandon a live selection.
             if self.select_anchor.is_some() {
                 return None;
             }
-            // The open file; in `commits` the line numbers aren't the worktree's, so no line.
-            let commit_diff = self.scope == Scope::Commits && self.diff.view == View::Diff;
-            (self.diff_path.clone()?, !commit_diff)
+            (self.diff_path.clone()?, self.worktree_line().unwrap_or(1))
         };
-        let line = if !numbered {
-            1
-        } else if self.rendered_active() {
-            // A block's first line, or a marker's line clamped to the file's end.
+        Some(EditTarget { path, line })
+    }
+
+    /// Whether the read pane numbers worktree lines: a `commits` diff numbers the commits'.
+    fn worktree_numbered(&self) -> bool {
+        !(self.scope == Scope::Commits && self.diff.view == View::Diff)
+    }
+
+    /// The worktree line under the read cursor, else the start; `None` in a `commits` diff.
+    fn worktree_line(&self) -> Option<u32> {
+        if !self.worktree_numbered() {
+            return None;
+        }
+        // Rendered rows: a block's first line, or a marker's line clamped to the file's end.
+        if self.rendered.on_screen() {
             let last = self.rendered.text().unwrap_or_default().lines().count().max(1) as u32;
-            match self.rendered.index.unit_at(self.diff_cursor).map(|u| u.unit) {
+            return Some(match self.rendered.index.unit_at(self.diff_cursor).map(|u| u.unit) {
                 Some(Unit::Block(src)) => src,
                 Some(Unit::Marker(src, _)) => src.clamp(1, last),
                 None => 1,
-            }
-        } else {
-            // The nearest worktree line number at or above the cursor, else the start.
-            self.visible
-                .get(..=self.diff_cursor)
-                .and_then(|above| above.iter().rev().find_map(Visible::new_no))
-                .unwrap_or(1)
-        };
-        Some(EditTarget { path, line })
+            });
+        }
+        // Source rows: the nearest worktree line number at or above the cursor.
+        let above = self.visible.get(..=self.diff_cursor);
+        Some(above.and_then(|rows| rows.iter().rev().find_map(Visible::new_no)).unwrap_or(1))
     }
 
     fn edit_comment(&mut self) {
@@ -4406,10 +4479,18 @@ impl App {
         if !self.find_available() {
             return;
         }
-        let last = u32::try_from(self.line_count()).unwrap_or(u32::MAX).max(1);
-        let n = n.clamp(1, last);
         self.clear_selection();
         self.focus = Focus::Diff;
+        self.land_line(n);
+    }
+
+    /// Land the cursor on line `n`, clamped to the file, opening what hides it, centered off screen.
+    fn land_line(&mut self, n: u32) {
+        if !self.find_available() {
+            return;
+        }
+        let last = u32::try_from(self.line_count()).unwrap_or(u32::MAX).max(1);
+        let n = n.clamp(1, last);
         if self.rendered_active() {
             self.open_disclosures_holding(n);
             self.diff_cursor = self.rendered.index.row_at_line(n).unwrap_or(0);
@@ -4645,40 +4726,19 @@ impl App {
             return Ok(());
         }
         self.close_search();
-        // The origin tab stashes its place.
+        // The origin tab stashes its place; the pick, not the file left, opens.
         if self.tab != Tab::AllFiles {
-            self.set_tab(Tab::AllFiles)?;
+            self.switch_tab(Tab::AllFiles, false)?;
         }
         // The pick feeds the engine's frecency store, so ranking improves with use.
         self.search_track = Some(path.clone());
-        let mut expanded = false;
-        let mut dir = path.as_str();
-        while let Some((parent, _)) = dir.rsplit_once('/') {
-            expanded |= self.set_dir_expanded(parent, true);
-            dir = parent;
-        }
-        if expanded {
-            // Search never returns an ignored path, so no worktree walk is needed.
-            self.rebuild_file_rows();
-        }
-        self.reset_diff_view();
-        self.set_file_view(&path);
-        if let Some(fi) = self.file_row_of_path(&path) {
-            self.file_cursor = fi;
-            self.reveal_files = true;
-        }
+        // A pick opens as a tree click does, a code hit at its line.
+        self.point_at(&path);
+        self.reload_open_view();
         self.focus = Focus::Diff;
         if let Some(line) = line {
-            // Rendered, land on the block holding the line.
-            let last = self.visible.len().saturating_sub(1);
-            self.diff_cursor = if self.rendered_active() {
-                let line = u32::try_from(line).unwrap_or(u32::MAX);
-                self.rendered.index.row_at_line(line).unwrap_or(0)
-            } else {
-                (line.saturating_sub(1) as usize).min(last)
-            };
+            self.land_worktree_line(u32::try_from(line).unwrap_or(u32::MAX));
         }
-        self.reveal_diff = true;
         Ok(())
     }
 

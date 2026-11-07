@@ -168,6 +168,9 @@ comment. Click files, tabs, and links. Scroll with the wheel.
 - **All files** — every file in the worktree. You can comment here too. Git-ignored files are dimmed.
 - **PR** — the branch's pull request (merge request on GitLab): state, checks, description, comments.
 
+Switching between **Changes** and **All files** keeps your file and line when the other tab lists
+the file. `follow_file_across_tabs = false` gives each tab its own place instead.
+
 ## Diff scopes
 
 - **uncommitted** — changes since the last commit, including new files.
@@ -201,6 +204,7 @@ navigator_position = "bottom"       # right | bottom | left | top
 toggle_placement = "overlay"        # split | overlay | zoomed | tab
 toggle_direction = "down"           # right | down, for split
 auto_open = false
+follow_file_across_tabs = false
 editor = "code -g {file}:{line}"
 url_opener = "browser-bridge --new-tab {url}"
 review_prefix = "Fix each comment, then run the tests."

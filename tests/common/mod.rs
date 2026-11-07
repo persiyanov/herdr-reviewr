@@ -305,13 +305,14 @@ impl UnifiedRow for herdr_reviewr::split::Visible {
     }
 }
 
-/// A fresh pane over `repo`, seeded from a config file holding `toml`.
+/// A fresh pane over `repo` running a config file holding `toml`, as startup applies it.
 pub fn app_on_config(repo: &Repo, toml: &str) -> App {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("config.toml"), toml).unwrap();
     let config = herdr_reviewr::config::plugin_config_in(dir.path()).unwrap();
     let mut app = App::new(repo.path_buf(), Scope::Uncommitted, None);
     app.seed_from_config(&config);
+    app.set_plugin_config(config);
     app.reload().unwrap();
     app
 }
