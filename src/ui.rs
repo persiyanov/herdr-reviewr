@@ -1515,9 +1515,13 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
 
     if app.file_rows.is_empty() {
         let gone = app.commits_gone_message();
+        let failed = format!(
+            "load failed, {} retries",
+            app.keymap().hint(crate::keymap::Action::Refresh).label()
+        );
         let msg = match app.tab {
             _ if app.world_load == WorldLoad::Pending => "",
-            _ if app.world_load == WorldLoad::Failed => "load failed, r retries",
+            _ if app.world_load == WorldLoad::Failed => failed.as_str(),
             Tab::AllFiles => "no files",
             Tab::Changes if app.awaiting_turn() => app.turn_wait_message(),
             Tab::Changes if app.commits_gone() => gone.as_str(),

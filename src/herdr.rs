@@ -104,7 +104,7 @@ pub enum SendError {
     /// herdr failed a call the send made.
     Herdr(HerdrError),
     /// The named agent waits on a permission or confirm prompt, which would drop a paste.
-    AtPrompt(String),
+    AtPrompt,
     /// The workspace holds no agent to send to.
     NoAgent,
     /// The review is over the send cap, so it cannot go as one paste.
@@ -121,7 +121,7 @@ impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Herdr(error) => error.fmt(f),
-            Self::AtPrompt(name) => write!(f, "{name} is at a prompt"),
+            Self::AtPrompt => write!(f, "the agent is at a prompt"),
             Self::NoAgent => write!(f, "no agent in the workspace"),
             Self::TooLarge => write!(f, "the review is over the {MAX_REQUEST_BYTES}-byte send cap"),
         }
@@ -466,9 +466,10 @@ pub fn send_target(ids: &PaneIds, choose: bool) -> Result<SendTarget, SendError>
     if picked.is_empty() {
         return Err(SendError::NoAgent);
     }
-    // Both lookups are best effort, so they share one wait instead of adding a second.
+    // Both lookups are best effort, so they share one wait; only picker rows show tab labels.
+    let shows_picker = choose || picked.len() > 1;
     let (tabs, panes) = std::thread::scope(|scope| {
-        let tabs = scope.spawn(|| tab_labels(ws));
+        let tabs = scope.spawn(|| if shows_picker { tab_labels(ws) } else { HashMap::new() });
         let panes = scope.spawn(|| ws.and_then(|ws| PaneList::of(ws).ok()));
         (tabs.join().unwrap_or_default(), panes.join().ok().flatten())
     });
@@ -664,9 +665,7 @@ fn readiness_in(agents: &[AgentPane], pane: &str) -> Result<(), SendError> {
             logln!("agent pane {pane} is gone");
             Err(HerdrError::PaneGone.into())
         }
-        Some(agent) if agent.status() == Status::Blocked => {
-            Err(SendError::AtPrompt(agent.row_name(None)))
-        }
+        Some(agent) if agent.status() == Status::Blocked => Err(SendError::AtPrompt),
         Some(_) => Ok(()),
     }
 }
@@ -1045,7 +1044,7 @@ mod tests {
         }
         // A prompt drops a paste.
         let blocked = super::readiness_in(&[at("blocked")], "w8:p1");
-        assert_eq!(blocked, Err(super::SendError::AtPrompt("claude".into())));
+        assert_eq!(blocked, Err(super::SendError::AtPrompt));
         let gone = Err(super::SendError::Herdr(HerdrError::PaneGone));
         assert_eq!(super::readiness_in(&[at("idle")], "w8:p9"), gone);
         // A pane whose agent exited is listed without one: the send goes nowhere near it.

@@ -52,7 +52,7 @@ pub trait ExportTarget {
 pub fn send_failure(error: &herdr::SendError, agent: Option<&str>, copy: &str) -> String {
     use herdr::{HerdrError as H, SendError as S};
     let cause = match error {
-        S::AtPrompt(name) => return format!("answer {}'s prompt first", agent.unwrap_or(name)),
+        S::AtPrompt => return format!("answer {}'s prompt first", agent.unwrap_or("the agent")),
         S::Herdr(H::PaneGone) => format!("{} closed", agent.unwrap_or("the agent")),
         S::NoAgent => "no agent in this workspace".to_string(),
         S::TooLarge => "review too large to send".to_string(),
@@ -246,7 +246,7 @@ mod tests {
         let rows = [
             (S::Herdr(H::PaneGone), "release-bot closed, press y to copy"),
             // A prompt refusal names the selected row, just as a successful send does.
-            (S::AtPrompt("codex".into()), "answer release-bot's prompt first"),
+            (S::AtPrompt, "answer release-bot's prompt first"),
             (S::NoAgent, "no agent in this workspace, press y to copy"),
             (S::TooLarge, "review too large to send, press y to copy"),
             (S::Herdr(H::Unanswered), "herdr didn't answer, press y to copy"),

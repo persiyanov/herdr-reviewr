@@ -268,7 +268,9 @@ fn invalidate_screen(terminal: &mut DefaultTerminal) -> Result<()> {
 
 /// The reviewed repository's top level, one spelling for the app and the worker; else as given.
 fn repo_root(cfg: &Config) -> std::path::PathBuf {
-    git::toplevel(&cfg.repo).unwrap_or_else(|| cfg.repo.clone())
+    // Absolute, so entering it (`enter_repo`) never shifts what a relative path names.
+    git::toplevel(&cfg.repo)
+        .unwrap_or_else(|| std::path::absolute(&cfg.repo).unwrap_or_else(|_| cfg.repo.clone()))
 }
 
 /// The startup app for one config snapshot: ready, or blocked on its error.
@@ -3825,7 +3827,8 @@ mod startup_tests {
 
         paint_then_request_load(&mut terminal, &mut app).unwrap();
         let first = screen(&terminal);
-        assert!(!first.contains("no changes") && !first.contains("0 changed"), "{first}");
+        let claims = ["no changes", "0 changed", "loading"];
+        assert!(!claims.iter().any(|claim| first.contains(claim)), "{first}");
         assert!(app.entries.is_empty(), "nothing loads before the frame loop runs");
         let request = app.world_request.clone().expect("the first load is requested");
         assert!(!request.background && request.refresh.is_full());
