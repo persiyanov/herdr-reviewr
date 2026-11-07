@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.50.0] — 2026-11-07
+
 ### Changed
 - **Switching between Changes and All files keeps your file and line** when the other tab lists the file.
   `follow_file_across_tabs = false` gives each tab its own place, as before.
