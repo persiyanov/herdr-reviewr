@@ -99,7 +99,7 @@ fn an_upstream_read_failure_never_falls_through_to_origin() {
 fn a_github_com_prefixed_host_is_only_supported_when_configured_literally() {
     let repo = worktree();
     repo.git(&["remote", "set-url", "origin", "https://github.com/acme/widgets.git"]);
-    repo.git(&["remote", "add", "upstream", "git@github.com-work:enterprise/widgets.git"]);
+    repo.git(&["remote", "add", "upstream", "https://github.com-work/enterprise/widgets.git"]);
 
     let input = fetch_input(repo.path(), None, &defaults()).unwrap();
     assert_target(&input.repository, "github.com", "acme", "widgets");
@@ -505,9 +505,9 @@ fn a_named_remote_follows_instead_of_rewrites() {
 
 #[test]
 fn an_unusable_origin_publishes_nowhere_never_on_the_target() {
-    // An origin behind an ssh alias names no repository; upstream's same-named PR is a stranger's.
+    // An origin on an unknown host names no repository; upstream's same-named PR is a stranger's.
     let repo = worktree();
-    repo.git(&["remote", "set-url", "origin", "git@github-work:me/repo.git"]);
+    repo.git(&["remote", "set-url", "origin", "https://git.example/me/repo.git"]);
     repo.git(&["remote", "add", "upstream", "https://github.com/acme/repo.git"]);
     assert!(heads(&repo).is_empty());
     repo.git(&["config", "branch.work.remote", "origin"]);
@@ -540,9 +540,9 @@ fn a_bare_push_to_the_only_remote_is_found_at_the_frontier() {
 }
 
 #[test]
-fn a_push_url_behind_an_ssh_alias_falls_back_to_the_fetch_url() {
+fn an_unusable_push_url_falls_back_to_the_fetch_url() {
     let repo = worktree();
-    repo.git(&["remote", "set-url", "--push", "origin", "git@github-work:owner/repo.git"]);
+    repo.git(&["remote", "set-url", "--push", "origin", "https://git.example/owner/repo.git"]);
     assert_eq!(heads(&repo), ["owner/repo:work"]);
 }
 

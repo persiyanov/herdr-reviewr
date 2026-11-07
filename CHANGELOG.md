@@ -13,6 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 - **With `toggle_placement = "tab"`, toggle and open show reviewr's new tab** again. Since herdr 0.9 the tab opened behind the one on screen.
   Thanks [@jfmainville](https://github.com/jfmainville) ([#132](https://github.com/persiyanov/herdr-reviewr/pull/132)).
+- **The PR tab finds the pull request behind an SSH host alias**, such as `git@github-work:owner/repo.git` for a second GitHub account. reviewr reads the real host from your ssh config, as `gh` does.
+  Thanks [@csjoshc](https://github.com/csjoshc) ([#169](https://github.com/persiyanov/herdr-reviewr/issues/169)).
 
 ## [0.50.0] — 2026-11-07
 

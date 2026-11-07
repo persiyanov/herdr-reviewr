@@ -304,7 +304,7 @@ A key is one character or a `ctrl+` / `alt+` chord. `Tab`, `Esc`, and `Enter` ar
 
 The PR tab reads the `upstream` remote, else `origin`, so forks work. Self-hosted servers need
 `github_host`, `gitlab_host`, or `azure_devops_host`, matching the remote's hostname exactly.
-SSH aliases like `github.com-work` don't match.
+An SSH alias like `github.com-work` resolves through your ssh config to the host it stands for.
 
 ### Pane placement
 
