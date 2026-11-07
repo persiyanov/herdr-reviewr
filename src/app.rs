@@ -832,6 +832,8 @@ pub struct App {
     pub pr_pending: Option<RefreshKind>,
     /// The world refresh to dispatch after the frame paints.
     pub world_request: Option<crate::world::WorldRequest>,
+    /// Whether a world snapshot has landed; before one, the lists read "loading…", not "no changes".
+    pub world_landed: bool,
     /// The search overlay's state while `mode == Mode::Search`, `None` otherwise.
     pub search: Option<SearchOverlay>,
     /// A query to dispatch after the frame paints.
@@ -1016,6 +1018,7 @@ impl App {
             reveal_pr_nav: std::cell::Cell::new(true),
             pr_pending: None,
             world_request: None,
+            world_landed: false,
             search: None,
             search_dirty: false,
             search_track: None,
@@ -1306,6 +1309,7 @@ impl App {
         self.ensure_config_ready()?;
         // Outside a git repo, a file tab shows an empty state rather than failing.
         if self.tab.is_file_tab() && !git::is_repo(&self.repo) {
+            self.world_landed = true;
             self.checkout = None;
             self.read_checkout = None;
             self.entries.clear();
@@ -1358,6 +1362,7 @@ impl App {
 
     /// Reconcile a snapshot into the view (Continuity); whether the file view took it, as `PR` never does.
     pub fn reconcile_world(&mut self, snapshot: crate::world::WorldSnapshot) -> bool {
+        self.world_landed = true;
         // A path-limited build carries its checkout rather than reading it.
         if snapshot.touched.is_none() {
             self.read_checkout.clone_from(&snapshot.checkout);

@@ -1412,6 +1412,9 @@ fn base_parts(app: &App, keymap: &Keymap, width: u16) -> Option<(String, String,
 
 /// The header suffix: the changed-file count and line totals, measured by display width.
 fn header_suffix(app: &App) -> String {
+    if !app.world_landed {
+        return String::new();
+    }
     let (added, removed) = app.changed_totals();
     let stats = stats_str(added, removed);
     let gap = if stats.is_empty() { "" } else { "  " };
@@ -1513,6 +1516,7 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
     if app.file_rows.is_empty() {
         let gone = app.commits_gone_message();
         let msg = match app.tab {
+            _ if !app.world_landed => "loading…",
             Tab::AllFiles => "no files",
             Tab::Changes if app.awaiting_turn() => app.turn_wait_message(),
             Tab::Changes if app.commits_gone() => gone.as_str(),
@@ -1781,6 +1785,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         // `All files` is no diff, so its copy avoids diff words.
         let gone = app.commits_gone_message();
         let msg = match app.tab {
+            _ if !app.world_landed => "",
             Tab::AllFiles => match app.diff.notice {
                 Some(notice) => notice.message(),
                 None if app.diff_path.is_some() => "empty file",

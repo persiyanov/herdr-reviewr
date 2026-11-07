@@ -305,14 +305,18 @@ pub fn switched_app(cfg: &mut Config, old: &mut App) -> Option<App> {
     Some(app)
 }
 
-/// Paint, then load, so a hung `git` never leaves a blank or stale pane (issue #4).
-fn paint_then_load(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
+/// Paint, then hand the first load to the world worker: a hung `git` never leaves a blank pane
+/// (issue #4), and the loop answers a resize while it loads (herdr resizes a fresh pane).
+fn paint_then_load<B: ratatui::backend::Backend>(
+    terminal: &mut ratatui::Terminal<B>,
+    app: &mut App,
+) -> Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
     terminal.draw(|f| ui::render(f, app))?;
-    if app.config_error().is_none()
-        && let Err(e) = app.reload()
-    {
-        logln!("reload failed: {e:#}");
-        app.status = format!("load failed: {e}");
+    if app.config_error().is_none() {
+        app.request_world_refresh(false);
     }
     Ok(())
 }
@@ -3774,5 +3778,43 @@ mod text_edit_tests {
         app.caret = 0;
         apply_text_edit(&mut app, KeyCode::Delete, false, false, false);
         assert_eq!((app.input.as_str(), app.caret), ("oo", 0));
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::paint_then_load;
+    use crate::app::App;
+    use crate::model::Scope;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn screen(terminal: &Terminal<TestBackend>) -> String {
+        terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect()
+    }
+
+    #[test]
+    fn the_first_paint_reads_loading_and_hands_the_load_to_the_worker() {
+        let (dir, git) = crate::test_support::test_repo();
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+        std::fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+        let mut app = App::new(dir.path().to_path_buf(), Scope::Uncommitted, None);
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+
+        paint_then_load(&mut terminal, &mut app).unwrap();
+        let first = screen(&terminal);
+        assert!(first.contains("loading…"), "{first}");
+        assert!(!first.contains("no changes") && !first.contains("0 changed"), "{first}");
+        assert!(app.entries.is_empty(), "nothing loads before the frame loop runs");
+        let request = app.world_request.clone().expect("the first load is requested");
+        assert!(!request.background && request.refresh.is_full());
+
+        // The worker's snapshot lands like any refresh, and the list replaces the loading line.
+        app.reconcile_world(crate::world::build(&app.world_input()).unwrap());
+        terminal.draw(|f| crate::ui::render(f, &app)).unwrap();
+        let loaded = screen(&terminal);
+        assert!(loaded.contains("a.txt") && !loaded.contains("loading…"), "{loaded}");
     }
 }
