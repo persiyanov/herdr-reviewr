@@ -158,6 +158,8 @@ The usual editing keys work: arrows, `Home` / `End`, `Ctrl+A` / `Ctrl+E`, `Alt+b
 | `PageUp` `PageDown` | Scroll |
 | `o` | Open in browser |
 | `r` | Refresh |
+| `s` | Send the selected comment to the agent |
+| `a` | Send all comments to the agent |
 
 **Mouse:** drag to copy, double-click a word, triple-click a line. Click or drag line numbers to
 comment. Click files, tabs, and links. Scroll with the wheel.
@@ -292,6 +294,7 @@ keys help non-Latin layouts: bind the character your layout types on the same ke
 | `goto-line` | `:` |
 | `keys` | `?` |
 | `send` | `s`, `S` |
+| `send-all` | `a`, `A` |
 | `copy` | `y`, `Y` |
 | `open-pr` | `o` |
 | `refresh` | `r` |

@@ -2525,8 +2525,8 @@ fn a_non_repo_path_yields_an_empty_state_not_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = App::new(dir.path().to_path_buf(), Scope::Uncommitted, None);
     assert!(app.reload().is_ok(), "a non-repo reload is graceful, not an error");
-    assert!(app.entries.is_empty());
-    assert!(app.diff.rows.is_empty());
+    assert_eq!(app.entries, Vec::new());
+    assert_eq!(app.diff.rows, Vec::new());
 }
 
 #[test]
@@ -3631,7 +3631,7 @@ fn a_diff_unset_file_reads_as_the_binary_notice_not_a_text_diff() {
     assert_eq!(app.diff.notice, Some(Notice::Binary));
     assert_eq!(app.diff.view, View::Diff);
     assert!(app.diff.rows.is_empty(), "a notice has no rows to comment on");
-    assert!(app.visible.is_empty());
+    assert_eq!(app.visible, Vec::new());
 }
 
 #[test]
@@ -3692,7 +3692,7 @@ fn an_oversize_file_in_all_files_degrades_to_a_notice() {
     app.select_file(row).unwrap();
     assert_eq!(app.diff.notice, Some(Notice::TooLarge), "an over-budget file is not read whole");
     assert_eq!(app.diff.view, View::File);
-    assert!(app.visible.is_empty());
+    assert_eq!(app.visible, Vec::new());
 }
 
 #[test]
@@ -3937,6 +3937,55 @@ fn apply_pr_follows_the_selected_comment_across_a_refresh() {
 }
 
 #[test]
+fn the_pr_tab_offers_its_sends_only_where_they_act() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{PrSnapshot, PrView};
+
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+
+    let has = |a: &App, x: FooterAction| a.footer_bands().iter().any(|&(act, _)| act == x);
+    let band = |a: &App, x: FooterAction| -> Option<Band> {
+        a.footer_bands().into_iter().find(|&(act, _)| act == x).map(|(_, b)| b)
+    };
+
+    // No snapshot yet: neither send is offered.
+    assert!(!has(&app, FooterAction::PrSend) && !has(&app, FooterAction::PrSendAll));
+
+    // Two comments, no description: the cursor is on the first, so both sends are offered —
+    // `send` closes row 1 like its file-tab sibling, `send-all` waits in the `do` band.
+    app.apply_pr(PrView::Pr(Box::new(PrSnapshot {
+        comments: vec![common::comment(), common::comment()],
+        ..common::pr_snapshot()
+    })));
+    assert!(has(&app, FooterAction::PrSendAll), "a non-empty list offers send-all");
+    assert!(has(&app, FooterAction::PrSend), "a comment under the cursor offers send");
+    assert_eq!(
+        band(&app, FooterAction::PrSend),
+        Some(Band::Send),
+        "send never drops, like the file tabs'"
+    );
+    assert_eq!(band(&app, FooterAction::PrSendAll), Some(Band::Do));
+
+    // The description row selects nothing: `send` drops, `send-all` stays.
+    app.apply_pr(PrView::Pr(Box::new(PrSnapshot {
+        body: "why".into(),
+        comments: vec![common::comment()],
+        ..common::pr_snapshot()
+    })));
+    app.pr_move(-100); // clamps to the top row — the pinned description
+    assert!(!has(&app, FooterAction::PrSend), "the description row selects no comment");
+    assert!(has(&app, FooterAction::PrSendAll), "the list is still there");
+
+    // An empty list offers neither.
+    app.apply_pr(PrView::Pr(Box::new(PrSnapshot { ..common::pr_snapshot() })));
+    assert!(!has(&app, FooterAction::PrSend) && !has(&app, FooterAction::PrSendAll));
+}
+
+#[test]
 fn a_held_resolution_and_a_transient_detach_keep_the_painted_pr() {
     use herdr_reviewr::forge::{PrSnapshot, PrView};
 
@@ -4124,7 +4173,7 @@ fn find_match_ranges_is_smart_case_and_non_overlapping() {
     assert_eq!(find_match_ranges("Total total", "Total", true), vec![(0, 5)]);
     // Occurrences are non-overlapping.
     assert_eq!(find_match_ranges("aaaa", "aa", false), vec![(0, 2), (2, 4)]);
-    assert!(find_match_ranges("abc", "", false).is_empty());
+    assert_eq!(find_match_ranges("abc", "", false), Vec::new());
 }
 
 #[test]
@@ -4770,7 +4819,7 @@ fn toggling_after_the_changeset_empties_is_inert() {
     assert!(!app.rendered_active());
     app.toggle_rendered();
     assert!(!app.rendered_active(), "an empty changeset never renders");
-    assert!(app.visible.is_empty());
+    assert_eq!(app.visible, Vec::new());
 }
 
 #[test]
@@ -5123,7 +5172,7 @@ fn outside_a_repo_the_build_yields_the_quiet_empty_snapshot() {
     let snapshot = herdr_reviewr::world::build(&app.world_input()).unwrap();
     assert!(snapshot.entries.is_empty(), "no error, no entries — the empty state stays quiet");
     let build = herdr_reviewr::world::build_changed(&app.world_input()).unwrap();
-    assert!(build.changeset.files.is_empty());
+    assert_eq!(build.changeset.files, std::collections::BTreeMap::new());
 }
 
 #[test]
@@ -6265,7 +6314,7 @@ fn a_config_error_closes_the_picker_and_keeps_the_comments() {
 
     app.set_config_error("theme = \"not-a-theme\"".to_string());
     assert_eq!(app.mode, Mode::Normal, "the picker's rows would be stale after recovery");
-    assert!(app.picker_rows.is_empty());
+    assert_eq!(app.picker_rows, Vec::new());
     assert_eq!(app.store.len(), 2, "saved comments always survive a config error");
 
     // Over the find band, recovery never restores a mode without its state.
@@ -6460,7 +6509,7 @@ fn a_filter_with_no_match_leaves_enter_inert_and_backspace_recovers() {
     for ch in "zzz".chars() {
         app.input_push(ch);
     }
-    assert!(app.base_picker.as_ref().unwrap().filtered().is_empty());
+    assert_eq!(app.base_picker.as_ref().unwrap().filtered(), Vec::<usize>::new());
     app.base_picker_pick().unwrap();
     assert_eq!(app.mode, Mode::BasePick, "enter does nothing with no matching branch");
     app.input_backspace();
@@ -8024,7 +8073,7 @@ fn a_gone_pick_reads_as_gone_and_g_reopens_the_picker() {
     assert_eq!(app.scope, Scope::Commits, "esc leaves the scope where it was");
     // `All files` keeps its content, and its own footer.
     enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
-    assert!(!app.entries.is_empty());
+    assert_ne!(app.entries, Vec::new());
     let bands = app.footer_bands();
     assert_ne!(bands[0].0, FooterAction::CommitPick, "the gone row is the Changes tab's");
     assert!(bands.iter().any(|&(a, _)| a == FooterAction::TogglePane));

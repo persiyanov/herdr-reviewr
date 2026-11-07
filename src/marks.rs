@@ -664,7 +664,7 @@ mod tests {
         // A rewrite whose words share nothing still edits the blocks it replaced.
         let (m, _) = marks_of("- alpha\n- beta\n- gamma\n", "- ALPHA\n- BETA\n- GAMMA\n", &[]);
         assert_eq!(bars(&m), vec![(1, Modified), (2, Modified), (3, Modified)]);
-        assert!(m.markers.is_empty());
+        assert_eq!(m.markers, Vec::new());
         // An edited paragraph, and a paragraph removed after it in the same hunk.
         let (m, _) =
             marks_of("# A\n\npara one\n\ngone para\n\n# C\n", "# A\n\npara ONE\n\n# C\n", &[]);
@@ -786,10 +786,10 @@ mod tests {
         // Derived open; the reviewer's own choice wins either way.
         assert_eq!(open_details(&doc.disclosures, &HashMap::new(), &spots), vec!["More#0"]);
         let closed = HashMap::from([("More#0".to_string(), false)]);
-        assert!(open_details(&doc.disclosures, &closed, &spots).is_empty());
+        assert_eq!(open_details(&doc.disclosures, &closed, &spots), Vec::<String>::new());
         let opened = HashMap::from([("More#0".to_string(), true)]);
         assert_eq!(open_details(&doc.disclosures, &opened, &[]), vec!["More#0"]);
-        assert!(open_details(&doc.disclosures, &HashMap::new(), &[]).is_empty());
+        assert_eq!(open_details(&doc.disclosures, &HashMap::new(), &[]), Vec::<String>::new());
         // Open: the body's paragraph wears the bar.
         let (m, _) = marks_of(old, new, &["More#0"]);
         assert_eq!(bars(&m), vec![(6, Bar::Modified)]);
@@ -798,6 +798,6 @@ mod tests {
         let summary = map.units.iter().find(|&&(_, e)| e == 8).expect("summary spans it");
         assert_eq!(bar(&m, summary.0), Some(Bar::Modified));
         assert_eq!(m.blocks[0].lines, 2);
-        assert!(m.markers.is_empty());
+        assert_eq!(m.markers, Vec::new());
     }
 }

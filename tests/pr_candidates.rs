@@ -509,7 +509,7 @@ fn an_unusable_origin_publishes_nowhere_never_on_the_target() {
     let repo = worktree();
     repo.git(&["remote", "set-url", "origin", "git@github-work:me/repo.git"]);
     repo.git(&["remote", "add", "upstream", "https://github.com/acme/repo.git"]);
-    assert!(heads(&repo).is_empty());
+    assert_eq!(heads(&repo), Vec::<String>::new());
     repo.git(&["config", "branch.work.remote", "origin"]);
     repo.git(&["config", "branch.work.merge", "refs/heads/work"]);
     assert!(heads(&repo).is_empty(), "a recorded unusable origin names nothing either");
