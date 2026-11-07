@@ -1833,10 +1833,10 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             Some(K::QuitDiscard) if quit => app.should_quit = true,
             Some(K::WorktreePick) if !quit => app.switch_discarding(),
             Some(K::Quit) if quit => {}
-            Some(K::Send) => {
+            Some(action @ (K::Send | K::SendTo)) => {
                 app.close_worktree_picker();
                 app.question = None;
-                app.send_to_agent();
+                app.send_to_agent(action == K::SendTo);
             }
             Some(K::Copy) => {
                 app.close_worktree_picker();
@@ -1947,7 +1947,8 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             (Some(K::Comments), _) | (_, Esc) => app.close_list(),
             (Some(K::Down), _) => app.list_move(1),
             (Some(K::Up), _) => app.list_move(-1),
-            (Some(K::Send), _) => app.send_to_agent(),
+            (Some(K::Send), _) => app.send_to_agent(false),
+            (Some(K::SendTo), _) => app.send_to_agent(true),
             (Some(K::Copy), _) => {
                 app.export(&Clipboard);
             }
@@ -2007,7 +2008,8 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             // `delete` needs the diff focused, never an off-screen cursor; `edit` works anywhere.
             K::Edit => app.start_edit(),
             K::Delete if app.focus == Focus::Diff => app.delete_comment(),
-            K::Send => app.send_to_agent(),
+            K::Send => app.send_to_agent(false),
+            K::SendTo => app.send_to_agent(true),
             K::Copy => {
                 app.export(&Clipboard);
             }

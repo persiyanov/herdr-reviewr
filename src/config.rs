@@ -1040,7 +1040,11 @@ mod tests {
         assert_eq!(keymap.action_for(Key::plain('c')), Some(Action::Comment));
         assert_eq!(keymap.action_for(Key::plain('x')), Some(Action::Send));
         assert_eq!(keymap.action_for(Key::plain('s')), None, "a binding replaces its defaults");
-        assert_eq!(keymap.action_for(Key::plain('S')), None);
+        assert_eq!(
+            keymap.action_for(Key::plain('S')),
+            Some(Action::SendTo),
+            "`send-to` keeps its own"
+        );
         assert_eq!(keymap.action_for(Key::plain('v')), Some(Action::Select), "unbound keep theirs");
     }
 
@@ -1248,7 +1252,8 @@ mod tests {
         assert_eq!(config.keymap().bindings().len(), Action::names().count());
         assert!(config.keymap().bindings().iter().all(|(_, keys)| !keys.is_empty()));
         assert_eq!(keys_of(&config, Action::Quit), ["q"]);
-        assert_eq!(keys_of(&config, Action::Send), ["s", "S"]);
+        assert_eq!(keys_of(&config, Action::Send), ["s"]);
+        assert_eq!(keys_of(&config, Action::SendTo), ["S"]);
     }
 
     /// `action`'s keys in `config`, spelled as the config file spells them.

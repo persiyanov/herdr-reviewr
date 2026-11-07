@@ -47,6 +47,7 @@ pub enum Action {
     GotoLine,
     Keys,
     Send,
+    SendTo,
     Copy,
     OpenPr,
     Refresh,
@@ -157,7 +158,7 @@ impl Key {
 }
 
 /// Every action with its config name and default keys, the one table the keymap derives from.
-const ACTIONS: [(Action, &str, &[Key]); 47] = [
+const ACTIONS: [(Action, &str, &[Key]); 48] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -199,7 +200,8 @@ const ACTIONS: [(Action, &str, &[Key]); 47] = [
     (Action::Find, "find", &[Key::ctrl('f')]),
     (Action::GotoLine, "goto-line", &[Key::plain(':')]),
     (Action::Keys, "keys", &[Key::plain('?')]),
-    (Action::Send, "send", &[Key::plain('s'), Key::plain('S')]),
+    (Action::Send, "send", &[Key::plain('s')]),
+    (Action::SendTo, "send-to", &[Key::plain('S')]),
     (Action::Copy, "copy", &[Key::plain('y'), Key::plain('Y')]),
     (Action::OpenPr, "open-pr", &[Key::plain('o')]),
     (Action::Refresh, "refresh", &[Key::plain('r')]),
@@ -326,7 +328,7 @@ mod tests {
     fn defaults_bind_every_action_and_hint_is_first_key() {
         let keymap = Keymap::default();
         assert_eq!(keymap.action_for(Key::plain('c')), Some(Action::Comment));
-        assert_eq!(keymap.action_for(Key::plain('S')), Some(Action::Send));
+        assert_eq!(keymap.action_for(Key::plain('S')), Some(Action::SendTo));
         assert_eq!(keymap.action_for(Key::plain('m')), Some(Action::Rendered));
         assert_eq!(keymap.action_for(Key::plain('|')), Some(Action::Split));
         assert_eq!(keymap.action_for(Key::plain('p')), Some(Action::NavigatorPosition));
@@ -387,7 +389,11 @@ mod tests {
 
         let keymap = Keymap::resolve(&[(Action::Send, vec![Key::plain('x')])]).unwrap();
         assert_eq!(keymap.action_for(Key::plain('s')), None);
-        assert_eq!(keymap.action_for(Key::plain('S')), None);
+        assert_eq!(
+            keymap.action_for(Key::plain('S')),
+            Some(Action::SendTo),
+            "a sibling keeps its own"
+        );
         assert_eq!(keymap.action_for(Key::plain('x')), Some(Action::Send));
     }
 

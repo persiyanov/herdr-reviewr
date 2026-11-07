@@ -465,8 +465,8 @@ fn agent_list() -> Result<Vec<AgentPane>, HerdrError> {
     parse_agents(&call(&["agent", "list"])?)
 }
 
-/// What `Send` does: the only agent, or the only one in reviewr's tab, sends; else the picker.
-pub fn send_target(ids: &PaneIds) -> Result<SendTarget, SendError> {
+/// The lone agent, or the lone one in reviewr's tab, unless `choose`; else the picker over all.
+pub fn send_target(ids: &PaneIds, choose: bool) -> Result<SendTarget, SendError> {
     let (ws, me) = (ids.workspace.as_deref(), ids.pane.as_deref());
     let agents = agent_list()?;
     // Candidates: agents in our workspace other than our pane, in herdr's own order.
@@ -474,7 +474,7 @@ pub fn send_target(ids: &PaneIds) -> Result<SendTarget, SendError> {
     match picked.len() {
         0 => Err(SendError::NoAgent),
         // The sole-agent send shows no row, so only a choice among several pays for the lookups.
-        1 => Ok(SendTarget::One(picked[0].choice(&HashMap::new(), &HashMap::new()))),
+        1 if !choose => Ok(SendTarget::One(picked[0].choice(&HashMap::new(), &HashMap::new()))),
         _ => {
             // Both lookups are best effort, so they share one wait instead of adding a second.
             let (tabs, panes) = std::thread::scope(|scope| {
@@ -482,22 +482,23 @@ pub fn send_target(ids: &PaneIds) -> Result<SendTarget, SendError> {
                 let panes = scope.spawn(|| ws.and_then(|ws| PaneList::of(ws).ok()));
                 (tabs.join().unwrap_or_default(), panes.join().ok().flatten())
             });
-            Ok(target_among(&picked, &tabs, panes.as_ref(), me))
+            Ok(target_among(&picked, &tabs, panes.as_ref(), me, choose))
         }
     }
 }
 
-/// Among several agents, the only one in reviewr's own tab sends; else the picker opens over all.
+/// The only agent in reviewr's own tab sends, unless the reviewer chose to pick; else the picker.
 fn target_among(
     picked: &[&AgentPane],
     tabs: &HashMap<String, String>,
     panes: Option<&PaneList>,
     me: Option<&str>,
+    choose: bool,
 ) -> SendTarget {
     let labels = panes.map(PaneList::labels).unwrap_or_default();
     let my_tab = me.and_then(|me| panes?.pane(me)?.tab_id.as_deref());
     let mut beside = picked.iter().filter(|agent| Some(agent.tab_id.as_str()) == my_tab);
-    if let (Some(agent), None) = (beside.next(), beside.next()) {
+    if !choose && let (Some(agent), None) = (beside.next(), beside.next()) {
         return SendTarget::One(agent.choice(tabs, &labels));
     }
     SendTarget::Many(picked.iter().map(|agent| agent.choice(tabs, &labels)).collect())
@@ -1011,6 +1012,7 @@ mod tests {
             &tabs,
             panes,
             Some("w1:p9"),
+            false,
         ) {
             SendTarget::One(row) => format!("one {} {}", row.pane_id, row.name),
             SendTarget::Many(rows) => {
@@ -1031,6 +1033,10 @@ mod tests {
         assert_eq!(target(&[&claude, &codex], Some(&alone)), "picker claude,claude");
         // Without the pane list, reviewr's tab is unknown, so the picker opens.
         assert_eq!(target(&[&claude, &codex], None), "picker claude,claude");
+        // Choosing opens the picker even over the one agent beside reviewr.
+        let chosen = target_among(&[&claude], &tabs, Some(&panes), Some("w1:p9"), true);
+        let SendTarget::Many(rows) = chosen else { panic!("choosing always opens the picker") };
+        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["api-refactor"]);
     }
 
     #[test]

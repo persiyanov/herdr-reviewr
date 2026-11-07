@@ -5071,13 +5071,13 @@ fn armed_row(rows: &[AgentChoice], last_sent: Option<&str>) -> usize {
 }
 
 impl App {
-    /// `Send`: one agent sends, several open the picker, none points at the clipboard.
-    pub fn send_to_agent(&mut self) {
+    /// `Send`, through the picker when `choose` (`send-to`); no agent points at the clipboard.
+    pub fn send_to_agent(&mut self, choose: bool) {
         if self.store.is_empty() {
             self.status = "no comments yet".to_string();
             return;
         }
-        match herdr::send_target(&self.herdr.ids) {
+        match herdr::send_target(&self.herdr.ids, choose) {
             Ok(SendTarget::One(agent)) => self.export_to_agent(&agent),
             Ok(SendTarget::Many(rows)) => self.open_picker(rows),
             Err(e) => self.status = crate::export::send_failure(&e, None, &self.copy_key()),

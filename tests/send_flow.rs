@@ -254,6 +254,16 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert_eq!(app.status, "sent 1 comment to claude");
     assert_eq!(app.last_sent_pane.as_deref(), Some("w8:p1"));
 
+    // `S` opens the picker even over that one agent, and `esc` leaves the comments unsent.
+    write_comment(&mut app, "chosen");
+    press(&mut app, KeyCode::Char('S'), area, &keymap);
+    assert_eq!(app.mode, Mode::Picker, "`send-to` always picks");
+    assert_eq!(app.picker_rows.len(), 1);
+    press(&mut app, KeyCode::Esc, area, &keymap);
+    assert_eq!((app.mode.clone(), app.store.len()), (Mode::Normal, 1));
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    assert!(app.store.is_empty(), "`s` still sends straight to the one agent");
+
     // An agent at a prompt takes no send, read at the send itself.
     agents(&fake_dir, TWO_AGENTS);
     write_comment(&mut app, "two");
