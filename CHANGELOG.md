@@ -10,6 +10,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **reviewr's git calls run no fsmonitor program and no git hooks**, so a planted `.git/config` or hook no longer runs when a pane refreshes.
   Thanks [@mitja-kleider](https://github.com/mitja-kleider) ([#163](https://github.com/persiyanov/herdr-reviewr/pull/163)).
 
+### Fixed
+- **With `toggle_placement = "tab"`, toggle and open show reviewr's new tab** again. Since herdr 0.9 the tab opened behind the one on screen.
+  Thanks [@jfmainville](https://github.com/jfmainville) ([#132](https://github.com/persiyanov/herdr-reviewr/pull/132)).
+
 ## [0.50.0] — 2026-11-07
 
 ### Changed

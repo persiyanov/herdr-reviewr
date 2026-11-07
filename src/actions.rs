@@ -413,6 +413,10 @@ fn open(
         && let Some(tab) = opened.tab_id.as_deref()
     {
         let _ = herdr::rename_tab(tab, herdr::LABEL);
+        // herdr#4283: a focused tab open leaves the client on the old tab.
+        if open.focus && herdr::focus_tab(tab).is_err() {
+            logln!("focusing tab {tab} failed");
+        }
     }
 
     let success = format!("opened {} ({}) in {ws}", opened.pane_id, placement.as_str());

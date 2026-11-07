@@ -293,6 +293,9 @@ fn auto_open_birth_events_follow_shared_policy() {
             assert!(open.contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))), "{open}");
             assert!(open.contains(&format!("--placement {placement}")), "{open}");
             assert!(!open.contains(live_repo.path().to_str().unwrap()), "{open}");
+            // The event names its tab but never switches to it.
+            assert_eq!(calls.contains("tab rename"), placement == "tab", "{calls}");
+            assert!(!calls.contains("tab focus"), "{calls}");
         }
     }
 }
@@ -979,6 +982,8 @@ fn tab_placement_open_names_its_fresh_tab() {
     assert!(open_call(dir.path()).contains("--placement tab --workspace workspace-1"));
     let calls = herdr_calls(dir.path());
     assert!(calls.lines().any(|l| l == "tab rename w1:t9 reviewr"), "{calls}");
+    // herdr#4283 leaves the client on the old tab, so a manual open switches to the new one.
+    assert!(calls.lines().any(|l| l == "tab focus w1:t9"), "{calls}");
 }
 
 #[test]
