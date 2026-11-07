@@ -128,13 +128,13 @@ fn the_wheel_scrolls_the_diff_without_moving_its_cursor() {
     let mut app = long_diff_app(40);
     app.focus = Focus::Diff;
     app.diff_cursor = 3;
-    app.reveal_diff = false;
+    app.diff_reveal = None;
     app.wheel_diff(10);
     let h = vec![1usize; app.visible.len()];
     app.bound_diff_scroll(&h, 8);
     assert_eq!(app.diff_cursor, 3, "the wheel leaves the comment cursor put");
     assert!(app.diff_scroll > 0, "the wheel moved the viewport");
-    assert!(!app.reveal_diff, "the wheel does not request a reveal");
+    assert!(app.diff_reveal.is_none(), "the wheel does not request a reveal");
 }
 
 #[test]
@@ -219,10 +219,10 @@ fn hunk_steps_walk_the_changeset_and_pass_over_hunkless_files() {
     // Files sort alphabetically, so the changeset reads a.rs, bin.dat, c.rs.
     assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
 
-    app.reveal_diff = false;
+    app.diff_reveal = None;
     app.next_hunk();
     assert_eq!(cursor_text(&app), "EDIT ONE");
-    assert!(app.reveal_diff, "a jumped-to hunk is scrolled into view");
+    assert!(app.diff_reveal.is_some(), "a jumped-to hunk is scrolled into view");
     app.next_hunk();
     assert_eq!(cursor_text(&app), "EDIT TWO");
 
@@ -232,11 +232,14 @@ fn hunk_steps_walk_the_changeset_and_pass_over_hunkless_files() {
     assert_eq!(app.armed_cross(), Some(true));
 
     // The second press takes it, crossing over the binary file, which has no hunk.
-    (app.reveal_diff, app.reveal_files) = (false, false);
+    (app.diff_reveal, app.reveal_files) = (None, false);
     app.next_hunk();
     assert_eq!(app.diff_path.as_deref(), Some("c.rs"));
     assert_eq!(cursor_text(&app), "EDIT THREE");
-    assert!(app.reveal_diff && app.reveal_files, "a crossing reveals the hunk and the file row");
+    assert!(
+        app.diff_reveal.is_some() && app.reveal_files,
+        "a crossing reveals the hunk and the file row"
+    );
     assert_eq!(app.armed_cross(), None, "the crossing consumed the arm");
     assert_eq!(selected_path(&app), Some("c.rs"), "the list selection follows the crossing");
     assert_eq!(app.focus, Focus::Diff, "crossing keeps the focused pane");
@@ -497,10 +500,10 @@ fn page_keys_move_the_cursor_in_both_panes() {
     // Diff pane: page moves the cursor.
     app.focus = Focus::Diff;
     app.diff_cursor = 0;
-    app.reveal_diff = false;
+    app.diff_reveal = None;
     app.move_cursor(5).unwrap();
     assert_eq!(app.diff_cursor, 5);
-    assert!(app.reveal_diff);
+    assert!(app.diff_reveal.is_some());
 }
 
 #[test]
@@ -550,10 +553,10 @@ fn a_poll_preserves_the_wheel_scroll_in_both_panes() {
     assert!(file_scroll > 0);
 
     // An unchanged poll requests no reveal, so wheel scrolls stay.
-    app.reveal_diff = false;
+    app.diff_reveal = None;
     app.reveal_files = false;
     app.reload().unwrap();
-    assert!(!app.reveal_diff, "a poll does not reveal the diff cursor");
+    assert!(app.diff_reveal.is_none(), "a poll does not reveal the diff cursor");
     assert!(!app.reveal_files, "a poll does not reveal the file cursor");
     let h = vec![1usize; app.visible.len()];
     app.bound_diff_scroll(&h, 10);
@@ -4487,7 +4490,7 @@ fn a_markdown_file_opens_rendered_with_a_cursor() {
     app.focus = Focus::Diff;
     app.move_cursor(1).unwrap();
     assert_eq!(app.diff_cursor, 1, "the cursor steps over rendered rows");
-    assert!(app.reveal_diff);
+    assert!(app.diff_reveal.is_some());
     app.move_cursor(100).unwrap();
     assert_eq!(app.diff_cursor, app.visible.len() - 1, "a page clamps at the last row");
     let cursor = app.diff_cursor;
@@ -4656,7 +4659,7 @@ fn m_flips_between_rendered_and_source_at_the_same_block() {
     app.toggle_rendered();
     assert!(!app.rendered_active());
     assert_eq!(app.visible[app.diff_cursor].new_no(), Some(7), "source lands on the block's line");
-    assert!(app.reveal_diff);
+    assert!(app.diff_reveal.is_some());
 
     app.diff_cursor = 4; // "## Section two" (source line 5)
     app.toggle_rendered();

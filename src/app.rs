@@ -48,6 +48,17 @@ enum DividerDrag {
     Cancelled,
 }
 
+/// How a frame shows the read cursor, weakest first: one event's strongest request wins.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Reveal {
+    /// Just onto the screen: a click, a drag, a relayout, a clamp.
+    Edge,
+    /// A keyboard step: onto the screen with `scrolloff` lines around it.
+    Context,
+    /// A jump: centered when it lands off screen.
+    Center,
+}
+
 /// Which pane has the keyboard.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
@@ -692,10 +703,8 @@ pub struct App {
     pub file_scroll: usize,
     /// Set by navigation, never the wheel, to reveal `file_cursor` next frame.
     pub reveal_files: bool,
-    /// Set by navigation, never the wheel, to reveal `diff_cursor` next frame.
-    pub reveal_diff: bool,
-    /// Set by `goto_line`: center a cursor that landed off screen, not nudge it to the edge.
-    pub reveal_center: bool,
+    /// How the next frame shows `diff_cursor`; navigation sets it, never the wheel.
+    pub diff_reveal: Option<Reveal>,
     /// Set by a relayout: the screen lines above the cursor the next frame keeps.
     keep_above: Option<usize>,
     /// The file crossing a hunk step armed at the file's last hunk.
@@ -937,8 +946,7 @@ impl App {
             file_cursor: 0,
             file_scroll: 0,
             reveal_files: false,
-            reveal_diff: false,
-            reveal_center: false,
+            diff_reveal: None,
             keep_above: None,
             armed_cross: None,
             resume_list: false,
@@ -1163,7 +1171,7 @@ impl App {
                 self.file_cursor = old.file_cursor;
                 self.file_scroll = old.file_scroll;
                 self.reveal_files = old.reveal_files;
-                self.reveal_diff = old.reveal_diff;
+                self.diff_reveal = old.diff_reveal;
                 self.changeset = std::mem::take(&mut old.changeset);
                 // The header and the footer's branch describe the carried list, so they carry too.
                 self.branch_base = std::mem::take(&mut old.branch_base);
@@ -1523,7 +1531,7 @@ impl App {
         let last = self.visible.len() - 1;
         let clamped = self.diff_cursor.min(last);
         if clamped != self.diff_cursor {
-            self.reveal_diff = true;
+            self.reveal_diff(Reveal::Edge);
         }
         self.diff_cursor = clamped;
         self.diff_scroll = self.diff_scroll.min(last);
@@ -2240,7 +2248,7 @@ impl App {
         // The old rows' marks go with them; a navigator highlight was never on them.
         self.drop_read_marks();
         self.settle_read();
-        self.reveal_diff = true;
+        self.reveal_diff(Reveal::Edge);
     }
 
     /// The styled lines the rendered rows paint, indexed by a `Row::Rendered`'s `line`.
@@ -2688,19 +2696,25 @@ impl App {
         self.diff_scroll = top_leaving(heights, target, room);
     }
 
-    /// Settle the scroll: a line jump centers (eating a same-event nudge), else nudge, then bound.
+    /// Settle the scroll by the event's reveal request, then bound it.
     pub fn settle_diff_scroll(&mut self, heights: &[usize], viewport: usize) {
-        let nudge = std::mem::take(&mut self.reveal_diff);
+        let reveal = self.diff_reveal.take();
         if let Some(lines) = self.keep_above.take() {
             let target = self.diff_cursor.min(heights.len().saturating_sub(1));
             self.diff_scroll = top_leaving(heights, target, lines);
         }
-        if std::mem::take(&mut self.reveal_center) {
-            self.center_diff_cursor(heights, viewport);
-        } else if nudge || self.composing() {
-            self.reveal_diff_cursor(heights, viewport);
+        match reveal {
+            Some(Reveal::Center) => self.center_diff_cursor(heights, viewport),
+            Some(Reveal::Edge | Reveal::Context) => self.reveal_diff_cursor(heights, viewport),
+            None if self.composing() => self.reveal_diff_cursor(heights, viewport),
+            None => {}
         }
         self.bound_diff_scroll(heights, viewport);
+    }
+
+    /// Ask the next frame to show the read cursor; the strongest request in one event wins.
+    pub fn reveal_diff(&mut self, how: Reveal) {
+        self.diff_reveal = self.diff_reveal.max(Some(how));
     }
 
     /// Clamp `diff_scroll` by display heights, so tall wrapped rows stay reachable.
@@ -3142,7 +3156,7 @@ impl App {
                         target = self.fold_clamped(a, target);
                     }
                     self.diff_cursor = target;
-                    self.reveal_diff = true;
+                    self.reveal_diff(Reveal::Context);
                 }
             }
         }
@@ -3200,7 +3214,7 @@ impl App {
         }
         if let Some(row) = hunk_row(&self.visible, Some(self.diff_cursor), forward) {
             self.diff_cursor = row;
-            self.reveal_diff = true;
+            self.reveal_diff(Reveal::Edge);
             return;
         }
         let Some(armed) = armed else {
@@ -3222,7 +3236,7 @@ impl App {
         // Land on a hunk of the rows now on screen.
         self.diff_cursor = hunk_row(&self.visible, None, forward).unwrap_or(0);
         self.reveal_files = true;
-        self.reveal_diff = true;
+        self.reveal_diff(Reveal::Edge);
     }
 
     /// The nearest file row that way with a hunk, so a crossing always lands on a change.
@@ -3427,7 +3441,7 @@ impl App {
             self.focus = Focus::Diff;
             let anchor = *self.select_anchor.get_or_insert(self.diff_cursor);
             self.diff_cursor = self.fold_clamped(anchor, index);
-            self.reveal_diff = true;
+            self.reveal_diff(Reveal::Edge);
         }
     }
 
@@ -3573,7 +3587,7 @@ impl App {
         self.diff_cursor = row;
         self.select_anchor = None;
         self.gesture = crate::selection::Gesture::Gutter;
-        self.reveal_diff = true;
+        self.reveal_diff(Reveal::Edge);
     }
 
     /// Finish a gutter gesture by opening the composer.
@@ -3608,7 +3622,7 @@ impl App {
                 Some(_) => None,
                 None => Some(self.diff_cursor),
             };
-            self.reveal_diff = true;
+            self.reveal_diff(Reveal::Edge);
         }
     }
 
@@ -3616,7 +3630,7 @@ impl App {
     pub fn clear_selection(&mut self) {
         if self.select_anchor.is_some() {
             self.select_anchor = None;
-            self.reveal_diff = true;
+            self.reveal_diff(Reveal::Edge);
         }
     }
 
@@ -3630,7 +3644,7 @@ impl App {
 
     pub fn start_comment(&mut self) {
         if self.focus == Focus::Diff && self.has_anchorable_selection() {
-            self.reveal_diff = true; // scroll the anchored line into view before the box opens
+            self.reveal_diff(Reveal::Edge); // scroll the anchored line into view before the box opens
             self.input.clear();
             self.caret = 0;
             self.resume_list = false; // a fresh diff comment returns to the diff, not the list
@@ -3741,7 +3755,7 @@ impl App {
             self.select_anchor = None;
         }
         self.focus = Focus::Diff;
-        self.reveal_diff = true; // scroll the edited line into view before the box opens
+        self.reveal_diff(Reveal::Edge); // scroll the edited line into view before the box opens
         self.caret = text.chars().count(); // edit opens with the caret at the end
         self.input = text;
         self.resume_list = from_list;
@@ -4342,7 +4356,7 @@ impl App {
         self.focus = Focus::Diff;
         self.select_anchor = None; // a comment jump is navigation, not a selection extend
         self.diff_cursor = row;
-        self.reveal_diff = true;
+        self.reveal_diff(Reveal::Edge);
         self.target_comment_card(ci);
     }
 
@@ -4388,7 +4402,7 @@ impl App {
         self.mode = Mode::Find;
         self.find = Some(Find::default());
         // The band takes the bottom row; keep the cursor above it.
-        self.reveal_diff = true;
+        self.reveal_diff(Reveal::Edge);
     }
 
     /// `:`: open the line field in the band's place, wherever find opens, over the open file.
@@ -4505,7 +4519,7 @@ impl App {
         } else {
             self.diff_cursor = self.land_on_line(n, self.line_side());
         }
-        self.reveal_center = true;
+        self.reveal_diff(Reveal::Center);
     }
 
     /// The row holding line `n` by `side`, its fold opened first: find steps and `:N` share it.
@@ -4597,7 +4611,7 @@ impl App {
             FindHit::Visible(v) => self.diff_cursor = v,
             FindHit::Folded { new_no } => self.diff_cursor = self.land_on_line(new_no, Side::New),
         }
-        self.reveal_diff = true;
+        self.reveal_diff(Reveal::Edge);
     }
 
     /// Find's query; `None` for the line field, whose digits are no search.
