@@ -423,6 +423,11 @@ fn open(
     let opened =
         herdr::open_plugin_pane(&open).map_err(|_| refused("herdr plugin pane open failed"))?;
 
+    // herdr#3799: a plugin pane keeps its spawn size until a geometry request, so its first frames
+    // draw cropped and leave stray borders; a zero resize claims the layout's sizes at once.
+    if placement != TogglePlacement::Tab && herdr::claim_geometry(&opened.pane_id).is_err() {
+        logln!("claiming geometry for {} failed", opened.pane_id);
+    }
     // Name a fresh tab after the plugin; cosmetic, so its failure is ignored.
     if placement == TogglePlacement::Tab
         && let Some(tab) = opened.tab_id.as_deref()

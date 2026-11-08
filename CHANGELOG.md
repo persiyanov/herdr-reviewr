@@ -20,7 +20,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Thanks [@Zahlii](https://github.com/Zahlii) ([#161](https://github.com/persiyanov/herdr-reviewr/pull/161)).
 
 ### Fixed
-- **reviewr no longer opens garbled.** A new pane loads the repo in the background, so herdr's resize right after the open repaints at once. Until the repo is in, the file list shows nothing rather than "no changes", and a failed load says so.
+- **reviewr no longer opens with stray borders.** The toggle asks herdr to size a fresh pane at once (herdr#3799 left it cropped for its first frames), and the repo loads in the background, so the pane answers keys and resizes while it loads. Until the repo is in, the file list shows nothing rather than "no changes", and a failed load says so.
 
 ## [0.51.0] — 2026-11-07
 

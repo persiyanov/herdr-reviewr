@@ -371,6 +371,11 @@ pub(crate) fn rename_tab(tab: &str, label: &str) -> Result<(), HerdrError> {
     call(&["tab", "rename", tab, label]).map(drop)
 }
 
+/// A zero resize from pane `pane`: herdr applies the layout's geometry to every pane it touches.
+pub(crate) fn claim_geometry(pane: &str) -> Result<(), HerdrError> {
+    call(&["pane", "resize", "--pane", pane, "--direction", "right", "--amount", "0"]).map(drop)
+}
+
 /// Switch to tab `tab`.
 pub(crate) fn focus_tab(tab: &str) -> Result<(), HerdrError> {
     call(&["tab", "focus", tab]).map(drop)

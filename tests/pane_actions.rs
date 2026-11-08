@@ -984,6 +984,7 @@ fn tab_placement_open_names_its_fresh_tab() {
     assert!(calls.lines().any(|l| l == "tab rename w1:t9 reviewr"), "{calls}");
     // herdr#4283 leaves the client on the old tab, so a manual open switches to the new one.
     assert!(calls.lines().any(|l| l == "tab focus w1:t9"), "{calls}");
+    assert!(!calls.contains("pane resize"), "a fresh tab has no split to size: {calls}");
 }
 
 #[test]
@@ -994,7 +995,11 @@ fn split_placement_open_renames_no_tab() {
     let output = run_open(dir.path());
 
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(!herdr_calls(dir.path()).contains("tab rename"), "{}", herdr_calls(dir.path()));
+    let calls = herdr_calls(dir.path());
+    assert!(!calls.contains("tab rename"), "{calls}");
+    // herdr#3799: the fresh pane claims its layout size at once, so no cropped frame shows.
+    let claim = "pane resize --pane w1:p9 --direction right --amount 0";
+    assert!(calls.lines().any(|l| l == claim), "{calls}");
 }
 
 #[test]
