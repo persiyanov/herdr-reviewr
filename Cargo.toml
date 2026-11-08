@@ -1,6 +1,6 @@
 [package]
 name = "herdr-reviewr"
-version = "0.52.0"
+version = "0.52.1"
 edition = "2024"
 rust-version = "1.99.1"
 description = "A terminal review pane for herdr: browse an agent's changes and send comments back to chat."

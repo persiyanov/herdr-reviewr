@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.52.1] — 2026-11-08
+
+### Changed
+- **Dependencies refreshed and built with Rust 1.99.1**, including the file watcher's macOS and Linux fixes (notify 9.0.0-rc.7).
+  Thanks [@mitja-kleider](https://github.com/mitja-kleider) ([#164](https://github.com/persiyanov/herdr-reviewr/pull/164)).
+
 ## [0.52.0] — 2026-11-08
 
 ### Changed
