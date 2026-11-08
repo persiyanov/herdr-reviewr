@@ -115,11 +115,35 @@ fn listen(path: &Path, state: Arc<Mutex<State>>, version: String) {
     use interprocess::local_socket::{GenericNamespaced, ListenerOptions, prelude::*};
     let name = path.to_string_lossy().into_owned().to_ns_name::<GenericNamespaced>().unwrap();
     let listener = ListenerOptions::new().name(name).create_sync().unwrap();
+    // `&Stream` reads and writes, so both halves share one stream (interprocess 2.4.8 deprecates `split`).
     let halves: Halves<interprocess::local_socket::Stream> = |s| {
-        let (read, write) = s.split();
-        (Box::new(read), Box::new(write))
+        let shared = Shared(Arc::new(s));
+        (Box::new(shared.clone()), Box::new(shared))
     };
     std::thread::spawn(move || serve(listener.incoming(), &state, &version, halves));
+}
+
+/// One named-pipe stream behind both halves of a connection.
+#[cfg(windows)]
+#[derive(Clone)]
+struct Shared(Arc<interprocess::local_socket::Stream>);
+
+#[cfg(windows)]
+impl Read for Shared {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self.0).read(buf)
+    }
+}
+
+#[cfg(windows)]
+impl Write for Shared {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        (&*self.0).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        (&*self.0).flush()
+    }
 }
 
 fn serve<S: Read + Write + Send + 'static>(
