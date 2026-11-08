@@ -787,7 +787,7 @@ mod tests {
             {"system": false, "body": "The real comment.", "author": {"username": "author"}}
         ]});
         assert_eq!(comment_root(&discussion).unwrap()["body"], "The real comment.");
-        assert!(replies_from_discussion(&discussion).is_empty());
+        assert_eq!(replies_from_discussion(&discussion), Vec::new());
     }
 
     #[test]

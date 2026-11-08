@@ -177,7 +177,7 @@ fn corrected_config_recovers_on_the_next_invocation() {
     let config = dir.path().join("config.toml");
     fs::write(&config, "unknown = true\n").unwrap();
     assert_eq!(run("close", dir.path()).status.code(), Some(1));
-    assert!(herdr_calls(dir.path()).is_empty());
+    assert_eq!(herdr_calls(dir.path()), "");
 
     fs::write(&config, "theme = \"gruvbox\"\n").unwrap();
     let output = run("close", dir.path());
@@ -198,8 +198,8 @@ fn an_unknown_action_refuses_before_any_herdr_call() {
         stderr(&output),
         "reviewr: unknown action 'frobnicate' (toggle | open | close | auto-open)\n"
     );
-    assert!(output.stdout.is_empty());
-    assert!(herdr_calls(dir.path()).is_empty());
+    assert_eq!(output.stdout, Vec::<u8>::new());
+    assert_eq!(herdr_calls(dir.path()), "");
 
     // A bare `--action` names no action at all, and refuses the same way.
     let output = Command::new(reviewr_bin())
@@ -223,9 +223,9 @@ fn disabled_auto_open_stops_after_successful_validation() {
     let output = run("auto-open", dir.path());
 
     assert!(output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(output.stderr.is_empty());
-    assert!(herdr_calls(dir.path()).is_empty());
+    assert_eq!(output.stdout, Vec::<u8>::new());
+    assert_eq!(output.stderr, Vec::<u8>::new());
+    assert_eq!(herdr_calls(dir.path()), "");
 }
 
 #[test]
@@ -253,8 +253,8 @@ fn auto_open_opened_live_exits_before_herdr_calls() {
     let output = run_auto_open(dir.path(), &event, None);
 
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(output.stdout.is_empty());
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stdout, Vec::<u8>::new());
+    assert_eq!(output.stderr, Vec::<u8>::new());
     assert!(herdr_calls(dir.path()).is_empty(), "opened-live inspected herdr before exiting");
 }
 

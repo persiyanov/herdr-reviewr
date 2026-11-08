@@ -690,7 +690,7 @@ mod tests {
              "author": {"displayName": "Author"}}
         ]});
         assert_eq!(comment_root(&thread).unwrap()["content"], "The real comment.");
-        assert!(replies_from_thread(&thread).is_empty());
+        assert_eq!(replies_from_thread(&thread), Vec::new());
     }
 
     #[test]
