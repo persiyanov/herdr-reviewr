@@ -2,7 +2,7 @@
 name = "herdr-reviewr"
 version = "0.52.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.99.1"
 description = "A terminal review pane for herdr: browse an agent's changes and send comments back to chat."
 authors = ["Dmitry Persiyanov <dmitry.persiyanov@gmail.com>"]
 license = "MIT"
@@ -107,6 +107,8 @@ cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
 cast_possible_wrap = "allow"
 too_many_lines = "allow"
+# Rust 1.99: `assert!(x.is_empty())` names its intent; a test that needs the value prints it.
+assert_is_empty = "allow"
 
 # unicode-width 0.2 trips unicode-truncate's width assert on Arabic lam-alef; release drops it, so dev does too.
 [profile.dev.package.unicode-truncate]
