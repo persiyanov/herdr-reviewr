@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.52.0] — 2026-11-08
+
 ### Changed
 - **Toggle, open and close act on your own reviewr**: the one in the focused tab, or with `tab` placement your worktree's reviewr tab. Toggle closes a reviewr you can see, takes you to one you can't, and opens one if there's none.
   Thanks [@jmoreno-blr](https://github.com/jmoreno-blr) ([#114](https://github.com/persiyanov/herdr-reviewr/issues/114)).
