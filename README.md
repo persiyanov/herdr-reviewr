@@ -259,7 +259,9 @@ open at the right line. A terminal editor takes the pane until you quit. For any
 
 ### URL opener
 
-Links open with `open`, `xdg-open`, or the Windows default browser. Under `herdr --remote`, set
+Links open with `open`, `xdg-open`, or the Windows default browser. Under `herdr --remote`, these
+open on the remote machine, so Ctrl-click the link instead: reviewr paints the PR chip and comment
+links as terminal hyperlinks, and herdr opens a Ctrl-clicked one in your local browser. Or set
 `url_opener` to something that reaches your browser. The URL is passed as one argument, never
 through a shell, so don't use `ssh host open {url}`.
 
