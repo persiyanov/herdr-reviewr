@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Bitbucket Cloud in the PR tab.** The read-only PR tab now mirrors pull requests on bitbucket.org, through the [`bkt`](https://github.com/avivsinai/bitbucket-cli) CLI: state, build statuses, description, comment threads with their file, line and quoted code, and approvals. Sign in with `bkt auth login https://bitbucket.org --kind cloud` and create a context for your workspace. Bitbucket reports no conflict or merge-check state, so no merge blocker shows ([#137](https://github.com/persiyanov/herdr-reviewr/issues/137)).
+
 ## [0.52.1] — 2026-11-08
 
 ### Changed
@@ -91,6 +94,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 - **A branch that shares a tag's name** reads as itself, not `heads/<name>`, in the PR tab and the base picker.
 - **Emoji in the footer** count by their columns, so a long status no longer runs past the edge.
+||||||| parent of 7e6771d (Mirror Bitbucket Cloud pull requests in the PR tab, through bkt)
 
 ## [0.48.0] — 2026-10-19
 
