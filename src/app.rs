@@ -2352,6 +2352,15 @@ impl App {
         self.painted_links.borrow_mut().push(PaintedLink { x_start, x_end, y, url });
     }
 
+    /// The painted frame's links as `(x_start, x_end, y, url)`.
+    pub(crate) fn painted_links(&self) -> Vec<(u16, u16, u16, std::sync::Arc<str>)> {
+        self.painted_links
+            .borrow()
+            .iter()
+            .map(|l| (l.x_start, l.x_end, l.y, l.url.clone()))
+            .collect()
+    }
+
     /// Note one heading anchor of the painted markdown body, by content line index.
     pub(crate) fn note_painted_anchor(&self, slug: String, content_line: usize) {
         self.painted_anchors.borrow_mut().push((slug, content_line));

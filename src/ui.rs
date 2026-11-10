@@ -119,6 +119,28 @@ pub fn render(frame: &mut Frame, app: &App) {
     if let Some(render_popup) = popup {
         scrim_behind(frame, app, area);
         render_popup(frame, app, area);
+    } else {
+        hyperlink_painted_links(frame.buffer_mut(), app);
+    }
+}
+
+/// Wrap each painted link in OSC 8, so herdr's Ctrl-click opens it on the client's machine.
+fn hyperlink_painted_links(buf: &mut ratatui::buffer::Buffer, app: &App) {
+    for (x1, x2, y, url) in app.painted_links() {
+        hyperlink_cells(buf, x1..x2, y, &url);
+    }
+}
+
+/// Wrap each cell of `xs` on row `y` in an OSC 8 link to an http(s) `url`; others stay plain.
+fn hyperlink_cells(buf: &mut ratatui::buffer::Buffer, xs: std::ops::Range<u16>, y: u16, url: &str) {
+    use ratatui::buffer::CellDiffOption;
+    // The gate also rejects control characters, which would end the escape early.
+    let Ok(url) = crate::browser::openable_url(url) else { return };
+    for x in xs {
+        let Some(cell) = buf.cell_mut((x, y)) else { continue };
+        let Some(width) = std::num::NonZeroU16::new(cell.symbol().width() as u16) else { continue };
+        let symbol = format!("\x1b]8;;{url}\x1b\\{}\x1b]8;;\x1b\\", cell.symbol());
+        cell.set_symbol(&symbol).set_diff_option(CellDiffOption::ForcedWidth(width));
     }
 }
 
@@ -4571,6 +4593,10 @@ fn render_pr_header(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(" ".repeat(w - used), bar));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    if let forge::PrView::Pr(s) = &app.pr {
+        let chip_x = area.x + area.width.saturating_sub(pr_chip_width(app, s) as u16);
+        hyperlink_cells(frame.buffer_mut(), chip_x..area.x + area.width, area.y, &s.url);
+    }
 }
 
 /// The status chip word for a PR's lifecycle; its accent comes from [`pr_status_chip`].
