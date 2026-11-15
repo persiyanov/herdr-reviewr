@@ -1038,7 +1038,7 @@ fn an_untracked_file_past_the_big_file_threshold_is_binary() {
 
 /// A copy a killed process left behind holds no lock, and the sweep removes it; a live one stays.
 #[test]
-fn a_dead_processs_index_copy_is_swept() {
+fn a_dead_process_index_copy_is_swept() {
     let r = Repo::init();
     let home = r.path().join(".git/reviewr");
     std::fs::create_dir_all(&home).unwrap();
@@ -1103,7 +1103,7 @@ fn a_worktree_re_added_at_its_path_lists_against_its_own_index() {
         r.git(&["worktree", "add", "-q", "-b", branch, at.to_str().unwrap()]);
     };
     add("one", &first);
-    assert!(changed_from(&first, "HEAD").unwrap().is_empty());
+    assert_eq!(changed_from(&first, "HEAD").unwrap(), Vec::new());
     r.git(&["worktree", "remove", "--force", first.to_str().unwrap()]);
     // The other worktree takes the freed admin dir and stages a change there.
     add("two", &other);
@@ -1114,7 +1114,7 @@ fn a_worktree_re_added_at_its_path_lists_against_its_own_index() {
     // Re-added under the same admin name, its copy went with the old admin dir.
     r.git(&["worktree", "remove", "--force", first.to_str().unwrap()]);
     add("four", &first);
-    assert!(changed_from(&first, "HEAD").unwrap().is_empty());
+    assert_eq!(changed_from(&first, "HEAD").unwrap(), Vec::new());
     // A pruned admin dir stays gone: reviewr never builds one back to hold its copy.
     let out = std::process::Command::new("git")
         .current_dir(&first)
