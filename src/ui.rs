@@ -459,7 +459,7 @@ fn seg_cell_range(
     if matches!(row, Row::Rendered { .. }) {
         (0, cells.len())
     } else if app.wrap {
-        let segs = wrap_segments(cells, code_width.max(1), ContinuationSpaces::Trim);
+        let segs = wrap_segments(cells, code_width.max(1), ContinuationSpaces::Trim, Cell::glyph);
         segs.get(seg).copied().unwrap_or((0, 0))
     } else {
         unwrapped_range(cells, app.h_scroll, code_width)
@@ -1106,7 +1106,7 @@ fn box_rows(input: &str, width: usize) -> Vec<(usize, String)> {
     loop {
         let line_end = chars[i..].iter().position(|&c| c == '\n').map_or(chars.len(), |p| i + p);
         let cells: Vec<Cell> = chars[i..line_end].iter().copied().map(plain_cell).collect();
-        let segments = wrap_segments(&cells, width, ContinuationSpaces::Keep);
+        let segments = wrap_segments(&cells, width, ContinuationSpaces::Keep, Cell::glyph);
         for &(a, b) in &segments {
             rows.push((i + a, chars[i + a..i + b].iter().collect::<String>()));
         }
@@ -1232,7 +1232,7 @@ pub fn caret_vertical(input: &str, caret: usize, content_w: usize, down: bool) -
 /// Word-wrap a plain string by the diff's own [`wrap_segments`] rule.
 fn wrap_text(s: &str, width: usize) -> Vec<String> {
     let cells: Vec<Cell> = s.chars().map(plain_cell).collect();
-    wrap_segments(&cells, width, ContinuationSpaces::Trim)
+    wrap_segments(&cells, width, ContinuationSpaces::Trim, Cell::glyph)
         .into_iter()
         .map(|(a, b)| cells[a..b].iter().map(|c| c.ch).collect())
         .collect()
@@ -1959,7 +1959,7 @@ fn row_height(row: &Row, gutter_w: usize, width: usize, wrap: bool) -> usize {
     }
     let code_width = width.saturating_sub(gutter_prefix_width(gutter_w)).max(1);
     // The find highlight never changes wrapping, so height ignores it.
-    wrap_segments(&plain_cells(row), code_width, ContinuationSpaces::Trim).len()
+    wrap_segments(&plain_cells(row), code_width, ContinuationSpaces::Trim, Cell::glyph).len()
 }
 
 /// The narrowest read pane that shows split: two 60-column halves, the longest file's gutters.
@@ -2244,7 +2244,7 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
     let prefix_w = gutter_prefix_width(gutter_w);
     let code_width = width.saturating_sub(prefix_w).max(1);
     let chunks: Vec<&[Cell]> = if wrap {
-        wrap_segments(&cells, code_width, ContinuationSpaces::Trim)
+        wrap_segments(&cells, code_width, ContinuationSpaces::Trim, Cell::glyph)
             .into_iter()
             .map(|(s, e)| &cells[s..e])
             .collect()
@@ -2398,7 +2398,7 @@ pub(crate) fn rgb(c: crate::diff::Rgb) -> Color {
 const TAB: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ContinuationSpaces {
+pub(crate) enum ContinuationSpaces {
     Keep,
     Trim,
 }
@@ -2415,10 +2415,11 @@ fn plain_cell(ch: char) -> Cell {
 }
 
 /// Greedy word wrap into one cell range per row, hard-breaking an over-wide word.
-fn wrap_segments(
-    cells: &[Cell],
+pub(crate) fn wrap_segments<T>(
+    cells: &[T],
     width: usize,
     continuation_spaces: ContinuationSpaces,
+    glyph: impl Fn(&T) -> (char, usize),
 ) -> Vec<(usize, usize)> {
     if cells.is_empty() {
         return vec![(0, 0)];
@@ -2430,7 +2431,7 @@ fn wrap_segments(
         let mut col = 0;
         let mut limit = start;
         while limit < cells.len() {
-            let cw = cells[limit].w;
+            let cw = glyph(&cells[limit]).1;
             if col + cw > width && limit > start {
                 break;
             }
@@ -2442,12 +2443,12 @@ fn wrap_segments(
             break;
         }
         // More cells follow; prefer breaking just after the last space that fits.
-        let brk = (start..limit).rev().find(|&i| cells[i].ch == ' ').map(|i| i + 1);
+        let brk = (start..limit).rev().find(|&i| glyph(&cells[i]).0 == ' ').map(|i| i + 1);
         let end = brk.filter(|&e| e > start).unwrap_or(limit);
         segs.push((start, end));
         start = end;
         if continuation_spaces == ContinuationSpaces::Trim {
-            while start < cells.len() && cells[start].ch == ' ' {
+            while start < cells.len() && glyph(&cells[start]).0 == ' ' {
                 start += 1;
             }
         }
@@ -2475,6 +2476,12 @@ struct Cell {
     hl: bool,
     /// The source char this cell paints; a tab's cells share one.
     src: usize,
+}
+
+impl Cell {
+    fn glyph(&self) -> (char, usize) {
+        (self.ch, self.w)
+    }
 }
 
 /// A row's display cells: tab-expanded, width-measured, emphasis and find flags, plus any CR marker.

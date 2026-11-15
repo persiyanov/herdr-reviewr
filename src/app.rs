@@ -1773,6 +1773,7 @@ impl App {
         let set: HashSet<String> = open.iter().cloned().collect();
         let doc = crate::markdown::render_expanded(
             old,
+            crate::markdown::Origin::File,
             DEFAULT_RENDER_WIDTH,
             &self.highlighter,
             &self.palette,
@@ -2417,6 +2418,7 @@ impl App {
     ) -> crate::markdown::Rendered {
         self.markdown_cache.borrow_mut().get_expanded(
             text,
+            crate::markdown::Origin::File,
             width,
             &self.highlighter,
             &self.palette,
@@ -2439,6 +2441,7 @@ impl App {
             .collect();
         let mut rendered = self.markdown_cache.borrow_mut().get_expanded(
             text,
+            crate::markdown::Origin::Body,
             width,
             &self.highlighter,
             &self.palette,

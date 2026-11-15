@@ -556,7 +556,7 @@ mod tests {
     use super::{DocMap, MarkMap, Place, Unit, derive, diff_lines, doc_map, open_details};
     use crate::diff::{Bar, FileDiff, MarkerKind, Row};
     use crate::highlight::Highlighter;
-    use crate::markdown::render_expanded;
+    use crate::markdown::{Origin, render_expanded};
     use std::collections::{HashMap, HashSet};
 
     /// The marks of `old → new`, checked so every changed line has a visible owner.
@@ -565,7 +565,8 @@ mod tests {
         let hl = Highlighter::new(t.syntax);
         let diff = FileDiff::build("doc.md".into(), None, old, new, &hl);
         let open: HashSet<String> = open.iter().map(|s| (*s).to_string()).collect();
-        let map = |text: &str| doc_map(&render_expanded(text, 80, &hl, &t.palette, &open));
+        let map =
+            |text: &str| doc_map(&render_expanded(text, Origin::File, 80, &hl, &t.palette, &open));
         let (new_map, old_map) = (map(new), map(old));
         let lines: Vec<&Row> = diff_lines(&diff.rows).collect();
         let marks = derive(&lines, &diff.pairs, &new_map, &old_map);

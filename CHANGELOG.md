@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **A markdown file's front matter reads as YAML** in both the rendered and the source view, not as a rule over a heading.
+- **Code in rendered markdown wraps at spaces**, as the diff does, instead of mid-word.
+
 ## [0.52.1] — 2026-11-08
 
 ### Changed
