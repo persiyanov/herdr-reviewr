@@ -126,7 +126,9 @@ mod clipboard {
 
     /// Pipe `text` into the first tool on `PATH`, succeeding only when it exits clean.
     pub(super) fn write(text: &str) -> Result<()> {
-        let (cmd, args) = select_tool(TOOLS, crate::proc::on_path).ok_or(NoTool)?;
+        let wayland =
+            std::env::var_os("WAYLAND_DISPLAY").is_some_and(|display| !display.is_empty());
+        let (cmd, args) = select_tool(TOOLS, wayland, crate::proc::on_path).ok_or(NoTool)?;
         let mut child = crate::proc::command(cmd)
             .args(args)
             .stdin(Stdio::piped())
@@ -145,11 +147,13 @@ mod clipboard {
     }
 
     /// The first clipboard tool the `present` predicate accepts, preserving list order.
+    /// `wl-copy` fails outside a Wayland session, so an X11 session skips it.
     pub(super) fn select_tool(
         tools: &'static [(&'static str, &'static [&'static str])],
+        wayland: bool,
         present: impl Fn(&str) -> bool,
     ) -> Option<(&'static str, &'static [&'static str])> {
-        tools.iter().copied().find(|(cmd, _)| present(cmd))
+        tools.iter().copied().find(|(cmd, _)| (wayland || *cmd != "wl-copy") && present(cmd))
     }
 }
 
@@ -216,17 +220,27 @@ mod tests {
     fn clipboard_tool_selection_prefers_list_order_and_can_be_empty() {
         use super::clipboard::{TOOLS, select_tool};
         // None present -> no tool (the caller surfaces the "install one" error).
-        assert!(select_tool(TOOLS, |_| false).is_none());
+        assert!(select_tool(TOOLS, true, |_| false).is_none());
         // Only an X11 tool present -> it's chosen, with its selection args.
         assert_eq!(
-            select_tool(TOOLS, |c| c == "xclip"),
+            select_tool(TOOLS, true, |c| c == "xclip"),
             Some(("xclip", &["-selection", "clipboard"][..]))
         );
         // When several are present, earlier in the list wins (pbcopy over xclip).
         assert_eq!(
-            select_tool(TOOLS, |c| c == "pbcopy" || c == "xclip").map(|(cmd, _)| cmd),
+            select_tool(TOOLS, true, |c| c == "pbcopy" || c == "xclip").map(|(cmd, _)| cmd),
             Some("pbcopy")
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn an_x11_session_copies_with_xclip_even_when_wl_copy_is_installed() {
+        use super::clipboard::{TOOLS, select_tool};
+        let present = |c: &str| c == "wl-copy" || c == "xclip";
+        assert_eq!(select_tool(TOOLS, true, present).map(|(cmd, _)| cmd), Some("wl-copy"));
+        assert_eq!(select_tool(TOOLS, false, present).map(|(cmd, _)| cmd), Some("xclip"));
+        assert!(select_tool(TOOLS, false, |c| c == "wl-copy").is_none());
     }
 
     #[test]

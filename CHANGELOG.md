@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **Copy works in an X11 session with `wl-clipboard` installed**: reviewr uses `wl-copy` only when `WAYLAND_DISPLAY` is set, else `xclip` or `xsel`.
+
 ## [0.52.2] — 2026-11-15
 
 ### Fixed
