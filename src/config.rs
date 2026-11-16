@@ -63,7 +63,7 @@ impl Config {
 /// Lines a keyboard move keeps between the diff cursor and the pane's edges, unless configured.
 pub const DEFAULT_SCROLLOFF: usize = 3;
 
-const PLUGIN_CONFIG_KEYS: [&str; 17] = [
+const PLUGIN_CONFIG_KEYS: [&str; 19] = [
     "theme",
     "default_scope",
     "markdown_view",
@@ -79,6 +79,8 @@ const PLUGIN_CONFIG_KEYS: [&str; 17] = [
     "azure_devops_host",
     "editor",
     "url_opener",
+    "max_file_bytes",
+    "max_file_lines",
     "review_prefix",
     "keybindings",
 ];
@@ -191,6 +193,7 @@ pub struct PluginConfig {
     azure_devops_host: Option<String>,
     editor: Option<String>,
     url_opener: Option<String>,
+    budget: crate::diff::Budget,
     review_prefix: Option<String>,
     keymap: crate::keymap::Keymap,
 }
@@ -213,6 +216,7 @@ impl Default for PluginConfig {
             azure_devops_host: None,
             editor: None,
             url_opener: None,
+            budget: crate::diff::Budget::default(),
             review_prefix: None,
             keymap: crate::keymap::Keymap::default(),
         }
@@ -295,6 +299,9 @@ impl PluginConfig {
         self.url_opener.as_deref()
     }
 
+    /// The file size budgets past which the read pane shows the too-large notice.
+    pub fn budget(&self) -> crate::diff::Budget {
+        self.budget
     /// Text that heads every exported review, as written.
     pub fn review_prefix(&self) -> Option<&str> {
         self.review_prefix.as_deref()
@@ -526,6 +533,11 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         }
         config.url_opener = Some(command.to_owned());
     }
+    if let Some(value) = table.get("max_file_bytes") {
+        config.budget.bytes = budget_value(path, "max_file_bytes", value)?;
+    }
+    if let Some(value) = table.get("max_file_lines") {
+        config.budget.lines = budget_value(path, "max_file_lines", value)?;
     if let Some(value) = table.get("review_prefix") {
         let prefix = value
             .as_str()
@@ -650,6 +662,21 @@ fn string_value<'a>(
     expected: &str,
 ) -> Result<&'a str, PluginConfigError> {
     value.as_str().ok_or_else(|| value_error(path, value, key, expected))
+}
+
+/// The most a budget key takes: `max_file_lines` is git's diff context, which git before 2.50
+/// overflows on Windows once doubled past 32 bits.
+const MAX_BUDGET: i64 = 1_000_000_000;
+
+/// A `max_file_*` value: a positive integer up to [`MAX_BUDGET`].
+fn budget_value(path: &Path, key: &str, value: &toml::Value) -> Result<usize, PluginConfigError> {
+    value
+        .as_integer()
+        .filter(|n| (1..=MAX_BUDGET).contains(n))
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| {
+            value_error(path, value, key, &format!("a positive integer up to {MAX_BUDGET}"))
+        })
 }
 
 /// An invalid value's error: the key, what it takes, and what it was given.
@@ -812,6 +839,7 @@ mod tests {
         assert_eq!(config.github_host(), None);
         assert_eq!(config.url_opener(), None);
         assert_eq!(config.markdown_view(), MarkdownView::Source);
+        assert_eq!(config.budget(), crate::diff::Budget::default());
         assert_eq!(config.diff_view(), DiffView::Unified);
     }
 
@@ -888,6 +916,39 @@ mod tests {
         std::fs::write(&path, "url_opener = \"remote-open\"\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.url_opener(), Some("remote-open"));
+    }
+
+    #[test]
+    fn the_file_budgets_reach_the_resolved_config() {
+        use crate::diff::Budget;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "max_file_bytes = 10_000_000\nmax_file_lines = 250_000\n").unwrap();
+        let budget = super::plugin_config_in(dir.path()).unwrap().budget();
+        assert_eq!(budget, Budget { lines: 250_000, bytes: 10_000_000 });
+        // One key alone keeps the other's default.
+        std::fs::write(&path, "max_file_lines = 7\n").unwrap();
+        let budget = super::plugin_config_in(dir.path()).unwrap().budget();
+        assert_eq!(budget, Budget { lines: 7, ..Budget::default() });
+        std::fs::write(&path, "max_file_lines = 1_000_000_000\n").unwrap();
+        assert_eq!(super::plugin_config_in(dir.path()).unwrap().budget().lines, 1_000_000_000);
+    }
+
+    #[test]
+    fn a_file_budget_is_a_positive_integer_up_to_a_billion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (line, given) in [
+            ("max_file_bytes = 0", "0"),
+            ("max_file_lines = -1", "-1"),
+            ("max_file_bytes = \"10MB\"", "\"10MB\""),
+            ("max_file_lines = 1_000_000_001", "1000000001"),
+        ] {
+            std::fs::write(&path, line).unwrap();
+            let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+            assert!(error.contains("expected a positive integer up to 1000000000"), "{error}");
+            assert!(error.contains(&format!("not `{given}`")), "{error}");
+        }
     }
 
     #[test]

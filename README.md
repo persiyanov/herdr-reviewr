@@ -202,6 +202,8 @@ auto_open = false
 follow_file_across_tabs = false
 scrolloff = 0                       # lines kept around the diff cursor, 3 by default; 999 centers
 editor = "code -g {file}:{line}"
+max_file_bytes = 10_000_000
+max_file_lines = 250_000
 url_opener = "browser-bridge --new-tab {url}"
 review_prefix = "Fix each comment, then run the tests."
 github_host = "github.example.com"
@@ -227,6 +229,24 @@ Pick one that matches your terminal's background. Shared names match herdr's col
 `m` and `|` stick for every file you open until you press them again. `markdown_view` and
 `diff_view` set how a new pane starts.
 
+```toml
+markdown_view = "rendered"
+```
+
+### File size budgets
+
+A file over either budget shows a "too large" notice instead of its lines:
+
+```toml
+max_file_bytes = 10_000_000   # default: 2_000_000
+max_file_lines = 250_000      # default: 50_000
+```
+
+A diff counts its old and new sides together, so a changed file reaches each budget at about
+half its size. Each key takes a positive integer up to 1,000,000,000. reviewr builds a file's
+rows while the pane waits, so a raised budget can stall the pane for a moment on a huge file.
+
+### Navigator position
 Split needs a diff pane 137 columns wide: hide the file list (`z`), move it below (`p`), or open
 reviewr zoomed or as an overlay. A narrower pane shows unified until it widens.
 
@@ -342,7 +362,9 @@ On Windows, point it at the plugin's own `bin` folder.
 - **A rename can pair with the wrong file** until you press `r`.
 - **Comments live only in the pane.** Closing it loses unsent ones. Send delivers all or none.
 - **Comments don't follow moved code.** reviewr marks them stale instead of dropping them.
-- **Files over 2 MB or 50,000 lines** aren't diffed. Neither are binary files.
+- **Budgets**
+- Files over 2 MB or 50,000 lines show a "too large" notice, unless you raise the
+  [file size budgets](#file-size-budgets). Binary files get no diff.
 
 ## Building from source
 
