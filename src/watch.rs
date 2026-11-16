@@ -400,7 +400,7 @@ impl ConfigFiles {
                 _ => break,
             }
         }
-        let watched = watched.canonicalize().unwrap_or(watched);
+        let watched = crate::git::canonical(&watched);
         let dir = missing.iter().rev().fold(watched.clone(), |d, name| d.join(name));
         let file = dir.join("config.toml");
         let target =
@@ -1092,7 +1092,7 @@ fn file_watch(file: &Path) -> Option<PathBuf> {
         return Some(file.to_path_buf());
     }
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    let home = home.canonicalize().unwrap_or(home);
+    let home = crate::git::canonical(&home);
     dir.filter(|d| !home.starts_with(d))
 }
 

@@ -125,6 +125,26 @@ impl Highlighter {
                 })
                 .collect();
         };
+        // A markdown file's front matter is YAML, as the rendered view shows it.
+        if syntax.name == "Markdown"
+            && let Some(n) = crate::markdown::front_matter_lines(lines)
+            && let Some(yaml) = syntaxes.find_syntax_by_extension("yaml")
+        {
+            let mut out = self.highlight_with(yaml, theme, &lines[..n]);
+            out.extend(self.highlight_with(syntax, theme, &lines[n..]));
+            return out;
+        }
+        self.highlight_with(syntax, theme, lines)
+    }
+
+    /// Highlight `lines` as one run of `syntax`.
+    fn highlight_with(
+        &self,
+        syntax: &syntect::parsing::SyntaxReference,
+        theme: &Theme,
+        lines: &[&str],
+    ) -> Vec<Vec<Span>> {
+        let syntaxes = syntaxes();
         let mut h = HighlightLines::new(syntax, theme);
         let mut out = Vec::new();
         for &line in lines {
@@ -195,6 +215,33 @@ mod tests {
             h.highlight("let a = 1;\r\n", Some("rs")),
             h.highlight("let a = 1;\n", Some("rs"))
         );
+    }
+
+    #[test]
+    fn markdown_front_matter_highlights_as_yaml() {
+        let h = Highlighter::new(mocha());
+        let md = h.highlight("---\nname: x\n---\n# T\n", Some("md"));
+        let yaml = h.highlight("---\nname: x\n---\n", Some("yaml"));
+        assert_eq!(md[..3], yaml[..], "fences and keys color as YAML");
+        assert_eq!(md[0], md[2], "both fences share one color");
+        assert_eq!(md[3], h.highlight("# T\n", Some("md"))[0], "the body highlights afresh");
+        let rule = h.highlight("---\n\nname: x\n---\n", Some("md"));
+        assert_ne!(rule[0], yaml[0], "a blank first line keeps a markdown rule");
+    }
+
+    #[test]
+    fn the_onig_only_grammars_highlight_javascript_and_powershell() {
+        // The fancy-regex dumps leave these out, so a swapped regex engine shows up here.
+        for (ext, want) in [
+            ("js", "JavaScript (Babel)"),
+            ("jsx", "JavaScript (Babel)"),
+            ("mjs", "JavaScript (Babel)"),
+            ("cjs", "JavaScript (Babel)"),
+            ("ps1", "PowerShell"),
+        ] {
+            let found = super::syntaxes().find_syntax_by_extension(ext).map(|s| s.name.as_str());
+            assert_eq!(found, Some(want), ".{ext}");
+        }
     }
 
     #[test]

@@ -293,6 +293,9 @@ fn auto_open_birth_events_follow_shared_policy() {
             assert!(open.contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))), "{open}");
             assert!(open.contains(&format!("--placement {placement}")), "{open}");
             assert!(!open.contains(live_repo.path().to_str().unwrap()), "{open}");
+            // The event names its tab but never switches to it.
+            assert_eq!(calls.contains("tab rename"), placement == "tab", "{calls}");
+            assert!(!calls.contains("tab focus"), "{calls}");
         }
     }
 }
@@ -979,6 +982,9 @@ fn tab_placement_open_names_its_fresh_tab() {
     assert!(open_call(dir.path()).contains("--placement tab --workspace workspace-1"));
     let calls = herdr_calls(dir.path());
     assert!(calls.lines().any(|l| l == "tab rename w1:t9 reviewr"), "{calls}");
+    // herdr#4283 leaves the client on the old tab, so a manual open switches to the new one.
+    assert!(calls.lines().any(|l| l == "tab focus w1:t9"), "{calls}");
+    assert!(!calls.contains("pane resize"), "a fresh tab has no split to size: {calls}");
 }
 
 #[test]
@@ -989,7 +995,11 @@ fn split_placement_open_renames_no_tab() {
     let output = run_open(dir.path());
 
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(!herdr_calls(dir.path()).contains("tab rename"), "{}", herdr_calls(dir.path()));
+    let calls = herdr_calls(dir.path());
+    assert!(!calls.contains("tab rename"), "{calls}");
+    // herdr#3799: the fresh pane claims its layout size at once, so no cropped frame shows.
+    let claim = "pane resize --pane w1:p9 --direction right --amount 0";
+    assert!(calls.lines().any(|l| l == claim), "{calls}");
 }
 
 #[test]
@@ -1144,14 +1154,14 @@ fn an_explicit_action_refuses_once_the_lock_stays_held_past_the_bound() {
         assert_eq!(output.status.code(), Some(1), "{mode}");
         assert_eq!(
             stderr(&output),
-            "reviewr: another reviewr action in workspace-1 is still running after 49s\n",
+            "reviewr: another reviewr action in workspace-1 is still running after 57s\n",
             "{mode}"
         );
         assert!(output.stdout.is_empty(), "{mode}");
     }
     let elapsed = started.elapsed();
 
-    assert!(elapsed >= Duration::from_millis(48500), "refused before the bound: {elapsed:?}");
+    assert!(elapsed >= Duration::from_millis(56500), "refused before the bound: {elapsed:?}");
     assert!(herdr_calls(dir.path()).is_empty(), "{}", herdr_calls(dir.path()));
 }
 
@@ -1409,6 +1419,284 @@ fn a_refusal_names_the_rejected_live_cwd_too() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         stderr(&output),
-        format!("reviewr: not a git repo: '<no cwd>' (live cwd '{}')\n", dir.path().display())
+        format!("reviewr: no repo to review: '{}' (not a git repo)\n", dir.path().display())
     );
+}
+
+// --- Open cwd past a plugin's checkout (#130): herdr's managed installs are never reviewed.
+
+/// One `plugin list --json` answer: a GitHub install managed at each of `managed`, and a linked
+/// plugin rooted at each of `linked`.
+fn plugins(dir: &Path, managed: &[&Path], linked: &[&Path]) {
+    let managed = managed.iter().map(|path| {
+        json!({"plugin_id": "a.managed", "plugin_root": path,
+               "source": {"kind": "github", "managed_path": path}})
+    });
+    let linked = linked.iter().map(
+        |path| json!({"plugin_id": "a.linked", "plugin_root": path, "source": {"kind": "local"}}),
+    );
+    let all: Vec<Value> = managed.chain(linked).collect();
+    fs::write(dir.join("plugins.json"), json!({"result": {"plugins": all}}).to_string()).unwrap();
+}
+
+#[test]
+fn open_skips_a_focused_plugin_checkout_for_the_agents_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    // The focused pane sits in a managed checkout; a plain pane listed first loses to the agent.
+    let plugin = Repo::init();
+    let shell_repo = Repo::init();
+    plugins(dir.path(), &[plugin.path()], &[]);
+    panes(
+        dir.path(),
+        &json!([
+            {"pane_id": "w1:p0", "foreground_cwd": shell_repo.path()},
+            {"pane_id": "w1:p1", "foreground_cwd": plugin.path()},
+            {"pane_id": "w1:p2", "agent": "claude", "foreground_cwd": env!("CARGO_MANIFEST_DIR")},
+        ]),
+    );
+    let context =
+        json!({"focused_pane_id": "w1:p1", "focused_pane_cwd": plugin.path()}).to_string();
+
+    let output = run_with_context("toggle", dir.path(), &context);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        open_call(dir.path()).contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))),
+        "the open must skip the plugin's checkout for the agent's repo: {}",
+        herdr_calls(dir.path())
+    );
+}
+
+#[test]
+fn open_skips_a_plugin_checkout_for_another_panes_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    // No agent pane: a plain pane's repo is next, as the workspace's root shell.
+    let plugin = Repo::init();
+    plugins(dir.path(), &[plugin.path()], &[]);
+    panes(
+        dir.path(),
+        &json!([
+            {"pane_id": "w1:p0", "foreground_cwd": env!("CARGO_MANIFEST_DIR")},
+            {"pane_id": "w1:p1", "foreground_cwd": plugin.path()},
+        ]),
+    );
+    let context =
+        json!({"focused_pane_id": "w1:p1", "focused_pane_cwd": plugin.path()}).to_string();
+
+    let output = run_with_context("toggle", dir.path(), &context);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        open_call(dir.path()).contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))),
+        "{}",
+        herdr_calls(dir.path())
+    );
+}
+
+#[test]
+fn open_skips_a_plugin_checkout_for_the_workspace_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    // No agent pane: the workspace's cwd is the last candidate.
+    let plugin = Repo::init();
+    plugins(dir.path(), &[plugin.path()], &[]);
+    pane_with_cwd(dir.path(), "w1:p1", &plugin.path().join("sub"));
+    fs::create_dir(plugin.path().join("sub")).unwrap();
+    let context = json!({
+        "focused_pane_id": "w1:p1",
+        "focused_pane_cwd": plugin.path(),
+        "workspace_cwd": env!("CARGO_MANIFEST_DIR"),
+    })
+    .to_string();
+
+    let output = run_with_context("open", dir.path(), &context);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        open_call(dir.path()).contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))),
+        "a folder inside the checkout is the plugin's too: {}",
+        herdr_calls(dir.path())
+    );
+}
+
+#[test]
+fn open_keeps_a_linked_plugins_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    // A linked plugin's root is the developer's own checkout, so it is reviewed.
+    plugins(dir.path(), &[], &[Path::new(env!("CARGO_MANIFEST_DIR"))]);
+
+    let output = run_open(dir.path());
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        open_call(dir.path()).contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))),
+        "{}",
+        herdr_calls(dir.path())
+    );
+}
+
+#[test]
+fn open_skips_a_non_repo_focused_pane_for_the_agents_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    // A shell in a non-repo folder yields to the agent's repo, with no plugin involved.
+    panes(
+        dir.path(),
+        &json!([
+            {"pane_id": "w1:p0", "agent": "claude", "foreground_cwd": env!("CARGO_MANIFEST_DIR")},
+            {"pane_id": "w1:p1", "foreground_cwd": dir.path()},
+        ]),
+    );
+    let context = json!({"focused_pane_id": "w1:p1", "focused_pane_cwd": dir.path()}).to_string();
+
+    let output = run_with_context("open", dir.path(), &context);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        open_call(dir.path()).contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))),
+        "{}",
+        herdr_calls(dir.path())
+    );
+}
+
+#[test]
+fn a_refusal_names_a_skipped_plugin_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    // herdr reports the checkout as the focused pane's cwd and the workspace's: named once.
+    let plugin = Repo::init();
+    plugins(dir.path(), &[plugin.path()], &[]);
+    let context = json!({
+        "focused_pane_id": "w1:p1",
+        "focused_pane_cwd": plugin.path(),
+        "workspace_cwd": plugin.path(),
+    })
+    .to_string();
+
+    let output = run_with_context("open", dir.path(), &context);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "reviewr: no repo to review: '{}' (a plugin's checkout)\n",
+            plugin.path().display()
+        )
+    );
+    assert!(!herdr_calls(dir.path()).contains("plugin pane open"), "{}", herdr_calls(dir.path()));
+}
+
+#[test]
+fn a_failed_plugin_list_still_opens_on_the_focused_pane() {
+    let dir = tempfile::tempdir().unwrap();
+    // The filter only guards a misplaced open, so a failed listing never blocks one.
+    fs::write(dir.path().join("pluginsfail"), herdr_error("internal")).unwrap();
+
+    let output = run_open(dir.path());
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        open_call(dir.path()).contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))),
+        "{}",
+        herdr_calls(dir.path())
+    );
+}
+
+/// `w1:p1` is the focused pane in tab `w1:t1`, working in `cwd`.
+fn tab_context(cwd: &Path) -> String {
+    json!({"tab_id": "w1:t1", "focused_pane_id": "w1:p1", "focused_pane_cwd": cwd}).to_string()
+}
+
+#[test]
+fn split_toggle_acts_on_the_focused_tabs_reviewr_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repo::init();
+    let pane =
+        |id: &str, tab: &str| json!({"pane_id": id, "tab_id": tab, "foreground_cwd": repo.path()});
+    // An agent in tab 1, and a reviewr beside another agent in tab 2.
+    panes(
+        dir.path(),
+        &json!([pane("w1:p1", "w1:t1"), pane("w1:p2", "w1:t2"), pane("w1:p3", "w1:t2")]),
+    );
+    procinfo(dir.path(), "w1:p3", &json!([review_ui()]));
+    let context = tab_context(repo.path());
+
+    let output = run_with_context("toggle", dir.path(), &context);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let calls = herdr_calls(dir.path());
+    assert!(calls.contains("plugin pane open"), "toggle opens one in tab 1: {calls}");
+    assert!(!calls.contains("pane close"), "tab 2's reviewr stays: {calls}");
+
+    // `close` in tab 1 leaves tab 2's reviewr alone too.
+    reset(dir.path());
+    let output = run_with_context("close", dir.path(), &context);
+    assert_eq!(stdout(&output), "reviewr: nothing open in workspace-1\n");
+    assert!(!herdr_calls(dir.path()).contains("pane close"));
+
+    // A reviewr in the focused tab is on screen: toggle closes it and nothing else.
+    reset(dir.path());
+    panes(
+        dir.path(),
+        &json!([pane("w1:p1", "w1:t1"), pane("w1:p4", "w1:t1"), pane("w1:p3", "w1:t2")]),
+    );
+    procinfo(dir.path(), "w1:p4", &json!([review_ui()]));
+    let output = run_with_context("toggle", dir.path(), &context);
+    assert_eq!(stdout(&output), "reviewr: closed w1:p4 in workspace-1\n");
+    assert!(!herdr_calls(dir.path()).contains("pane close w1:p3"));
+}
+
+#[test]
+fn tab_placement_shows_the_worktrees_reviewr_tab_then_closes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("config.toml"), "toggle_placement = \"tab\"\n").unwrap();
+    let (mine, other) = (Repo::init(), Repo::init());
+    // Tab 1: an agent on `mine`. Tab 3: `mine`'s reviewr. Tab 4: `other`'s reviewr.
+    panes(
+        dir.path(),
+        &json!([
+            {"pane_id": "w1:p1", "tab_id": "w1:t1", "foreground_cwd": mine.path(), "agent": "claude"},
+            {"pane_id": "w1:p5", "tab_id": "w1:t3", "foreground_cwd": mine.path()},
+            {"pane_id": "w1:p6", "tab_id": "w1:t4", "foreground_cwd": other.path()},
+        ]),
+    );
+    procinfo(dir.path(), "w1:p5", &json!([review_ui()]));
+    procinfo(dir.path(), "w1:p6", &json!([review_ui()]));
+
+    // Off screen: the first press takes you to it.
+    let output = run_with_context("toggle", dir.path(), &tab_context(mine.path()));
+    assert_eq!(stdout(&output), "reviewr: showed w1:p5 in workspace-1\n");
+    let calls = herdr_calls(dir.path());
+    assert!(calls.lines().any(|l| l == "tab focus w1:t3"), "{calls}");
+    assert!(!calls.contains("pane close") && !calls.contains("plugin pane open"), "{calls}");
+
+    // On its tab, the next press closes it.
+    reset(dir.path());
+    let on_it = json!({"tab_id": "w1:t3", "focused_pane_id": "w1:p5"}).to_string();
+    let output = run_with_context("toggle", dir.path(), &on_it);
+    assert_eq!(stdout(&output), "reviewr: closed w1:p5 in workspace-1\n");
+
+    // `close` closes your worktree's reviewr tab from anywhere, and only that one.
+    reset(dir.path());
+    let output = run_with_context("close", dir.path(), &tab_context(mine.path()));
+    assert_eq!(stdout(&output), "reviewr: closed w1:p5 in workspace-1\n");
+    assert!(!herdr_calls(dir.path()).contains("pane close w1:p6"));
+}
+
+#[test]
+fn tab_placement_opens_a_reviewr_tab_for_a_worktree_without_one() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("config.toml"), "toggle_placement = \"tab\"\n").unwrap();
+    let (mine, other) = (Repo::init(), Repo::init());
+    panes(
+        dir.path(),
+        &json!([
+            {"pane_id": "w1:p1", "tab_id": "w1:t1", "foreground_cwd": mine.path(), "agent": "claude"},
+            {"pane_id": "w1:p6", "tab_id": "w1:t4", "foreground_cwd": other.path()},
+        ]),
+    );
+    procinfo(dir.path(), "w1:p6", &json!([review_ui()]));
+
+    let output = run_with_context("toggle", dir.path(), &tab_context(mine.path()));
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let calls = herdr_calls(dir.path());
+    assert!(open_call(dir.path()).contains("--placement tab"), "{calls}");
+    assert!(!calls.contains("tab focus w1:t4") && !calls.contains("pane close"), "{calls}");
 }

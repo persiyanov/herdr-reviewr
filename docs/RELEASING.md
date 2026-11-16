@@ -27,7 +27,8 @@ Pick the new version with semver: a behavior change or new feature is a minor bu
 2. **Finalize the changelog** — rename `## [Unreleased]` to `## [X.Y.Z] — <date>` and add a fresh
    empty `## [Unreleased]` above it. The format is [Keep a Changelog](https://keepachangelog.com).
 3. **Refresh the lock** — `cargo build` so `Cargo.lock`'s `herdr-reviewr` entry updates to `X.Y.Z`.
-4. **Verify green** — `just ci` (fmt-check, clippy, test, release build).
+4. **Verify green** — `just ci` (fmt-check, clippy, test, release build), then every workflow
+   on the release commit, `audit` (cargo-deny) included: `gh run list --commit <sha>`.
 5. **Commit** the bump + changelog on a branch, review, and land it on `main`.
 6. **Tag and push** — an annotated tag whose name is `vX.Y.Z`:
 

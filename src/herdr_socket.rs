@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::herdr::PaneIds;
 use crate::herdr::socket::{Line, Subscription};
+use crate::herdr::{AgentSample, PaneIds};
 use crate::logln;
 use crate::schedule::Backoff;
 use crate::turn::{Status, TurnFeed, TurnHost, TurnNews, TurnReport, Wrote};
@@ -86,7 +86,10 @@ impl Connection {
     ) -> std::io::Result<Self> {
         let (me, rx) = mpsc::channel();
         let queue = me.clone();
+        // Turn snapshots run git on `repo`, even after a switch let go of it.
+        let session = crate::git::lease_session(&repo);
         std::thread::Builder::new().name("herdr".into()).spawn(move || {
+            let _session = session;
             let mut thread = Thread {
                 socket,
                 pane_id,
@@ -121,12 +124,11 @@ impl Drop for Connection {
     }
 }
 
-/// One agent pane: where it works, its latest status, and whether that status came from an
-/// event on the live subscription, which no snapshot read after it can be newer than.
+/// One agent pane as sampled.
 #[derive(Clone, Debug)]
 struct Agent {
-    cwd: Option<String>,
-    status: Status,
+    sample: AgentSample,
+    /// Its status came from a live event, which no snapshot read after it can be newer than.
     heard: bool,
 }
 
@@ -473,30 +475,30 @@ impl Thread {
         let result = self.request("session.snapshot").map_err(Outcome::Lost)?;
         let (session, agents) =
             read_session(&result["snapshot"], &self.pane_id, &mut self.terminal);
+        let workspace = session.me.as_ref().and_then(|me| me.workspace.clone());
         self.tx.send(HerdrEvent::Session(session)).map_err(|_| Outcome::Gone)?;
         // No list, or an entry herdr shaped unexpectedly that may be a member: hold, and read again.
         let Some(sampled) = agents else {
             self.hold_membership();
             return Ok(());
         };
-        if self.host.may_include(&sampled.odd) {
-            self.hold_membership();
-            return Ok(());
-        }
         self.agents = sampled
             .agents
             .into_iter()
-            .map(|(pane, sample)| {
-                let agent = match self.agents.get(&pane) {
-                    Some(known) if known.heard => Agent { cwd: sample.cwd, ..known.clone() },
-                    _ => Agent { cwd: sample.cwd, status: sample.status, heard: false },
+            .map(|(pane, mut sample)| {
+                let heard = match self.agents.get(&pane) {
+                    Some(known) if known.heard => {
+                        sample.status = known.sample.status;
+                        true
+                    }
+                    _ => false,
                 };
-                (pane, agent)
+                (pane, Agent { sample, heard })
             })
             .collect();
-        let panes: Vec<(&str, Option<&str>)> =
-            self.agents.iter().map(|(pane, a)| (pane.as_str(), a.cwd.as_deref())).collect();
-        let Some(members) = self.host.members(&panes) else {
+        let panes: Vec<(&str, &AgentSample)> =
+            self.agents.iter().map(|(pane, a)| (pane.as_str(), &a.sample)).collect();
+        let Some(members) = self.host.members(&panes, &sampled.odd, workspace.as_deref()) else {
             self.hold_membership();
             return Ok(());
         };
@@ -525,7 +527,7 @@ impl Thread {
     /// One agent's status changed, heard `at`: fold the worktree's state again.
     fn observe_status(&mut self, pane: &str, status: &str, at: Instant) {
         if let Some(agent) = self.agents.get_mut(pane) {
-            agent.status = Status::from_wire(status);
+            agent.sample.status = Status::from_wire(status);
             agent.heard = true;
             self.fold(at);
         }
@@ -537,7 +539,7 @@ impl Thread {
             .members
             .iter()
             .filter_map(|pane| self.agents.get(pane))
-            .map(|a| a.status)
+            .map(|a| a.sample.status)
             .collect();
         let report = self.host.observe_statuses(Some(&statuses), at);
         self.report_turn(report);

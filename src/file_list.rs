@@ -20,8 +20,8 @@ pub struct Row {
 /// What a [`Row`] is: a directory (togglable) or a file (opens the read pane).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RowKind {
-    /// A directory, keyed by its path; `has_change` marks a collapsed folder holding a change.
-    Dir { path: String, expanded: bool, has_change: bool },
+    /// A directory, keyed by its path, with the change mark and line sums of everything below.
+    Dir { path: String, expanded: bool, has_change: bool, additions: u32, deletions: u32 },
     /// A file: its index into the source `&[Entry]`, which holds its change.
     File { index: usize },
 }
@@ -76,6 +76,9 @@ struct Dir {
     ignored: bool,
     /// Whether an annotated entry lies anywhere below, marked as entries are inserted.
     has_change: bool,
+    /// The line counts of every annotated entry below, saturating.
+    additions: u32,
+    deletions: u32,
 }
 
 /// Flatten `entries` into visible rows; `toggled` holds directories flipped from `default_expanded`.
@@ -106,10 +109,14 @@ fn insert(root: &mut Dir, entry: &Entry, index: usize) {
     }
     let Some(base) = segments.pop() else { return };
     let changed = entry.annotation.is_some();
+    let (additions, deletions) =
+        entry.annotation.as_ref().map_or((0, 0), |a| (a.additions, a.deletions));
     let mut cur = root;
     for seg in segments {
         cur = cur.dirs.entry(seg.to_string()).or_default();
         cur.has_change |= changed;
+        cur.additions = cur.additions.saturating_add(additions);
+        cur.deletions = cur.deletions.saturating_add(deletions);
     }
     cur.files.insert(base.to_string(), index);
 }
@@ -134,7 +141,13 @@ fn flatten<S: BuildHasher>(
             rows.push(Row {
                 depth,
                 name: display,
-                kind: RowKind::Dir { path: path.clone(), expanded, has_change: node.has_change },
+                kind: RowKind::Dir {
+                    path: path.clone(),
+                    expanded,
+                    has_change: node.has_change,
+                    additions: node.additions,
+                    deletions: node.deletions,
+                },
                 ignored: node.ignored,
             });
             if expanded {
@@ -309,6 +322,44 @@ mod tests {
         let rows = build(&es, &toggled, false);
         assert_eq!(shape_rows(&rows), ["0:dir:a", "1:dir:b", "1:file:top.rs"]);
         assert!(has_change(&rows[0]) && has_change(&rows[1]), "a/ and a/b/ both marked");
+    }
+
+    fn line_sums(row: &super::Row) -> Option<(u32, u32)> {
+        match row.kind {
+            RowKind::Dir { additions, deletions, .. } => Some((additions, deletions)),
+            RowKind::File { .. } => None,
+        }
+    }
+
+    #[test]
+    fn a_directory_row_sums_the_lines_of_every_change_beneath_it() {
+        let mut top = file("a/top.rs");
+        top.deletions = 4;
+        let mut deep = file("a/b/deep.rs");
+        deep.additions = 10;
+        deep.deletions = 2;
+        let mut es = entries(&[top, deep, file("a/b/other.rs")]);
+        es.push(plain("a/b/clean.rs"));
+        let rows = build(&es, &HashSet::new(), true);
+        assert_eq!(
+            shape_rows(&rows),
+            [
+                "0:dir:a",
+                "1:dir:b",
+                "2:file:clean.rs",
+                "2:file:deep.rs",
+                "2:file:other.rs",
+                "1:file:top.rs"
+            ]
+        );
+        assert_eq!(line_sums(&rows[0]), Some((12, 6)), "a/ sums top.rs and all of b/");
+        assert_eq!(line_sums(&rows[1]), Some((11, 2)), "b/ sums deep.rs and other.rs only");
+
+        // A single-child chain shows the sums of the folder it stops at.
+        let rows =
+            build(&entries(&[file("x/y/one.rs"), file("x/y/two.rs")]), &HashSet::new(), true);
+        assert_eq!(shape_rows(&rows)[0], "0:dir:x/y");
+        assert_eq!(line_sums(&rows[0]), Some((2, 0)));
     }
 
     fn ignored_dir(path: &str) -> Entry {

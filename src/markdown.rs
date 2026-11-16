@@ -75,14 +75,23 @@ pub struct LinkSpan {
     pub url: std::sync::Arc<str>,
 }
 
-/// Render `text` as styled lines wrapped to `width` columns. All details start collapsed.
+/// Where a markdown text comes from, which decides whether a leading YAML block is front matter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    File,
+    /// A forge body, which GitHub renders without front matter.
+    Body,
+}
+
+/// Render a file's `text` as styled lines wrapped to `width` columns. All details start collapsed.
 pub fn render(text: &str, width: usize, hl: &Highlighter, p: &Palette) -> Rendered {
-    render_expanded(text, width, hl, p, &HashSet::new())
+    render_expanded(text, Origin::File, width, hl, p, &HashSet::new())
 }
 
 /// Like [`render`], with the `<details>` whose [`DetailsHit::key`] is in `expanded` opened.
 pub fn render_expanded<S: std::hash::BuildHasher>(
     text: &str,
+    origin: Origin,
     width: usize,
     hl: &Highlighter,
     p: &Palette,
@@ -132,8 +141,9 @@ pub fn render_expanded<S: std::hash::BuildHasher>(
         details: Vec::new(),
         skip_relative: false,
     };
-    for (event, range) in Parser::new_ext(text, opts).into_offset_iter() {
-        r.event(event, range);
+    let body = if origin == Origin::File { r.front_matter() } else { 0 };
+    for (event, range) in Parser::new_ext(&text[body..], opts).into_offset_iter() {
+        r.event(event, range.start + body..range.end + body);
     }
     r.flush_block(false);
     r.finish(text)
@@ -148,6 +158,7 @@ pub struct RenderCache {
 #[derive(Debug)]
 struct CacheSlot {
     text: String,
+    origin: Origin,
     width: usize,
     expanded: Vec<String>,
     rendered: Rendered,
@@ -157,12 +168,13 @@ const CACHE_SLOTS: usize = 16;
 
 impl RenderCache {
     pub fn get(&mut self, text: &str, width: usize, hl: &Highlighter, p: &Palette) -> Rendered {
-        self.get_expanded(text, width, hl, p, &HashSet::new())
+        self.get_expanded(text, Origin::File, width, hl, p, &HashSet::new())
     }
 
     pub fn get_expanded<S: std::hash::BuildHasher>(
         &mut self,
         text: &str,
+        origin: Origin,
         width: usize,
         hl: &Highlighter,
         p: &Palette,
@@ -170,19 +182,18 @@ impl RenderCache {
     ) -> Rendered {
         let mut expanded_key: Vec<String> = expanded.iter().cloned().collect();
         expanded_key.sort();
-        if let Some(i) = self
-            .slots
-            .iter()
-            .position(|s| s.text == text && s.width == width && s.expanded == expanded_key)
-        {
+        if let Some(i) = self.slots.iter().position(|s| {
+            s.text == text && s.origin == origin && s.width == width && s.expanded == expanded_key
+        }) {
             let slot = self.slots.remove(i);
             let rendered = slot.rendered.clone();
             self.slots.push(slot);
             return rendered;
         }
-        let rendered = render_expanded(text, width, hl, p, expanded);
+        let rendered = render_expanded(text, origin, width, hl, p, expanded);
         self.slots.push(CacheSlot {
             text: text.to_string(),
+            origin,
             width,
             expanded: expanded_key,
             rendered: rendered.clone(),
@@ -1039,7 +1050,7 @@ impl Renderer<'_> {
         let line_of = |k: usize| shares.iter().find(|&&(end, _)| k < end).map(|&(_, l)| l);
         let fragments: Vec<Fragment> =
             chunks.into_iter().map(|c| (c.text, c.style, c.link)).collect();
-        let wrapped = wrap_fragments(&fragments, self.budget(first.width()), true);
+        let wrapped = wrap_fragments(&fragments, self.budget(first.width()));
         let mut seen = 0;
         for (i, (spans, links)) in wrapped.into_iter().enumerate() {
             let n: usize =
@@ -1083,28 +1094,22 @@ impl Renderer<'_> {
         marker
     }
 
-    /// Emit styled fragments char-wrapped under the block prefix, a pending marker first.
-    fn emit_fragments(&mut self, fragments: Vec<(String, Style)>, extra_indent: &str) {
+    /// Emit one line of verbatim fragments, wrapped as the diff wraps, a pending marker first.
+    fn emit_fragments(&mut self, fragments: &[(String, Style)], extra_indent: &str) {
         let marker = self.take_marker();
         let (first, cont) = self.prefix(marker.as_deref());
         let style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
         let first = Span::styled(format!("{}{extra_indent}", first.content), style);
         let cont = Span::styled(format!("{}{extra_indent}", cont.content), style);
         let budget = self.budget(cont.width());
-        let linkless: Vec<Fragment> = fragments.into_iter().map(|(t, s)| (t, s, None)).collect();
-        let wrapped = wrap_fragments(&linkless, budget, false);
-        if wrapped.is_empty() {
-            self.push_plain_line(Line::from(first));
-            return;
-        }
-        for (i, (spans, _)) in wrapped.into_iter().enumerate() {
+        for (i, spans) in wrap_verbatim(fragments, budget).into_iter().enumerate() {
             let mut line = vec![if i == 0 { first.clone() } else { cont.clone() }];
             line.extend(spans);
             self.push_plain_line(Line::from(line));
         }
     }
 
-    /// Close a code block: highlight it whole, emit it indented and char-wrapped.
+    /// Close a code block: highlight it whole, emit it indented and wrapped.
     fn end_code(&mut self) {
         let Some(CodeBlock { lang, content, fenced }) = self.code.take() else {
             return;
@@ -1129,10 +1134,29 @@ impl Renderer<'_> {
                 .into_iter()
                 .map(|s| (sanitize(&s.text), Style::default().fg(crate::ui::rgb(s.color))))
                 .collect();
-            self.emit_fragments(fragments, CODE_INDENT);
+            self.emit_fragments(&fragments, CODE_INDENT);
         }
         self.row_lines = None;
         self.needs_blank = true;
+    }
+
+    /// Emit the file's leading front matter as a yaml code block; the byte offset after it.
+    fn front_matter(&mut self) -> usize {
+        let lines = crate::text::lines(self.source);
+        let Some(close) = front_matter_lines(&lines) else {
+            return 0;
+        };
+        (self.block_src, self.block_end) = (1, close);
+        self.out.code_blocks.push((1, close));
+        let mut content = String::new();
+        for line in &lines[1..close - 1] {
+            content.push_str(crate::text::line_body(line).0);
+            content.push('\n');
+        }
+        self.code = Some(CodeBlock { lang: Some("yaml".into()), content, fenced: true });
+        self.end_code();
+        self.covered.push((1, close));
+        lines[..close].iter().map(|l| l.len()).sum()
     }
 
     fn emit_mermaid_placeholder(&mut self, content: &str) {
@@ -1142,7 +1166,7 @@ impl Renderer<'_> {
             None => "⧉ mermaid".to_string(),
         };
         let style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
-        self.emit_fragments(vec![(text, style)], "");
+        self.emit_fragments(&[(text, style)], "");
     }
 
     /// Close a table: aligned, widest columns shrunk to fit, dim source when floors overflow.
@@ -1208,7 +1232,7 @@ impl Renderer<'_> {
             for (i, src_line) in src.trim_end_matches('\n').split('\n').enumerate() {
                 self.block_src = first_line + i;
                 self.block_end = self.block_src;
-                self.emit_fragments(vec![(sanitize(src_line), style)], "");
+                self.emit_fragments(&[(sanitize(src_line), style)], "");
             }
             self.needs_blank = true;
             return;
@@ -1244,7 +1268,7 @@ impl Renderer<'_> {
                     } else {
                         let fragments: Vec<Fragment> =
                             cell.iter().map(|c| (c.text.clone(), style_of(c), c.link)).collect();
-                        wrap_fragments(&fragments, widths[i], true)
+                        wrap_fragments(&fragments, widths[i])
                     }
                 })
                 .collect();
@@ -1325,6 +1349,16 @@ pub(crate) fn slug_text(text: &str) -> String {
 pub(crate) fn hostile_char(c: char) -> bool {
     c.is_control()
         || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}')
+}
+
+/// How many leading lines are YAML front matter, fences included; a blank first line keeps a rule.
+pub(crate) fn front_matter_lines(lines: &[&str]) -> Option<usize> {
+    let body = |i: usize| lines.get(i).map(|l| crate::text::line_body(l).0);
+    let closes = |l: &str| matches!(l.trim_end(), "---" | "...");
+    if body(0)?.trim_end() != "---" || body(1)?.trim().is_empty() || body(1).is_some_and(closes) {
+        return None;
+    }
+    (2..lines.len()).find(|&i| body(i).is_some_and(closes)).map(|i| i + 1)
 }
 
 fn mermaid_kind(content: &str) -> Option<&str> {
@@ -1446,8 +1480,30 @@ type Fragment = (String, Style, Option<usize>);
 /// One wrapped line: spans, and link runs as `(start, end, url index)`.
 type WrappedLine = (Vec<Span<'static>>, Vec<(usize, usize, usize)>);
 
-/// Wrap fragments to `budget` cells, at words when `by_words`, else anywhere.
-fn wrap_fragments(fragments: &[Fragment], budget: usize, by_words: bool) -> Vec<WrappedLine> {
+/// Wrap one line of verbatim text by the diff pane's rule, keeping every character.
+fn wrap_verbatim(fragments: &[(String, Style)], budget: usize) -> Vec<Vec<Span<'static>>> {
+    let cells: Vec<(char, Style)> =
+        fragments.iter().flat_map(|(text, style)| text.chars().map(move |c| (c, *style))).collect();
+    let rows =
+        crate::ui::wrap_segments(&cells, budget, crate::ui::ContinuationSpaces::Trim, |&(c, _)| {
+            (c, char_width(c))
+        });
+    rows.into_iter()
+        .map(|(start, end)| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for &(c, style) in &cells[start..end] {
+                match spans.last_mut() {
+                    Some(last) if last.style == style => last.content.to_mut().push(c),
+                    _ => spans.push(Span::styled(c.to_string(), style)),
+                }
+            }
+            spans
+        })
+        .collect()
+}
+
+/// Wrap prose fragments to `budget` cells at words.
+fn wrap_fragments(fragments: &[Fragment], budget: usize) -> Vec<WrappedLine> {
     let mut w = Wrapper {
         budget: budget.max(1),
         lines: Vec::new(),
@@ -1464,9 +1520,8 @@ fn wrap_fragments(fragments: &[Fragment], budget: usize, by_words: bool) -> Vec<
                     w.place_word();
                     w.flush_line();
                 }
-                ' ' if by_words => w.place_word(),
-                c if by_words => w.push_word_char(c, *style, *link),
-                c => w.place_char(c, *style, *link),
+                ' ' => w.place_word(),
+                c => w.push_word_char(c, *style, *link),
             }
         }
     }
@@ -1574,7 +1629,7 @@ fn char_width(c: char) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{LinkSpan, RenderCache, Rendered, render, render_expanded};
+    use super::{LinkSpan, Origin, RenderCache, Rendered, render, render_expanded};
     use crate::highlight::Highlighter;
     use crate::roles::Palette;
     use crate::roles::{Fill, Ink};
@@ -1732,6 +1787,38 @@ mod tests {
     }
 
     #[test]
+    fn a_files_front_matter_renders_as_yaml_code() {
+        let (hl, p) = setup();
+        let md = "---\nname: x\ndescription: 'y z'\n---\n# Title\n";
+        let r = render(md, 80, &hl, &p);
+        assert_eq!(texts(&r.lines), ["  name: x", "  description: 'y z'", "", "Title"]);
+        assert_eq!(span_of(&r, "name"), (1, 2), "the first line holds the opening fence");
+        assert_eq!(span_of(&r, "description"), (3, 4), "the last line holds the closing fence");
+        assert_eq!(r.code_blocks, [(1, 4)]);
+        assert!(r.silent.is_empty(), "{:?}", r.silent);
+        let fg = |text: &str| {
+            r.lines[0].spans.iter().find(|s| s.content.contains(text)).unwrap().style.fg
+        };
+        assert_ne!(fg("name"), fg("x"), "yaml highlights: {:?}", r.lines[0].spans);
+        let crlf = render(&md.replace('\n', "\r\n"), 80, &hl, &p);
+        assert_eq!(texts(&crlf.lines), texts(&r.lines));
+    }
+
+    #[test]
+    fn only_a_leading_unblank_block_is_front_matter() {
+        let (hl, p) = setup();
+        let rule = |md: &str, origin| {
+            let r = render_expanded(md, origin, 80, &hl, &p, &HashSet::new());
+            texts(&r.lines).iter().any(|l| l.starts_with('─'))
+        };
+        assert!(rule("---\n\nintro\n\n---\n", Origin::File), "a blank first line is a rule");
+        assert!(rule("a\n\n---\nb\n---\n", Origin::File), "mid-document it is a rule");
+        assert!(rule("---\nb: c\n---\n", Origin::Body), "GitHub bodies have no front matter");
+        assert!(rule("---\nb: c\n", Origin::File), "an unclosed block is a rule");
+        assert!(!rule("---\nb: c\n...\n", Origin::File), "`...` closes too");
+    }
+
+    #[test]
     fn fenced_rust_highlights_like_the_diff_pane() {
         let (hl, p) = setup();
         let lines = render_lines("```rust\nlet x = 1;\n```", 80, &hl, &p);
@@ -1740,6 +1827,18 @@ mod tests {
         let colors: Vec<_> = lines[0].spans.iter().filter_map(|s| s.style.fg).collect();
         assert!(colors.len() > 2, "rust tokenizes into several colored spans: {colors:?}");
         assert!(colors.iter().any(|&c| c != p.ink(Ink::Text, Fill::Base)));
+    }
+
+    #[test]
+    fn code_wraps_like_the_diff_at_the_last_space_that_fits() {
+        let (hl, p) = setup();
+        let t = |md: &str, width| texts(&render_lines(md, width, &hl, &p));
+        assert_eq!(t("```\naaaa bbbb cc\n```", 9), ["  aaaa ", "  bbbb cc"]);
+        assert_eq!(
+            t("```\nabcdefghij\n```", 6),
+            ["  abcd", "  efgh", "  ij"],
+            "a long word breaks"
+        );
     }
 
     #[test]
@@ -2155,7 +2254,7 @@ mod tests {
         // Open, its closing tag alone on its line renders nothing.
         let open: HashSet<String> = HashSet::from(["More info#0".to_string()]);
         let md = "<details>\n<summary>\nMore info\n</summary>\n\nbody\n\n</details>\n";
-        assert_eq!(render_expanded(md, 80, &hl, &p, &open).silent, [8]);
+        assert_eq!(render_expanded(md, Origin::File, 80, &hl, &p, &open).silent, [8]);
         assert_eq!(silent("```\n```\n"), [1, 2], "an empty fence renders no line");
         // Lone tags and a lone `>` line render nothing either, in any line ending.
         assert_eq!(silent("<p>\n<summary>\n"), [1, 2]);
@@ -2245,7 +2344,7 @@ mod tests {
         assert_eq!(keys.len(), 2);
         assert_ne!(keys[0], keys[1], "one summary, two disclosures");
         let open: HashSet<String> = [keys[1].clone()].into();
-        let t = texts(&render_expanded(md, 80, &hl, &p, &open).lines);
+        let t = texts(&render_expanded(md, Origin::File, 80, &hl, &p, &open).lines);
         assert!(t.iter().any(|l| l.contains("second body")), "{t:?}");
         assert!(!t.iter().any(|l| l.contains("first body")), "{t:?}");
     }
@@ -2422,7 +2521,7 @@ mod tests {
         let md = "<details> <summary>About Codex</summary>\n\n- one\n\n</details>";
         let mut open = HashSet::new();
         open.insert("About Codex#0".into());
-        let r = render_expanded(md, 80, &hl, &p, &open);
+        let r = render_expanded(md, Origin::File, 80, &hl, &p, &open);
         let t = texts(&r.lines);
         assert!(t.iter().any(|l| l.contains("▾ About Codex")), "{t:?}");
         assert!(t.iter().any(|l| l.contains("• one")), "{t:?}");

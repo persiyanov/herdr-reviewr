@@ -87,6 +87,11 @@ def fixture(root):
     git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
     with open(os.path.join(repo, "f1.txt"), "a") as f:
         f.write("edited\n")
+    # A second worktree to switch to, with a change only it has.
+    other = os.path.join(root, "wt-switched")
+    git(repo, "worktree", "add", "-q", "-b", "switched", other)
+    with open(os.path.join(other, "only-there.txt"), "w") as f:
+        f.write("new\n")
     return repo
 
 
@@ -113,6 +118,30 @@ def pump(fd, seconds):
             except OSError:
                 return out
     return out
+
+
+def quiet_window(fd, pid, log, seconds):
+    """Leave the pane alone for `seconds`: the log lines it wrote meanwhile and the CPU it used."""
+    start = os.path.getsize(log) if os.path.exists(log) else 0
+    cpu_before = cpu_seconds(pid)
+    pump(fd, seconds)
+    cpu = cpu_seconds(pid) - cpu_before
+    with open(log) as f:
+        f.seek(start)
+        return [line.rstrip() for line in f], cpu
+
+
+def report_still(label, lines, cpu):
+    """Print a still phase's wakes and process starts; whether the pane stirred."""
+    stirred = [line for line in lines if " wake " in line or " spawn " in line]
+    print(f"{label}: {len(stirred)} wakes or process starts, cpu {cpu * 1000:.0f}ms")
+    # A thread spinning on its own (a watcher feeding itself) wakes no loop but burns CPU.
+    busy = cpu > 0.02
+    if busy:
+        print(f"{label}: used CPU with nothing happening")
+    for line in stirred[:10]:
+        print("  " + line)
+    return bool(stirred) or busy
 
 
 def main():
@@ -150,13 +179,7 @@ def main():
             os.execve(binary, [binary, repo], env)
         try:
             pump(fd, args.settle)
-            start = os.path.getsize(log) if os.path.exists(log) else 0
-            cpu_before = cpu_seconds(pid)
-            pump(fd, args.quiet)
-            quiet_cpu = cpu_seconds(pid) - cpu_before
-            with open(log) as f:
-                f.seek(start)
-                quiet = [line.rstrip() for line in f]
+            quiet, quiet_cpu = quiet_window(fd, pid, log, args.quiet)
             # An edit must reach the pane through the watcher: nothing else would notice it.
             edit_at = os.path.getsize(log)
             with open(os.path.join(repo, "f2.txt"), "a") as f:
@@ -201,15 +224,23 @@ def main():
             # The search screen open on a settled query sits as still as the diff view.
             os.write(fd, b"/line")
             pump(fd, 3.0)
-            search_at = os.path.getsize(log)
-            cpu_before = cpu_seconds(pid)
-            pump(fd, args.search)
-            search_cpu = cpu_seconds(pid) - cpu_before
-            with open(log) as f:
-                f.seek(search_at)
-                searching = [line.rstrip() for line in f]
+            searching, search_cpu = quiet_window(fd, pid, log, args.search)
             os.write(fd, b"\x1b")
             pump(fd, 0.5)
+            # `W`, a filter and enter restart the pane on the other worktree, with no shell between.
+            os.write(fd, b"Wswitched")
+            pump(fd, 0.5)
+            os.write(fd, b"\r")
+            switch_screen = b""
+            switched_in = None
+            pressed = time.monotonic()
+            while time.monotonic() - pressed < 3 and switched_in is None:
+                switch_screen += pump(fd, 0.05)
+                if b"only-there.txt" in switch_screen:
+                    switched_in = time.monotonic() - pressed
+            left_screen = b"\x1b[?1049l" in switch_screen
+            pump(fd, args.settle)
+            switched_quiet, switched_cpu = quiet_window(fd, pid, log, args.quiet)
             # `1` (a no-op tab press) and `q` arrive together; crossterm parses both from one read.
             os.write(fd, b"1q")
             quit_in = None
@@ -226,22 +257,8 @@ def main():
                 os.waitpid(pid, 0)
             log_text = open(log).read() if os.path.exists(log) else ""
 
-    wakes = [line for line in quiet if " wake " in line]
-    spawns = [line for line in quiet if " spawn " in line]
-    print(f"quiet {args.quiet:.0f}s: {len(wakes)} wakes, {len(spawns)} process starts, cpu {quiet_cpu * 1000:.0f}ms")
-    # A thread spinning on its own (a watcher feeding itself) wakes no loop but burns CPU.
-    busy = quiet_cpu > 0.02
-    if busy:
-        print("an idle pane used CPU with nothing happening")
-    for line in (wakes + spawns)[:10]:
-        print("  " + line)
-    search_wakes = [line for line in searching if " wake " in line or " spawn " in line]
-    print(f"search open {args.search:.0f}s: {len(search_wakes)} wakes or process starts, cpu {search_cpu * 1000:.0f}ms")
-    search_busy = search_cpu > 0.02
-    if search_busy:
-        print("the open search screen used CPU with nothing happening")
-    for line in search_wakes[:10]:
-        print("  " + line)
+    idle_stirred = report_still(f"quiet {args.quiet:.0f}s", quiet, quiet_cpu)
+    search_stirred = report_still(f"search open {args.search:.0f}s", searching, search_cpu)
     hidden_spawns = [line for line in hidden if " spawn " in line]
     resize_shown = any("visible=true" in line for line in hidden)
     if resize_shown:
@@ -272,16 +289,20 @@ def main():
     else:
         print(f"an edited file appeared on screen in {painted * 1000:.0f}ms")
     print("shown again, it caught up at once" if caught_up else "shown again, it never refreshed")
+    if switched_in is None:
+        print("a switch never painted the other worktree's change")
+    else:
+        print(f"a switch painted the other worktree in {switched_in * 1000:.0f}ms")
+    if left_screen:
+        print("a switch left the alternate screen: the shell flashed between loops")
+    switched_stirred = report_still(f"switched, quiet {args.quiet:.0f}s", switched_quiet, switched_cpu)
     if quit_in is None:
         print("the second key of `1q` never quit: a buffered key waited behind a sleep")
     else:
         print(f"`1q` in one write quit in {quit_in * 1000:.0f}ms")
     failed = (
-        wakes
-        or busy
-        or spawns
-        or search_wakes
-        or search_busy
+        idle_stirred
+        or search_stirred
         or hidden_spawns
         or hidden_busy
         or resize_shown
@@ -290,6 +311,9 @@ def main():
         or refreshed is None
         or painted is None
         or not caught_up
+        or switched_in is None
+        or left_screen
+        or switched_stirred
         or quit_in is None
     )
     return 1 if failed else 0

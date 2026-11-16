@@ -114,15 +114,7 @@ pub(crate) fn snippet_caption_sign(rows: &[Row], start: u32, end: u32, side: Sid
 /// Whether this row is the comment subject (in your comment color).
 pub(crate) fn snippet_row_is_comment(row: &Row, start: u32, end: u32, side: Side) -> bool {
     let (start, end) = ordered(start, end);
-    match row {
-        Row::Insertion { new_no, .. } => side == Side::New && in_span(*new_no, start, end),
-        Row::Deletion { old_no, .. } => side == Side::Old && in_span(*old_no, start, end),
-        Row::Context { old_no, new_no, .. } => match side {
-            Side::New => in_span(*new_no, start, end),
-            Side::Old => in_span(*old_no, start, end),
-        },
-        Row::Fold { .. } | Row::Rendered { .. } => false,
-    }
+    row.no(side).is_some_and(|n| in_span(n, start, end))
 }
 
 fn opposite_change(row: &Row, side: Side) -> bool {

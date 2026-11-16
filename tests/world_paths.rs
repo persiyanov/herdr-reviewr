@@ -170,6 +170,7 @@ fn path_limited_equals_full(scope: Scope, tab: Tab) {
         let ends = |s: &WorldSnapshot| s.changeset.ends.clone();
         assert_eq!(ends(&scoped), ends(&full), "{scope:?}/{tab:?} {name}: the ends");
         assert_eq!(scoped.entries, full.entries, "{scope:?}/{tab:?} {name}: the navigator");
+        assert_eq!(scoped.checkout.as_deref(), Some("feature"), "{scope:?}/{tab:?} {name}");
         let batch: BTreeSet<String> = batch.iter().map(|p| (*p).to_string()).collect();
         let touched = scoped.touched.unwrap_or_else(|| panic!("{scope:?}/{tab:?} {name}: by path"));
         assert!(touched.is_superset(&batch), "{scope:?}/{tab:?} {name}: re-read {touched:?}");
@@ -209,6 +210,78 @@ fn last_turn_all_files_tab() {
 #[test]
 fn commits_changes_tab() {
     path_limited_equals_full(Scope::Commits, Tab::Changes);
+}
+
+#[test]
+fn a_full_build_names_what_the_worktree_has_checked_out() {
+    let r = fixture();
+    let mut worker = Worker::on(&r);
+    let input = input_for(&r, Scope::Uncommitted, Tab::Changes);
+    let checkout = |worker: &mut Worker| worker.run(&input, Refresh::Full).1.unwrap().checkout;
+    assert_eq!(checkout(&mut worker).as_deref(), Some("feature"));
+    r.git(&["checkout", "-q", "main"]);
+    assert_eq!(checkout(&mut worker).as_deref(), Some("main"), "a checkout");
+    r.git(&["checkout", "-q", "--detach"]);
+    let head = r.git(&["rev-parse", "--short=7", "HEAD"]).trim().to_string();
+    assert_eq!(checkout(&mut worker), Some(format!("detached {head}")), "a detached HEAD");
+}
+
+#[test]
+fn the_pr_tab_reads_only_the_checkout_and_leaves_the_file_tabs_frozen() {
+    let r = fixture();
+    let root = herdr_reviewr::git::toplevel(r.path()).unwrap();
+    let mut app = App::new(root.clone(), Scope::Uncommitted, Some("main".into()));
+    app.reload().unwrap();
+    app.set_tab(Tab::Pr).unwrap();
+    let frozen = app.entries.clone();
+    r.git(&["checkout", "-q", "-b", "other"]);
+    r.write("new.txt", "x\n");
+
+    let mut worker = Worker::on(&r);
+    let (_, read) = worker.run(&app.world_input(), paths(&["new.txt"]));
+    assert!(read.is_none(), "a worktree batch reads nothing on the PR tab");
+    let (_, read) = worker.run(&app.world_input(), Refresh::Full);
+    app.reconcile_world(read.expect("a full refresh reads the checkout"));
+    assert_eq!(app.worktree_name().1, Some("other"), "the footer follows the checkout");
+    assert_eq!(app.entries, frozen, "the file tabs stay frozen");
+
+    // Back on a file tab, the footer names what the frozen list was built from until it lands.
+    app.set_tab(Tab::Changes).unwrap();
+    assert_eq!(app.worktree_name().1, Some("feature"), "the list on screen is `feature`'s");
+    // Back on `PR` before that lands, it still names the latest read.
+    app.set_tab(Tab::Pr).unwrap();
+    assert_eq!(app.worktree_name().1, Some("other"));
+    app.set_tab(Tab::Changes).unwrap();
+    let (_, read) = worker.run(&app.world_input(), Refresh::Full);
+    app.reconcile_world(read.expect("a return refreshes"));
+    assert_eq!(app.worktree_name().1, Some("other"), "the refresh lands both");
+
+    // The other file tab paints its own stash the same way.
+    common::enter_tab(&mut app, Tab::AllFiles);
+    r.git(&["checkout", "-q", "feature"]);
+    let (_, read) = worker.run(&app.world_input(), Refresh::Full);
+    app.reconcile_world(read.expect("a checkout refreshes"));
+    app.set_tab(Tab::Changes).unwrap();
+    assert_eq!(app.worktree_name().1, Some("other"), "Changes' stash is `other`'s");
+    r.git(&["checkout", "-q", "other"]);
+
+    // A pane that opens or switches onto the PR tab names its checkout too.
+    let mut opened = App::new(root, Scope::Uncommitted, Some("main".into()));
+    opened.set_tab(Tab::Pr).unwrap();
+    opened.reload().unwrap();
+    assert_eq!(opened.worktree_name().1, Some("other"));
+}
+
+#[test]
+fn a_worktree_that_stops_being_a_repo_names_no_checkout() {
+    let r = fixture();
+    let root = herdr_reviewr::git::toplevel(r.path()).unwrap();
+    let mut app = App::new(root, Scope::Uncommitted, Some("main".into()));
+    app.reload().unwrap();
+    assert_eq!(app.worktree_name().1, Some("feature"));
+    std::fs::remove_dir_all(r.path().join(".git")).unwrap();
+    app.reload().unwrap();
+    assert_eq!(app.worktree_name().1, None, "nothing is checked out outside a repo");
 }
 
 #[test]
@@ -271,9 +344,8 @@ fn a_batch_rereads_the_open_file_only_when_it_names_it() {
     r.write("b.txt", "bb\n");
     let mut app = common::app_on(&r);
     assert_eq!(app.diff_path.as_deref(), Some("a.txt"), "the first changed file is open");
-    let text = |app: &App| {
-        app.visible.iter().map(herdr_reviewr::diff::Row::text).collect::<Vec<_>>().join("\n")
-    };
+    let text =
+        |app: &App| app.visible.iter().map(common::UnifiedRow::text).collect::<Vec<_>>().join("\n");
     assert!(text(&app).contains("two"));
 
     r.write("a.txt", "three\n");
@@ -365,4 +437,37 @@ fn a_path_limited_read_never_rewrites_the_index() {
     let (_, landed) = worker.run(&input, paths(&["a.txt", "c.txt"]));
     assert!(landed.expect("a batch re-reads").touched.is_some(), "by path");
     assert_eq!(stamp(), before, ".git/index was rewritten");
+}
+
+#[test]
+fn a_worktree_index_copy_goes_once_neither_pane_nor_worker_holds_it() {
+    let r = fixture();
+    let input = input_for(&r, Scope::Uncommitted, Tab::Changes);
+    let copies = || {
+        let dir = std::fs::read_dir(r.path().join(".git/reviewr")).unwrap();
+        dir.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("index-")).count()
+    };
+    // One full build, then the worker stops, as the event loop's does when it ends.
+    let build_then_stop = || {
+        let (jobs, rx) = mpsc::channel();
+        let (tx, done) = channel(&Waker::detached());
+        // The event loop spawns its worker on the repo its jobs name.
+        let worker = world::spawn(input.repo.clone(), rx, tx);
+        let job =
+            WorldJob { generation: 1, input: input.clone(), reveal: false, refresh: Refresh::Full };
+        jobs.send(job).unwrap();
+        done.recv().unwrap();
+        assert_eq!(copies(), 1, "a build works on a session copy");
+        drop(jobs);
+        worker.join().unwrap();
+    };
+    // The pane still reviews the worktree, as after a switch back or a herdr too old to connect.
+    let pane = herdr_reviewr::git::lease_session(&input.repo);
+    build_then_stop();
+    assert_eq!(copies(), 1, "a worker that stops under a live pane leaves the session");
+    drop(pane);
+    assert_eq!(copies(), 0, "the last holder ends it");
+    // The pane switched away while the worker finished its build.
+    build_then_stop();
+    assert_eq!(copies(), 0, "the stopped worker ended its session");
 }

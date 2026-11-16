@@ -115,11 +115,35 @@ fn listen(path: &Path, state: Arc<Mutex<State>>, version: String) {
     use interprocess::local_socket::{GenericNamespaced, ListenerOptions, prelude::*};
     let name = path.to_string_lossy().into_owned().to_ns_name::<GenericNamespaced>().unwrap();
     let listener = ListenerOptions::new().name(name).create_sync().unwrap();
+    // `&Stream` reads and writes, so both halves share one stream (interprocess 2.4.8 deprecates `split`).
     let halves: Halves<interprocess::local_socket::Stream> = |s| {
-        let (read, write) = s.split();
-        (Box::new(read), Box::new(write))
+        let shared = Shared(Arc::new(s));
+        (Box::new(shared.clone()), Box::new(shared))
     };
     std::thread::spawn(move || serve(listener.incoming(), &state, &version, halves));
+}
+
+/// One named-pipe stream behind both halves of a connection.
+#[cfg(windows)]
+#[derive(Clone)]
+struct Shared(Arc<interprocess::local_socket::Stream>);
+
+#[cfg(windows)]
+impl Read for Shared {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self.0).read(buf)
+    }
+}
+
+#[cfg(windows)]
+impl Write for Shared {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        (&*self.0).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        (&*self.0).flush()
+    }
 }
 
 fn serve<S: Read + Write + Send + 'static>(
@@ -686,4 +710,92 @@ fn the_old_subscription_counts_until_the_new_one_is_live() {
     // The new subscription is not acknowledged yet: only the old one carries this turn.
     fake.push(&[status("w1:p2", "working"), status("w1:p2", "idle")]);
     assert!(turn_until(&rx, |t| t.ended).ended, "the old subscription's turn still counts");
+}
+
+// --- a worktree no agent sits in ----------------------------------------------------------------
+
+/// A repository, its root, and a linked worktree of it with its root.
+fn linked_repo() -> (Repo, PathBuf, common::LinkedWorktree, PathBuf) {
+    let (r, root) = agent_repo();
+    let wt = r.add_worktree("linked");
+    let linked = herdr_reviewr::git::toplevel(wt.path()).unwrap();
+    (r, root, wt, linked)
+}
+
+/// The panes the latest subscription watches.
+fn watched(fake: &FakeHerdr, n: usize) -> Vec<String> {
+    let subscribed = wait_subscribed(fake, n);
+    let last = subscribed.last().unwrap().as_array().unwrap();
+    last.iter().filter_map(|s| s["pane_id"].as_str().map(str::to_string)).collect()
+}
+
+#[test]
+fn on_a_worktree_no_agent_sits_in_the_workspaces_agent_in_this_clone_drives_turns() {
+    let (_r, root, wt, linked) = linked_repo();
+    let fake = FakeHerdr::start("0.9.3");
+    // The pane switched here mid-turn: the agent works from the main checkout.
+    fake.set_snapshot(session_with_agent(&root, "working"));
+    let (c, rx) = connect_for(&fake, &linked);
+    assert_eq!(watched(&fake, 1), ["w1:p2"], "the agent in this clone is followed");
+    let present = turn_until(&rx, |t| t.agents_present.is_some());
+    assert_eq!(present.agents_present, Some(true));
+    assert_eq!(present.last, LastTurn::Waiting, "a turn already running is never adopted");
+
+    fake.push(&[status("w1:p2", "idle"), status("w1:p2", "working")]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let promoted = (1..).find_map(|n| {
+        std::fs::write(wt.path().join("page.txt"), format!("edit {n}\n")).unwrap();
+        feed_write(&c, Instant::now() + Duration::from_secs(5), &["page.txt"]);
+        assert!(Instant::now() < deadline, "never promoted");
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(HerdrEvent::Turn(t)) if t.last.tree().is_some() => Some(t),
+            _ => None,
+        }
+    });
+    assert!(promoted.is_some(), "its next turn's changes here form the baseline");
+}
+
+#[test]
+fn an_agent_in_the_worktree_keeps_the_others_out() {
+    let (_r, root, _wt, linked) = linked_repo();
+    let fake = FakeHerdr::start("0.9.3");
+    let mut s = session_with_agent(&root, "idle");
+    s["agents"].as_array_mut().unwrap().push(agent("w1:p3", linked.to_str().unwrap(), "idle"));
+    fake.set_snapshot(s);
+    let (_c, rx) = connect_for(&fake, &linked);
+    assert_eq!(watched(&fake, 1), ["w1:p3"], "only the agent here");
+    fake.push(&[status("w1:p2", "working"), status("w1:p2", "idle")]);
+    let events = events_within(&rx, Duration::from_millis(500));
+    assert!(
+        !events.iter().any(|e| matches!(e, HerdrEvent::Turn(t) if t.ended)),
+        "another worktree's turn is not this one's: {events:?}"
+    );
+}
+
+#[test]
+fn an_agent_arriving_in_the_worktree_replaces_the_fallback_mid_turn() {
+    let (_r, root, _wt, linked) = linked_repo();
+    let fake = FakeHerdr::start("0.9.3");
+    fake.set_snapshot(session_with_agent(&root, "idle"));
+    let (_c, rx) = connect_for(&fake, &linked);
+    assert_eq!(watched(&fake, 1), ["w1:p2"]);
+    fake.push(&[status("w1:p2", "working")]);
+
+    let mut arrived = session_with_agent(&root, "working");
+    arrived["agents"].as_array_mut().unwrap().push(agent(
+        "w1:p3",
+        linked.to_str().unwrap(),
+        "working",
+    ));
+    fake.set_snapshot(arrived);
+    fake.emit(&["pane.agent_detected"]);
+    assert_eq!(watched(&fake, 2), ["w1:p3"], "the fallback drops");
+    fake.push(&[status("w1:p2", "idle")]);
+    let events = events_within(&rx, Duration::from_millis(500));
+    assert!(
+        !events.iter().any(|e| matches!(e, HerdrEvent::Turn(t) if t.ended)),
+        "the dropped agent's rest is no longer this worktree's: {events:?}"
+    );
+    fake.push(&[status("w1:p3", "idle"), status("w1:p3", "working"), status("w1:p3", "idle")]);
+    assert!(turn_until(&rx, |t| t.ended).ended, "the new member's next turn is tracked");
 }

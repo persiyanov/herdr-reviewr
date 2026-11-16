@@ -1,8 +1,8 @@
 [package]
 name = "herdr-reviewr"
-version = "0.46.0"
+version = "0.52.2"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.99.1"
 description = "A terminal review pane for herdr: browse an agent's changes and send comments back to chat."
 authors = ["Dmitry Persiyanov <dmitry.persiyanov@gmail.com>"]
 license = "MIT"
@@ -21,7 +21,7 @@ hex = "0.4"
 # as the search screen, over a plain string list.
 neo_frizbee = "0.13.3"
 # Already in the tree through fff-search. The watcher reads raw events: a debouncer crate ticks forever.
-notify = "=9.0.0-rc.5"
+notify = "=9.0.0-rc.7"
 # Already in the tree. Reads herdr's version against the minimum it needs.
 semver = "1.0.28"
 # Already in the tree through fff-search, which walks with it. Walks a folder that appears into the
@@ -33,20 +33,23 @@ palette = { version = "0.7.7", default-features = false, features = ["std"] }
 # herdr and the forge CLIs run in a process group (unix) or job object (Windows), so ending a
 # run ends its whole tree, `az.cmd`'s python included.
 process-wrap = { version = "10.0.1", default-features = false, features = ["std", "process-group", "job-object"] }
-pulldown-cmark = { version = "0.13.4", default-features = false }
+pulldown-cmark = { version = "0.13.6", default-features = false }
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = { version = "3.2.0", features = ["text"] }
-# Dumps + fancy-regex only: no yaml-load (we read prebuilt binary syntax dumps, so the
-# unmaintained yaml-rust never enters the tree), no onig (pure-Rust regex engine).
-syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy", "dump-load", "plist-load"] }
+# Dumps + Oniguruma: no yaml-load (we read prebuilt binary syntax dumps, so the unmaintained
+# yaml-rust never enters the tree). fancy-regex can't compile bat's JavaScript and PowerShell grammars.
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-onig", "dump-load", "plist-load"] }
 # The private index copies git refreshes and adds into (`git::IndexCopy`).
 tempfile = "3"
 # Already in the tree through ratatui's calendar widget. Parses RFC 3339 forge timestamps.
 time = { version = "0.3", features = ["parsing"] }
 toml = "1.1"
-two-face = "0.5.2"
+# The onig syntax dumps, matching syntect's engine: the fancy ones drop JavaScript (Babel) and PowerShell.
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-onig"] }
+# Already in the tree through ratatui. Cuts a name's head by display width, graphemes whole.
+unicode-truncate = "2.0.1"
 unicode-width = "0.2"
 # Program lookup the way a shell does it: the executable bit on unix, PATHEXT on Windows
 # (so `az` finds `az.cmd`), and never the current directory for a bare name.
@@ -104,6 +107,12 @@ cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
 cast_possible_wrap = "allow"
 too_many_lines = "allow"
+# Rust 1.99: `assert!(x.is_empty())` names its intent; a test that needs the value prints it.
+assert_is_empty = "allow"
+
+# unicode-width 0.2 trips unicode-truncate's width assert on Arabic lam-alef; release drops it, so dev does too.
+[profile.dev.package.unicode-truncate]
+debug-assertions = false
 
 [profile.release]
 strip = true

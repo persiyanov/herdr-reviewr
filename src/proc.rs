@@ -13,7 +13,8 @@ use process_wrap::std::CommandWrap;
 
 /// Host bin dirs a stripped PATH may omit; none on Windows, where `\\usr\\bin` is plantable.
 #[cfg(unix)]
-const COMMON_BINS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
+const COMMON_BINS: &[&str] =
+    &["/opt/homebrew/bin", "/home/linuxbrew/.linuxbrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 #[cfg(not(unix))]
 const COMMON_BINS: &[&str] = &[];
 
@@ -209,6 +210,24 @@ mod tests {
         let mut expected = common();
         expected.extend([abs("inherited-a"), abs("inherited-b")]);
         assert_eq!(parts, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stripped_path_still_searches_homebrew_on_macos_and_linux() {
+        // A herdr server started without a login shell inherits only the system bins.
+        let got = prepended_path(Some(OsStr::new("/usr/bin:/bin")));
+        let parts: Vec<PathBuf> = env::split_paths(&got).collect();
+        let expected = [
+            "/opt/homebrew/bin",
+            "/home/linuxbrew/.linuxbrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/bin",
+            "/bin",
+        ];
+        assert_eq!(parts, expected.map(PathBuf::from));
     }
 
     #[test]

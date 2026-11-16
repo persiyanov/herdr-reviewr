@@ -186,6 +186,8 @@ mod tests {
             ("\x1b", key(KeyCode::Esc, NONE)),
             ("\x1b\r", key(KeyCode::Enter, ALT)),
             ("\x1bx", key(KeyCode::Char('x'), ALT)),
+            ("\x1b\x7f", key(KeyCode::Backspace, ALT)),
+            ("\x1b[3;3~", key(KeyCode::Delete, ALT)),
             ("\x1b[A", key(KeyCode::Up, NONE)),
             ("\x1b[D", key(KeyCode::Left, NONE)),
             ("\x1b[1;5D", key(KeyCode::Left, CONTROL)),

@@ -3,7 +3,9 @@
 How to run a locally built `herdr-reviewr` inside the real herdr panes. Follow it exactly. Every
 step exists because skipping it has broken a session before.
 
-The installed plugin lives at `~/.config/herdr/plugins/github/persiyanov.reviewr-<hash>/`. Its
+The installed plugin lives at the `plugin_root` that `herdr plugin list --json` reports
+(`~/.config/herdr/plugins/github/persiyanov.reviewr-<hash>/` before herdr 0.9.5, a checkout under
+`plugins/github-installations/` since). Its
 pane and its actions run `bin/herdr-reviewr` from that directory, as its `herdr-plugin.toml`
 says. QA means swapping those two files and restarting the panes. herdr rereads the manifest on
 every plugin call, so a manifest change takes effect on the next keypress, with no herdr
@@ -55,8 +57,8 @@ times tells you which panes are still old.
 The plugin's `open` and `toggle` actions act on the **focused workspace**, whatever
 `HERDR_WORKSPACE_ID` says. Scripting them from outside herdr stacks every new pane into
 whichever workspace happens to be focused. Closing is safe
-(`herdr plugin action invoke close --plugin persiyanov.reviewr` sweeps the focused workspace's
-reviewr panes), but opening is not. After the swap, tell the user: press the reviewr toggle in
+(`herdr plugin action invoke close --plugin persiyanov.reviewr` closes the focused tab's
+reviewr), but opening is not. After the swap, tell the user: press the reviewr toggle in
 each space you want on the new build. Do not automate it.
 
 The Windows VM below is the one exception: no user sits at its herdr, so a script opens panes

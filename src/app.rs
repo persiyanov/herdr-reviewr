@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
+use crate::config::DiffView;
 use crate::diff::{DiffCache, FileDiff, RenderedKind, Row, View};
-use crate::export::{Agent, ExportTarget, format_all};
+use crate::export::{Agent, ExportTarget, format_review};
 use crate::file_list::{self, Entry, RowKind};
 use crate::forge;
 use crate::git;
@@ -18,6 +19,7 @@ use crate::marks::{MarkMap, Unit, diff_lines};
 use crate::model::{ChangeKind, ChangedFile, Comment, CommentStore, CommitPick, Rev, Scope, Side};
 use crate::rendered::{Built, Content, OldMap, RenderedIndex, RenderedInput, RenderedView, RowId};
 use crate::roles::Palette;
+use crate::split::{Pair, Visible};
 use crate::theme;
 use crate::world::{Changeset, PickStatus, PickVerdict};
 
@@ -44,6 +46,27 @@ enum DividerDrag {
         position: crate::config::NavigatorPosition,
     },
     Cancelled,
+}
+
+/// The first world build's outcome, which an empty list reports instead of "no changes".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WorldLoad {
+    /// Still building; the refresh glyph lights past its delay.
+    Pending,
+    Landed,
+    /// The build failed before any landed.
+    Failed,
+}
+
+/// How a frame shows the read cursor, weakest first: one event's strongest request wins.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Reveal {
+    /// Just onto the screen: a click, a drag, a relayout, a clamp.
+    Edge,
+    /// A keyboard step: onto the screen with `scrolloff` lines around it.
+    Context,
+    /// A jump: centered when it lands off screen.
+    Center,
 }
 
 /// Which pane has the keyboard.
@@ -90,15 +113,18 @@ struct TabStash {
     file_scroll: usize,
     toggled_dirs: HashSet<String>,
     diff: FileDiff,
-    visible: Vec<Row>,
+    visible: Vec<Visible>,
     expanded_folds: HashSet<u32>,
     diff_path: Option<String>,
     diff_cursor: usize,
     diff_scroll: usize,
     h_scroll: usize,
     select_anchor: Option<usize>,
+    cursor_line: Option<(usize, usize)>,
     comment_target: Option<u64>,
     rendered: RenderedView,
+    /// The checkout this tab's list was built from, which the footer names beside it.
+    checkout: Option<String>,
     /// Whether this tab ever loaded; a first visit loads before the frame.
     visited: bool,
 }
@@ -183,17 +209,23 @@ impl BaseChoice {
     }
 }
 
+/// The indices of `haystacks` that `query` fuzzily matches, best first, ties in input order.
+fn fuzzy_order<S: AsRef<str>>(query: &str, haystacks: &[S]) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..haystacks.len()).collect();
+    }
+    let haystacks: Vec<&str> = haystacks.iter().map(AsRef::as_ref).collect();
+    // The default sort is score descending, then input order: the tie rule above.
+    let config = neo_frizbee::Config::default();
+    let matches = neo_frizbee::Matcher::new(query, &config).match_list(&haystacks);
+    matches.into_iter().map(|m| m.index as usize).collect()
+}
+
 impl BasePicker {
     /// Rows the query fuzzily matches, best first, ties in frozen order.
     pub fn filtered(&self) -> Vec<usize> {
-        if self.query.is_empty() {
-            return (0..self.rows.len()).collect();
-        }
         let names: Vec<&str> = self.rows.iter().map(BaseChoice::name).collect();
-        // The default sort is score descending, then input order: the tie rule above.
-        let config = neo_frizbee::Config::default();
-        let matches = neo_frizbee::Matcher::new(self.query.as_str(), &config).match_list(&names);
-        matches.into_iter().map(|m| m.index as usize).collect()
+        fuzzy_order(&self.query, &names)
     }
 
     /// Whether a row spells the query, any case, so no revision probe runs.
@@ -212,6 +244,49 @@ impl BasePicker {
             rows.push(probe);
         }
         rows
+    }
+}
+
+/// One worktree picker row: where the worktree is and how it reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeChoice {
+    pub path: PathBuf,
+    /// The branch, or `detached <sha>`.
+    pub name: String,
+    /// The path with the home directory as `~`.
+    pub shown_path: String,
+    pub current: bool,
+    /// The worktree this pane opened on.
+    pub home: bool,
+}
+
+/// The open worktree picker: this clone's worktrees, the current first, then home, then by branch.
+#[derive(Clone, Debug)]
+pub struct WorktreePicker {
+    pub rows: Vec<WorktreeChoice>,
+    /// The highlighted row, an index into the visible view.
+    pub cursor: usize,
+    /// The typed filter, matching the branch or the path.
+    pub query: String,
+    /// The caret in `query`, a char index.
+    pub caret: usize,
+}
+
+/// A question unsent comments raise; the next input answers it, and until then it owns the footer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Question {
+    /// Quit and lose them (#119).
+    Quit,
+    /// Switch to this worktree and lose them, over the picker it was picked in.
+    Switch(WorktreeChoice),
+}
+
+impl WorktreePicker {
+    /// The rows the query fuzzily matches, best first, ties in listed order.
+    pub fn visible(&self) -> Vec<&WorktreeChoice> {
+        let haystacks: Vec<String> =
+            self.rows.iter().map(|r| format!("{} {}", r.name, r.shown_path)).collect();
+        fuzzy_order(&self.query, &haystacks).into_iter().map(|i| &self.rows[i]).collect()
     }
 }
 
@@ -323,6 +398,8 @@ pub enum Mode {
     BasePick,
     /// Choosing the `commits` scope's pick.
     CommitPick,
+    /// Choosing the worktree to switch the pane to.
+    WorktreePick,
     /// The search screen, replacing the body.
     Search,
     /// The read pane's foot band: find in the file, or a line to jump to.
@@ -334,7 +411,12 @@ impl Mode {
     pub fn is_modal(&self) -> bool {
         matches!(
             self,
-            Mode::Composing { .. } | Mode::List | Mode::Picker | Mode::BasePick | Mode::CommitPick
+            Mode::Composing { .. }
+                | Mode::List
+                | Mode::Picker
+                | Mode::BasePick
+                | Mode::CommitPick
+                | Mode::WorktreePick
         )
     }
 }
@@ -528,8 +610,12 @@ pub enum FooterAction {
     /// Hide or show the navigator; hidden, it joins row 1.
     NavigatorHide,
     Wrap,
+    /// Flip the diff between unified and split, named by destination.
+    Split,
     Scope,
     Send,
+    /// `send-to`: pick the agent, shown in the `?` bands beside `send`.
+    SendTo,
     List,
     Copy,
     /// The quit question's answer that quits, naming the comments still pending.
@@ -546,7 +632,14 @@ pub enum FooterAction {
     BasePick,
     /// The base picker's bar.
     PickBaseRow,
-    MoveBaseRow,
+    /// The arrows of a filtered menu, the base and worktree pickers.
+    MoveMenuRow,
+    /// Open the worktree picker.
+    WorktreePick,
+    /// The worktree picker's bar.
+    PickWorktreeRow,
+    /// The switch question's answer that switches, naming the comments still pending.
+    SwitchDiscard,
     /// Open the commit picker.
     CommitPick,
     /// The commit picker's bar.
@@ -622,10 +715,10 @@ pub struct App {
     pub file_scroll: usize,
     /// Set by navigation, never the wheel, to reveal `file_cursor` next frame.
     pub reveal_files: bool,
-    /// Set by navigation, never the wheel, to reveal `diff_cursor` next frame.
-    pub reveal_diff: bool,
-    /// Set by `goto_line`: center a cursor that landed off screen, not nudge it to the edge.
-    pub reveal_center: bool,
+    /// How the next frame shows `diff_cursor`; navigation sets it, never the wheel.
+    pub diff_reveal: Option<Reveal>,
+    /// Set by a relayout: the screen lines above the cursor the next frame keeps.
+    keep_above: Option<usize>,
     /// The file crossing a hunk step armed at the file's last hunk.
     armed_cross: Option<ArmedCross>,
     /// Whether this compose opened from the comments list, to return there.
@@ -637,8 +730,8 @@ pub struct App {
     /// The active scope's changed files and the ends they were diffed between, on every tab.
     changeset: Changeset,
     pub diff: FileDiff,
-    /// `diff.rows` with folds applied: what the cursor and hit tests index.
-    pub visible: Vec<Row>,
+    /// The rows on screen (rendered, unified or split, folds applied): what the cursor indexes.
+    pub visible: Vec<Visible>,
     /// Fold anchors (first-hidden-line numbers) currently expanded; survives a refresh.
     expanded_folds: HashSet<u32>,
     /// The open diff's file, frozen with it while composing.
@@ -656,10 +749,18 @@ pub struct App {
     markdown_rendered: bool,
     /// The rendered rows' wrap width, `0` until the first frame.
     rendered_width: usize,
+    /// The pane-wide diff choice, `None` until the config seeds it or `|` flips it.
+    split_chosen: Option<DiffView>,
+    /// The read pane's inner width, which decides whether split fits; `0` until the first frame.
+    split_width: usize,
+    /// The line a view switch landed the cursor on, at that row, so switching back returns to it.
+    switch_line: Option<(usize, Side, u32)>,
     /// The link regions painted this frame.
     painted_links: std::cell::RefCell<Vec<PaintedLink>>,
     /// The read pane's display lines as painted, which every hit test indexes.
     painted_slots: std::cell::RefCell<Vec<crate::ui::Slot>>,
+    /// The cursor's row and the screen line it started on when this tab last painted it.
+    cursor_line: std::cell::Cell<Option<(usize, usize)>>,
     /// The whole body's heading anchors as `(slug, line)`.
     painted_anchors: std::cell::RefCell<Vec<(String, usize)>>,
     /// `<details>` summary hit boxes painted this frame.
@@ -701,6 +802,8 @@ pub struct App {
     pub last_sent_pane: Option<String>,
     /// The base picker's rows, filter, and highlight while `Mode::BasePick` is open
     pub base_picker: Option<BasePicker>,
+    /// The worktree picker while `Mode::WorktreePick` is open.
+    pub worktree_picker: Option<WorktreePicker>,
     pub mode: Mode,
     pub input: String,
     /// The comment editor's caret: a char index into `input` (`0..=chars().count()`).
@@ -709,8 +812,16 @@ pub struct App {
     /// Whether the `?` list is open, on every tab.
     pub keys_expanded: bool,
     pub should_quit: bool,
-    /// Quit pressed with unsent comments; the next input answers (#119). Beside [`Mode`], not one.
-    pub confirming_quit: bool,
+    /// The question the next input answers. Beside [`Mode`], not one: it asks over any mode.
+    pub question: Option<Question>,
+    /// The worktree this pane restarts on when the frame loop next returns.
+    pub switch_to: Option<PathBuf>,
+    /// The worktree this pane opened on, kept across switches.
+    pub home: PathBuf,
+    /// The checkout the active file tab's list was built from.
+    checkout: Option<String>,
+    /// The checkout the latest full build read, which `PR` names, as it leaves the file tabs frozen.
+    read_checkout: Option<String>,
     /// The read-only `PR` tab's view of the pull request.
     pub pr: forge::PrView,
     /// The resolved target's forge, which picks the display noun.
@@ -733,6 +844,8 @@ pub struct App {
     pub pr_pending: Option<RefreshKind>,
     /// The world refresh to dispatch after the frame paints.
     pub world_request: Option<crate::world::WorldRequest>,
+    /// Whether the first world build landed: until it does, no list claims "no changes".
+    pub world_load: WorldLoad,
     /// The search overlay's state while `mode == Mode::Search`, `None` otherwise.
     pub search: Option<SearchOverlay>,
     /// A query to dispatch after the frame paints.
@@ -830,6 +943,7 @@ impl App {
         let last_turn = baseline.map_or(crate::turn::LastTurn::Waiting, crate::turn::LastTurn::At);
         let theme = theme::resolve(None);
         Self {
+            home: repo.clone(),
             repo,
             base,
             branch_base: git::BaseStatus::default(),
@@ -846,8 +960,8 @@ impl App {
             file_cursor: 0,
             file_scroll: 0,
             reveal_files: false,
-            reveal_diff: false,
-            reveal_center: false,
+            diff_reveal: None,
+            keep_above: None,
             armed_cross: None,
             resume_list: false,
             toggled_dirs: HashSet::new(),
@@ -864,8 +978,12 @@ impl App {
             rendered: RenderedView::default(),
             markdown_rendered: false,
             rendered_width: 0,
+            split_chosen: None,
+            split_width: 0,
+            switch_line: None,
             painted_links: std::cell::RefCell::new(Vec::new()),
             painted_slots: std::cell::RefCell::new(Vec::new()),
+            cursor_line: std::cell::Cell::new(None),
             painted_anchors: std::cell::RefCell::new(Vec::new()),
             painted_details: std::cell::RefCell::new(Vec::new()),
             pr_expanded_details: HashSet::new(),
@@ -890,13 +1008,17 @@ impl App {
             picker_over: Mode::Normal,
             last_sent_pane: None,
             base_picker: None,
+            worktree_picker: None,
             mode: Mode::Normal,
             input: String::new(),
             caret: 0,
             status: String::new(),
             keys_expanded: false,
             should_quit: false,
-            confirming_quit: false,
+            question: None,
+            switch_to: None,
+            checkout: None,
+            read_checkout: None,
             pr: forge::PrView::Pending,
             pr_forge: crate::git::Forge::GitHub,
             pr_notice: None,
@@ -908,6 +1030,7 @@ impl App {
             reveal_pr_nav: std::cell::Cell::new(true),
             pr_pending: None,
             world_request: None,
+            world_load: WorldLoad::Pending,
             search: None,
             search_dirty: false,
             search_track: None,
@@ -981,6 +1104,7 @@ impl App {
         self.cancel_gesture();
         // The picker closes first, onto its mode, so the closers below tear that mode down.
         self.close_picker();
+        self.close_worktree_picker();
         self.close_search();
         self.close_find();
         self.config = PluginConfigState::Blocked { error };
@@ -1008,24 +1132,46 @@ impl App {
         }
     }
 
-    /// Carry the review into a recovered app: comments, and a draft with its frozen diff.
-    pub(crate) fn carry_authored_state_from(&mut self, old: &mut Self) {
-        self.store = std::mem::take(&mut old.store);
-        self.list_cursor = old.list_cursor;
-        // The footer expansion is one global toggle, carried regardless of the recovered mode
+    /// Carry the pane's own state: where it opened, the footer expansion, the navigator and splits.
+    fn carry_pane_from(&mut self, old: &Self) {
+        self.home.clone_from(&old.home);
         self.keys_expanded = old.keys_expanded;
-        // Session memory, like the comments.
-        self.last_sent_pane = old.last_sent_pane.take();
-        // The commit pick is session memory like the comments: replaced, never cleared
-        self.commit_pick = old.commit_pick.take();
         self.navigator_side_pct = old.navigator_side_pct;
         self.navigator_stack_pct = old.navigator_stack_pct;
         self.navigator_hidden = old.navigator_hidden;
+        // A pane born blocked never chose, so the new pane's seed stands.
+        self.split_chosen = old.split_chosen.or(self.split_chosen);
         // A hidden navigator keeps focus on the read pane.
         if self.navigator_hidden {
             self.focus = Focus::Diff;
         }
         self.search_pct = old.search_pct;
+    }
+
+    /// Carry how the pane views, never what it reviews, into a pane switched to another worktree.
+    pub fn carry_view_from(&mut self, old: &mut Self) {
+        self.carry_pane_from(old);
+        self.wrap = old.wrap;
+        self.markdown_rendered = old.markdown_rendered;
+        // A commit pick names the old worktree's commits, so its scope stays behind.
+        if old.scope != Scope::Commits {
+            self.scope = old.scope;
+        }
+        // What herdr said of the pane carries; what it said of the old worktree does not.
+        self.herdr.ids = std::mem::take(&mut old.herdr.ids);
+        self.herdr.on_screen = old.herdr.on_screen;
+        self.herdr.too_old = old.herdr.too_old;
+    }
+
+    /// Carry the review into a recovered app: comments, and a draft with its frozen diff.
+    pub(crate) fn carry_authored_state_from(&mut self, old: &mut Self) {
+        self.store = std::mem::take(&mut old.store);
+        self.list_cursor = old.list_cursor;
+        self.carry_pane_from(old);
+        // Session memory, like the comments.
+        self.last_sent_pane = old.last_sent_pane.take();
+        // The commit pick is session memory like the comments: replaced, never cleared
+        self.commit_pick = old.commit_pick.take();
         // What herdr reported is reported once; a recovered app keeps it.
         self.herdr =
             std::mem::replace(&mut old.herdr, HerdrView::new(crate::turn::LastTurn::default()));
@@ -1034,7 +1180,7 @@ impl App {
         let old_mode = old.mode.clone();
         match old_mode {
             // `set_config_error` already closed these.
-            Mode::Normal | Mode::Search | Mode::Find | Mode::Picker => {}
+            Mode::Normal | Mode::Search | Mode::Find | Mode::Picker | Mode::WorktreePick => {}
             Mode::List | Mode::Composing { .. } | Mode::BasePick | Mode::CommitPick => {
                 self.scope = old.scope;
                 self.tab = old.tab;
@@ -1045,16 +1191,18 @@ impl App {
                 self.file_cursor = old.file_cursor;
                 self.file_scroll = old.file_scroll;
                 self.reveal_files = old.reveal_files;
-                self.reveal_diff = old.reveal_diff;
+                self.diff_reveal = old.diff_reveal;
                 self.changeset = std::mem::take(&mut old.changeset);
-                // The header describes the carried list, so it carries too.
+                // The header and the footer's branch describe the carried list, so they carry too.
                 self.branch_base = std::mem::take(&mut old.branch_base);
+                self.checkout = old.checkout.take();
                 self.pick_status = old.pick_status.take();
                 self.diff = std::mem::take(&mut old.diff);
                 self.visible = std::mem::take(&mut old.visible);
                 self.expanded_folds = std::mem::take(&mut old.expanded_folds);
                 self.diff_path = old.diff_path.take();
                 self.diff_cursor = old.diff_cursor;
+                self.switch_line = old.switch_line;
                 self.diff_scroll = old.diff_scroll;
                 self.h_scroll = old.h_scroll;
                 self.select_anchor = old.select_anchor;
@@ -1176,12 +1324,11 @@ impl App {
     /// Build and reconcile synchronously; never touches comments or the draft.
     pub fn reload(&mut self) -> Result<()> {
         self.ensure_config_ready()?;
-        // The `PR` tab has no file tree; a file tab reloads on return.
-        if !self.tab.is_file_tab() {
-            return Ok(());
-        }
-        // Outside a git repo, show an empty state rather than failing.
-        if !git::is_repo(&self.repo) {
+        // Outside a git repo, a file tab shows an empty state rather than failing.
+        if self.tab.is_file_tab() && !git::is_repo(&self.repo) {
+            self.world_load = WorldLoad::Landed;
+            self.checkout = None;
+            self.read_checkout = None;
             self.entries.clear();
             self.changeset = Changeset::default();
             self.file_rows.clear();
@@ -1192,7 +1339,8 @@ impl App {
             }
             return Ok(());
         }
-        let snapshot = crate::world::build(&self.world_input())?;
+        let snapshot =
+            crate::world::build(&self.world_input()).inspect_err(|_| self.load_failed())?;
         self.reconcile_world(snapshot);
         Ok(())
     }
@@ -1230,8 +1378,18 @@ impl App {
         }
     }
 
-    /// Reconcile a snapshot into the view: identity, then fallback, then clamp (Continuity).
-    pub fn reconcile_world(&mut self, snapshot: crate::world::WorldSnapshot) {
+    /// Reconcile a snapshot into the view (Continuity); whether the file view took it, as `PR` never does.
+    pub fn reconcile_world(&mut self, snapshot: crate::world::WorldSnapshot) -> bool {
+        self.world_load = WorldLoad::Landed;
+        // A path-limited build carries its checkout rather than reading it.
+        if snapshot.touched.is_none() {
+            self.read_checkout.clone_from(&snapshot.checkout);
+        }
+        if !self.tab.is_file_tab() {
+            return false;
+        }
+        // The footer names the checkout this build read, in the frame its list lands in.
+        self.checkout = snapshot.checkout;
         // The cursor keeps its target, else the open file, else the first file.
         let anchor = self.cursor_anchor();
         let open = self.diff_path.clone();
@@ -1279,15 +1437,14 @@ impl App {
         }
         self.refresh_commit_picker(snapshot.head.as_deref());
         self.tab_visited = true;
+        true
     }
 
     /// The text of the read-pane row the multi-click chain targets.
     fn clicked_target_text(&self) -> Option<String> {
         let click = self.last_click?;
-        if click.surface != crate::selection::Surface::Read {
-            return None;
-        }
-        Some(self.visible.get(click.target)?.text())
+        let crate::selection::Surface::Read { side } = click.surface else { return None };
+        self.visible.get(click.target)?.text_row(side).map(Row::text)
     }
 
     /// Reload the open view; only a different file resets it and drops an armed crossing.
@@ -1401,7 +1558,7 @@ impl App {
         let last = self.visible.len() - 1;
         let clamped = self.diff_cursor.min(last);
         if clamped != self.diff_cursor {
-            self.reveal_diff = true;
+            self.reveal_diff(Reveal::Edge);
         }
         self.diff_cursor = clamped;
         self.diff_scroll = self.diff_scroll.min(last);
@@ -1421,9 +1578,16 @@ impl App {
         self.drop_read_marks();
     }
 
-    /// Build `visible`: rendered rows, else source (an empty render shows source too).
-    /// The one rebuild site, so it carries the place, the find band, and the marks.
+    /// Rebuild `visible` in the layout on screen: a refresh or a fold never flips it (Continuity).
     fn rebuild_visible(&mut self) {
+        self.build_visible(false);
+    }
+
+    /// The one rebuild of `visible`, carrying place, find and marks; `choose` (a switch) picks the layout.
+    fn build_visible(&mut self, choose: bool) {
+        // The last switch's line serves only the next switch, on the rows it landed on.
+        let kept = self.switch_line.take();
+        let remembered = kept.filter(|_| choose);
         let clicked_before = self.clicked_target_text();
         let was_rendered = self.rendered.on_screen();
         // A line map, only when the text moved under the rendered rows.
@@ -1433,54 +1597,82 @@ impl App {
             .flatten()
             .filter(|b| b.input.text != text)
             .map(|b| LineMap::new(&b.input.text, text));
-        let line_at = |i: usize| -> Option<u32> {
+        let spot_at = |i: usize| -> Spot {
+            // The line the last switch landed on, on the rows it landed on.
+            let remembered = remembered.filter(|&(row, ..)| row == i).map(|(_, side, n)| (side, n));
             if was_rendered {
                 // A rendered row's current line: its unit's first line, through the edit.
-                let src = self.rendered.index.unit_at(i)?.src;
-                Some(edit.as_ref().map_or(src, |m| m.line(src)))
-            } else {
-                source_line_at(&self.visible, i)
+                let unit = self.rendered.index.unit_at(i);
+                let new = unit.map(|u| u.src).map(|src| edit.as_ref().map_or(src, |m| m.line(src)));
+                return Spot { new, at: remembered.or(new.map(|n| (Side::New, n))) };
             }
+            // A remembered new line, else the row's: a fold's first line is not the one it hides.
+            let new = remembered
+                .filter(|&(side, _)| side == Side::New)
+                .map(|(_, n)| n)
+                .or_else(|| source_line_at(&self.visible, i));
+            let old_only =
+                self.visible.get(i).filter(|v| v.new_no().is_none()).and_then(Visible::old_no);
+            let own = old_only.map(|n| (Side::Old, n)).or(new.map(|n| (Side::New, n)));
+            Spot { new, at: remembered.or(own) }
         };
         let place = (!self.visible.is_empty()).then(|| {
-            let anchor = self.select_anchor.map(line_at);
-            (was_rendered, line_at(self.diff_cursor), line_at(self.diff_scroll), anchor)
+            let anchor = self.select_anchor.map(spot_at);
+            (self.shown(), spot_at(self.diff_cursor), spot_at(self.diff_scroll), anchor)
         });
-        let rendered = self.wants_rendered() && self.rebuild_rendered(edit.as_ref());
+        let render = if self.wants_rendered() {
+            self.rebuild_rendered(edit.as_ref())
+        } else {
+            Render::Nothing
+        };
+        // Rendered rows kept from the same input, base numbers included, still hold that line.
+        if render == Render::Kept && !choose {
+            self.switch_line = kept;
+        }
+        let rendered = render != Render::Nothing;
         if !rendered {
             if !self.wants_rendered() {
                 self.rendered.built = None;
             }
             // Source rows on screen: no render, marks, or index stand behind them.
             self.rendered.drop_rows();
-            self.visible = self
-                .diff
-                .rows
-                .iter()
-                .flat_map(|row| match row {
-                    Row::Fold { lines }
-                        if row.fold_anchor().is_some_and(|a| self.expanded_folds.contains(&a)) =>
-                    {
-                        lines.clone()
-                    }
-                    _ => vec![row.clone()],
-                })
-                .collect();
-        }
-        // Across row kinds, the place crosses by source line.
-        if let Some((from_rendered, cursor, scroll, anchor)) = place
-            && from_rendered != rendered
-        {
-            let to = |line: Option<u32>| -> Option<usize> {
-                let line = line?;
-                if rendered {
-                    self.rendered.index.row_at_line(line)
-                } else {
-                    Some(line_row(&self.visible, line, Row::new_no))
+            let split = match place {
+                Some((from, ..)) if !choose => from == Shown::Split && self.diff.view == View::Diff,
+                _ => self.wants_split(),
+            };
+            let rows = self.diff.rows.iter().flat_map(|row| match row {
+                Row::Fold { lines }
+                    if row.fold_anchor().is_some_and(|a| self.expanded_folds.contains(&a)) =>
+                {
+                    lines.clone()
                 }
+                _ => vec![row.clone()],
+            });
+            let rows: Vec<Visible> = if split {
+                crate::split::split_rows(rows.collect(), &self.diff.pairs)
+            } else {
+                rows.map(Visible::Row).collect()
+            };
+            // Source rows a refresh rebuilds unchanged still hold that line.
+            if kept.is_some() && !choose && !was_rendered && rows == self.visible {
+                self.switch_line = kept;
+            }
+            self.visible = rows;
+        }
+        // Across layouts, the place crosses by line.
+        if let Some((from, cursor, scroll, anchor)) = place
+            && from != self.shown()
+        {
+            let to = |spot: Spot| -> Option<usize> {
+                if rendered {
+                    return self.rendered.index.row_at_line(spot.new?);
+                }
+                let (side, line) = spot.at?;
+                Some(line_row(&self.visible, line, side))
             };
             if let Some(i) = to(cursor) {
                 self.diff_cursor = i;
+                self.switch_line = cursor.at.filter(|_| choose).map(|(side, n)| (i, side, n));
             }
             if let Some(i) = to(scroll) {
                 self.diff_scroll = i;
@@ -1501,10 +1693,10 @@ impl App {
             self.last_click = None;
         }
         if let Some((d, copied)) = &self.settled_sel
-            && d.surface == crate::selection::Surface::Read
+            && let crate::selection::Surface::Read { side } = d.surface
         {
             let (a, b) = d.ordered();
-            if crate::selection::read_text(&self.visible, a, b) != *copied {
+            if crate::selection::read_text(&self.visible, side, a, b) != *copied {
                 self.settled_sel = None;
             }
         }
@@ -1513,13 +1705,13 @@ impl App {
     /// Drop the read pane's marks; navigator marks stay.
     fn drop_read_marks(&mut self) {
         use crate::selection::Surface;
-        if self.last_click.is_some_and(|c| c.surface == Surface::Read) {
+        if self.last_click.is_some_and(|c| matches!(c.surface, Surface::Read { .. })) {
             self.last_click = None;
         }
         if self
             .settled_sel
             .as_ref()
-            .is_some_and(|(d, _)| matches!(d.surface, Surface::Read | Surface::Card { .. }))
+            .is_some_and(|(d, _)| matches!(d.surface, Surface::Read { .. } | Surface::Card { .. }))
         {
             self.settled_sel = None;
         }
@@ -1590,6 +1782,7 @@ impl App {
         let set: HashSet<String> = open.iter().cloned().collect();
         let doc = crate::markdown::render_expanded(
             old,
+            crate::markdown::Origin::File,
             DEFAULT_RENDER_WIDTH,
             &self.highlighter,
             &self.palette,
@@ -1602,9 +1795,9 @@ impl App {
     }
 
     /// Build the rendered rows unless their input is unchanged, carrying the place by identity.
-    /// `false` when the content renders nothing, a verdict kept for the same content.
-    fn rebuild_rendered(&mut self, edit: Option<&LineMap>) -> bool {
-        let Some(text) = self.rendered.text().map(str::to_string) else { return false };
+    /// `Nothing` when the content renders nothing, a verdict kept for the same content.
+    fn rebuild_rendered(&mut self, edit: Option<&LineMap>) -> Render {
+        let Some(text) = self.rendered.text().map(str::to_string) else { return Render::Nothing };
         let same_text = self.rendered.built.as_ref().is_some_and(|b| b.input.text == text);
         let details = if same_text && self.rendered.on_screen() {
             self.derived_details(&self.rendered.doc.disclosures)
@@ -1617,7 +1810,7 @@ impl App {
             && b.input == input
             && (b.empty || showing)
         {
-            return !b.empty;
+            return if b.empty { Render::Nothing } else { Render::Kept };
         }
         let mut open: HashSet<String> = input.details.iter().cloned().collect();
         let mut doc = self.markdown_render(&text, input.width, &open);
@@ -1629,12 +1822,12 @@ impl App {
         }
         if doc.lines.is_empty() {
             self.rendered.built = Some(Built { input, empty: true });
-            return false;
+            return Render::Nothing;
         }
         // The place, re-expressed in the new content's line numbers.
         let place = showing.then(|| {
             let id = |i: usize| {
-                let id = self.visible.get(i).and_then(RowId::of)?;
+                let id = self.visible.get(i).and_then(Visible::row).and_then(RowId::of)?;
                 Some(edit.map_or(id, |m| id.map(|line| m.line(line))))
             };
             (id(self.diff_cursor), id(self.diff_scroll), self.select_anchor.map(id))
@@ -1669,7 +1862,7 @@ impl App {
         self.rendered.marks = marks;
         self.rendered.doc = doc;
         self.rendered.built = Some(Built { input, empty: false });
-        self.visible = rows;
+        self.visible = rows.into_iter().map(Visible::Row).collect();
         if let Some((cursor, scroll, anchor)) = place {
             let index = &self.rendered.index;
             // A live range's anchor reconciles by the same identity as the cursor.
@@ -1683,7 +1876,7 @@ impl App {
                 self.diff_scroll = i;
             }
         }
-        true
+        Render::Built
     }
 
     /// Rebuild the rendered rows when width or theme moved; a modal or gesture defers it.
@@ -1710,7 +1903,7 @@ impl App {
     /// Expand the fold under the cursor for good, growing toward the nearer viewport edge.
     pub fn expand_fold(&mut self, heights: &[usize], viewport: usize) {
         let fold_idx = self.diff_cursor;
-        let Some(anchor) = self.visible.get(fold_idx).and_then(Row::fold_anchor) else {
+        let Some(anchor) = self.visible.get(fold_idx).and_then(Visible::fold_anchor) else {
             return;
         };
         // Expanding replaces the 1 fold row with N context rows; rows below it shift by N-1.
@@ -1928,6 +2121,7 @@ impl App {
         self.diff_scroll = 0;
         self.h_scroll = 0;
         self.select_anchor = None;
+        self.switch_line = None;
     }
 
     /// Scroll sideways by `delta` columns; inert while wrapping, so no offset piles up.
@@ -1982,9 +2176,10 @@ impl App {
         self.markdown_rendered && self.rendered.content.is_some()
     }
 
-    /// Seed a fresh pane's markdown view; a reread never flips it.
+    /// Seed a fresh pane's markdown and diff views; a reread never flips them.
     pub fn seed_from_config(&mut self, config: &crate::config::PluginConfig) {
         self.markdown_rendered = config.markdown_view() == crate::config::MarkdownView::Rendered;
+        self.split_chosen = Some(config.diff_view());
     }
 
     /// Whether `m` acts: a file tab holding renderable markdown.
@@ -2001,20 +2196,95 @@ impl App {
         if self.rendered.renders_nothing() {
             self.status = "nothing here renders".to_string();
         } else {
-            self.flip(!self.markdown_rendered);
+            self.markdown_rendered = !self.markdown_rendered;
+            self.relayout();
         }
     }
 
-    /// Flip to `rendered`, the cursor crossing by source line at the same screen height.
-    fn flip(&mut self, rendered: bool) {
+    /// Whether the open diff can split: source rows of a diff with a change on both sides.
+    fn split_allowed(&self) -> bool {
+        self.tab.is_file_tab()
+            && self.diff.view == View::Diff
+            && !self.rendered.on_screen()
+            && self.diff.splits()
+    }
+
+    /// Whether the read pane is wide enough for split.
+    fn split_fits(&self) -> bool {
+        self.split_width >= crate::ui::SPLIT_MIN_WIDTH
+    }
+
+    /// Whether split is due: chosen, fitting and allowed (the cheap checks first).
+    fn wants_split(&self) -> bool {
+        self.split_chosen == Some(DiffView::Split) && self.split_fits() && self.split_allowed()
+    }
+
+    /// Whether the rows on screen hold their layout: a modal, a gesture or a row selection is open.
+    fn layout_held(&self) -> bool {
+        self.view_frozen() || self.select_anchor.is_some()
+    }
+
+    /// Whether split rows are on screen: there every row but a fold is a pair, elsewhere none.
+    pub fn split_on_screen(&self) -> bool {
+        let first = self.visible.iter().find(|v| v.fold_anchor().is_none());
+        first.is_some_and(|v| matches!(v, Visible::Pair(_)))
+    }
+
+    /// The layout on screen.
+    fn shown(&self) -> Shown {
+        if self.rendered.on_screen() {
+            Shown::Rendered
+        } else if self.split_on_screen() {
+            Shown::Split
+        } else {
+            Shown::Unified
+        }
+    }
+
+    /// Whether `|` acts: split is on screen to leave, or the open diff can split at this width.
+    pub(crate) fn split_acts(&self) -> bool {
+        self.split_on_screen() || (self.split_fits() && self.split_allowed())
+    }
+
+    /// `|`: flip the diff between unified and split, where split can show; inert elsewhere.
+    pub fn toggle_split(&mut self) {
+        if !self.split_acts() {
+            // Only a pane too narrow says why, as `m` where nothing renders; elsewhere `|` is silent.
+            if self.split_allowed() {
+                self.status = "too narrow for split".to_string();
+            }
+            return;
+        }
+        let to = if self.split_on_screen() { DiffView::Unified } else { DiffView::Split };
+        self.split_chosen = Some(to);
+        self.relayout();
+    }
+
+    /// Show the layout due at this width before the frame, once no held rows are on screen.
+    pub fn sync_split_width(&mut self, width: usize) {
+        if width == 0 || !self.tab.is_file_tab() {
+            return;
+        }
+        self.split_width = width;
+        if !self.layout_held() && self.wants_split() != self.split_on_screen() {
+            self.relayout();
+        }
+    }
+
+    /// Rebuild the rows in another layout, the cursor keeping its line at the same screen height.
+    fn relayout(&mut self) {
+        // A selection's rows hold other lines in another layout (the width sync waits on one).
+        self.clear_selection();
         let above = self.diff_cursor.saturating_sub(self.diff_scroll);
-        self.markdown_rendered = rendered;
-        self.rebuild_visible();
+        // Only while the cursor is still the row painted there (Continuity: identity first).
+        let painted = self.cursor_line.get().filter(|&(row, _)| row == self.diff_cursor);
+        self.keep_above = painted.map(|(_, line)| line);
+        self.build_visible(true);
         self.diff_scroll = self.diff_cursor.saturating_sub(above);
         // The old rows' marks go with them; a navigator highlight was never on them.
         self.drop_read_marks();
         self.settle_read();
-        self.reveal_diff = true;
+        self.reveal_diff(Reveal::Edge);
     }
 
     /// The styled lines the rendered rows paint, indexed by a `Row::Rendered`'s `line`.
@@ -2073,6 +2343,13 @@ impl App {
 
     /// Record the read pane's painted layout for the hit tests.
     pub(crate) fn note_painted_slots(&self, slots: Vec<crate::ui::Slot>) {
+        let cursor = self.diff_cursor;
+        self.cursor_line.set(
+            slots
+                .iter()
+                .position(|s| matches!(*s, crate::ui::Slot::Code { row, seg: 0 } if row == cursor))
+                .map(|line| (cursor, line)),
+        );
         *self.painted_slots.borrow_mut() = slots;
     }
 
@@ -2140,7 +2417,7 @@ impl App {
                 matches!(r, Row::Rendered { kind: RenderedKind::Block { line: l, .. }, .. }
                     if *l as usize == line)
             };
-            if let Some(row) = self.visible.iter().position(at) {
+            if let Some(row) = self.visible.iter().position(|v| v.row().is_some_and(at)) {
                 self.select_anchor = None;
                 self.diff_cursor = row;
                 self.diff_scroll = row;
@@ -2158,6 +2435,7 @@ impl App {
     ) -> crate::markdown::Rendered {
         self.markdown_cache.borrow_mut().get_expanded(
             text,
+            crate::markdown::Origin::File,
             width,
             &self.highlighter,
             &self.palette,
@@ -2180,6 +2458,7 @@ impl App {
             .collect();
         let mut rendered = self.markdown_cache.borrow_mut().get_expanded(
             text,
+            crate::markdown::Origin::Body,
             width,
             &self.highlighter,
             &self.palette,
@@ -2428,15 +2707,21 @@ impl App {
         self.file_scroll = bound(self.file_scroll, self.file_rows.len(), viewport);
     }
 
-    /// Nudge the diff to show the cursor, or while composing the line the box opens under.
-    pub fn reveal_diff_cursor(&mut self, heights: &[usize], viewport: usize) {
+    /// Nudge the cursor (composing, the box's line) on screen, `margin` lines clear of the edges.
+    pub fn reveal_diff_cursor(&mut self, heights: &[usize], viewport: usize, margin: usize) {
         if self.visible.is_empty() {
             self.diff_scroll = 0;
             return;
         }
         let target = if self.composing() { self.compose_row() } else { self.diff_cursor };
         let target = target.min(self.visible.len() - 1);
-        self.diff_scroll = keep_in_view(target, self.diff_scroll, heights, viewport);
+        self.diff_scroll = keep_in_view_off(target, self.diff_scroll, heights, viewport, margin);
+    }
+
+    /// The lines a keyboard move keeps around the diff cursor (`scrolloff`).
+    fn scrolloff(&self) -> usize {
+        self.plugin_config()
+            .map_or(crate::config::DEFAULT_SCROLLOFF, crate::config::PluginConfig::scrolloff)
     }
 
     /// Center the cursor's row by display heights when it sits off screen.
@@ -2452,24 +2737,40 @@ impl App {
         }
         // Rows above the target fill about half of what the target leaves of the pane.
         let room = viewport.saturating_sub(heights[target]) / 2;
-        let mut top = target;
-        let mut above = 0;
-        while top > 0 && above + heights[top - 1] <= room {
-            top -= 1;
-            above += heights[top];
-        }
-        self.diff_scroll = top;
+        self.diff_scroll = top_leaving(heights, target, room);
     }
 
-    /// Settle the scroll: a line jump centers (eating a same-event nudge), else nudge, then bound.
+    /// Settle the scroll by the event's reveal request, then bound it.
     pub fn settle_diff_scroll(&mut self, heights: &[usize], viewport: usize) {
-        let nudge = std::mem::take(&mut self.reveal_diff);
-        if std::mem::take(&mut self.reveal_center) {
-            self.center_diff_cursor(heights, viewport);
-        } else if nudge || self.composing() {
-            self.reveal_diff_cursor(heights, viewport);
+        let reveal = self.diff_reveal.take();
+        if let Some(lines) = self.keep_above.take() {
+            let target = self.diff_cursor.min(heights.len().saturating_sub(1));
+            self.diff_scroll = top_leaving(heights, target, lines);
+        }
+        // Only the keyboard keeps the margin: a click, a drag or a relayout leaves rows in place.
+        match reveal {
+            Some(Reveal::Center) => {
+                self.center_diff_cursor(heights, viewport);
+                self.reveal_diff_cursor(heights, viewport, self.scrolloff());
+            }
+            Some(Reveal::Context) => self.reveal_diff_cursor(heights, viewport, self.scrolloff()),
+            Some(Reveal::Edge) => self.reveal_diff_cursor(heights, viewport, 0),
+            None if self.composing() => self.reveal_diff_cursor(heights, viewport, 0),
+            None => {}
         }
         self.bound_diff_scroll(heights, viewport);
+    }
+
+    /// A world build failed: before any landed, the lists say so instead of staying blank.
+    pub fn load_failed(&mut self) {
+        if self.world_load == WorldLoad::Pending {
+            self.world_load = WorldLoad::Failed;
+        }
+    }
+
+    /// Ask the next frame to show the read cursor; the strongest request in one event wins.
+    pub fn reveal_diff(&mut self, how: Reveal) {
+        self.diff_reveal = self.diff_reveal.max(Some(how));
     }
 
     /// Clamp `diff_scroll` by display heights, so tall wrapped rows stay reachable.
@@ -2527,6 +2828,7 @@ impl App {
             self.stash.diff_scroll = 0;
             self.stash.h_scroll = 0;
             self.stash.select_anchor = None;
+            self.stash.cursor_line = None;
             // `All files` keeps its tree; only the changed set rebuilds now.
             let build = crate::world::build_changed(&self.world_input())?;
             self.adopt_branch_base(build.branch_base);
@@ -2547,16 +2849,24 @@ impl App {
         self.pr_pending = self.pr_pending.max(Some(kind));
     }
 
-    /// Switch to `tab`, restoring its place as left; a refresh lands behind (Continuity).
+    /// Switch to `tab`: the file left follows when the config asks and the tab lists it.
     pub fn set_tab(&mut self, tab: Tab) -> Result<()> {
+        self.switch_tab(tab, true)
+    }
+
+    /// Switch to `tab`: its place as left, or the file and line left if `follow` and the config agree.
+    fn switch_tab(&mut self, tab: Tab, follow: bool) -> Result<()> {
         self.ensure_config_ready()?;
         if self.tab == tab || self.composing() {
             return Ok(());
         }
+        let follow = follow && self.config_snapshot().follow_file_across_tabs();
         // The line field was typed for the tab it opened over; the PR tab draws no band at all.
         if self.line_open() || (tab == Tab::Pr && self.mode == Mode::Find) {
             self.close_find();
         }
+        // A switch's line serves the next switch in the tab it was made in.
+        self.switch_line = None;
         self.tab = tab;
         // `PR` leaves the file tabs frozen and refetches behind its last snapshot.
         if tab == Tab::Pr {
@@ -2564,22 +2874,38 @@ impl App {
             return Ok(());
         }
         // Bring the tab's state into the live fields if the stash holds it.
+        let mut carried = None;
         if self.active_file_tab != tab {
+            if follow {
+                carried = self.carried_to(tab);
+            }
             self.swap_active_with_stash();
             self.active_file_tab = tab;
             // Follow a markdown choice flipped while away.
             if self.rendered.on_screen() != self.wants_rendered()
                 && !self.rendered.renders_nothing()
             {
-                self.rebuild_visible();
-                self.settle_read();
+                self.relayout();
             }
+        }
+        if let Some((path, _)) = &carried {
+            self.point_at(path);
         }
         // A return paints its stash and refreshes behind; a first visit loads before the frame.
         if self.tab_visited {
             self.request_world_refresh(true);
+            // The stash may hold an older copy of the carried file.
+            if carried.is_some() {
+                self.reload_open_view();
+            }
         } else {
             self.reload()?;
+        }
+        // A file gone before the load landed leaves the line unlanded.
+        if let Some((path, Some(n))) = carried
+            && self.diff_path.as_deref() == Some(path.as_str())
+        {
+            self.land_worktree_line(n);
         }
         self.settle_tab_entry();
         // A find band opened over the other tab's file does not search this one's.
@@ -2588,6 +2914,51 @@ impl App {
         }
         self.reveal_files = true; // pull the restored cursor back into view
         Ok(())
+    }
+
+    /// The open file and its worktree line, when file tab `tab` lists that file.
+    fn carried_to(&self, tab: Tab) -> Option<(String, Option<u32>)> {
+        let path = self.diff_path.clone()?;
+        // `All files` lists every file on disk; `Changes`, the scope's changeset.
+        let listed = match tab {
+            Tab::AllFiles => self.repo.join(&path).is_file(),
+            Tab::Changes => self.changeset.files.contains_key(&path),
+            Tab::Pr => false,
+        };
+        listed.then(|| (path, self.worktree_line()))
+    }
+
+    /// Put the tree cursor on `path`, its folders open, listing it if this tab's list predates it.
+    fn point_at(&mut self, path: &str) {
+        let mut changed = false;
+        let mut dir = path;
+        while let Some((parent, _)) = dir.rsplit_once('/') {
+            changed |= self.set_dir_expanded(parent, true);
+            dir = parent;
+        }
+        // The refresh behind lands the true list; this row stands in until it does.
+        if !self.entries.iter().any(|e| e.path == path) {
+            let annotation = self.changeset.files.get(path).cloned();
+            let at = self.entries.partition_point(|e| e.path.as_str() < path);
+            let entry = Entry { path: path.to_string(), annotation, ignored: false, is_dir: false };
+            self.entries.insert(at, entry);
+            changed = true;
+        }
+        if changed {
+            self.rebuild_file_rows();
+        }
+        if let Some(row) = self.file_row_of_path(path) {
+            self.file_cursor = row;
+        }
+        self.reveal_files = true;
+    }
+
+    /// Land on worktree line `n`; a cursor already on it keeps its place and selection.
+    fn land_worktree_line(&mut self, n: u32) {
+        if self.worktree_numbered() && self.worktree_line() != Some(n) {
+            self.clear_selection();
+            self.land_line(n);
+        }
     }
 
     /// Focus the tree when the read pane is empty, so the keys aren't trapped.
@@ -2795,6 +3166,7 @@ impl App {
         std::mem::swap(&mut self.toggled_dirs, &mut self.stash.toggled_dirs);
         std::mem::swap(&mut self.diff, &mut self.stash.diff);
         std::mem::swap(&mut self.visible, &mut self.stash.visible);
+        std::mem::swap(self.cursor_line.get_mut(), &mut self.stash.cursor_line);
         std::mem::swap(&mut self.expanded_folds, &mut self.stash.expanded_folds);
         std::mem::swap(&mut self.diff_path, &mut self.stash.diff_path);
         std::mem::swap(&mut self.diff_cursor, &mut self.stash.diff_cursor);
@@ -2803,6 +3175,7 @@ impl App {
         std::mem::swap(&mut self.select_anchor, &mut self.stash.select_anchor);
         std::mem::swap(&mut self.rendered, &mut self.stash.rendered);
         std::mem::swap(&mut self.comment_target, &mut self.stash.comment_target);
+        std::mem::swap(&mut self.checkout, &mut self.stash.checkout);
         std::mem::swap(&mut self.tab_visited, &mut self.stash.visited);
     }
 
@@ -2839,7 +3212,7 @@ impl App {
                         target = self.fold_clamped(a, target);
                     }
                     self.diff_cursor = target;
-                    self.reveal_diff = true;
+                    self.reveal_diff(Reveal::Context);
                 }
             }
         }
@@ -2897,7 +3270,7 @@ impl App {
         }
         if let Some(row) = hunk_row(&self.visible, Some(self.diff_cursor), forward) {
             self.diff_cursor = row;
-            self.reveal_diff = true;
+            self.reveal_diff(Reveal::Center);
             return;
         }
         let Some(armed) = armed else {
@@ -2919,7 +3292,7 @@ impl App {
         // Land on a hunk of the rows now on screen.
         self.diff_cursor = hunk_row(&self.visible, None, forward).unwrap_or(0);
         self.reveal_files = true;
-        self.reveal_diff = true;
+        self.reveal_diff(Reveal::Center);
     }
 
     /// The nearest file row that way with a hunk, so a crossing always lands on a change.
@@ -3057,7 +3430,7 @@ impl App {
     /// Whether the focused diff cursor is on a fold, which `→` expands.
     pub fn on_fold(&self) -> bool {
         self.focus == Focus::Diff
-            && self.visible.get(self.diff_cursor).and_then(Row::fold_anchor).is_some()
+            && self.visible.get(self.diff_cursor).and_then(Visible::fold_anchor).is_some()
     }
 
     /// Expand the directory under the cursor (`→`); a no-op if it is a file or already open.
@@ -3125,7 +3498,7 @@ impl App {
             self.focus = Focus::Diff;
             let anchor = *self.select_anchor.get_or_insert(self.diff_cursor);
             self.diff_cursor = self.fold_clamped(anchor, index);
-            self.reveal_diff = true;
+            self.reveal_diff(Reveal::Edge);
         }
     }
 
@@ -3188,7 +3561,7 @@ impl App {
         use crate::selection::Surface;
         matches!(self.gesture, crate::selection::Gesture::Gutter)
             || self.text_drag().is_some_and(|d| match d.surface {
-                Surface::Read | Surface::Card { .. } => true,
+                Surface::Read { .. } | Surface::Card { .. } => true,
                 // The `PR` read pane holds through the gated PR drains instead.
                 Surface::Painted | Surface::Files | Surface::PrNav => false,
             })
@@ -3201,7 +3574,9 @@ impl App {
         // Exhaustive, so a new surface must choose its freeze.
         self.text_drag().is_some_and(|d| match d.surface {
             Surface::Files => true,
-            Surface::Read | Surface::Card { .. } | Surface::Painted | Surface::PrNav => false,
+            Surface::Read { .. } | Surface::Card { .. } | Surface::Painted | Surface::PrNav => {
+                false
+            }
         })
     }
 
@@ -3212,7 +3587,7 @@ impl App {
         self.text_drag().is_some_and(|d| match d.surface {
             Surface::PrNav => true,
             Surface::Painted => self.tab == Tab::Pr,
-            Surface::Read | Surface::Card { .. } | Surface::Files => false,
+            Surface::Read { .. } | Surface::Card { .. } | Surface::Files => false,
         })
     }
 
@@ -3269,7 +3644,7 @@ impl App {
         self.diff_cursor = row;
         self.select_anchor = None;
         self.gesture = crate::selection::Gesture::Gutter;
-        self.reveal_diff = true;
+        self.reveal_diff(Reveal::Edge);
     }
 
     /// Finish a gutter gesture by opening the composer.
@@ -3304,7 +3679,7 @@ impl App {
                 Some(_) => None,
                 None => Some(self.diff_cursor),
             };
-            self.reveal_diff = true;
+            self.reveal_diff(Reveal::Edge);
         }
     }
 
@@ -3312,7 +3687,7 @@ impl App {
     pub fn clear_selection(&mut self) {
         if self.select_anchor.is_some() {
             self.select_anchor = None;
-            self.reveal_diff = true;
+            self.reveal_diff(Reveal::Edge);
         }
     }
 
@@ -3326,7 +3701,7 @@ impl App {
 
     pub fn start_comment(&mut self) {
         if self.focus == Focus::Diff && self.has_anchorable_selection() {
-            self.reveal_diff = true; // scroll the anchored line into view before the box opens
+            self.reveal_diff(Reveal::Edge); // scroll the anchored line into view before the box opens
             self.input.clear();
             self.caret = 0;
             self.resume_list = false; // a fresh diff comment returns to the diff, not the list
@@ -3373,36 +3748,41 @@ impl App {
         if self.mode != Mode::Normal {
             return None;
         }
-        let (path, numbered) = if self.focus == Focus::Files {
+        let (path, line) = if self.focus == Focus::Files {
             // The selected navigator file at its start. A directory row names no file.
-            (self.current_entry()?.path.clone(), false)
+            (self.current_entry()?.path.clone(), 1)
         } else {
             // A press must not abandon a live selection.
             if self.select_anchor.is_some() {
                 return None;
             }
-            // The open file; in `commits` the line numbers aren't the worktree's, so no line.
-            let commit_diff = self.scope == Scope::Commits && self.diff.view == View::Diff;
-            (self.diff_path.clone()?, !commit_diff)
+            (self.diff_path.clone()?, self.worktree_line().unwrap_or(1))
         };
-        let line = if !numbered {
-            1
-        } else if self.rendered_active() {
-            // A block's first line, or a marker's line clamped to the file's end.
+        Some(EditTarget { path, line })
+    }
+
+    /// Whether the read pane numbers worktree lines: a `commits` diff numbers the commits'.
+    fn worktree_numbered(&self) -> bool {
+        !(self.scope == Scope::Commits && self.diff.view == View::Diff)
+    }
+
+    /// The worktree line under the read cursor, else the start; `None` in a `commits` diff.
+    fn worktree_line(&self) -> Option<u32> {
+        if !self.worktree_numbered() {
+            return None;
+        }
+        // Rendered rows: a block's first line, or a marker's line clamped to the file's end.
+        if self.rendered.on_screen() {
             let last = self.rendered.text().unwrap_or_default().lines().count().max(1) as u32;
-            match self.rendered.index.unit_at(self.diff_cursor).map(|u| u.unit) {
+            return Some(match self.rendered.index.unit_at(self.diff_cursor).map(|u| u.unit) {
                 Some(Unit::Block(src)) => src,
                 Some(Unit::Marker(src, _)) => src.clamp(1, last),
                 None => 1,
-            }
-        } else {
-            // The nearest worktree line number at or above the cursor, else the start.
-            self.visible
-                .get(..=self.diff_cursor)
-                .and_then(|above| above.iter().rev().find_map(Row::new_no))
-                .unwrap_or(1)
-        };
-        Some(EditTarget { path, line })
+            });
+        }
+        // Source rows: the nearest worktree line number at or above the cursor.
+        let above = self.visible.get(..=self.diff_cursor);
+        Some(above.and_then(|rows| rows.iter().rev().find_map(Visible::new_no)).unwrap_or(1))
     }
 
     fn edit_comment(&mut self) {
@@ -3432,7 +3812,7 @@ impl App {
             self.select_anchor = None;
         }
         self.focus = Focus::Diff;
-        self.reveal_diff = true; // scroll the edited line into view before the box opens
+        self.reveal_diff(Reveal::Edge); // scroll the edited line into view before the box opens
         self.caret = text.chars().count(); // edit opens with the caret at the end
         self.input = text;
         self.resume_list = from_list;
@@ -3449,6 +3829,9 @@ impl App {
             Mode::Search => self.search.as_mut().map(|s| (&mut s.query, &mut s.caret)),
             Mode::Find => self.find.as_mut().map(|f| (&mut f.query, &mut f.caret)),
             Mode::BasePick => self.base_picker.as_mut().map(|b| (&mut b.query, &mut b.caret)),
+            Mode::WorktreePick => {
+                self.worktree_picker.as_mut().map(|w| (&mut w.query, &mut w.caret))
+            }
             Mode::Normal | Mode::List | Mode::Picker | Mode::CommitPick => None,
         }
     }
@@ -3474,6 +3857,13 @@ impl App {
         }
         if changed && self.mode == Mode::BasePick {
             self.refilter_base_picker(highlighted);
+        }
+        // The worktree picker opens on its no-op current row, so a filter edit takes the best match.
+        if changed
+            && self.mode == Mode::WorktreePick
+            && let Some(wp) = self.worktree_picker.as_mut()
+        {
+            wp.cursor = 0;
         }
     }
 
@@ -3571,11 +3961,15 @@ impl App {
             self.paste_line(text);
             return;
         }
+        // A paste answers a question as a stray key does: it stays, the paste unapplied.
+        if self.question.take().is_some() {
+            return;
+        }
         let mut norm = text.replace("\r\n", "\n").replace('\r', "\n");
         match self.mode {
             Mode::Search | Mode::Find => norm = norm.replace('\n', " "),
-            // No branch name holds a newline.
-            Mode::BasePick => norm.retain(|c| c != '\n'),
+            // No branch or worktree name holds a newline.
+            Mode::BasePick | Mode::WorktreePick => norm.retain(|c| c != '\n'),
             _ => {}
         }
         let norm: Vec<char> = norm.chars().collect();
@@ -3611,6 +4005,14 @@ impl App {
             let start = word_start(v, *caret);
             v.drain(start..*caret);
             *caret = start;
+        });
+    }
+
+    /// `Alt+Delete`: delete whitespace, then the word, after the caret.
+    pub fn input_delete_word_forward(&mut self) {
+        self.edit_input(|v, caret| {
+            let end = word_end(v, *caret);
+            v.drain(*caret..end);
         });
     }
 
@@ -3714,21 +4116,20 @@ impl App {
             return self.selection_anchor().is_some();
         }
         let (lo, hi) = self.selection_range();
-        self.visible.get(lo..=hi).is_some_and(|s| s.iter().any(Row::is_content))
+        self.visible.get(lo..=hi).is_some_and(|s| s.iter().any(Visible::is_content))
     }
 
     /// The selection's `(side, start, end, snippet)`, rendered or not, by one `anchor()` (G1).
     fn selection_anchor(&self) -> Option<(Side, u32, u32, String)> {
         if self.rendered.on_screen() {
-            return anchor(&self.rendered_anchor_rows());
+            return anchor(self.rendered_anchor_rows());
         }
-        let (lo, hi) = self.selection_range();
-        anchor(self.visible.get(lo..=hi)?)
+        anchor(self.source_anchor_rows())
     }
 
     /// The source rows a rendered selection stands for: its new-side span, deletions, and owned changes.
     /// A comment on them equals the source comment on the same rows.
-    fn rendered_anchor_rows(&self) -> Vec<Row> {
+    fn rendered_anchor_rows(&self) -> Vec<&Row> {
         let (lo, hi) = self.selection_range();
         let units: Vec<&crate::rendered::UnitRows> =
             self.rendered.index.units().iter().filter(|u| u.end > lo && u.start <= hi).collect();
@@ -3755,7 +4156,21 @@ impl App {
                 });
                 within || owned()
             })
-            .map(|(_, row)| row.clone())
+            .map(|(_, row)| row)
+            .collect()
+    }
+
+    /// The diff lines a source selection's rows hold, either layout, in diff order.
+    fn source_anchor_rows(&self) -> Vec<&Row> {
+        let (lo, hi) = self.selection_range();
+        let picked = self.visible.get(lo..=hi).unwrap_or(&[]);
+        let olds: HashSet<u32> = picked.iter().filter_map(Visible::old_no).collect();
+        let news: HashSet<u32> = picked.iter().filter_map(Visible::new_no).collect();
+        diff_lines(&self.diff.rows)
+            .filter(|row| {
+                row.old_no().is_some_and(|n| olds.contains(&n))
+                    || row.new_no().is_some_and(|n| news.contains(&n))
+            })
             .collect()
     }
 
@@ -3805,6 +4220,7 @@ impl App {
             | Mode::Picker
             | Mode::BasePick
             | Mode::CommitPick
+            | Mode::WorktreePick
             | Mode::Search
             | Mode::Find => None,
         }
@@ -3838,8 +4254,17 @@ impl App {
             .filter(|(_, c)| c.file == file && self.comment_in_view(c))
             .collect();
         if !self.rendered_active() {
+            let split = self.split_on_screen();
             let rows = |c: &Comment| -> Vec<usize> {
-                (0..self.visible.len()).filter(|&i| line_in(c, &self.visible[i])).collect()
+                let hit: Vec<usize> =
+                    (0..self.visible.len()).filter(|&i| line_in(c, &self.visible[i])).collect();
+                // A split comment spans its lines' rows, fill rows between them included.
+                match (split, hit.first(), hit.last()) {
+                    (true, Some(&first), Some(&last)) => (first..=last)
+                        .filter(|&i| matches!(self.visible[i], Visible::Pair(_)))
+                        .collect(),
+                    _ => hit,
+                }
             };
             return shown.into_iter().map(|(ci, c)| (ci, rows(c))).collect();
         }
@@ -3930,10 +4355,13 @@ impl App {
         covers.then_some(index)
     }
 
-    /// Clear a pick no longer live, after each input; refreshes never call it.
-    pub fn settle_pick(&mut self) {
+    /// Clear a pick and a switch line no longer live, after each input; refreshes never call it.
+    pub fn settle_input(&mut self) {
         if self.comment_target.is_some() && self.live_target(&self.comment_rows()).is_none() {
             self.comment_target = None;
+        }
+        if self.switch_line.is_some_and(|(row, ..)| row != self.diff_cursor) {
+            self.switch_line = None;
         }
     }
 
@@ -3985,7 +4413,7 @@ impl App {
         self.focus = Focus::Diff;
         self.select_anchor = None; // a comment jump is navigation, not a selection extend
         self.diff_cursor = row;
-        self.reveal_diff = true;
+        self.reveal_diff(Reveal::Center);
         self.target_comment_card(ci);
     }
 
@@ -4017,7 +4445,7 @@ impl App {
 
     /// Whether the foot band opens: a file tab with at least one content row, source or rendered.
     pub fn find_available(&self) -> bool {
-        self.tab.is_file_tab() && self.visible.iter().any(Row::is_content)
+        self.tab.is_file_tab() && self.visible.iter().any(Visible::is_content)
     }
 
     /// `ctrl+f`: open find as a fresh gesture, focusing the read pane.
@@ -4031,7 +4459,7 @@ impl App {
         self.mode = Mode::Find;
         self.find = Some(Find::default());
         // The band takes the bottom row; keep the cursor above it.
-        self.reveal_diff = true;
+        self.reveal_diff(Reveal::Edge);
     }
 
     /// `:`: open the line field in the band's place, wherever find opens, over the open file.
@@ -4085,11 +4513,11 @@ impl App {
 
     /// Which side's numbers `:N` uses: the new side's, or the old side's in a file with no new
     /// lines (deleted or emptied).
-    fn line_side(&self) -> fn(&Row) -> Option<u32> {
-        if crate::marks::diff_lines(&self.visible).any(|r| r.new_no().is_some()) {
-            Row::new_no
+    fn line_side(&self) -> Side {
+        if diff_lines(&self.diff.rows).any(|r| r.new_no().is_some()) {
+            Side::New
         } else {
-            Row::old_no
+            Side::Old
         }
     }
 
@@ -4100,7 +4528,7 @@ impl App {
             return self.rendered.content.as_ref().map_or(0, |c| c.text.lines().count());
         }
         let side = self.line_side();
-        crate::marks::diff_lines(&self.visible).filter_map(side).max().unwrap_or(0) as usize
+        diff_lines(&self.diff.rows).filter_map(|r| r.no(side)).max().unwrap_or(0) as usize
     }
 
     /// Paste into the line field: a number or `$` replaces it, wrapping punctuation dropped;
@@ -4130,21 +4558,29 @@ impl App {
         if !self.find_available() {
             return;
         }
-        let last = u32::try_from(self.line_count()).unwrap_or(u32::MAX).max(1);
-        let n = n.clamp(1, last);
         self.clear_selection();
         self.focus = Focus::Diff;
+        self.land_line(n);
+    }
+
+    /// Land the cursor on line `n`, clamped to the file, opening what hides it, centered off screen.
+    fn land_line(&mut self, n: u32) {
+        if !self.find_available() {
+            return;
+        }
+        let last = u32::try_from(self.line_count()).unwrap_or(u32::MAX).max(1);
+        let n = n.clamp(1, last);
         if self.rendered_active() {
             self.open_disclosures_holding(n);
             self.diff_cursor = self.rendered.index.row_at_line(n).unwrap_or(0);
         } else {
             self.diff_cursor = self.land_on_line(n, self.line_side());
         }
-        self.reveal_center = true;
+        self.reveal_diff(Reveal::Center);
     }
 
     /// The row holding line `n` by `side`, its fold opened first: find steps and `:N` share it.
-    fn land_on_line(&mut self, n: u32, side: fn(&Row) -> Option<u32>) -> usize {
+    fn land_on_line(&mut self, n: u32, side: Side) -> usize {
         let row = line_row(&self.visible, n, side);
         let Some(anchor) = self.visible[row].fold_anchor() else { return row };
         self.expanded_folds.insert(anchor);
@@ -4181,7 +4617,7 @@ impl App {
     fn find_hits(&self, query: &str) -> (Vec<FindHit>, usize, bool) {
         let cs = find_case_sensitive(query);
         // A row's own text: a rendered row's never carries a marker's or a note's words.
-        let is_hit = |row: &Row| !find_match_ranges(&row.text(), query, cs).is_empty();
+        let is_hit = |text: &str| !find_match_ranges(text, query, cs).is_empty();
         let mut hits = Vec::new();
         let mut cursor_rank = 0usize;
         let mut on_match = false;
@@ -4190,13 +4626,17 @@ impl App {
             if here {
                 cursor_rank = hits.len();
             }
-            if let Row::Fold { lines } = row {
-                // Folded lines are context, so each has a new-side number.
-                let folded = lines.iter().filter(|l| is_hit(l)).filter_map(Row::new_no);
-                hits.extend(folded.map(|new_no| FindHit::Folded { new_no }));
-                continue;
-            }
-            let m = is_hit(row);
+            let m = match row {
+                Visible::Row(Row::Fold { lines }) => {
+                    // Folded lines are context, so each has a new-side number.
+                    let folded = lines.iter().filter(|l| is_hit(&l.text())).filter_map(Row::new_no);
+                    hits.extend(folded.map(|new_no| FindHit::Folded { new_no }));
+                    continue;
+                }
+                Visible::Row(row) => is_hit(&row.text()),
+                // A split row is one hit, matching on either half.
+                Visible::Pair(p) => p.rows().any(|r| is_hit(&r.text())),
+            };
             if here {
                 on_match = m;
             }
@@ -4226,9 +4666,9 @@ impl App {
         };
         match hits[target] {
             FindHit::Visible(v) => self.diff_cursor = v,
-            FindHit::Folded { new_no } => self.diff_cursor = self.land_on_line(new_no, Row::new_no),
+            FindHit::Folded { new_no } => self.diff_cursor = self.land_on_line(new_no, Side::New),
         }
-        self.reveal_diff = true;
+        self.reveal_diff(Reveal::Center);
     }
 
     /// Find's query; `None` for the line field, whose digits are no search.
@@ -4365,40 +4805,19 @@ impl App {
             return Ok(());
         }
         self.close_search();
-        // The origin tab stashes its place.
+        // The origin tab stashes its place; the pick, not the file left, opens.
         if self.tab != Tab::AllFiles {
-            self.set_tab(Tab::AllFiles)?;
+            self.switch_tab(Tab::AllFiles, false)?;
         }
         // The pick feeds the engine's frecency store, so ranking improves with use.
         self.search_track = Some(path.clone());
-        let mut expanded = false;
-        let mut dir = path.as_str();
-        while let Some((parent, _)) = dir.rsplit_once('/') {
-            expanded |= self.set_dir_expanded(parent, true);
-            dir = parent;
-        }
-        if expanded {
-            // Search never returns an ignored path, so no worktree walk is needed.
-            self.rebuild_file_rows();
-        }
-        self.reset_diff_view();
-        self.set_file_view(&path);
-        if let Some(fi) = self.file_row_of_path(&path) {
-            self.file_cursor = fi;
-            self.reveal_files = true;
-        }
+        // A pick opens as a tree click does, a code hit at its line.
+        self.point_at(&path);
+        self.reload_open_view();
         self.focus = Focus::Diff;
         if let Some(line) = line {
-            // Rendered, land on the block holding the line.
-            let last = self.visible.len().saturating_sub(1);
-            self.diff_cursor = if self.rendered_active() {
-                let line = u32::try_from(line).unwrap_or(u32::MAX);
-                self.rendered.index.row_at_line(line).unwrap_or(0)
-            } else {
-                (line.saturating_sub(1) as usize).min(last)
-            };
+            self.land_worktree_line(u32::try_from(line).unwrap_or(u32::MAX));
         }
-        self.reveal_diff = true;
         Ok(())
     }
 
@@ -4422,8 +4841,25 @@ impl App {
         use FooterAction as A;
 
         // A modal owns the bar, its exit right after the primary so trims spare it.
-        if self.confirming_quit {
-            return vec![(A::QuitDiscard, Primary), (A::Cancel, Do), (A::Send, Do), (A::Copy, Do)];
+        match self.question {
+            Some(Question::Quit) => {
+                return vec![
+                    (A::QuitDiscard, Primary),
+                    (A::Cancel, Do),
+                    (A::Send, Do),
+                    (A::Copy, Do),
+                ];
+            }
+            // The switch question mirrors quit's.
+            Some(Question::Switch(_)) => {
+                return vec![
+                    (A::SwitchDiscard, Primary),
+                    (A::Cancel, Do),
+                    (A::Send, Do),
+                    (A::Copy, Do),
+                ];
+            }
+            None => {}
         }
         match self.mode {
             Mode::Composing { .. } => {
@@ -4442,7 +4878,14 @@ impl App {
                 return vec![(A::PickAgent, Primary), (A::ClosePicker, Do), (A::MovePickerRow, Do)];
             }
             Mode::BasePick => {
-                return vec![(A::PickBaseRow, Primary), (A::ClosePicker, Do), (A::MoveBaseRow, Do)];
+                return vec![(A::PickBaseRow, Primary), (A::ClosePicker, Do), (A::MoveMenuRow, Do)];
+            }
+            Mode::WorktreePick => {
+                return vec![
+                    (A::PickWorktreeRow, Primary),
+                    (A::ClosePicker, Do),
+                    (A::MoveMenuRow, Do),
+                ];
             }
             Mode::CommitPick => {
                 // Nothing listed: only the exit.
@@ -4503,6 +4946,7 @@ impl App {
             if self.pr_snapshot().is_some() {
                 out.push((A::OpenPr, Primary));
             }
+            out.push((A::WorktreePick, Go));
             out.push((A::Search, Go));
             out.push((A::TogglePane, Go));
             out.push((A::NavigatorPosition, Go));
@@ -4592,6 +5036,7 @@ impl App {
         // `send` closes row 1 once a comment exists.
         if !self.store.is_empty() {
             out.push((A::Send, Send));
+            out.push((A::SendTo, Do));
         }
 
         // The `go` band: keys that work anywhere, never repeating row 1.
@@ -4606,6 +5051,7 @@ impl App {
         if !out.iter().any(|&(a, _)| a == A::CommitPick) {
             out.push((A::CommitPick, Go));
         }
+        out.push((A::WorktreePick, Go));
         out.push((A::Search, Go));
         // In-file find shows wherever the read pane has content to search.
         if self.find_available() {
@@ -4615,6 +5061,9 @@ impl App {
         // Rendered rows come pre-wrapped, so `w` acts only on source.
         if !self.rendered_active() {
             out.push((A::Wrap, Go));
+        }
+        if self.split_acts() {
+            out.push((A::Split, Go));
         }
         if !self.store.is_empty() {
             out.push((A::List, Go));
@@ -4664,13 +5113,13 @@ fn armed_row(rows: &[AgentChoice], last_sent: Option<&str>) -> usize {
 }
 
 impl App {
-    /// `Send`: one agent sends, several open the picker, none points at the clipboard.
-    pub fn send_to_agent(&mut self) {
+    /// `Send`, through the picker when `choose` (`send-to`); no agent points at the clipboard.
+    pub fn send_to_agent(&mut self, choose: bool) {
         if self.store.is_empty() {
             self.status = "no comments yet".to_string();
             return;
         }
-        match herdr::send_target(&self.herdr.ids) {
+        match herdr::send_target(&self.herdr.ids, choose) {
             Ok(SendTarget::One(agent)) => self.export_to_agent(&agent),
             Ok(SendTarget::Many(rows)) => self.open_picker(rows),
             Err(e) => self.status = crate::export::send_failure(&e, None, &self.copy_key()),
@@ -4787,29 +5236,150 @@ impl App {
         self.mode = Mode::BasePick;
     }
 
+    /// The worktree on screen, for the footer: its folder, and the checkout of what is on screen.
+    pub fn worktree_name(&self) -> (String, Option<&str>) {
+        let folder = self.repo.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let checkout = match self.tab {
+            Tab::Pr => self.read_checkout.as_ref(),
+            Tab::Changes | Tab::AllFiles => self.checkout.as_ref(),
+        };
+        (folder, checkout.map(String::as_str))
+    }
+
+    /// This clone's worktrees as picker rows, listed from the common dir, which outlives any one.
+    fn worktree_rows(&self) -> Result<Vec<WorktreeChoice>, git::GitFail> {
+        // Outside a repo there is nothing to list.
+        let Some(common) = git::common_dir(&self.repo) else { return Ok(Vec::new()) };
+        let here = git::canonical(&self.repo);
+        let home = git::canonical(&self.home);
+        let listed = git::worktrees(&common, &[&self.repo, &self.home])?;
+        Ok(listed
+            .into_iter()
+            .map(|c| {
+                let at = git::canonical(&c.path);
+                WorktreeChoice {
+                    current: at == here,
+                    home: at == home,
+                    shown_path: home_relative(&c.path),
+                    name: git::checkout_name(c.branch, c.head.as_deref()).unwrap_or_default(),
+                    path: c.path,
+                }
+            })
+            .collect())
+    }
+
+    /// Open the worktree picker on the current worktree; outside a repo, stay silent.
+    pub fn open_worktree_picker(&mut self) {
+        if self.mode != Mode::Normal {
+            return;
+        }
+        let mut rows = match self.worktree_rows() {
+            Ok(rows) => rows,
+            Err(e) => {
+                self.status = e.0;
+                return;
+            }
+        };
+        if rows.is_empty() {
+            return;
+        }
+        rows.sort_by(|a, b| {
+            (b.current, b.home).cmp(&(a.current, a.home)).then_with(|| a.name.cmp(&b.name))
+        });
+        self.worktree_picker =
+            Some(WorktreePicker { rows, cursor: 0, query: String::new(), caret: 0 });
+        self.mode = Mode::WorktreePick;
+    }
+
+    /// Close the picker, and the switch question asked over it.
+    pub fn close_worktree_picker(&mut self) {
+        if self.mode == Mode::WorktreePick {
+            self.mode = Mode::Normal;
+        }
+        self.worktree_picker = None;
+        if matches!(self.question, Some(Question::Switch(_))) {
+            self.question = None;
+        }
+    }
+
+    /// The open base or worktree picker's highlight, and how many rows its filter shows.
+    fn filter_highlight(&mut self) -> Option<(&mut usize, usize)> {
+        match self.mode {
+            Mode::BasePick => self.base_picker.as_mut().map(|p| {
+                let len = p.visible().len();
+                (&mut p.cursor, len)
+            }),
+            Mode::WorktreePick => self.worktree_picker.as_mut().map(|p| {
+                let len = p.visible().len();
+                (&mut p.cursor, len)
+            }),
+            _ => None,
+        }
+    }
+
+    /// Move the base or worktree picker's highlight through the visible view.
+    pub fn filter_picker_move(&mut self, delta: isize) {
+        if let Some((cursor, len)) = self.filter_highlight()
+            && len > 0
+        {
+            *cursor = step((*cursor).min(len - 1), delta, len);
+        }
+    }
+
+    /// Move that highlight to visible `row`, for a click; a row past the end is inert.
+    pub fn filter_picker_goto(&mut self, row: usize) {
+        if let Some((cursor, len)) = self.filter_highlight()
+            && row < len
+        {
+            *cursor = row;
+        }
+    }
+
+    /// Pick the highlight: the current one closes, a gone one says so, and unsent comments ask.
+    pub fn worktree_picker_pick(&mut self) {
+        let Some(wp) = &self.worktree_picker else { return };
+        let Some(choice) = wp.visible().get(wp.cursor).map(|c| (*c).clone()) else { return };
+        if choice.current {
+            self.close_worktree_picker();
+        } else if choice.path.is_dir() && self.unsent() > 0 {
+            self.question = Some(Question::Switch(choice));
+        } else {
+            self.request_switch(choice);
+        }
+    }
+
+    /// Close the picker and restart on `choice`, unless it vanished since the list was read.
+    fn request_switch(&mut self, choice: WorktreeChoice) {
+        self.close_worktree_picker();
+        if choice.path.is_dir() {
+            self.switch_to = Some(choice.path);
+        } else {
+            self.status = format!("worktree gone: {}", choice.shown_path);
+        }
+    }
+
+    /// The pick the switch question is asking about.
+    #[must_use]
+    pub fn switch_question(&self) -> Option<&WorktreeChoice> {
+        match &self.question {
+            Some(Question::Switch(choice)) => Some(choice),
+            _ => None,
+        }
+    }
+
+    /// Answer the switch question by switching and dropping the unsent comments.
+    pub fn switch_discarding(&mut self) {
+        match self.question.take() {
+            Some(Question::Switch(choice)) => self.request_switch(choice),
+            _ => self.close_worktree_picker(),
+        }
+    }
+
     pub fn close_base_picker(&mut self) {
         if self.mode == Mode::BasePick {
             self.mode = Mode::Normal;
         }
         self.base_picker = None;
-    }
-
-    /// Move the highlight through the visible view.
-    pub fn base_picker_move(&mut self, delta: isize) {
-        let Some(bp) = self.base_picker.as_mut() else { return };
-        let len = bp.visible().len();
-        if len > 0 {
-            bp.cursor = step(bp.cursor.min(len - 1), delta, len);
-        }
-    }
-
-    /// Move the highlight to visible `row`, for a click. A row past the end is inert
-    pub fn base_picker_goto(&mut self, row: usize) {
-        if let Some(bp) = self.base_picker.as_mut()
-            && row < bp.visible().len()
-        {
-            bp.cursor = row;
-        }
     }
 
     /// Pick the highlight, or a resolving query, and rebuild; the default row clears the pick.
@@ -5009,7 +5579,8 @@ impl App {
             return false;
         }
         let refs: Vec<&Comment> = self.store.iter().collect();
-        let text = format_all(&refs);
+        let prefix = self.plugin_config().and_then(crate::config::PluginConfig::review_prefix);
+        let text = format_review(prefix, &self.repo, &refs);
         let n = refs.len();
         logln!("export ({n}) -> {} ::\n{text}", target.label());
         let delivered = match target.export(&text) {
@@ -5033,12 +5604,17 @@ impl App {
         delivered
     }
 
+    /// Whether the frame loop should return: to quit, or to restart on another worktree.
+    pub fn leaving(&self) -> bool {
+        self.should_quit || self.switch_to.is_some()
+    }
+
     /// Quit, asking first while comments are unsent.
     pub fn request_quit(&mut self) {
         if self.unsent() == 0 {
             self.should_quit = true;
         } else {
-            self.confirming_quit = true;
+            self.question = Some(Question::Quit);
         }
     }
 
@@ -5051,7 +5627,7 @@ impl App {
 
     /// Whether the footer is the `Normal` bar with `?` and bands.
     pub fn footer_open_ended(&self) -> bool {
-        self.mode == Mode::Normal && !self.confirming_quit
+        self.mode == Mode::Normal && self.question.is_none()
     }
 
     /// The scope's changed-file count, on every tab.
@@ -5087,6 +5663,14 @@ fn cards_of(rows: &[(usize, Vec<usize>)]) -> Vec<(usize, usize)> {
     rows.iter().filter_map(|(ci, r)| r.last().map(|&last| (last, *ci))).collect()
 }
 
+/// `path` with the home directory written `~`.
+fn home_relative(path: &std::path::Path) -> String {
+    match dirs::home_dir().as_deref().and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
 /// Step `cur` by `delta` within `0..n`, clamping at both ends.
 fn step(cur: usize, delta: isize, n: usize) -> usize {
     if n == 0 {
@@ -5098,6 +5682,16 @@ fn step(cur: usize, delta: isize, n: usize) -> usize {
     } else {
         cur.saturating_sub(delta.unsigned_abs())
     }
+}
+
+/// The top row that leaves at most `lines` display lines above row `target`.
+fn top_leaving(heights: &[usize], target: usize, lines: usize) -> usize {
+    let (mut top, mut above) = (target, 0);
+    while top > 0 && above + heights[top - 1] <= lines {
+        top -= 1;
+        above += heights[top];
+    }
+    top
 }
 
 /// The minimal scroll that fits `cursor`'s row in the viewport, by display heights.
@@ -5114,6 +5708,24 @@ fn keep_in_view(cursor: usize, scroll: usize, heights: &[usize], viewport: usize
         top -= 1;
     }
     top
+}
+
+/// [`keep_in_view`] that also keeps `off` lines above and below `cursor`, capped at half the pane.
+fn keep_in_view_off(
+    cursor: usize,
+    scroll: usize,
+    heights: &[usize],
+    viewport: usize,
+    off: usize,
+) -> usize {
+    if viewport == 0 || heights.is_empty() || off == 0 {
+        return keep_in_view(cursor, scroll, heights, viewport);
+    }
+    let cursor = cursor.min(heights.len() - 1);
+    let off = off.min(viewport.saturating_sub(heights[cursor]) / 2);
+    let below = off.min(heights[cursor + 1..].iter().sum());
+    let top = keep_in_view(cursor, scroll, heights, viewport - below);
+    top.min(top_leaving(heights, cursor, off))
 }
 
 /// Clamp a scroll so the window shows no blank tail.
@@ -5245,18 +5857,26 @@ fn is_change(row: &Row) -> bool {
     }
 }
 
+/// Whether row `v` shows a change: a changed source or rendered row, or a changed pair.
+fn shows_change(v: &Visible) -> bool {
+    match v {
+        Visible::Row(row) => is_change(row),
+        Visible::Pair(p) => !matches!(p, Pair::Same(_)),
+    }
+}
+
 /// The nearest hunk start past `from` that way, or from the far end when `None`.
-fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
-    let joins = |a: &Row, b: &Row| match (a, b) {
+fn hunk_row(rows: &[Visible], from: Option<usize>, forward: bool) -> Option<usize> {
+    let joins = |a: &Visible, b: &Visible| match (a.row(), b.row()) {
         (
-            Row::Rendered { kind: RenderedKind::Block { bar: Some(_), .. }, .. },
-            Row::Rendered { kind: RenderedKind::Block { .. }, .. },
+            Some(Row::Rendered { kind: RenderedKind::Block { bar: Some(_), .. }, .. }),
+            Some(Row::Rendered { kind: RenderedKind::Block { .. }, .. }),
         ) => true,
-        (Row::Rendered { .. }, _) | (_, Row::Rendered { .. }) => false,
-        _ => is_change(a),
+        (Some(Row::Rendered { .. }), _) | (_, Some(Row::Rendered { .. })) => false,
+        _ => shows_change(a),
     };
     let starts_hunk =
-        |&i: &usize| is_change(&rows[i]) && (i == 0 || !joins(&rows[i - 1], &rows[i]));
+        |&i: &usize| shows_change(&rows[i]) && (i == 0 || !joins(&rows[i - 1], &rows[i]));
     if forward {
         (from.map_or(0, |i| i + 1)..rows.len()).find(starts_hunk)
     } else {
@@ -5301,28 +5921,54 @@ fn worktree_content(
     }
 }
 
+/// The read pane's layout: one column, split, or rendered markdown.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shown {
+    Unified,
+    Split,
+    Rendered,
+}
+
+/// What a rendered rebuild did: nothing renders, the rows stand as built, or they were built anew.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Render {
+    Nothing,
+    Kept,
+    Built,
+}
+
+/// Where a place sat before a rebuild: its current new-side line, and the line it is on, by side.
+#[derive(Clone, Copy)]
+struct Spot {
+    new: Option<u32>,
+    at: Option<(Side, u32)>,
+}
+
 /// The current line row `i` stands for, else a fold's first, the next below, the next above.
-fn source_line_at(rows: &[Row], i: usize) -> Option<u32> {
-    let line_of = |r: &Row| match r {
-        Row::Fold { lines } => lines.first().and_then(Row::new_no),
-        _ => r.new_no(),
+fn source_line_at(rows: &[Visible], i: usize) -> Option<u32> {
+    let line_of = |v: &Visible| match v.row() {
+        Some(Row::Fold { lines }) => lines.first().and_then(Row::new_no),
+        _ => v.new_no(),
     };
     let at = i.min(rows.len());
     rows[at..].iter().find_map(line_of).or_else(|| rows[..at].iter().rev().find_map(line_of))
 }
 
-/// The row holding `line` by `side`: its own, the fold hiding it, the next, or the last numbered.
-fn line_row(rows: &[Row], line: u32, side: fn(&Row) -> Option<u32>) -> usize {
-    // A row's lines, a collapsed fold's hidden ones included.
-    let any_line = |r: &Row, pred: &dyn Fn(Option<u32>) -> bool| {
-        crate::marks::diff_lines(std::slice::from_ref(r)).any(|l| pred(side(l)))
+/// The line numbers on `side` that row `v` holds, a collapsed fold's hidden ones included.
+fn numbers_on(v: &Visible, side: Side) -> impl Iterator<Item = u32> + '_ {
+    let rows = match v {
+        Visible::Row(row) => std::slice::from_ref(row),
+        Visible::Pair(p) => p.half(side).map_or(&[][..], std::slice::from_ref),
     };
-    let numbered = |r: &Row| any_line(r, &|n| n.is_some());
-    let holds = |r: &Row| any_line(r, &|n| n == Some(line));
+    diff_lines(rows).filter_map(move |l| l.no(side))
+}
+
+/// The row holding `line` by `side`: its own, the fold hiding it, the next, or the last numbered.
+fn line_row(rows: &[Visible], line: u32, side: Side) -> usize {
     rows.iter()
-        .position(holds)
-        .or_else(|| rows.iter().position(|r| side(r).is_some_and(|n| n > line)))
-        .or_else(|| rows.iter().rposition(numbered))
+        .position(|v| numbers_on(v, side).any(|n| n == line))
+        .or_else(|| rows.iter().position(|v| v.no(side).is_some_and(|n| n > line)))
+        .or_else(|| rows.iter().rposition(|v| numbers_on(v, side).next().is_some()))
         .unwrap_or(rows.len().saturating_sub(1))
 }
 
@@ -5354,21 +6000,17 @@ impl LineMap {
     }
 }
 
-/// Whether source row `row` lies in `c`'s range on its side.
-fn line_in(c: &Comment, row: &Row) -> bool {
-    let no = match c.side {
-        Side::New => row.new_no(),
-        Side::Old => row.old_no(),
-    };
-    no.is_some_and(|n| c.start <= n && n <= c.end)
+/// Whether row `v` holds a line in `c`'s range on its side.
+fn line_in(c: &Comment, v: &Visible) -> bool {
+    v.no(c.side).is_some_and(|n| c.start <= n && n <= c.end)
 }
 
 /// The `(side, start, end, snippet)` of diff rows: new side unless all deletions.
-fn anchor(selected: &[Row]) -> Option<(Side, u32, u32, String)> {
+fn anchor<'a>(selected: impl IntoIterator<Item = &'a Row>) -> Option<(Side, u32, u32, String)> {
     let mut new: Option<(u32, u32)> = None;
     let mut old: Option<(u32, u32)> = None;
     let mut snippet = String::new();
-    for row in selected.iter().filter(|row| row.is_content()) {
+    for row in selected {
         if !snippet.is_empty() {
             snippet.push('\n');
         }
@@ -5387,12 +6029,30 @@ fn anchor(selected: &[Row]) -> Option<(Side, u32, u32, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, Mode};
-    use crate::config::NavigatorPosition;
+    use super::{App, Mode, Visible};
+    use crate::config::{DiffView, NavigatorPosition};
     use crate::model::{Comment, CommitPick, Scope, Side};
     use crate::test_support::test_repo;
     use crate::world::{PickStatus, PickVerdict};
     use std::path::PathBuf;
+
+    #[test]
+    fn scrolloff_keeps_lines_around_the_cursor_and_centers_when_large() {
+        use super::keep_in_view_off as k;
+        let h = [1; 100];
+        // Off is 0: the minimal scroll, unchanged.
+        assert_eq!(k(30, 0, &h, 20, 0), 11);
+        // Moving down keeps 8 lines below; moving up keeps 8 above.
+        assert_eq!(k(30, 0, &h, 20, 8), 19);
+        assert_eq!(k(30, 40, &h, 20, 8), 22);
+        // Inside the margin band nothing scrolls.
+        assert_eq!(k(30, 20, &h, 20, 8), 20);
+        // A huge off centers: 10 above, 9 below in a 20-line pane.
+        assert_eq!(k(30, 0, &h, 20, 999), 20);
+        assert_eq!(k(31, 20, &h, 20, 999), 21);
+        // At the top there is nothing above to keep.
+        assert_eq!(k(2, 0, &h, 20, 999), 0);
+    }
 
     #[test]
     fn a_pr_settled_highlight_survives_a_kept_snapshot_and_blanks_on_a_replace() {
@@ -5447,18 +6107,28 @@ mod tests {
     }
 
     #[test]
-    fn config_recovery_carries_the_rendered_choice_and_open_details() {
+    fn config_recovery_carries_the_view_choices_and_open_details() {
         let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
         old.mode = Mode::List;
         old.markdown_rendered = true; // flipped to rendered, away from the default
+        old.split_chosen = Some(DiffView::Split);
+        old.switch_line = Some((3, Side::Old, 2));
+        let row = super::Row::Context { old_no: 1, new_no: 1, spans: Vec::new() };
+        old.visible = vec![Visible::Pair(super::Pair::Same(row))];
         old.rendered.content =
             Some(crate::rendered::Content { text: "# doc".to_string(), old: None, nothing: false });
         old.rendered.details.insert("Details#0".to_string(), true);
+        old.checkout = Some("first".to_string());
 
         let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
+        recovered.checkout = Some("second".to_string()); // its load ran after a checkout
         recovered.carry_authored_state_from(&mut old);
+        assert_eq!(recovered.worktree_name().1, Some("first"), "the branch of the carried view");
 
         assert!(recovered.markdown_rendered, "the pane's choice survives a modal's recovery");
+        assert_eq!(recovered.split_chosen, Some(DiffView::Split), "so does split");
+        assert_eq!(recovered.switch_line, Some((3, Side::Old, 2)), "and the switch-back line");
+        assert!(recovered.split_on_screen(), "and the split rows the line was remembered on");
         assert_eq!(recovered.rendered.text(), Some("# doc"));
         assert_eq!(
             recovered.rendered.details.get("Details#0"),
@@ -5493,7 +6163,10 @@ mod tests {
         assert_eq!(colors(&recovered), before, "the list freezes the view under it");
         recovered.mode = Mode::Normal;
         recovered.sync_rendered_width(80); // the next frame
-        assert!(matches!(recovered.visible.first(), Some(crate::diff::Row::Rendered { .. })));
+        assert!(matches!(
+            recovered.visible.first().and_then(Visible::row),
+            Some(crate::diff::Row::Rendered { .. })
+        ));
         assert_ne!(colors(&recovered), before, "the rows repaint in the recovered theme");
     }
 
@@ -5691,6 +6364,18 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_born_blocked_recovers_onto_the_configured_diff_view() {
+        let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "diff_view = \"split\"\n").unwrap();
+        let config = crate::config::plugin_config_in(dir.path()).unwrap();
+        let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
+        recovered.seed_from_config(&config);
+        recovered.carry_authored_state_from(&mut old);
+        assert_eq!(recovered.split_chosen, Some(DiffView::Split), "the blocked pane never chose");
+    }
+
+    #[test]
     fn config_recovery_keeps_the_hidden_navigator() {
         let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
         old.navigator_hidden = true;
@@ -5777,7 +6462,10 @@ mod tests {
             Row::Insertion { new_no: 10, spans: bare(), emphasis: Vec::new(), cr: false },
             Row::Deletion { old_no: 11, spans: bare(), emphasis: Vec::new(), cr: false },
             Row::Insertion { new_no: 12, spans: bare(), emphasis: Vec::new(), cr: false },
-        ];
+        ]
+        .into_iter()
+        .map(Visible::Row)
+        .collect();
         app.diff_cursor = 1;
         app
     }
@@ -5801,12 +6489,12 @@ mod tests {
                 "read pane, nothing numbered above",
                 Box::new(|a: &mut App| {
                     a.visible.truncate(1);
-                    a.visible[0] = crate::diff::Row::Deletion {
+                    a.visible[0] = Visible::Row(crate::diff::Row::Deletion {
                         old_no: 3,
                         spans: Vec::new(),
                         emphasis: Vec::new(),
                         cr: false,
-                    };
+                    });
                     a.diff_cursor = 0;
                 }),
                 target("src/lib.rs", 1),
@@ -5857,8 +6545,13 @@ mod tests {
                 "navigator, on a directory row",
                 Box::new(|a: &mut App| {
                     a.focus = crate::Focus::Files;
-                    a.file_rows[0].kind =
-                        RowKind::Dir { path: "src".into(), expanded: true, has_change: false };
+                    a.file_rows[0].kind = RowKind::Dir {
+                        path: "src".into(),
+                        expanded: true,
+                        has_change: false,
+                        additions: 0,
+                        deletions: 0,
+                    };
                 }),
                 None,
             ),

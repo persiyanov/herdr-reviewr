@@ -60,14 +60,20 @@ impl Config {
     }
 }
 
-const PLUGIN_CONFIG_KEYS: [&str; 15] = [
+/// Lines a keyboard move keeps between the diff cursor and the pane's edges, unless configured.
+pub const DEFAULT_SCROLLOFF: usize = 3;
+
+const PLUGIN_CONFIG_KEYS: [&str; 19] = [
     "theme",
     "default_scope",
     "markdown_view",
+    "diff_view",
     "navigator_position",
     "toggle_placement",
     "toggle_direction",
     "auto_open",
+    "follow_file_across_tabs",
+    "scrolloff",
     "github_host",
     "gitlab_host",
     "azure_devops_host",
@@ -75,6 +81,7 @@ const PLUGIN_CONFIG_KEYS: [&str; 15] = [
     "url_opener",
     "max_file_bytes",
     "max_file_lines",
+    "review_prefix",
     "keybindings",
 ];
 
@@ -84,6 +91,14 @@ pub enum MarkdownView {
     #[default]
     Source,
     Rendered,
+}
+
+/// How a fresh pane shows a diff: one column, or old and new side by side.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffView {
+    #[default]
+    Unified,
+    Split,
 }
 
 /// Where the navigator sits around the read pane.
@@ -166,16 +181,20 @@ pub struct PluginConfig {
     theme: String,
     default_scope: crate::model::Scope,
     markdown_view: MarkdownView,
+    diff_view: DiffView,
     navigator_position: NavigatorPosition,
     toggle_placement: TogglePlacement,
     toggle_direction: ToggleDirection,
     auto_open: bool,
+    follow_file_across_tabs: bool,
+    scrolloff: usize,
     github_host: Option<String>,
     gitlab_host: Option<String>,
     azure_devops_host: Option<String>,
     editor: Option<String>,
     url_opener: Option<String>,
     budget: crate::diff::Budget,
+    review_prefix: Option<String>,
     keymap: crate::keymap::Keymap,
 }
 
@@ -185,16 +204,20 @@ impl Default for PluginConfig {
             theme: crate::theme::DEFAULT.to_owned(),
             default_scope: crate::model::Scope::Uncommitted,
             markdown_view: MarkdownView::Source,
+            diff_view: DiffView::Unified,
             navigator_position: NavigatorPosition::Right,
             toggle_placement: TogglePlacement::Split,
             toggle_direction: ToggleDirection::Right,
             auto_open: true,
+            follow_file_across_tabs: true,
+            scrolloff: DEFAULT_SCROLLOFF,
             github_host: None,
             gitlab_host: None,
             azure_devops_host: None,
             editor: None,
             url_opener: None,
             budget: crate::diff::Budget::default(),
+            review_prefix: None,
             keymap: crate::keymap::Keymap::default(),
         }
     }
@@ -215,6 +238,11 @@ impl PluginConfig {
         self.markdown_view
     }
 
+    /// How a fresh pane shows a diff; only `|` flips a running one.
+    pub fn diff_view(&self) -> DiffView {
+        self.diff_view
+    }
+
     pub fn navigator_position(&self) -> NavigatorPosition {
         self.navigator_position
     }
@@ -229,6 +257,16 @@ impl PluginConfig {
 
     pub fn auto_open(&self) -> bool {
         self.auto_open
+    }
+
+    /// Whether a switch between `Changes` and `All files` opens the file and line left.
+    pub fn follow_file_across_tabs(&self) -> bool {
+        self.follow_file_across_tabs
+    }
+
+    /// Lines kept above and below the diff cursor, as vim's `scrolloff`; a large value centers it.
+    pub fn scrolloff(&self) -> usize {
+        self.scrolloff
     }
 
     pub fn github_host(&self) -> Option<&str> {
@@ -264,6 +302,9 @@ impl PluginConfig {
     /// The file size budgets past which the read pane shows the too-large notice.
     pub fn budget(&self) -> crate::diff::Budget {
         self.budget
+    /// Text that heads every exported review, as written.
+    pub fn review_prefix(&self) -> Option<&str> {
+        self.review_prefix.as_deref()
     }
 
     /// The resolved keymap: the defaults with this snapshot's `[keybindings]` applied.
@@ -378,6 +419,13 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
                 }
             };
     }
+    if let Some(value) = table.get("diff_view") {
+        config.diff_view = match string_value(path, "diff_view", value, "one of unified, split")? {
+            "unified" => DiffView::Unified,
+            "split" => DiffView::Split,
+            _ => return Err(value_error(path, value, "diff_view", "one of unified, split")),
+        };
+    }
     if let Some(value) = table.get("navigator_position") {
         config.navigator_position = match string_value(
             path,
@@ -434,6 +482,17 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         config.auto_open =
             value.as_bool().ok_or_else(|| value_error(path, value, "auto_open", "a boolean"))?;
     }
+    if let Some(value) = table.get("follow_file_across_tabs") {
+        config.follow_file_across_tabs = value
+            .as_bool()
+            .ok_or_else(|| value_error(path, value, "follow_file_across_tabs", "a boolean"))?;
+    }
+    if let Some(value) = table.get("scrolloff") {
+        config.scrolloff = value
+            .as_integer()
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| value_error(path, value, "scrolloff", "a non-negative integer"))?;
+    }
     if let Some(value) = table.get("github_host") {
         config.github_host = Some(parse_forge_host(path, "github_host", value)?);
     }
@@ -479,6 +538,12 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
     }
     if let Some(value) = table.get("max_file_lines") {
         config.budget.lines = budget_value(path, "max_file_lines", value)?;
+    if let Some(value) = table.get("review_prefix") {
+        let prefix = value
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+            .ok_or_else(|| value_error(path, value, "review_prefix", "non-empty text"))?;
+        config.review_prefix = Some(prefix.to_owned());
     }
     // One hostname per forge; the later key's error names the earlier owner.
     let host_keys = [
@@ -698,7 +763,8 @@ pub(crate) fn plugin_config_from_herdr() -> Result<PluginConfig, PluginConfigErr
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, MarkdownView, NavigatorPosition, PluginConfig, ToggleDirection, TogglePlacement,
+        Config, DiffView, MarkdownView, NavigatorPosition, PluginConfig, ToggleDirection,
+        TogglePlacement,
     };
     use crate::keymap::KeyCode;
     use crate::model::Scope;
@@ -769,10 +835,12 @@ mod tests {
         assert_eq!(config.toggle_placement(), TogglePlacement::Split);
         assert_eq!(config.toggle_direction(), ToggleDirection::Right);
         assert!(config.auto_open());
+        assert!(config.follow_file_across_tabs());
         assert_eq!(config.github_host(), None);
         assert_eq!(config.url_opener(), None);
         assert_eq!(config.markdown_view(), MarkdownView::Source);
         assert_eq!(config.budget(), crate::diff::Budget::default());
+        assert_eq!(config.diff_view(), DiffView::Unified);
     }
 
     #[test]
@@ -787,19 +855,23 @@ mod tests {
                 "toggle_placement = \"overlay\"\n",
                 "toggle_direction = \"down\"\n",
                 "auto_open = false\n",
+                "follow_file_across_tabs = false\n",
                 "github_host = \"GitHub.Example.COM\"\n",
                 "markdown_view = \"rendered\"\n",
+                "diff_view = \"split\"\n",
             ),
         )
         .unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.markdown_view(), MarkdownView::Rendered);
+        assert_eq!(config.diff_view(), DiffView::Split);
         assert_eq!(config.theme(), "tokyo-night");
         assert_eq!(config.default_scope(), Scope::LastTurn);
         assert_eq!(config.navigator_position(), NavigatorPosition::Bottom);
         assert_eq!(config.toggle_placement(), TogglePlacement::Overlay);
         assert_eq!(config.toggle_direction(), ToggleDirection::Down);
         assert!(!config.auto_open());
+        assert!(!config.follow_file_across_tabs());
         assert_eq!(config.github_host(), Some("github.example.com"));
     }
 
@@ -822,6 +894,19 @@ mod tests {
         std::fs::write(&path, "theme = \"tokyo-night\"\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.editor(), None);
+    }
+
+    #[test]
+    fn the_review_prefix_reaches_the_resolved_config_as_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "review_prefix = \"\"\"\n/fix {all} of these\n\n  then test\n\"\"\"\n",
+        )
+        .unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.review_prefix(), Some("/fix {all} of these\n\n  then test\n"));
     }
 
     #[test]
@@ -896,10 +981,14 @@ mod tests {
             ("default_scope = \"commits\"\n", "`default_scope`"),
             ("markdown_view = \"preview\"\n", "`markdown_view`"),
             ("markdown_view = true\n", "`markdown_view`"),
+            ("diff_view = \"side-by-side\"\n", "`diff_view`"),
             ("navigator_position = \"center\"\n", "`navigator_position`"),
             ("toggle_placement = \"left\"\n", "`toggle_placement`"),
             ("toggle_direction = \"left\"\n", "`toggle_direction`"),
             ("auto_open = \"yes\"\n", "`auto_open`"),
+            ("follow_file_across_tabs = \"no\"\n", "`follow_file_across_tabs`"),
+            ("scrolloff = -1\n", "`scrolloff`"),
+            ("scrolloff = \"8\"\n", "`scrolloff`"),
             ("github_host = \"https://github.example.com\"\n", "`github_host`"),
             ("editor = \"\"\n", "`editor`"),
             ("editor = \"   \"\n", "`editor`"),
@@ -914,6 +1003,9 @@ mod tests {
             ("url_opener = \"bridge {ur}\"\n", "`{ur}`"),
             ("url_opener = \"''\"\n", "`url_opener`"),
             ("url_opener = \"{url} --new\"\n", "`url_opener`"),
+            ("review_prefix = \"\"\n", "`review_prefix`"),
+            ("review_prefix = \"\"\"\n  \n\"\"\"\n", "`review_prefix`"),
+            ("review_prefix = 42\n", "`review_prefix`"),
             ("github_host = \"github.com\"\n", "`github_host`"),
             ("github_host = \"gitlab.com\"\n", "`github_host`"),
             ("gitlab_host = \"gitlab.com\"\n", "`gitlab_host`"),
@@ -1009,7 +1101,11 @@ mod tests {
         assert_eq!(keymap.action_for(Key::plain('c')), Some(Action::Comment));
         assert_eq!(keymap.action_for(Key::plain('x')), Some(Action::Send));
         assert_eq!(keymap.action_for(Key::plain('s')), None, "a binding replaces its defaults");
-        assert_eq!(keymap.action_for(Key::plain('S')), None);
+        assert_eq!(
+            keymap.action_for(Key::plain('S')),
+            Some(Action::SendTo),
+            "`send-to` keeps its own"
+        );
         assert_eq!(keymap.action_for(Key::plain('v')), Some(Action::Select), "unbound keep theirs");
     }
 
@@ -1097,6 +1193,27 @@ mod tests {
             error.contains("`expand`") && error.contains("`comments`") && error.contains('l'),
             "{error}"
         );
+    }
+
+    #[test]
+    fn switch_pane_rebinds_and_tab_is_a_key_name() {
+        use crate::keymap::{Action, Key, KeyCode};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let tab = Key::named(KeyCode::Tab);
+        assert_eq!(PluginConfig::default().keymap().action_for(tab), Some(Action::SwitchPane));
+
+        // `l` is `comments` by default, so taking it names both.
+        std::fs::write(&path, "[keybindings]\nswitch-pane = [\"l\"]\n").unwrap();
+        let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("`switch-pane`") && error.contains("`comments`"), "{error}");
+
+        // A freed `tab` can serve another action.
+        std::fs::write(&path, "[keybindings]\nswitch-pane = [\"h\"]\nnext-file = [\"tab\"]\n")
+            .unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.keymap().action_for(Key::plain('h')), Some(Action::SwitchPane));
+        assert_eq!(config.keymap().action_for(tab), Some(Action::NextFile));
     }
 
     #[test]
@@ -1196,7 +1313,8 @@ mod tests {
         assert_eq!(config.keymap().bindings().len(), Action::names().count());
         assert!(config.keymap().bindings().iter().all(|(_, keys)| !keys.is_empty()));
         assert_eq!(keys_of(&config, Action::Quit), ["q"]);
-        assert_eq!(keys_of(&config, Action::Send), ["s", "S"]);
+        assert_eq!(keys_of(&config, Action::Send), ["s"]);
+        assert_eq!(keys_of(&config, Action::SendTo), ["S"]);
     }
 
     /// `action`'s keys in `config`, spelled as the config file spells them.

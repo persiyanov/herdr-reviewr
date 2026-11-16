@@ -6,6 +6,123 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.52.2] — 2026-11-15
+
+### Fixed
+- **A markdown file's front matter reads as YAML** in both the rendered and the source view, not as a rule over a heading.
+- **Code in rendered markdown wraps at spaces**, as the diff does, instead of mid-word.
+
+## [0.52.1] — 2026-11-08
+
+### Changed
+- **Dependencies refreshed and built with Rust 1.99.1**, including the file watcher's macOS and Linux fixes (notify 9.0.0-rc.7).
+  Thanks [@mitja-kleider](https://github.com/mitja-kleider) ([#164](https://github.com/persiyanov/herdr-reviewr/pull/164)).
+
+## [0.52.0] — 2026-11-08
+
+### Changed
+- **Toggle, open and close act on your own reviewr**: the one in the focused tab, or with `tab` placement your worktree's reviewr tab. Toggle closes a reviewr you can see, takes you to one you can't, and opens one if there's none.
+  Thanks [@jmoreno-blr](https://github.com/jmoreno-blr) ([#114](https://github.com/persiyanov/herdr-reviewr/issues/114)).
+- **Send goes straight to the agent beside reviewr**: the only agent in the workspace, else the only one in reviewr's tab. Otherwise the picker opens as before.
+  Thanks [@black-snow](https://github.com/black-snow) ([#160](https://github.com/persiyanov/herdr-reviewr/issues/160)).
+- **The agent picker names agents by their pane's label**, so several Claude Code panes no longer all read `claude`.
+  Thanks [@199nishikawa](https://github.com/199nishikawa) ([#133](https://github.com/persiyanov/herdr-reviewr/pull/133)).
+- **Breaking: `S` opens the agent picker** (`send-to`) instead of sending. A config that binds `S` to any action now collides with it and must move one of them.
+
+### Added
+- **A collapsed folder in Changes shows its line totals**, `+N −M` for everything inside it.
+  Thanks [@Zahlii](https://github.com/Zahlii) ([#161](https://github.com/persiyanov/herdr-reviewr/pull/161)).
+
+### Fixed
+- **reviewr no longer opens with stray borders.** The toggle asks herdr to size a fresh pane at once (herdr#3799 left it cropped for its first frames), and the repo loads in the background, so the pane answers keys and resizes while it loads. Until the repo is in, the file list shows nothing rather than "no changes", and a failed load says so.
+
+## [0.51.0] — 2026-11-07
+
+### Added
+- **`switch-pane` rebinds the pane switch**, `tab` by default, so `h` or any other key can move between the file list and the diff.
+  Thanks [@ianptkcs](https://github.com/ianptkcs) ([#89](https://github.com/persiyanov/herdr-reviewr/issues/89)).
+- **`scrolloff` keeps lines of context around the diff cursor**: 3 by default, `0` for the old edge, `999` to stay mid-pane.
+  Thanks [@AnteWall](https://github.com/AnteWall) ([#166](https://github.com/persiyanov/herdr-reviewr/pull/166)).
+
+### Changed
+- **Find steps, hunk steps and comment jumps center a target off screen**, as `:N` and search picks do.
+  Thanks [@spion](https://github.com/spion) ([#156](https://github.com/persiyanov/herdr-reviewr/pull/156)).
+
+### Fixed
+- **alt+backspace, alt+delete and alt+d delete a word in every text field**, the `:` line field included, and other alt chords no longer type a letter.
+  Thanks [@reobin](https://github.com/reobin) ([#145](https://github.com/persiyanov/herdr-reviewr/pull/145)).
+
+## [0.50.1] — 2026-11-07
+
+### Security
+- **reviewr's git calls run no fsmonitor program and no git hooks**, so a planted `.git/config` or hook no longer runs when a pane refreshes.
+  Thanks [@mitja-kleider](https://github.com/mitja-kleider) ([#163](https://github.com/persiyanov/herdr-reviewr/pull/163)).
+
+### Fixed
+- **With `toggle_placement = "tab"`, toggle and open show reviewr's new tab** again. Since herdr 0.9 the tab opened behind the one on screen.
+  Thanks [@jfmainville](https://github.com/jfmainville) ([#132](https://github.com/persiyanov/herdr-reviewr/pull/132)).
+- **The PR tab finds the pull request behind an SSH host alias**, such as `git@github-work:owner/repo.git` for a second GitHub account. reviewr reads the real host from your ssh config, as `gh` does.
+  Thanks [@csjoshc](https://github.com/csjoshc) ([#169](https://github.com/persiyanov/herdr-reviewr/issues/169)).
+- **The PR tab finds a `gh`, `glab`, or `az` installed by Homebrew on Linux**, even when herdr's server started without your shell's `PATH`.
+  Thanks [@baozich](https://github.com/baozich) ([#165](https://github.com/persiyanov/herdr-reviewr/pull/165)).
+
+## [0.50.0] — 2026-11-07
+
+### Changed
+- **Switching between Changes and All files keeps your file and line** when the other tab lists the file.
+  `follow_file_across_tabs = false` gives each tab its own place, as before.
+- **Picking the open file in search keeps your place**, as a click in the file tree does.
+
+### Fixed
+- **A search hit inside a collapsed `<details>` opens it** and lands on its line.
+- **A search pick of a file created moments ago stays open** when the file tree catches up.
+
+## [0.49.1] — 2026-11-04
+
+### Fixed
+- **All files lists an ignored folder inside an untracked one**, such as `docs/library/` while `docs/` is uncommitted.
+
+## [0.49.0] — 2026-10-29
+
+### Added
+- **Worktree switch**: `W` lists this repo's worktrees, and a pick reviews that one in the same pane until it closes.
+  Thanks [@cajames](https://github.com/cajames) ([#152](https://github.com/persiyanov/herdr-reviewr/pull/152)) and [@jmoreno-blr](https://github.com/jmoreno-blr) ([#115](https://github.com/persiyanov/herdr-reviewr/issues/115)).
+- **Breaking: `W` is a new default key.** A `[keybindings]` config that already uses `W` now collides and must move it.
+
+### Changed
+- **Every review names its worktree**: a send or copy carries `Worktree: <path>` after `review_prefix`, ahead of the comments.
+- **Footer**: the worktree on screen, as `folder · branch` (once when they match), closes the row at the right, and `?` moves to the left.
+- **Last turn** follows this workspace's agents when none works in the reviewed worktree, so a switched pane still tracks turns.
+
+### Fixed
+- **A branch that shares a tag's name** reads as itself, not `heads/<name>`, in the PR tab and the base picker.
+- **Emoji in the footer** count by their columns, so a long status no longer runs past the edge.
+
+## [0.48.0] — 2026-10-19
+
+### Added
+- **Review prefix**: `review_prefix` puts your own text above the comments on every send and copy.
+  Thanks [@macintacos](https://github.com/macintacos) ([#129](https://github.com/persiyanov/herdr-reviewr/issues/129)).
+
+## [0.47.0] — 2026-10-19
+
+### Added
+- **Split view**: `|` shows the diff side by side, and comments, find and copy work on both halves. `diff_view = "split"` starts a fresh pane in split.
+  Thanks [@Tarektouati](https://github.com/Tarektouati) ([#116](https://github.com/persiyanov/herdr-reviewr/issues/116)).
+- **Breaking: `|` is a new default key.** A `[keybindings]` config that already uses `|` now collides and must move it.
+
+## [0.46.2] — 2026-10-18
+
+### Fixed
+- **Toggle from a plugin's pane**: opening from a pane inside another plugin's checkout, like herdr-file-viewer, now reviews the agent's repo, else another pane's, not that checkout.
+  Thanks [@Branpolo](https://github.com/Branpolo) ([#130](https://github.com/persiyanov/herdr-reviewr/issues/130)).
+
+## [0.46.1] — 2026-10-18
+
+### Fixed
+- **Windows install from PowerShell 7**: installing no longer fails at "verifying checksum" when herdr was started from pwsh 7.
+  Thanks [@v-senninha-v](https://github.com/v-senninha-v) ([#127](https://github.com/persiyanov/herdr-reviewr/issues/127)) and [@Yivas](https://github.com/Yivas) ([#142](https://github.com/persiyanov/herdr-reviewr/issues/142)).
+
 ## [0.46.0] — 2026-10-06
 
 ### Changed

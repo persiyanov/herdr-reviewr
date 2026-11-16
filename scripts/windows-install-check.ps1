@@ -134,6 +134,17 @@ try {
     if ($run.Code -ne 0) { Fail-Row 'late' "exited $($run.Code)" }
     $got = (Get-FileHash -LiteralPath (Join-Path $root 'bin\herdr-reviewr.exe')).Hash
     if ($want -ne $got) { Fail-Row 'late' "installed $got, the release holds $want" }
+
+    # herdr started from pwsh 7 hands the build pwsh's PSModulePath, PS7's module dirs first.
+    Write-Host "row: a PSModulePath inherited from pwsh 7 still installs"
+    $root = New-PluginRoot 'pwsh'
+    $inherited = $env:PSModulePath
+    $env:PSModulePath = & pwsh -NoProfile -Command '[Console]::Out.Write($env:PSModulePath)'
+    try { $run = Invoke-Install $root $goodUrl } finally { $env:PSModulePath = $inherited }
+    if ($run.Code -ne 0) { Fail-Row 'pwsh' "exited $($run.Code)" }
+    Assert-Prefixed 'pwsh' $run.Lines
+    $got = (Get-FileHash -LiteralPath (Join-Path $root 'bin\herdr-reviewr.exe')).Hash
+    if ($want -ne $got) { Fail-Row 'pwsh' "installed $got, the release holds $want" }
 } finally {
     Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
 }

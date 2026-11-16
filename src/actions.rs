@@ -3,7 +3,7 @@
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{File, TryLockError};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -140,27 +140,77 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
     let existing = reviewr_panes(&panes)
         .ok_or_else(|| refused(format!("herdr pane process-info failed in {ws}")))?;
 
-    if !existing.is_empty() {
-        return match action {
-            Action::Close | Action::Toggle => close_all(&existing, ws).map(Some),
-            Action::Open | Action::AutoOpen => {
-                Ok(Some(format!("already open ({}) in {ws}", existing.join(" "))))
-            }
-        };
+    let mine = if action == Action::AutoOpen {
+        // The event opens a fresh workspace's first reviewr, so any reviewr there is enough.
+        if existing.is_empty() { Mine::None(None) } else { Mine::Here(existing) }
+    } else {
+        mine(&existing, &panes, &target, config.toggle_placement())
+    };
+    // Toggle closes a reviewr you can see, shows one you can't, and opens one if there's none.
+    match (action, mine) {
+        (Action::Toggle | Action::Close, Mine::Here(here)) => close_all(&here, ws).map(Some),
+        (_, Mine::Here(here)) => Ok(Some(format!("already open ({}) in {ws}", here.join(" ")))),
+        (Action::Close, Mine::Elsewhere { pane, .. }) => close_all(&[pane], ws).map(Some),
+        (_, Mine::Elsewhere { pane, tab }) => herdr::focus_tab(&tab)
+            .map(|()| Some(format!("showed {pane} in {ws}")))
+            .map_err(|_| refused(format!("herdr tab focus failed for {tab} in {ws}"))),
+        (Action::Close, Mine::None(_)) => Ok(Some(format!("nothing open in {ws}"))),
+        (_, Mine::None(cwd)) => open(action, &config, &target, &panes, cwd).map(Some),
     }
-    if action == Action::Close {
-        return Ok(Some(format!("nothing open in {ws}")));
+}
+
+/// The reviewr an explicit action acts on.
+enum Mine<'p> {
+    /// In the focused tab, so on screen.
+    Here(Vec<&'p str>),
+    /// With `tab` placement, the focused worktree's reviewr tab, off screen.
+    Elsewhere { pane: &'p str, tab: String },
+    /// No reviewr of yours; the review folder, when the search already read it.
+    None(Option<String>),
+}
+
+/// The focused tab's reviewr panes, else with `tab` placement the reviewr tab for the review dir.
+fn mine<'p>(
+    existing: &[&'p str],
+    panes: &PaneList,
+    target: &Target,
+    placement: TogglePlacement,
+) -> Mine<'p> {
+    let tab_of = |pane: &str| panes.pane(pane).and_then(|entry| entry.tab_id.as_deref());
+    // Without a focused tab from herdr, every reviewr counts as on screen, as before tabs did.
+    let here: Vec<&str> = match target.tab.as_deref() {
+        Some(focused) => existing.iter().copied().filter(|p| tab_of(p) == Some(focused)).collect(),
+        None => existing.to_vec(),
+    };
+    if !here.is_empty() {
+        return Mine::Here(here);
     }
-    open(action, &config, &target, &panes).map(Some)
+    if placement != TogglePlacement::Tab {
+        return Mine::None(None);
+    }
+    // A reviewr tab belongs to the worktree it reviews; an unreadable dir matches none.
+    let Ok(cwd) = review_dir(target, panes) else { return Mine::None(None) };
+    let worktree = |dir: &str| crate::git::toplevel(Path::new(dir));
+    let Some(root) = worktree(cwd) else { return Mine::None(None) };
+    existing
+        .iter()
+        .copied()
+        .find_map(|pane| {
+            let entry = panes.pane(pane)?;
+            let dir = entry.foreground_cwd.as_deref().or(entry.cwd.as_deref())?;
+            let tab = entry.tab_id.clone()?;
+            (worktree(dir).as_ref() == Some(&root)).then_some(Mine::Elsewhere { pane, tab })
+        })
+        .unwrap_or_else(|| Mine::None(Some(cwd.to_owned())))
 }
 
 /// The review binary's name, which identifies a reviewr pane and names its launch links.
 const BINARY: &str = env!("CARGO_PKG_NAME");
 
-/// How long an action waits for its workspace's lock: a holder's five herdr calls all wedged, its
+/// How long an action waits for its workspace's lock: a holder's six herdr calls all wedged, its
 /// visibility wait, and three seconds of slack, typically enough for its last poll pause and git reads.
 const LOCK_BOUND: Duration = herdr::CALL_BOUND
-    .saturating_mul(5)
+    .saturating_mul(6)
     .saturating_add(VISIBLE_BOUND)
     .saturating_add(Duration::from_secs(3));
 
@@ -216,6 +266,10 @@ struct Target {
     cwd: Option<String>,
     /// The focused pane, whose live cwd a manual open prefers over `cwd`.
     focused: Option<String>,
+    /// The workspace's cwd, the last candidate.
+    workspace_cwd: Option<String>,
+    /// The focused tab, whose reviewr is the one on screen.
+    tab: Option<String>,
 }
 
 impl Target {
@@ -232,6 +286,8 @@ impl Target {
                 cwd: text(&event, "/data/workspace/worktree/checkout_path")
                     .or_else(|| text(&event, "/data/worktree/path")),
                 focused: None,
+                workspace_cwd: None,
+                tab: None,
             });
         }
         let context: Value = var("HERDR_PLUGIN_CONTEXT_JSON")
@@ -241,8 +297,10 @@ impl Target {
         Ok(Self {
             ws: ws.ok_or_else(no_workspace)?,
             pane,
-            cwd: text(&context, "/focused_pane_cwd").or_else(|| text(&context, "/workspace_cwd")),
+            cwd: text(&context, "/focused_pane_cwd"),
             focused: text(&context, "/focused_pane_id"),
+            workspace_cwd: text(&context, "/workspace_cwd"),
+            tab: text(&context, "/tab_id"),
         })
     }
 }
@@ -333,23 +391,12 @@ fn open(
     config: &PluginConfig,
     target: &Target,
     panes: &PaneList,
+    cwd: Option<String>,
 ) -> Result<String, Stop> {
     let ws = target.ws.as_str();
-    // The focused pane's live cwd wins over the launch cwd, when it is inside a repo.
-    let live = target
-        .focused
-        .as_deref()
-        .and_then(|focused| panes.pane(focused))
-        .and_then(|entry| entry.foreground_cwd.clone());
-    let cwd = match (&live, &target.cwd) {
-        (Some(live), _) if has_worktree(live) => live,
-        (_, Some(cwd)) if has_worktree(cwd) => cwd,
-        // Name every rejected candidate.
-        _ => {
-            let live = live.map(|live| format!(" (live cwd '{live}')")).unwrap_or_default();
-            let cwd = target.cwd.as_deref().unwrap_or("<no cwd>");
-            return Err(refused(format!("not a git repo: '{cwd}'{live}")));
-        }
+    let cwd = match cwd {
+        Some(cwd) => cwd,
+        None => review_dir(target, panes)?.to_owned(),
     };
 
     let plugin = herdr::plugin_id();
@@ -371,15 +418,25 @@ fn open(
         TogglePlacement::Overlay => herdr::Spot::Overlay,
     };
     // A manual open takes focus. The event never does.
-    let open = herdr::PaneOpen { plugin: &plugin, spot, cwd, focus: action != Action::AutoOpen };
+    let open =
+        herdr::PaneOpen { plugin: &plugin, spot, cwd: &cwd, focus: action != Action::AutoOpen };
     let opened =
         herdr::open_plugin_pane(&open).map_err(|_| refused("herdr plugin pane open failed"))?;
 
+    // herdr#3799: a plugin pane keeps its spawn size until a geometry request, so its first frames
+    // draw cropped and leave stray borders; a zero resize claims the layout's sizes at once.
+    if placement != TogglePlacement::Tab && herdr::claim_geometry(&opened.pane_id).is_err() {
+        logln!("claiming geometry for {} failed", opened.pane_id);
+    }
     // Name a fresh tab after the plugin; cosmetic, so its failure is ignored.
     if placement == TogglePlacement::Tab
         && let Some(tab) = opened.tab_id.as_deref()
     {
         let _ = herdr::rename_tab(tab, herdr::LABEL);
+        // herdr#4283: a focused tab open leaves the client on the old tab.
+        if open.focus && herdr::focus_tab(tab).is_err() {
+            logln!("focusing tab {tab} failed");
+        }
     }
 
     let success = format!("opened {} ({}) in {ws}", opened.pane_id, placement.as_str());
@@ -388,6 +445,56 @@ fn open(
         Launch::Unseen => Ok(format!("{success}, not yet seen running")),
         Launch::Exited => Err(refused(format!("pane {} exited at launch in {ws}", opened.pane_id))),
     }
+}
+
+/// The folder an open reviews: the first candidate in a worktree, never a plugin's checkout.
+fn review_dir<'a>(target: &'a Target, panes: &'a PaneList) -> Result<&'a str, Stop> {
+    // The focused pane's live cwd, its launch cwd, the agent panes', the other panes', the workspace's.
+    let live = target
+        .focused
+        .as_deref()
+        .and_then(|focused| panes.pane(focused))
+        .and_then(|entry| entry.foreground_cwd.as_deref());
+    let mut by_agent: Vec<_> = panes.panes.iter().collect();
+    by_agent.sort_by_key(|entry| entry.agent.is_none());
+    let others = by_agent.into_iter().filter_map(|entry| entry.foreground_cwd.as_deref());
+    // herdr often reports one folder several ways, so each counts once.
+    let mut candidates: Vec<&str> = Vec::new();
+    for dir in live
+        .into_iter()
+        .chain(target.cwd.as_deref())
+        .chain(others)
+        .chain(target.workspace_cwd.as_deref())
+    {
+        if !candidates.contains(&dir) {
+            candidates.push(dir);
+        }
+    }
+    // A failed listing skips no checkout: the open still lands, as it did before the filter.
+    let managed: Vec<PathBuf> = herdr::managed_plugin_dirs()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|dir| crate::git::canonical(&dir))
+        .collect();
+    let in_plugin = |dir: &str| {
+        let dir = crate::git::canonical(Path::new(dir));
+        managed.iter().any(|plugin| dir.starts_with(plugin))
+    };
+    let Some(&cwd) = candidates.iter().find(|dir| !in_plugin(dir) && has_worktree(dir)) else {
+        // Name every rejected candidate.
+        if candidates.is_empty() {
+            return Err(refused("no repo to review: no cwd"));
+        }
+        let rejected: Vec<String> = candidates
+            .iter()
+            .map(|dir| {
+                let why = if in_plugin(dir) { "a plugin's checkout" } else { "not a git repo" };
+                format!("'{dir}' ({why})")
+            })
+            .collect();
+        return Err(refused(format!("no repo to review: {}", rejected.join(", "))));
+    };
+    Ok(cwd)
 }
 
 /// Whether `dir` sits in a worktree; a `.git` dir or bare repository does not.

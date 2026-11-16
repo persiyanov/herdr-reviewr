@@ -7,6 +7,7 @@ use std::path::Path;
 use similar::{ChangeTag, TextDiff};
 
 use crate::highlight::Highlighter;
+use crate::model::Side;
 use crate::text::{line_body, lines};
 
 /// An 8-bit RGB color.
@@ -84,6 +85,14 @@ impl Row {
         match self {
             Row::Context { old_no, .. } | Row::Deletion { old_no, .. } => Some(*old_no),
             Row::Insertion { .. } | Row::Fold { .. } | Row::Rendered { .. } => None,
+        }
+    }
+
+    /// The line on `side`, if this row holds one.
+    pub fn no(&self, side: Side) -> Option<u32> {
+        match side {
+            Side::Old => self.old_no(),
+            Side::New => self.new_no(),
         }
     }
 
@@ -239,6 +248,27 @@ impl Default for FileDiff {
 }
 
 impl FileDiff {
+    /// Whether a split view has two sides to show: a changed line, and lines on both sides.
+    #[must_use]
+    pub fn splits(&self) -> bool {
+        let (mut old, mut new, mut change) = (false, false, false);
+        // A fold holds context, lines on both sides, so its lines need no walk.
+        for row in &self.rows {
+            let (o, n) = match row {
+                Row::Deletion { .. } => (true, false),
+                Row::Insertion { .. } => (false, true),
+                Row::Context { .. } | Row::Fold { .. } => (true, true),
+                Row::Rendered { .. } => (false, false),
+            };
+            (old, new) = (old | o, new | n);
+            change |= o != n;
+            if old && new && change {
+                return true;
+            }
+        }
+        false
+    }
+
     /// An empty placeholder, for when no file is selected.
     pub fn empty() -> Self {
         Self::rowless(String::new(), None, None, View::Diff)

@@ -29,6 +29,7 @@ pub mod schedule;
 pub mod search;
 pub mod selection;
 pub mod snippet;
+pub mod split;
 #[cfg(test)]
 mod test_support;
 mod text;
@@ -59,11 +60,11 @@ use ratatui::layout::Rect;
 
 use std::process::Stdio;
 
-use crate::app::{App, Focus, Mode};
+use crate::app::{App, Focus, Mode, Question};
 use crate::config::{Config, PluginConfig};
 use crate::export::Clipboard;
 use crate::keymap::Keymap;
-use crate::model::Scope;
+use crate::model::{Scope, Side};
 
 /// Entry point: parse config, set up the terminal, run the loop, restore.
 pub fn run() -> Result<()> {
@@ -75,30 +76,58 @@ pub fn run() -> Result<()> {
     let initial_config = config::plugin_config(cfg.plugin_config_dir.as_deref());
     let mut app = app_for(&cfg, &initial_config);
 
-    let mut terminal = ratatui::init();
-    // `ratatui::init` claimed the screen and raw mode; the input modes are left.
-    claim_input_modes();
-    // Paint before the first load, so a hung `git` never leaves herdr's blank pane (issue #4).
-    if let Err(error) = terminal.draw(|f| ui::render(f, &app)) {
-        restore_terminal();
-        return Err(error.into());
-    }
-    // A cosmetic label; identity is the process.
+    let mut screen = Screen::claim();
+    // A cosmetic label, stamped on its own thread; identity is the process.
     herdr::label_pane(&app.herdr.ids);
-    if initial_config.is_ok()
-        && let Err(e) = app.reload()
-    {
-        logln!("startup reload failed: {e:#}");
-        app.status = format!("load failed: {e}");
-    }
+    let result = review(&mut screen, &mut cfg, &mut app);
+    screen.release();
+    herdr::clear_pane_label(&app.herdr.ids);
+    git::end_sessions();
+    result
+}
+
+/// Review until quit, restarting on each switch's pick in the same pane.
+fn review(screen: &mut Screen, cfg: &mut Config, app: &mut App) -> Result<()> {
+    let mut _session = git::lease_session(&app.repo);
+    enter_repo(cfg, app);
+    paint_then_request_load(&mut screen.terminal, app)?;
     // An old command line hears what changed instead of quietly doing something else.
     if let Some(note) = &cfg.removed_flag {
         app.status.clone_from(note);
     }
-    let result = event_loop(&mut terminal, &mut app, &cfg);
-    herdr::clear_pane_label(&app.herdr.ids);
-    git::end_sessions();
-    result
+    // Window editors outlive a switch, so the next loop reaps them.
+    let mut open_editors = Vec::new();
+    loop {
+        event_loop(screen, app, cfg, &mut open_editors)?;
+        let Some(switched) = switched_app(cfg, app) else { return Ok(()) };
+        *app = switched;
+        enter_repo(cfg, app);
+        // The old worktree's session ends once its workers finish too.
+        _session = git::lease_session(&app.repo);
+        paint_then_request_load(&mut screen.terminal, app)?;
+    }
+}
+
+/// The screen claimed at startup, handed back once on the way out.
+struct Screen {
+    terminal: DefaultTerminal,
+    held: bool,
+}
+
+impl Screen {
+    fn claim() -> Self {
+        let terminal = ratatui::init();
+        // `ratatui::init` claimed the screen and raw mode; the input modes are left.
+        claim_input_modes();
+        Self { terminal, held: true }
+    }
+
+    /// Hand the screen back; a second call does nothing.
+    fn release(&mut self) {
+        if std::mem::take(&mut self.held) {
+            restore_terminal();
+        }
+    }
 }
 
 /// Claim the input modes on a screen something else owns.
@@ -239,7 +268,9 @@ fn invalidate_screen(terminal: &mut DefaultTerminal) -> Result<()> {
 
 /// The reviewed repository's top level, one spelling for the app and the worker; else as given.
 fn repo_root(cfg: &Config) -> std::path::PathBuf {
-    git::toplevel(&cfg.repo).unwrap_or_else(|| cfg.repo.clone())
+    // Absolute, so entering it (`enter_repo`) never shifts what a relative path names.
+    git::toplevel(&cfg.repo)
+        .unwrap_or_else(|| std::path::absolute(&cfg.repo).unwrap_or_else(|_| cfg.repo.clone()))
 }
 
 /// The startup app for one config snapshot: ready, or blocked on its error.
@@ -267,6 +298,41 @@ fn ready_app(cfg: &Config, plugin_config: PluginConfig) -> App {
         app.wrap = wrap;
     }
     app
+}
+
+/// `old` restarted unloaded on the pick it asked for, `cfg` pointed there; `None` when it asked none.
+pub fn switched_app(cfg: &mut Config, old: &mut App) -> Option<App> {
+    cfg.repo = old.switch_to.take()?;
+    let plugin_config = config::plugin_config(cfg.plugin_config_dir.as_deref());
+    let mut app = app_for(cfg, &plugin_config);
+    app.carry_view_from(old);
+    Some(app)
+}
+
+/// Work in the reviewed repo: herdr reports a pane's folder from its process, and the actions
+/// match a `tab`-placement reviewr to a worktree by it.
+fn enter_repo(cfg: &mut Config, app: &App) {
+    // A relative `cfg.repo` would name another folder from inside, so a recovery rereads this one.
+    cfg.repo.clone_from(&app.repo);
+    if let Err(e) = std::env::set_current_dir(&app.repo) {
+        logln!("chdir to {} failed: {e}", app.repo.display());
+    }
+}
+
+/// Paint, then hand the first load to the world worker: a hung `git` never leaves a blank pane
+/// (issue #4), and the loop answers a resize while it loads (herdr resizes a fresh pane).
+fn paint_then_request_load<B: ratatui::backend::Backend>(
+    terminal: &mut ratatui::Terminal<B>,
+    app: &mut App,
+) -> Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
+    terminal.draw(|f| ui::render(f, app))?;
+    if app.config_error().is_none() {
+        app.request_world_refresh(false);
+    }
+    Ok(())
 }
 
 /// A transient status message (e.g. "sent 3 comments") fades after this long idle.
@@ -683,8 +749,7 @@ pub fn land_world_completion(
         Some(Ok(snapshot))
             if app.config_error().is_none() && app.world_input() == completion.input =>
         {
-            app.reconcile_world(snapshot);
-            if completion.reveal {
+            if app.reconcile_world(snapshot) && completion.reveal {
                 // The landing may have moved the cursor.
                 app.settle_tab_entry();
                 app.reveal_files = true;
@@ -697,6 +762,7 @@ pub fn land_world_completion(
         }
         Some(Err(e)) => {
             app.status = format!("refresh failed: {e}");
+            app.load_failed();
             Landing::Failed(completion.refresh)
         }
         None => Landing::Landed,
@@ -816,18 +882,23 @@ fn glyph_clears(lit_for: Duration) -> bool {
 }
 
 /// Draw, then sleep until input, a worker's result, or the nearest armed deadline.
-fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Result<()> {
+fn event_loop(
+    screen: &mut Screen,
+    app: &mut App,
+    cfg: &Config,
+    open_editors: &mut Vec<std::process::Child>,
+) -> Result<()> {
+    let terminal = &mut screen.terminal;
     // The config is read at the first frame and again only when the watcher says it changed.
     let mut config_dirty = true;
     // When the last mouse event came, and whether it sat on the pane's edge.
     let mut last_mouse = Instant::now();
     let mut mouse_exited = false;
     let mut last_pr_poll = Instant::now();
-    // The loop sleeps on terminal input and this wake, which every worker's result and (on unix)
-    // every window resize sets; nothing polls a channel.
+    // The loop sleeps on input and this wake, rung only by its own workers and resizes.
     let wake = crate::wake::Wake::new()?;
     #[cfg(unix)]
-    wake.sys().watch_resizes()?;
+    let _resizes = wake.sys().watch_resizes()?;
     let waker = wake.waker();
     // Probes and forge reads run on workers.
     let (probe_tx, probe_rx) = crate::wake::channel::<(
@@ -844,7 +915,8 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
     let _world_worker = crate::world::spawn(app.repo.clone(), world_job_rx, world_res_tx);
     // herdr pushes focus, this pane's moves, and agent statuses; outside herdr nothing connects.
     let (herdr_tx, herdr_rx) = crate::wake::channel::<crate::herdr_socket::HerdrEvent>(&waker);
-    let herdr = herdr::connection_target().and_then(|(socket, pane)| {
+    // The pane as herdr last saw it, since a move or an earlier switch leaves the environment's stale.
+    let herdr = herdr::socket_path().zip(app.herdr.ids.pane.clone()).and_then(|(socket, pane)| {
         crate::herdr_socket::Connection::start(socket, pane, app.repo.clone(), herdr_tx)
             .inspect_err(|e| logln!("herdr connection did not start: {e}"))
             .ok()
@@ -862,8 +934,6 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
     let mut repaint_whole = false;
     // Input that showed the pane, held for the repaint; clicks aimed at the stale frame dropped.
     let mut held: std::collections::VecDeque<Event> = std::collections::VecDeque::new();
-    // Window editors reviewr launched, reaped at the next press.
-    let mut open_editors: Vec<std::process::Child> = Vec::new();
     // The last dispatched world job, which completions are tagged against.
     let mut world_live = LiveJob::default();
     // When a background refresh may run: batches gather, then wait out the debounce and the budget.
@@ -882,7 +952,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
     // Fetch the PR at open, so the tab is ready when visited.
     app.pr_pending = None;
     let result: Result<()> = (|| {
-        while !app.should_quit {
+        while !app.leaving() {
             if let Ok((epoch, target, mut recovered)) = recovery_rx.try_recv() {
                 recovery_inflight = false;
                 if epoch == config_epoch {
@@ -968,6 +1038,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             };
             // Rewrap rendered markdown before the heights measure it.
             app.sync_rendered_width(ui::rendered_width(area, app));
+            app.sync_split_width(ui::diff_inner_width(area, app));
             let heights = ui::diff_row_heights(app, area);
             app.settle_diff_scroll(&heights, effective);
             let file_vp = ui::file_viewport_height(area, app);
@@ -998,6 +1069,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                         Err(mpsc::TryRecvError::Disconnected) if world_live.running.is_some() => {
                             world_live.running = None;
                             app.status = "refresh worker unavailable".to_string();
+                            app.load_failed();
                             break;
                         }
                         Err(_) => break,
@@ -1121,7 +1193,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                     full: request.refresh.is_full(),
                     reveal: request.reveal,
                     running: Some(Instant::now()),
-                    // The `PR` tab builds nothing.
+                    // The `PR` tab reads only the checkout.
                     builds: input.tab.is_file_tab(),
                 };
                 let job = crate::world::WorldJob {
@@ -1135,6 +1207,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 if world_tx.send(job).is_err() {
                     // A dead worker must not pin the in-flight marker.
                     app.status = "refresh worker unavailable".to_string();
+                    app.load_failed();
                     world_live.running = None;
                 }
             }
@@ -1387,9 +1460,9 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 app.tick_base_picker_probe();
             }
             if app.editor_request.is_some() {
-                run_editor(terminal, app, painted_frame.editor(), &mut open_editors)?;
+                run_editor(terminal, app, painted_frame.editor(), open_editors)?;
             }
-            if app.should_quit {
+            if app.leaving() {
                 break;
             }
             // Stillness inside the pane is a held button; only an edge exit completes.
@@ -1399,12 +1472,15 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
         }
         Ok(())
     })();
-    restore_terminal();
-    drain_pr_shutdown(&mut pr, &probe_rx, &pr_rx);
+    // Leaving hands the shell back before the bounded drain; a switch keeps the screen to paint over.
+    if result.is_err() || app.switch_to.is_none() {
+        screen.release();
+        drain_pr_shutdown(&mut pr, &probe_rx, &pr_rx);
+    }
     result
 }
 
-/// A click or a wheel turn: the mouse events that answer the quit question.
+/// A click or a wheel turn: the mouse events that answer the quit or switch question.
 fn answers_question(kind: MouseEventKind) -> bool {
     matches!(kind, MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
 }
@@ -1418,16 +1494,16 @@ fn handle_blocked_event(app: &mut App, event: &Event) {
                 KeyCode::Char(c) => keymap::default_keymap().action_for(keymap::Key::plain(c)),
                 _ => None,
             };
-            match (app.confirming_quit, action) {
-                (true, Some(keymap::Action::QuitDiscard)) => app.should_quit = true,
-                (true, Some(keymap::Action::Quit)) => {}
-                (true, _) => app.confirming_quit = false,
-                (false, Some(keymap::Action::Quit)) => app.request_quit(),
-                (false, _) => {}
+            match (&app.question, action) {
+                (Some(Question::Quit), Some(keymap::Action::QuitDiscard)) => app.should_quit = true,
+                (Some(Question::Quit), Some(keymap::Action::Quit)) => {}
+                (Some(_), _) => app.question = None,
+                (None, Some(keymap::Action::Quit)) => app.request_quit(),
+                (None, _) => {}
             }
         }
-        Event::Mouse(m) if app.confirming_quit && answers_question(m.kind) => {
-            app.confirming_quit = false;
+        Event::Mouse(m) if app.question.is_some() && answers_question(m.kind) => {
+            app.question = None;
         }
         Event::Mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left), .. })
             if app.divider_drag_captured() =>
@@ -1632,6 +1708,17 @@ const HALF_PAGE: isize = 8;
 
 /// Apply one readline-style key to the active text field; `word` moves by word.
 fn apply_text_edit(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bool) {
+    if !edit_command(app, code, ctrl, alt, word)
+        && let KeyCode::Char(c) = code
+        && !ctrl
+        && !alt
+    {
+        app.input_push(c);
+    }
+}
+
+/// The caret moves and deletes every text field shares, readline's; `false` when `code` is none.
+fn edit_command(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bool) -> bool {
     use KeyCode::{Backspace, Char, Delete, End, Home, Left, Right};
     match code {
         Char('w') if ctrl => app.input_delete_word(),
@@ -1642,23 +1729,25 @@ fn apply_text_edit(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bo
         // `Alt+b`/`Alt+f` survive multiplexers that strip modified arrows.
         Char('b') if alt => app.caret_word_left(),
         Char('f') if alt => app.caret_word_right(),
+        Char('d') | Delete if alt => app.input_delete_word_forward(),
         Left if word => app.caret_word_left(),
         Right if word => app.caret_word_right(),
         Left => app.caret_left(),
         Right => app.caret_right(),
         Home => app.caret_home(),
         End => app.caret_end(),
+        Backspace if alt => app.input_delete_word(),
         Delete => app.input_delete_forward(),
         Backspace => app.input_backspace(),
-        Char(c) if !ctrl => app.input_push(c),
-        _ => {}
+        _ => return false,
     }
+    true
 }
 
 /// Map one key press onto `App` through the painted frame's `keymap`.
 pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Result<()> {
     let done = dispatch_key(app, key, area, keymap);
-    app.settle_pick();
+    app.settle_input();
     done
 }
 
@@ -1715,24 +1804,16 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // Line field: digits or `$` edit, Enter jumps, Esc closes, the rest is inert.
+    // Line field: digits or `$` type, the shared edits edit, Enter jumps, Esc closes.
     if app.line_open() {
-        let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             Esc => app.close_find(),
             Enter => app.line_go(),
-            Char(c @ ('0'..='9' | '$')) if plain => app.line_type(c),
-            code @ (KeyCode::Backspace
-            | KeyCode::Delete
-            | KeyCode::Left
-            | KeyCode::Right
-            | KeyCode::Home
-            | KeyCode::End)
-                if plain =>
-            {
-                apply_text_edit(app, code, false, false, false);
+            Char(c @ ('0'..='9' | '$')) if !ctrl && !alt => app.line_type(c),
+            code => {
+                edit_command(app, code, ctrl, alt, alt || ctrl);
             }
-            _ => {}
         }
         return Ok(());
     }
@@ -1749,7 +1830,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // Bound keys resolve through the keymap; the rest fall to the fixed `tab` and `esc`.
+    // Bound keys resolve through the keymap; the rest fall to the fixed `esc`.
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let code = match key.code {
         Char(c) => Some(keymap::KeyCode::Char(c)),
@@ -1759,24 +1840,34 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         Down => Some(keymap::KeyCode::Down),
         PageUp => Some(keymap::KeyCode::PageUp),
         PageDown => Some(keymap::KeyCode::PageDown),
+        Tab => Some(keymap::KeyCode::Tab),
         _ => None,
     };
     let action = code.and_then(|code| keymap.action_for(crate::keymap::Key { ctrl, alt, code }));
 
-    // The quit question owns the keyboard; `q` leaves it open, so auto-repeat never answers it.
-    if app.confirming_quit {
+    // A question owns the keyboard: its key drops, `s`/`y` export, others stay, `q` repeats as no-op.
+    if app.question.is_some() {
+        let quit = app.question == Some(Question::Quit);
         match action {
-            Some(K::QuitDiscard) => app.should_quit = true,
-            Some(K::Quit) => {}
+            Some(K::QuitDiscard) if quit => app.should_quit = true,
+            Some(K::WorktreePick) if !quit => app.switch_discarding(),
+            Some(K::Quit) if quit => {}
             Some(K::Send) => {
-                app.confirming_quit = false;
-                app.send_to_agent();
+                app.close_worktree_picker();
+                app.question = None;
+                app.send_to_agent(false);
+            }
+            Some(K::SendTo) => {
+                app.close_worktree_picker();
+                app.question = None;
+                app.send_to_agent(true);
             }
             Some(K::Copy) => {
-                app.confirming_quit = false;
+                app.close_worktree_picker();
+                app.question = None;
                 app.export(&Clipboard);
             }
-            _ => app.confirming_quit = false,
+            _ => app.question = None,
         }
         return Ok(());
     }
@@ -1804,19 +1895,22 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // Base picker: every printable filters, so a branch `qa` is typable; vertical keys move.
-    if app.mode == Mode::BasePick {
+    // Base and worktree pickers: every printable filters, so `qa` is typable; vertical keys move.
+    if matches!(app.mode, Mode::BasePick | Mode::WorktreePick) {
+        let base = app.mode == Mode::BasePick;
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let word = alt || ctrl;
         match key.code {
-            Esc => app.close_base_picker(),
-            Enter => app.base_picker_pick()?,
-            Down => app.base_picker_move(1),
-            Up => app.base_picker_move(-1),
-            PageDown => app.base_picker_move(PAGE),
-            PageUp => app.base_picker_move(-PAGE),
-            Char('n') if ctrl => app.base_picker_move(1),
-            Char('p') if ctrl => app.base_picker_move(-1),
+            Esc if base => app.close_base_picker(),
+            Esc => app.close_worktree_picker(),
+            Enter if base => app.base_picker_pick()?,
+            Enter => app.worktree_picker_pick(),
+            Down => app.filter_picker_move(1),
+            Up => app.filter_picker_move(-1),
+            PageDown => app.filter_picker_move(PAGE),
+            PageUp => app.filter_picker_move(-PAGE),
+            Char('n') if ctrl => app.filter_picker_move(1),
+            Char('p') if ctrl => app.filter_picker_move(-1),
             code => apply_text_edit(app, code, ctrl, alt, word),
         }
         return Ok(());
@@ -1850,6 +1944,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             (Some(K::TabChanges), _) => app.set_tab(crate::app::Tab::Changes)?,
             (Some(K::TabAllFiles), _) => app.set_tab(crate::app::Tab::AllFiles)?,
             (Some(K::OpenPr), _) => app.pr_open(),
+            (Some(K::WorktreePick), _) => app.open_worktree_picker(),
             (Some(K::Search), _) => app.open_search(),
             (Some(K::NavigatorPosition), _) => app.cycle_navigator_position(),
             (Some(K::NavigatorGrow), _) => app.resize_navigator(4),
@@ -1858,7 +1953,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             (Some(K::Up), _) => app.pr_move(-1),
             (Some(K::Keys), _) => app.toggle_keys(),
             (_, Esc) => app.escape(),
-            (_, Tab) => app.toggle_focus(),
+            (Some(K::SwitchPane), _) => app.toggle_focus(),
             (Some(K::PageDown), _) if app.focus == Focus::Files => app.pr_scroll_nav(PAGE),
             (Some(K::PageUp), _) if app.focus == Focus::Files => app.pr_scroll_nav(-PAGE),
             (Some(K::PageDown), _) => app.pr_scroll_read(PAGE),
@@ -1876,7 +1971,8 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             (Some(K::Comments), _) | (_, Esc) => app.close_list(),
             (Some(K::Down), _) => app.list_move(1),
             (Some(K::Up), _) => app.list_move(-1),
-            (Some(K::Send), _) => app.send_to_agent(),
+            (Some(K::Send), _) => app.send_to_agent(false),
+            (Some(K::SendTo), _) => app.send_to_agent(true),
             (Some(K::Copy), _) => {
                 app.export(&Clipboard);
             }
@@ -1912,12 +2008,14 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::PageUp => app.move_cursor(-PAGE)?,
             K::HalfDown => app.move_cursor(HALF_PAGE)?,
             K::HalfUp => app.move_cursor(-HALF_PAGE)?,
+            K::SwitchPane => app.toggle_focus(),
             K::NextHunk => app.next_hunk(),
             K::PrevHunk => app.prev_hunk(),
             K::NextFile => app.next_file(),
             K::PrevFile => app.prev_file(),
             K::Wrap => app.toggle_wrap(),
             K::Rendered => app.toggle_rendered(),
+            K::Split => app.toggle_split(),
             K::NavigatorPosition => app.cycle_navigator_position(),
             K::NavigatorHide => app.toggle_navigator_hidden(),
             K::NavigatorGrow => app.resize_navigator(4),
@@ -1928,12 +2026,14 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::ScopeCommits => app.set_scope(Scope::Commits)?,
             K::BasePick => app.open_base_picker(),
             K::CommitPick => app.open_commit_picker(),
+            K::WorktreePick => app.open_worktree_picker(),
             K::Select => app.toggle_select(),
             K::Comment => app.start_comment(),
             // `delete` needs the diff focused, never an off-screen cursor; `edit` works anywhere.
             K::Edit => app.start_edit(),
             K::Delete if app.focus == Focus::Diff => app.delete_comment(),
-            K::Send => app.send_to_agent(),
+            K::Send => app.send_to_agent(false),
+            K::SendTo => app.send_to_agent(true),
             K::Copy => {
                 app.export(&Clipboard);
             }
@@ -1950,11 +2050,9 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    match key.code {
-        Tab => app.toggle_focus(),
-        // `esc` peels one layer: selection, armed crossing, footer expansion.
-        Esc => app.escape(),
-        _ => {}
+    // `esc` peels one layer: selection, armed crossing, footer expansion.
+    if key.code == Esc {
+        app.escape();
     }
     Ok(())
 }
@@ -1977,8 +2075,8 @@ fn handle_text_down(app: &mut App, m: MouseEvent, area: Rect) -> bool {
         app.gesture =
             Gesture::Text { drag: TextDrag { surface, anchor: point, extent: point }, count };
     };
-    if file_tab && let Some(point) = ui::read_point_at(area, app, m.column, m.row) {
-        arm(app, Surface::Read, point);
+    if file_tab && let Some((side, point)) = ui::read_point_at(area, app, m.column, m.row) {
+        arm(app, Surface::Read { side }, point);
         return true;
     }
     if file_tab && let Some((comment, point)) = ui::card_point_at(area, app, m.column, m.row) {
@@ -2031,9 +2129,12 @@ fn text_drag_edge_scroll(app: &mut App, m: MouseEvent, area: Rect) {
     use crate::selection::Surface;
     let Some(drag) = app.text_drag() else { return };
     match drag.surface {
-        Surface::Read => read_edge_scroll(app, m, area, true),
+        Surface::Read { side } => {
+            read_edge_scroll(app, m, area);
+            read_edge_scroll_sideways(app, m, area, side);
+        }
         // Card text ignores h-scroll (TS-ONE-SURFACE).
-        Surface::Card { .. } => read_edge_scroll(app, m, area, false),
+        Surface::Card { .. } => read_edge_scroll(app, m, area),
         Surface::Files => {
             let inner = ui::files_inner_rect(area, app);
             let delta = edge_delta(m.row, inner);
@@ -2064,7 +2165,7 @@ fn text_drag_set_extent(app: &mut App, m: MouseEvent, area: Rect) {
     use crate::selection::{Point, Surface};
     let Some(drag) = app.text_drag() else { return };
     let extent = match drag.surface {
-        Surface::Read => ui::read_point_clamped(area, app, m.column, m.row),
+        Surface::Read { side } => ui::read_point_clamped(area, app, side, m.column, m.row),
         Surface::Card { comment } => ui::card_point_clamped(area, app, comment, m.column, m.row),
         Surface::Painted => ui::painted_point(area, app, m.column, m.row, true),
         Surface::Files => {
@@ -2087,8 +2188,8 @@ fn text_drag_set_extent(app: &mut App, m: MouseEvent, area: Rect) {
     }
 }
 
-/// Scroll the read pane while a drag is past its content, and sideways when `horizontal`.
-fn read_edge_scroll(app: &mut App, m: MouseEvent, area: Rect, horizontal: bool) {
+/// Scroll the read pane while a drag is past its content rows.
+fn read_edge_scroll(app: &mut App, m: MouseEvent, area: Rect) {
     let content = ui::read_content_rect(area, app);
     if content.height == 0 {
         return;
@@ -2099,16 +2200,22 @@ fn read_edge_scroll(app: &mut App, m: MouseEvent, area: Rect, horizontal: bool) 
         // The same event's extent update maps against the post-scroll layout.
         ui::refresh_read_layout(app, area);
     }
+}
+
+/// Scroll the read pane sideways while a text drag is past its column on `side`.
+fn read_edge_scroll_sideways(app: &mut App, m: MouseEvent, area: Rect, side: Option<Side>) {
     // Rendered markdown never scrolls sideways, so its drag leaves the source's offset alone.
-    if horizontal && !app.wrap && !app.rendered_active() {
-        if m.column < content.x {
-            app.h_scroll = app.h_scroll.saturating_sub(2);
-        } else if m.column >= content.x + content.width {
-            // Capped at the widest row, never pulled back from a keyboard scroll past it.
-            let cap = ui::widest_visible_row(app, area).saturating_sub(1);
-            if app.h_scroll < cap {
-                app.h_scroll = (app.h_scroll + 2).min(cap);
-            }
+    if app.wrap || app.rendered_active() {
+        return;
+    }
+    let (left, right) = ui::read_drag_columns(area, app, side);
+    if m.column < left {
+        app.h_scroll = app.h_scroll.saturating_sub(2);
+    } else if m.column >= right {
+        // Capped at the widest row, never pulled back from a keyboard scroll past it.
+        let cap = ui::widest_visible_row(app, area).saturating_sub(1);
+        if app.h_scroll < cap {
+            app.h_scroll = (app.h_scroll + 2).min(cap);
         }
     }
 }
@@ -2138,13 +2245,13 @@ fn finish_text_drag(
                 }
             }
             // A double copies the word; a wordless cell clicks.
-            Surface::Read | Surface::Painted | Surface::Card { .. } if count == 2 => {
+            Surface::Read { .. } | Surface::Painted | Surface::Card { .. } if count == 2 => {
                 if !word_click_copy(app, area, drag, target) && clicks_act {
                     perform_click(app, m, area, heights, drag)?;
                 }
             }
             // A triple copies the source line; an empty line clicks.
-            Surface::Read | Surface::Painted | Surface::Card { .. } if count >= 3 => {
+            Surface::Read { .. } | Surface::Painted | Surface::Card { .. } if count >= 3 => {
                 if !line_click_copy(app, area, drag, target) && clicks_act {
                     perform_click(app, m, area, heights, drag)?;
                 }
@@ -2267,7 +2374,7 @@ fn surface_text(
 ) -> Option<String> {
     use crate::selection::{Surface, lines_text};
     match surface {
-        Surface::Read => Some(crate::selection::read_text(&app.visible, a, b)),
+        Surface::Read { side } => Some(crate::selection::read_text(&app.visible, side, a, b)),
         Surface::Files => {
             Some(crate::selection::files_text(&app.file_rows, &app.entries, a.row, b.row))
         }
@@ -2305,7 +2412,7 @@ fn perform_click(
                 app.pr_select(i);
             }
         }
-        Surface::Read | Surface::Painted | Surface::Card { .. } => {
+        Surface::Read { .. } | Surface::Painted | Surface::Card { .. } => {
             if let Some(url) = app.painted_link_at(m.column, m.row) {
                 app.focus = Focus::Diff;
                 app.open_link(&url);
@@ -2344,7 +2451,7 @@ pub fn handle_mouse(
     target: &dyn crate::export::ExportTarget,
 ) -> Result<()> {
     let done = dispatch_mouse(app, m, area, heights, keymap, target);
-    app.settle_pick();
+    app.settle_input();
     done
 }
 
@@ -2358,9 +2465,9 @@ fn dispatch_mouse(
     target: &dyn crate::export::ExportTarget,
 ) -> Result<()> {
     app.hover = Some((m.column, m.row));
-    // A click or wheel only answers the quit question; a gesture under way finishes.
-    if app.confirming_quit && answers_question(m.kind) {
-        app.confirming_quit = false;
+    // A click or wheel only answers a question, by staying; a gesture under way finishes.
+    if app.question.is_some() && answers_question(m.kind) {
+        app.question = None;
         return Ok(());
     }
     // Buttonless motion or a new down proves the release was lost; complete it first.
@@ -2450,7 +2557,16 @@ fn dispatch_mouse(
                     Some(i) if app.base_picker.as_ref().is_some_and(|bp| bp.cursor == i) => {
                         app.base_picker_pick()?;
                     }
-                    Some(i) => app.base_picker_goto(i),
+                    Some(i) => app.filter_picker_goto(i),
+                    None => {}
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) if app.mode == Mode::WorktreePick => {
+                match ui::hit_worktree_picker_row(area, app, m.column, m.row) {
+                    Some(i) if app.worktree_picker.as_ref().is_some_and(|wp| wp.cursor == i) => {
+                        app.worktree_picker_pick();
+                    }
+                    Some(i) => app.filter_picker_goto(i),
                     None => {}
                 }
             }
@@ -2568,7 +2684,7 @@ fn dispatch_mouse(
             } else if let Some(i) =
                 ui::hit_diff(area, app, m.column, m.row, heights, app.diff_scroll)
             {
-                // Only non-text display lines reach here: a fold or a comment card's line.
+                // Only lines with no text under the pointer reach here: a fold, a card, a blank half.
                 app.focus = Focus::Diff;
                 app.diff_cursor = i;
                 app.select_anchor = None;
@@ -2581,8 +2697,8 @@ fn dispatch_mouse(
         }
         MouseEventKind::Drag(MouseButton::Left) if app.gutter_drag() => {
             // A gutter drag selects rows, so it never scrolls horizontally.
-            read_edge_scroll(app, m, area, false);
-            if let Some(p) = ui::read_point_clamped(area, app, m.column, m.row) {
+            read_edge_scroll(app, m, area);
+            if let Some(p) = ui::read_point_clamped(area, app, None, m.column, m.row) {
                 app.drag_select_to(p.row);
             }
         }
@@ -2610,7 +2726,7 @@ fn dispatch_mouse(
                 ui::refresh_read_layout(app, area);
             }
             if app.gutter_drag() {
-                if let Some(p) = ui::read_point_clamped(area, app, m.column, m.row) {
+                if let Some(p) = ui::read_point_clamped(area, app, None, m.column, m.row) {
                     app.drag_select_to(p.row);
                 }
             } else {
@@ -2641,7 +2757,7 @@ mod refresh_tests {
         glyph_clears, handle_blocked_event, handle_resize, ready_app, schedule_pr_probe,
         world_indicator,
     };
-    use crate::app::{App, Tab};
+    use crate::app::{App, Question, Tab};
 
     #[test]
     fn a_recovery_saved_over_twice_recovers_to_the_newest_config() {
@@ -2733,7 +2849,7 @@ mod refresh_tests {
         use crate::selection::{Gesture, Point, Surface, TextDrag};
         let mut app = App::new(std::path::PathBuf::from("."), Scope::Uncommitted, None);
         let drag = TextDrag {
-            surface: Surface::Read,
+            surface: Surface::Read { side: None },
             anchor: Point { row: 0, chr: 0 },
             extent: Point { row: 0, chr: 4 },
         };
@@ -2920,7 +3036,7 @@ mod refresh_tests {
 
         // The frozen draft is unsent, so `q` asks and `Q` quits.
         handle_blocked_event(&mut app, &Event::Key(KeyEvent::from(KeyCode::Char('q'))));
-        assert!(app.confirming_quit && !app.should_quit);
+        assert!(app.question == Some(Question::Quit) && !app.should_quit);
         handle_blocked_event(&mut app, &Event::Key(KeyEvent::from(KeyCode::Char('Q'))));
         assert!(app.should_quit);
     }
@@ -2940,12 +3056,13 @@ mod refresh_tests {
         });
         app.set_config_error("invalid config".to_string());
         let q = Event::Key(KeyEvent::from(KeyCode::Char('q')));
+        let asking = |app: &App| app.question == Some(Question::Quit);
         handle_blocked_event(&mut app, &q);
-        assert!(app.confirming_quit && !app.should_quit, "the first `q` asks");
+        assert!(asking(&app) && !app.should_quit, "the first `q` asks");
         handle_blocked_event(&mut app, &q);
-        assert!(app.confirming_quit && !app.should_quit, "a repeated `q` never answers");
+        assert!(asking(&app) && !app.should_quit, "a repeated `q` never answers");
         handle_blocked_event(&mut app, &Event::Key(KeyEvent::from(KeyCode::Esc)));
-        assert!(!app.confirming_quit && !app.should_quit, "any other key answers and stays");
+        assert!(!asking(&app) && !app.should_quit, "any other key answers and stays");
         handle_blocked_event(&mut app, &q);
         let click = Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -2954,7 +3071,7 @@ mod refresh_tests {
             modifiers: KeyModifiers::NONE,
         });
         handle_blocked_event(&mut app, &click);
-        assert!(!app.confirming_quit && !app.should_quit, "a click answers and stays");
+        assert!(!asking(&app) && !app.should_quit, "a click answers and stays");
         handle_blocked_event(&mut app, &q);
         handle_blocked_event(&mut app, &Event::Key(KeyEvent::from(KeyCode::Char('Q'))));
         assert!(app.should_quit, "asked, `Q` quits");
@@ -2965,7 +3082,7 @@ mod refresh_tests {
         app.input = "half a thought".to_string();
         app.set_config_error("invalid config".to_string());
         handle_blocked_event(&mut app, &q);
-        assert!(app.confirming_quit && !app.should_quit, "a draft makes `q` ask");
+        assert!(asking(&app) && !app.should_quit, "a draft makes `q` ask");
     }
 
     #[test]
@@ -3511,7 +3628,7 @@ mod refresh_tests {
         // A pristine press, so the completion copies nothing and no clipboard runs.
         let press = Gesture::Text {
             drag: TextDrag {
-                surface: Surface::Read,
+                surface: Surface::Read { side: None },
                 anchor: Point { row: 0, chr: 0 },
                 extent: Point { row: 0, chr: 0 },
             },
@@ -3583,5 +3700,159 @@ mod refresh_tests {
         assert_eq!(recovery_epoch, epoch);
         assert_eq!(target.theme(), "gruvbox");
         assert_eq!(recovered.plugin_config().unwrap().theme(), "gruvbox");
+    }
+
+    #[test]
+    fn recovery_after_a_switch_rebuilds_on_the_worktree_on_screen() {
+        let (dir, git) = crate::test_support::test_repo();
+        std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "a"]);
+        let linked = tempfile::tempdir().unwrap();
+        let wt = linked.path().join("wt");
+        git(&["worktree", "add", "-q", "-b", "other", wt.to_str().unwrap()]);
+        let config_dir = tempfile::tempdir().unwrap();
+        let opened = Config::parse([dir.path().display().to_string()]);
+        let mut old = crate::app_for(&opened, &Ok(crate::PluginConfig::default()));
+
+        let mut cfg = opened.clone();
+        old.switch_to = Some(wt.clone());
+        let mut app = crate::switched_app(&mut cfg, &mut old).expect("a switch was asked");
+        app.set_config_error("unknown key".into());
+        let (tx, rx) = crate::wake::channel(&crate::wake::Waker::detached());
+        let (mut epoch, mut inflight) = (0, false);
+        apply_plugin_config_observation(
+            &mut app,
+            &cfg,
+            &mut epoch,
+            &tx,
+            &mut inflight,
+            plugin_config_in(config_dir.path()),
+        );
+        let (_, _, mut recovered) = rx.recv_timeout(Duration::from_secs(5)).expect("recovery");
+        recovered.carry_authored_state_from(&mut app);
+        let canonical = crate::git::canonical;
+        assert_eq!(canonical(&recovered.repo), canonical(&wt), "the switched worktree");
+        assert_eq!(canonical(&recovered.home), canonical(dir.path()), "where the pane opened");
+    }
+}
+
+#[cfg(test)]
+mod text_edit_tests {
+    use super::apply_text_edit;
+    use crate::app::{App, Mode};
+    use crate::model::Scope;
+    use ratatui::crossterm::event::KeyCode;
+    use std::path::PathBuf;
+
+    fn composing(text: &str, caret: usize) -> App {
+        let mut app = App::new(PathBuf::from("."), Scope::Uncommitted, None);
+        app.mode = Mode::Composing { editing: None };
+        app.input = text.to_string();
+        app.caret = caret;
+        app
+    }
+
+    #[test]
+    fn alt_backspace_deletes_the_word_behind_the_caret() {
+        let mut app = composing("foo bar", 7);
+        apply_text_edit(&mut app, KeyCode::Backspace, false, true, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foo ", 4));
+    }
+
+    #[test]
+    fn alt_delete_deletes_the_word_ahead_of_the_caret() {
+        let mut app = composing("foo bar", 0);
+        apply_text_edit(&mut app, KeyCode::Delete, false, true, false);
+        assert_eq!((app.input.as_str(), app.caret), (" bar", 0));
+        let mut app = composing("foo   bar", 3);
+        apply_text_edit(&mut app, KeyCode::Delete, false, true, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foo", 3), "skips the gap, then the word");
+        // `alt+d` is readline's name for the same delete.
+        let mut app = composing("foo bar", 3);
+        apply_text_edit(&mut app, KeyCode::Char('d'), false, true, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foo", 3));
+    }
+
+    #[test]
+    fn alt_letter_types_nothing_into_the_field() {
+        let mut app = composing("foo", 3);
+        apply_text_edit(&mut app, KeyCode::Char('x'), false, true, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foo", 3));
+    }
+
+    #[test]
+    fn ctrl_w_and_alt_word_jumps_still_work() {
+        let mut app = composing("foo bar", 7);
+        apply_text_edit(&mut app, KeyCode::Char('b'), false, true, false);
+        assert_eq!(app.caret, 4, "alt+b still jumps a word left");
+        apply_text_edit(&mut app, KeyCode::Char('f'), false, true, false);
+        assert_eq!(app.caret, 7, "alt+f still jumps a word right");
+        apply_text_edit(&mut app, KeyCode::Char('w'), true, false, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foo ", 4));
+    }
+
+    #[test]
+    fn plain_chars_backspace_and_delete_still_edit_one_char() {
+        let mut app = composing("foo", 3);
+        apply_text_edit(&mut app, KeyCode::Char('x'), false, false, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foox", 4));
+        apply_text_edit(&mut app, KeyCode::Backspace, false, false, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foo", 3));
+        apply_text_edit(&mut app, KeyCode::Delete, false, false, false);
+        assert_eq!((app.input.as_str(), app.caret), ("foo", 3), "nothing ahead, nothing lost");
+        app.caret = 0;
+        apply_text_edit(&mut app, KeyCode::Delete, false, false, false);
+        assert_eq!((app.input.as_str(), app.caret), ("oo", 0));
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::paint_then_request_load;
+    use crate::app::App;
+    use crate::model::Scope;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn screen(terminal: &Terminal<TestBackend>) -> String {
+        terminal.backend().buffer().content().iter().map(ratatui::buffer::Cell::symbol).collect()
+    }
+
+    #[test]
+    fn the_first_paint_claims_nothing_and_hands_the_load_to_the_worker() {
+        let (dir, git) = crate::test_support::test_repo();
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+        std::fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+        let mut app = App::new(dir.path().to_path_buf(), Scope::Uncommitted, None);
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+
+        paint_then_request_load(&mut terminal, &mut app).unwrap();
+        let first = screen(&terminal);
+        let claims = ["no changes", "0 changed", "loading"];
+        assert!(!claims.iter().any(|claim| first.contains(claim)), "{first}");
+        assert!(app.entries.is_empty(), "nothing loads before the frame loop runs");
+        let request = app.world_request.clone().expect("the first load is requested");
+        assert!(!request.background && request.refresh.is_full());
+
+        // A failed first build says so, rather than leaving the list blank.
+        app.load_failed();
+        terminal.draw(|f| crate::ui::render(f, &app)).unwrap();
+        assert!(screen(&terminal).contains("load failed, r retries"));
+        // It names the key the reviewer bound.
+        let config_dir = tempfile::tempdir().unwrap();
+        let toml = "[keybindings]\nrefresh = [\"R\"]\n";
+        std::fs::write(config_dir.path().join("config.toml"), toml).unwrap();
+        app.set_plugin_config(crate::config::plugin_config_in(config_dir.path()).unwrap());
+        terminal.draw(|f| crate::ui::render(f, &app)).unwrap();
+        assert!(screen(&terminal).contains("load failed, R retries"));
+
+        // The worker's snapshot lands like any refresh, and the list fills.
+        app.reconcile_world(crate::world::build(&app.world_input()).unwrap());
+        terminal.draw(|f| crate::ui::render(f, &app)).unwrap();
+        let loaded = screen(&terminal);
+        assert!(loaded.contains("a.txt") && !loaded.contains("load failed"), "{loaded}");
     }
 }

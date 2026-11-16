@@ -27,12 +27,15 @@ const W: u16 = 120;
 const H: u16 = 34;
 /// The markdown showcase is tall enough to show every element at once.
 const TALL: u16 = 63;
+/// The split scene is wide enough to split.
+const WIDE: u16 = 160;
 
 /// A scene: its name, and how to build its app on the fixture repo for one theme.
 type Scene = (&'static str, fn(&Path, &str) -> App);
 
 const SCENES: &[Scene] = &[
     ("diff", scene_diff),
+    ("split", scene_split),
     ("comments", scene_comment_list),
     ("find", scene_find),
     ("markdown", scene_markdown),
@@ -50,7 +53,12 @@ fn main() {
         std::fs::create_dir_all(&dir).expect("out dir");
         for (name, scene) in SCENES {
             let app = scene(repo.path(), theme);
-            let html = frame_html(&app, if *name == "markdown-all" { TALL } else { H });
+            let (w, h) = match *name {
+                "markdown-all" => (W, TALL),
+                "split" => (WIDE, H),
+                _ => (W, H),
+            };
+            let html = frame_html(&app, w, h);
             std::fs::write(dir.join(format!("{name}.html")), html).expect("write fragment");
         }
     }
@@ -269,8 +277,11 @@ fn open(app: &mut App, path: &str) {
 
 /// The cursor on the first added line whose text contains `needle`.
 fn cursor_to(app: &mut App, needle: &str) {
-    app.diff_cursor =
-        app.visible.iter().position(|r| r.text().contains(needle)).expect("row with needle");
+    app.diff_cursor = app
+        .visible
+        .iter()
+        .position(|v| v.row().is_some_and(|r| r.text().contains(needle)))
+        .expect("row with needle");
 }
 
 fn comment(app: &mut App, needle: &str, text: &str) {
@@ -290,6 +301,16 @@ fn scene_diff(repo: &Path, theme: &str) -> App {
     comment(&mut app, "saturating_sub", "say why a discount can exceed the price");
     cursor_to(&mut app, "discounts.get");
     app.status.clear();
+    app
+}
+
+/// The same diff split, the navigator hidden, the cursor on a commented line.
+fn scene_split(repo: &Path, theme: &str) -> App {
+    let mut app = scene_diff(repo, theme);
+    app.toggle_navigator_hidden();
+    app.sync_split_width(ui::diff_inner_width(Rect::new(0, 0, WIDE, H), &app));
+    app.toggle_split();
+    assert!(app.split_on_screen(), "the split scene splits");
     app
 }
 
@@ -424,8 +445,8 @@ impl ExportTarget for NoClipboard {
 
 /// The frame as a `<pre>` of styled runs. `Color::Reset` is the terminal's own color, which
 /// the precondition makes the theme's `base` and `text`.
-fn frame_html(app: &App, h: u16) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(W, h)).expect("terminal");
+fn frame_html(app: &App, w: u16, h: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
     terminal.draw(|f| ui::render(f, app)).expect("draw");
     let buf: Buffer = terminal.backend().buffer().clone();
     let p = app.palette();
@@ -437,7 +458,7 @@ fn frame_html(app: &App, h: u16) -> String {
     for y in 0..h {
         let mut run = String::new();
         let mut style = String::new();
-        for x in 0..W {
+        for x in 0..w {
             let cell = &buf[(x, y)];
             let mut s = String::new();
             if cell.fg != Color::Reset {

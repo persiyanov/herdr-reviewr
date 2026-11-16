@@ -448,7 +448,7 @@ fn fetch_input_inner(
     verify_repository: bool,
 ) -> Result<PrFetchInput, PrInputError> {
     let (repository, origin_repository) =
-        crate::git::remote_identities(repo, &config.forge_hosts())
+        crate::git::remote_identities(repo, &config.forge_hosts(), crate::git::ssh_hostname)
             .map_err(|error| PrInputError::TargetRead(error.0))?;
     let crate::git::RepositoryIdentity::Repository(target) = &repository else {
         return Ok(PrFetchInput {
@@ -457,21 +457,26 @@ fn fetch_input_inner(
             local: crate::git::PrLocalState::default(),
         });
     };
-    let local = match crate::git::pr_local(repo, base, &config.forge_hosts()) {
-        Ok(local) => local,
-        Err(error) => {
-            let (current, _) = crate::git::remote_identities(repo, &config.forge_hosts())
+    let local =
+        match crate::git::pr_local(repo, base, &config.forge_hosts(), crate::git::ssh_hostname) {
+            Ok(local) => local,
+            Err(error) => {
+                let (current, _) = crate::git::remote_identities(
+                    repo,
+                    &config.forge_hosts(),
+                    crate::git::ssh_hostname,
+                )
                 .map_err(|read_error| PrInputError::TargetRead(read_error.0))?;
-            if current != repository {
-                return Err(PrInputError::TargetRead(
-                    "repository changed while reading branch state".to_string(),
-                ));
+                if current != repository {
+                    return Err(PrInputError::TargetRead(
+                        "repository changed while reading branch state".to_string(),
+                    ));
+                }
+                return Err(PrInputError::BranchState { target: target.clone(), message: error.0 });
             }
-            return Err(PrInputError::BranchState { target: target.clone(), message: error.0 });
-        }
-    };
+        };
     let (repository, origin_repository) = if verify_repository {
-        crate::git::remote_identities(repo, &config.forge_hosts())
+        crate::git::remote_identities(repo, &config.forge_hosts(), crate::git::ssh_hostname)
             .map_err(|error| PrInputError::TargetRead(error.0))?
     } else {
         (repository, origin_repository)

@@ -124,6 +124,16 @@ pub(crate) mod sys {
     #[derive(Debug)]
     pub(crate) struct Waker(Arc<UnixStream>);
 
+    /// SIGWINCH writing to one wake, until dropped: a switched pane's next loop registers its own.
+    #[must_use]
+    pub(crate) struct ResizeWatch(signal_hook::SigId);
+
+    impl Drop for ResizeWatch {
+        fn drop(&mut self) {
+            signal_hook::low_level::unregister(self.0);
+        }
+    }
+
     impl Wake {
         pub(super) fn new() -> io::Result<(Self, Waker)> {
             let (pipe, write) = UnixStream::pair()?;
@@ -139,12 +149,12 @@ pub(crate) mod sys {
         }
 
         /// Write a byte on every SIGWINCH; crossterm still reads the resize itself.
-        pub(crate) fn watch_resizes(&self) -> io::Result<()> {
-            signal_hook::low_level::pipe::register(
+        pub(crate) fn watch_resizes(&self) -> io::Result<ResizeWatch> {
+            let id = signal_hook::low_level::pipe::register(
                 signal_hook::consts::SIGWINCH,
                 self.write.try_clone()?,
             )?;
-            Ok(())
+            Ok(ResizeWatch(id))
         }
 
         pub(crate) fn fd(&self) -> BorrowedFd<'_> {
@@ -331,8 +341,16 @@ mod tests {
     #[test]
     fn a_window_resize_wakes_the_wait() {
         let wake = Wake::new().unwrap();
-        wake.sys().watch_resizes().unwrap();
+        let watch = wake.sys().watch_resizes().unwrap();
         signal_hook::low_level::raise(signal_hook::consts::SIGWINCH).unwrap();
         assert_eq!(wake.wait(Some(Duration::from_secs(5))).unwrap(), Woke::Woken);
+
+        // A switched pane's old loop drops its watch: resizes reach only the new loop's wake.
+        let next = Wake::new().unwrap();
+        drop(watch);
+        let _next_watch = next.sys().watch_resizes().unwrap();
+        signal_hook::low_level::raise(signal_hook::consts::SIGWINCH).unwrap();
+        assert_eq!(next.wait(Some(Duration::from_secs(5))).unwrap(), Woke::Woken);
+        assert_eq!(wake.wait(Some(Duration::from_millis(50))).unwrap(), Woke::Deadline);
     }
 }

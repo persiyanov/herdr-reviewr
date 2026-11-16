@@ -2,6 +2,8 @@
 # ASCII and PowerShell 5.1 only: 5.1 reads a BOM-less script in the ANSI code page.
 
 $ErrorActionPreference = 'Stop'
+# A PSModulePath inherited from pwsh 7 loads PS7's modules, which 5.1 can't run (Get-FileHash).
+$env:PSModulePath = Join-Path $PSHOME 'Modules'
 # 5.1 draws a progress bar per downloaded chunk, which slows a download severalfold.
 $ProgressPreference = 'SilentlyContinue'
 # 5.1 can default to TLS 1.0, which GitHub refuses.

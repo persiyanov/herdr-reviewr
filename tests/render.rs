@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Repo, app_on, app_on_rendered, enter_tab};
+use common::{Repo, UnifiedRow as _, app_on, app_on_rendered, app_on_split, enter_tab};
 use herdr_reviewr::app::{App, BaseChoice, BasePicker, BaseProbe, Focus, Mode, Tab};
 use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::diff::{Bar, MarkerKind};
@@ -671,6 +671,11 @@ fn footer_line(out: &str) -> String {
     out.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or_default().to_string()
 }
 
+/// Whether a footer row opens with the `?` that lists every key.
+fn opens_with_more(row: &str) -> bool {
+    row.starts_with(" ?")
+}
+
 /// Focus the diff on its first changed line.
 fn on_changed_line(app: &mut App) {
     app.focus = Focus::Diff;
@@ -714,23 +719,23 @@ fn the_footer_shows_the_action_for_the_context() {
 #[test]
 fn the_footer_trims_trailing_actions_to_fit_keeping_the_primary_and_the_more_hint() {
     let mut app = edited_app();
-    on_changed_line(&mut app); // diff focus, content line → c comment · v select … ?
-    // Wide: every cursor action fits, and the `?` closes the row.
+    on_changed_line(&mut app); // diff focus, content line → ? · c comment · v select …
+    // Wide: every cursor action fits, and the `?` opens the row.
     let wide = footer_line(&render_at(&app, 120));
     assert!(
-        wide.contains("c comment") && wide.contains("v select") && wide.trim_end().ends_with('?'),
+        wide.contains("c comment") && wide.contains("v select") && opens_with_more(&wide),
         "wide footer shows all actions and the `?`:\n{wide}"
     );
-    // Narrow: the primary survives, the trailing action drops, and the `?` stays at the right.
+    // Narrow: the primary survives, the trailing action drops, and the `?` stays at the left.
     let narrow = footer_line(&render_at(&app, 18));
     assert!(narrow.contains("c comment"), "the primary action is never dropped:\n{narrow}");
-    assert!(narrow.trim_end().ends_with('?'), "the `?` never drops:\n{narrow}");
+    assert!(opens_with_more(&narrow), "the `?` never drops:\n{narrow}");
     assert!(!narrow.contains("v select"), "the trailing action is trimmed off row 1:\n{narrow}");
     // Too narrow: the primary sheds its label and the `?` survives.
     let tiny = footer_line(&render_at(&app, 11));
     assert!(tiny.contains(" c "), "the primary keeps its key:\n{tiny}");
     assert!(!tiny.contains("comment"), "the primary sheds its label:\n{tiny}");
-    assert!(tiny.trim_end().ends_with('?'), "the `?` still survives:\n{tiny}");
+    assert!(opens_with_more(&tiny), "the `?` still survives:\n{tiny}");
 }
 
 #[test]
@@ -742,11 +747,19 @@ fn a_narrow_row_keeps_send_and_the_more_hint_by_shedding_the_primary_label() {
         app.input_push(ch);
     }
     app.submit_comment(); // a written comment adds `s send 1` to row 1
-    // The primary sheds its label so `send` and `?` never clip.
+    // The primary sheds its label, and `?` its separator, so the key, `send` and `?` never clip.
     let narrow = footer_line(&render_at(&app, 16));
-    assert!(narrow.contains("s send 1"), "send never drops:\n{narrow}");
-    assert!(narrow.trim_end().ends_with('?'), "the `?` never drops:\n{narrow}");
-    assert!(narrow.chars().count() <= 16, "the row never overflows its width:\n{narrow}");
+    assert_eq!(narrow, " ? e · s send 1 ", "the row at 16 columns");
+    // The label outranks the separator, and a row with no column for the key leaves it out.
+    let rows = [
+        (14, " ? · s send 1 "),
+        (20, " ? e edit · s send 1"),
+        (21, " ? e edit · s send 1 "),
+        (22, " ? · e edit · s send 1"),
+    ];
+    for (w, expected) in rows {
+        assert_eq!(footer_line(&render_at(&app, w)), expected, "the row at {w} columns");
+    }
 }
 
 #[test]
@@ -782,7 +795,7 @@ fn the_footer_shows_the_sends_outcome_at_a_pane_width_by_yielding_the_cursor_act
     let narrow = footer_line(&render_at(&app, 40));
     assert!(narrow.contains("no agent in"), "the refusal shows at 40 columns:\n{narrow}");
     assert!(narrow.contains("s send 1"), "send never drops:\n{narrow}");
-    assert!(narrow.trim_end().ends_with('?'), "the `?` never drops:\n{narrow}");
+    assert!(opens_with_more(&narrow), "the `?` never drops:\n{narrow}");
     assert!(!narrow.contains("d delete"), "the cursor's actions yield to the status:\n{narrow}");
 
     // With room for both, nothing yields.
@@ -798,11 +811,28 @@ fn the_footer_shows_the_sends_outcome_at_a_pane_width_by_yielding_the_cursor_act
     assert!(!tiny.contains("agent"), "no room for a legible message, so none is painted:\n{tiny}");
     assert!(tiny.contains("s send 1"), "send still never drops:\n{tiny}");
 
-    // A status never pushes `?` off, at any width row 1's fixed parts fit (14+).
+    // A status never pushes `?`, `send` or the primary's key off, at any width they fit (14+).
     for w in 14..=140u16 {
         let row = footer_line(&render_at(&app, w));
-        assert!(row.trim_end().ends_with('?'), "the `?` left the row at width {w}:\n{row}");
+        assert!(opens_with_more(&row), "the `?` left the row at width {w}:\n{row}");
+        assert!(row.contains("s send 1"), "send left the row at width {w}:\n{row}");
+        // An overflow clips the row's last entry: `send`, the status, or the worktree name.
+        let end = row.trim_end();
+        let whole = ["s send 1", "copy", "…", "main"].iter().any(|last| end.ends_with(last));
+        assert!(whole, "the row's last entry is clipped at width {w}:\n{row}");
+        let keyed = row.starts_with(" ? e") || row.starts_with(" ? · e");
+        assert!(w < 16 || keyed, "the primary's key left the row at width {w}:\n{row}");
     }
+
+    // A status of wide graphemes truncates by its columns, so the row still ends whole.
+    app.status = "❤️".repeat(40);
+    for w in 30..=70u16 {
+        let row = footer_line(&render_at(&app, w));
+        let end = row.trim_end();
+        let whole = ["s send 1", "…", "main"].iter().any(|last| end.ends_with(last));
+        assert!(whole, "the status overflows at width {w}:\n{row}");
+    }
+    app.status = "no agent in this workspace, press y to copy".to_string();
 
     // The comments list shows the status too, keeping room for its `…`.
     app.open_list();
@@ -824,15 +854,15 @@ fn the_expansion_aligns_row_one_into_the_labeled_grid() {
     let line_of = |lbl: &str| {
         out.lines()
             .skip(footer_start)
-            .find(|l| l.trim_start().starts_with(lbl))
+            .find(|l| l.trim_start().trim_start_matches('?').trim_start().starts_with(lbl))
             .unwrap_or("")
             .to_string()
     };
     let (do_line, go_line, move_line) = (line_of("do"), line_of("go"), line_of("move"));
 
-    // Row 1 is now the `do` band: the primary, and the `?` still at the right.
+    // Row 1 is now the `do` band: the `?` that opened it, then the primary.
     assert!(
-        do_line.contains("c comment") && do_line.trim_end().ends_with('?'),
+        do_line.contains("c comment") && opens_with_more(&do_line),
         "row 1 is the `do` line with the primary and `?`:\n{do_line}"
     );
     assert!(go_line.contains("scope"), "the go band lists the always-there keys:\n{go_line}");
@@ -857,10 +887,7 @@ fn the_collapsed_footer_stays_a_flush_action_bar() {
     let mut app = edited_app();
     on_changed_line(&mut app); // collapsed: no expansion
     let footer = footer_line(&render(&app));
-    assert!(
-        footer.trim_start().starts_with("c comment"),
-        "no `do` gutter when collapsed:\n{footer}"
-    );
+    assert!(footer.starts_with(" ? · c comment"), "no `do` gutter when collapsed:\n{footer}");
     assert!(!footer.contains(" do "), "the `do` label appears only when expanded:\n{footer}");
 }
 
@@ -879,8 +906,10 @@ fn the_expanded_row_one_never_drops_send_or_the_more_hint_on_a_narrow_pane() {
         let row1 = out.lines().find(|l| l.contains("send")).expect("row 1 carries send");
         let row1 = row1.trim_end();
         assert!(row1.contains("s send 1"), "send survives at w={w}: [{row1}]");
-        assert!(row1.ends_with('?'), "the `?` survives at w={w}: [{row1}]");
-        assert!(row1.chars().count() <= w as usize, "row 1 never overflows at w={w}: [{row1}]");
+        assert!(opens_with_more(row1), "the `?` survives at w={w}: [{row1}]");
+        // An overflow clips the row's last entry: `send`, or the worktree name after it.
+        let whole = row1.ends_with("s send 1") || row1.ends_with("main");
+        assert!(whole, "row 1 never overflows at w={w}: [{row1}]");
     }
 }
 
@@ -915,6 +944,16 @@ fn the_pr_footer_keeps_the_open_action_when_the_state_line_is_long() {
     // At narrow width the state line is capped so the primary `o open ↗` is never crowded off.
     let footer = footer_line(&render_at(&app, 60));
     assert!(footer.contains("o open"), "the open action survives a long state line:\n{footer}");
+
+    // Wide characters in the state count by their columns, so the worktree name ends the row.
+    app.pr = PrView::Pr(Box::new(PrSnapshot {
+        merge: Merge::Conflicting,
+        base_ref: "機能/ベース".into(),
+        ..common::pr_snapshot()
+    }));
+    let (folder, _) = app.worktree_name();
+    let footer = footer_line(&render_at(&app, 120));
+    assert!(footer.ends_with(&format!("  {folder} · main ")), "{footer}");
 }
 
 #[test]
@@ -1464,10 +1503,7 @@ fn all_files_tab_bar_footer_and_count_read_for_the_tab() {
         "the changed count stays in the header on All files:\n{out}"
     );
     let footer = footer_line(&out);
-    assert!(
-        footer.trim_end().ends_with('?'),
-        "the collapsed footer closes with the `?`:\n{footer}"
-    );
+    assert!(opens_with_more(&footer), "the collapsed footer opens with the `?`:\n{footer}");
     assert!(
         !footer.contains("changed"),
         "the changed count is not repeated in the footer:\n{footer}"
@@ -3365,6 +3401,135 @@ fn a_probe_row_still_fits_when_every_branch_matches() {
     assert_eq!(rows.into_iter().collect::<Vec<_>>(), [0, 1], "the hit row is inside the box");
 }
 
+#[test]
+fn the_worktree_picker_paints_its_rows_and_clicks_land_on_them() {
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    let wt = r.add_worktree("company-pages");
+    let mut app = app_on(&r);
+    app.open_worktree_picker();
+
+    let frame = render(&app);
+    assert!(frame.contains("worktrees · 2"), "{frame}");
+    assert!(frame.contains("● current"), "{frame}");
+    let tail = wt.path().file_name().unwrap().to_str().unwrap();
+    let pages = frame.lines().find(|l| l.contains("company-pages")).expect("the other row");
+    assert!(pages.contains(&format!("/{tail}│")), "the path, right-aligned: {pages}");
+
+    let rows: std::collections::BTreeSet<usize> = (0..AREA.height)
+        .flat_map(|row| (0..AREA.width).map(move |col| (col, row)))
+        .filter_map(|(col, row)| ui::hit_worktree_picker_row(AREA, &app, col, row))
+        .collect();
+    assert_eq!(rows.into_iter().collect::<Vec<_>>(), [0, 1], "both rows, the filter line skipped");
+
+    // Narrower than the shortest temp path's row (Linux), the path gives way from its head.
+    let narrow = dump(&render_size(&app, 32, 20));
+    let pages = narrow.lines().find(|l| l.contains("company-pages")).expect("the other row");
+    assert!(pages.contains('…'), "{narrow}");
+
+    // Switched away, the pane's first worktree reads `home`, under the current, over earlier branches.
+    let _alpha = r.add_worktree("alpha");
+    let mut away = App::new(wt.path().to_path_buf(), Scope::Uncommitted, None);
+    away.home = r.path().to_path_buf();
+    away.reload().unwrap();
+    away.open_worktree_picker();
+    let frame = render(&away);
+    let lines: Vec<&str> = frame.lines().collect();
+    let row = |i: usize| {
+        let at = (0..AREA.height).find(|&y| {
+            (0..AREA.width).any(|x| ui::hit_worktree_picker_row(AREA, &away, x, y) == Some(i))
+        });
+        at.map_or("", |y| lines[y as usize])
+    };
+    assert!(row(0).contains("company-pages") && row(0).contains("● current"), "{frame}");
+    assert!(row(1).contains("main") && row(1).contains(" home "), "{frame}");
+    assert!(row(2).contains("alpha") && !row(2).contains(" home "), "{frame}");
+}
+
+#[test]
+fn the_footer_names_the_worktree_at_its_right_edge() {
+    let mut app = edited_app();
+    on_changed_line(&mut app);
+    let (folder, checkout) = app.worktree_name();
+    assert_eq!(checkout, Some("main"), "the branch the load read");
+    let name = format!("{folder} · main");
+
+    // Wide, the folder and its branch close the row, one space from the edge.
+    let wide = footer_line(&render_at(&app, 120));
+    assert!(wide.ends_with(&format!("  {name} ")), "{wide}");
+    // Narrow, the name outranks the actions `?` repeats, and gives way from its head.
+    let narrow = footer_line(&render_at(&app, 30));
+    assert!(narrow.ends_with(" · main ") && narrow.contains('…'), "{narrow}");
+    assert!(!narrow.contains("v select"), "{narrow}");
+    // A status outranks it.
+    app.status = "no agent in this workspace, press y to copy".to_string();
+    let status = footer_line(&render_at(&app, 40));
+    assert!(status.contains("no agent in") && !status.contains("main"), "{status}");
+
+    // A modal footer names it after its own actions.
+    app.start_comment();
+    let composing = footer_line(&render_at(&app, 120));
+    assert!(
+        composing.contains("esc cancel") && composing.ends_with(&format!("  {name} ")),
+        "{composing}"
+    );
+
+    // Wide characters in an action count by their columns, so the name still ends the row.
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    let _wide = r.add_worktree("機能/ブランチ名");
+    let mut app = app_on(&r);
+    let (folder, _) = app.worktree_name();
+    app.store.add(herdr_reviewr::model::Comment {
+        file: "hello.rs".into(),
+        side: herdr_reviewr::model::Side::New,
+        start: 1,
+        end: 1,
+        lines: "+alpha".into(),
+        text: "unsent".into(),
+        diff_anchored: true,
+        rev: herdr_reviewr::model::Rev::Worktree,
+    });
+    app.open_worktree_picker();
+    for code in [KeyCode::Down, KeyCode::Enter] {
+        handle_key(&mut app, KeyEvent::from(code), AREA, &Keymap::default()).unwrap();
+    }
+    assert!(app.switch_question().is_some());
+    let asking = footer_line(&render_at(&app, 120));
+    assert!(asking.contains("(1 pending) · esc cancel"), "{asking}");
+    assert!(asking.ends_with(&format!("  {folder} · main ")), "{asking}");
+
+    // The question owns its row on `PR` too, the PR's state line set aside as quit's is.
+    handle_key(&mut app, KeyEvent::from(KeyCode::Esc), AREA, &Keymap::default()).unwrap();
+    handle_key(&mut app, KeyEvent::from(KeyCode::Esc), AREA, &Keymap::default()).unwrap();
+    app.set_tab(Tab::Pr).unwrap();
+    app.pr = herdr_reviewr::forge::PrView::Pr(Box::new(common::pr_snapshot()));
+    app.open_worktree_picker();
+    for code in [KeyCode::Down, KeyCode::Enter] {
+        handle_key(&mut app, KeyEvent::from(code), AREA, &Keymap::default()).unwrap();
+    }
+    assert!(app.switch_question().is_some());
+    let on_pr = footer_line(&render_at(&app, 60));
+    assert!(on_pr.starts_with(" W switch"), "{on_pr}");
+
+    // A branch with a `/` reads whole: the folder gives way before it.
+    let r = Repo::init();
+    r.write("hello.rs", "alpha\n");
+    r.commit_all("init");
+    let keep = tempfile::tempdir().unwrap();
+    let wt = keep.path().join("herdr-reviewr");
+    r.git(&["worktree", "add", "-q", "-b", "worktree/lucky-meadow-02ec", wt.to_str().unwrap()]);
+    let mut app = App::new(wt, Scope::Uncommitted, None);
+    app.reload().unwrap();
+    let row = footer_line(&render_at(&app, 55));
+    assert_eq!(row, " ? · b/t/g scope  …eviewr · worktree/lucky-meadow-02ec ");
+    // With no column left for the folder's `…`, the branch stands alone.
+    let row = footer_line(&render_at(&app, 45));
+    assert_eq!(row, " ? · b/t/g scope  worktree/lucky-meadow-02ec ");
+}
+
 fn now_minus(secs: u64) -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3886,7 +4051,7 @@ fn the_text_selection_highlights_the_dragged_span() {
     // `beta` on row 0 through char 1 (`本`) of row 2: a three-row stream selection.
     app.gesture = herdr_reviewr::selection::Gesture::Text {
         drag: TextDrag {
-            surface: Surface::Read,
+            surface: Surface::Read { side: None },
             anchor: Point { row: 0, chr: 6 },
             extent: Point { row: 2, chr: 1 },
         },
@@ -3948,7 +4113,10 @@ fn the_commit_picker_paints_rows_a_run_bar_and_its_count() {
     let ends: std::collections::HashSet<usize> =
         rows.iter().map(|l| l[..l.find("  Test ").unwrap()].chars().count()).collect();
     assert_eq!(ends.len(), 1, "the author column is one edge:\n{out}");
-    assert!(!out.contains("· main"), "the checked-out branch is never a ref:\n{out}");
+    assert!(
+        !rows.iter().any(|l| l.contains("· main")),
+        "the checked-out branch is never a ref:\n{out}"
+    );
     let rows: Vec<&str> = out.lines().filter(|l| l.contains("▎")).collect();
     assert_eq!(rows.len(), 3, "the run carries a bar:\n{out}");
     assert!(
@@ -4073,7 +4241,7 @@ fn the_commits_header_names_the_pick_and_its_verdict() {
         "both panes:\n{out}"
     );
     let footer = footer_line(&out);
-    assert!(footer.trim_start().starts_with("G commits"), "{footer}");
+    assert!(footer.starts_with(" ? · G commits"), "{footer}");
     assert!(footer.contains("u/b/t scope"), "the other three scopes: {footer}");
 }
 
@@ -4266,6 +4434,11 @@ fn m_marker_fg(buf: &Buffer) -> ratatui::style::Color {
     buf.cell((x, y)).unwrap().style().fg.expect("the marker is colored")
 }
 
+/// A pane whose tab switch carries no file, so `All files` opens on its folders closed.
+fn app_on_closed_tree(r: &Repo) -> App {
+    common::app_on_config(r, "follow_file_across_tabs = false\n")
+}
+
 /// `src/` and `docs/` committed, `src/ui.rs` and `zz.rs` edited, `zz.rs` for the color.
 fn dotted_repo() -> Repo {
     let r = Repo::init();
@@ -4283,7 +4456,7 @@ fn dotted_repo() -> Repo {
 #[test]
 fn a_collapsed_all_files_folder_with_a_change_wears_a_dot() {
     let r = dotted_repo();
-    let mut app = app_on(&r);
+    let mut app = app_on_closed_tree(&r);
     enter_tab(&mut app, Tab::AllFiles);
     assert!(dot_at_edge(&app, "src/"), "src/ holds the edit: {:?}", files_row(&app, "src/"));
     assert!(!files_row(&app, "docs/").contains('•'), "docs/ holds no change");
@@ -4308,7 +4481,7 @@ fn a_kept_change_under_an_ignored_folder_wears_the_same_dot() {
     r.commit_all("vendor");
     r.write("vendor/lib.rs", "v2\n");
     r.write("zz.rs", "z3\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_closed_tree(&r);
     enter_tab(&mut app, Tab::AllFiles);
     assert!(dot_at_edge(&app, "vendor/"), "{:?}", files_row(&app, "vendor/"));
 }
@@ -4332,21 +4505,26 @@ fn a_folder_whose_only_change_has_no_row_wears_no_dot() {
 }
 
 #[test]
-fn a_collapsed_changes_folder_wears_no_dot_and_reserves_nothing() {
-    // `Changes` paints no dot.
+fn a_collapsed_changes_folder_wears_its_line_sums_instead_of_the_dot() {
     let r = dotted_repo();
     r.write("src/app.rs", "x2\n"); // two changed files keep `src/` a directory row
     let mut app = app_on(&r);
+    assert_eq!(files_row(&app, "src/"), "▾ src/", "an open folder's files show their own");
     app.focus = Focus::Files;
     app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some("src")).unwrap();
     app.collapse_dir();
-    assert!(!files_row(&app, "src/").contains('•'), "no dot on Changes");
+    let row = files_row(&app, "src/");
+    assert!(!row.contains('•') && row.ends_with("+2 −2"), "collapsed, it sums: {row:?}");
     let wide = "n".repeat((FILES_X1 - FILES_X0) as usize - 2); // `▸ ` + name + `/` fills the row
     r.write(&format!("{wide}/a.rs"), "a\n");
     r.write(&format!("{wide}/b.rs"), "b\n");
     app.reload().unwrap();
     let row = files_row(&app, &wide[..20]);
-    assert_eq!(row, format!("▾ {wide}/"), "the exact-fit name is whole on Changes");
+    assert_eq!(row, format!("▾ {wide}/"), "an open folder keeps its whole name on Changes");
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some(&wide)).unwrap();
+    app.collapse_dir();
+    let row = files_row(&app, &wide[..20]);
+    assert_eq!(row, format!("▸ …{}/  +2", &wide[5..]), "collapsed, the sums elide the name");
     enter_tab(&mut app, Tab::AllFiles);
     assert!(dot_at_edge(&app, "…"), "{:?}", files_row(&app, "…"));
     assert_eq!(
@@ -4391,7 +4569,7 @@ fn a_long_folder_name_leaves_room_for_the_dot() {
     r.commit_all("init");
     r.write(&format!("{dir}/one.rs"), "1b\n");
     r.write("zz.rs", "z2\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_closed_tree(&r);
     enter_tab(&mut app, Tab::AllFiles);
     assert!(dot_at_edge(&app, "…"), "{:?}", files_row(&app, "…"));
     let row = files_row(&app, "…");
@@ -4612,7 +4790,7 @@ fn the_quit_question_owns_the_footer_and_the_blocked_screen() {
         "the footer is the question:\n{row}"
     );
     assert!(row.contains("s send 1") && row.contains("y copy"), "{row}");
-    assert!(!row.trim_end().ends_with('?'), "the question owns the bar:\n{row}");
+    assert!(!opens_with_more(&row), "the question owns the bar:\n{row}");
 
     // A pane-width row keeps the way out, even with a status left over from the comment.
     app.status = "comment added".to_string();
@@ -4680,12 +4858,14 @@ fn a_trimmed_modal_row_always_shows_its_ellipsis() {
         for w in 30..=80u16 {
             let row = footer_line(&render_at(&app, w));
             let row = row.trim_end();
-            assert!(row.chars().count() <= usize::from(w), "{n} at {w} overflows:\n{row}");
             if !row.contains("y copy") {
                 assert!(row.ends_with('…'), "{n} at {w} trims without its `…`:\n{row}");
             }
+            // An overflow clips the row's last entry: `y copy`, or the worktree name after it.
+            let whole = ["…", "y copy", "main"].iter().any(|last| row.ends_with(last));
+            assert!(whole, "{n} at {w} overflows:\n{row}");
         }
-        app.confirming_quit = false;
+        app.question = None;
     }
 }
 
@@ -4928,4 +5108,355 @@ fn the_line_field_paints_its_number_count_and_footer() {
     // The digits are a line, not a search: `row 1337` lights no match.
     let hl = app.palette().fill(Fill::Highlight);
     assert!(!render_buffer(&app).content.iter().any(|c| c.bg == hl), "no find highlight");
+}
+
+/// One frame at `width` with the navigator hidden, as the event loop draws it: width syncs first.
+fn split_frame(app: &mut App, width: u16) -> Buffer {
+    let area = Rect::new(0, 0, width, 20);
+    app.sync_split_width(ui::diff_inner_width(area, app));
+    render_size(app, width, 20)
+}
+
+/// The rows of a frame painting `old` and `new` side by side.
+fn side_by_side(out: &str, old: &str, new: &str) -> usize {
+    out.lines().filter(|l| l.contains(old) && l.contains(new)).count()
+}
+
+/// A frame row's halves, either side of the divider of a 142-column frame's read pane.
+fn halves(line: &str) -> (String, String) {
+    let chars: Vec<char> = line.chars().collect();
+    (chars[1..70].iter().collect(), chars[71..141].iter().collect())
+}
+
+/// One file with an insertion above a change between two unchanged lines.
+fn split_repo() -> Repo {
+    let r = Repo::init();
+    r.write("a.rs", "one\nlet total = two;\nthree\n");
+    r.commit_all("init");
+    r.write("a.rs", "zero\none\nlet total = TWO;\nthree\n");
+    r
+}
+
+#[test]
+fn split_shows_only_where_it_fits_and_keeps_the_choice() {
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+
+    let out = dump(&split_frame(&mut app, 142));
+    assert_eq!(side_by_side(&out, "two;", "TWO;"), 1, "142 columns show old beside new: {out}");
+
+    let out = dump(&split_frame(&mut app, 96));
+    assert_eq!(side_by_side(&out, "two;", "TWO;"), 0, "96 columns show unified: {out}");
+    assert!(out.contains("two;") && out.contains("TWO;"));
+
+    let out = dump(&split_frame(&mut app, 142));
+    assert_eq!(side_by_side(&out, "two;", "TWO;"), 1, "the choice outlives a narrow spell");
+
+    // A 135-column read pane is the narrowest that splits.
+    let out = dump(&split_frame(&mut app, 136));
+    assert_eq!(side_by_side(&out, "two;", "TWO;"), 0, "134 inner columns show unified: {out}");
+    let out = dump(&split_frame(&mut app, 137));
+    assert_eq!(side_by_side(&out, "two;", "TWO;"), 1, "135 inner columns split: {out}");
+}
+
+#[test]
+fn hiding_the_navigator_shows_split_on_the_next_frame() {
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    let out = dump(&split_frame(&mut app, 142));
+    assert_eq!(side_by_side(&out, "two;", "TWO;"), 0, "beside the navigator the pane is narrow");
+
+    app.toggle_navigator_hidden();
+    let out = dump(&split_frame(&mut app, 142));
+    assert_eq!(side_by_side(&out, "two;", "TWO;"), 1, "the first frame after `z` shows split");
+}
+
+#[test]
+fn one_sided_files_rendered_markdown_and_all_files_show_unified() {
+    let r = Repo::init();
+    r.write("doc.md", "# Title\n\nold body\n");
+    r.write("gone.rs", "fn gone() {}\n");
+    r.commit_all("init");
+    r.write("added.rs", "fn added() {}\n");
+    r.write("doc.md", "# Title\n\nnew body\n");
+    r.write("gone.rs", "");
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        split_frame(&mut app, 142);
+        let path = app.diff_path.clone().unwrap();
+        // Markdown shows source until `m`, so it splits like any diff.
+        assert_eq!(app.split_on_screen(), path == "doc.md", "{path}");
+        seen.push(path);
+        app.focus = Focus::Files;
+        app.move_cursor(1).unwrap();
+    }
+    seen.sort();
+    assert_eq!(seen, ["added.rs", "doc.md", "gone.rs"]);
+
+    app.file_cursor = 0;
+    app.move_cursor(1).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
+    app.focus = Focus::Diff;
+    app.toggle_rendered();
+    split_frame(&mut app, 142);
+    assert!(!app.split_on_screen(), "rendered markdown never splits");
+    app.toggle_rendered();
+    split_frame(&mut app, 142);
+    assert!(app.split_on_screen(), "back to source, it splits again");
+
+    enter_tab(&mut app, Tab::AllFiles);
+    split_frame(&mut app, 142);
+    assert!(!app.split_on_screen(), "All files shows content, never split");
+}
+
+#[test]
+fn a_file_growing_past_999_lines_keeps_split() {
+    let lines = |n: usize, mid: &str| -> String {
+        (1..=n).map(|i| if i == 500 { format!("{mid}\n") } else { format!("line {i}\n") }).collect()
+    };
+    let r = Repo::init();
+    r.write("big.txt", &lines(998, "middle old"));
+    r.commit_all("init");
+    r.write("big.txt", &lines(998, "middle new"));
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    split_frame(&mut app, 137);
+    assert!(app.split_on_screen());
+
+    r.write("big.txt", &lines(1010, "middle new"));
+    app.reload().unwrap();
+    split_frame(&mut app, 137);
+    assert!(app.split_on_screen(), "a four-digit gutter fits the narrowest split");
+}
+
+#[test]
+fn the_readme_names_the_pane_width_split_needs() {
+    let pane = (ui::SPLIT_MIN_WIDTH + 2).to_string(); // the read pane's two border cells
+    let readme = include_str!("../README.md");
+    assert_eq!(
+        readme.matches(&format!("{pane} columns")).count()
+            + readme.matches(&format!("{pane}\ncolumns")).count(),
+        2
+    );
+}
+
+#[test]
+fn a_hovered_split_row_shows_the_plus_on_each_half_it_paints() {
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    let out = dump(&split_frame(&mut app, 142));
+    let row = |text: &str| out.lines().position(|l| l.contains(text)).unwrap();
+    for (text, old_half) in [("TWO;", true), ("zero", false)] {
+        app.hover = Some((10, row(text) as u16));
+        let hovered = dump(&split_frame(&mut app, 142));
+        let (left, right) = halves(hovered.lines().nth(row(text)).unwrap());
+        assert_eq!(left.contains("[+]"), old_half, "a blank half shows none: {left:?}");
+        assert!(right.contains("[+]"), "{right:?}");
+    }
+}
+
+#[test]
+fn each_half_paints_its_own_side() {
+    const EMPH_INS_BG: ratatui::style::Color = ratatui::style::Color::Rgb(0x30, 0x55, 0x3f);
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    app.focus = Focus::Files; // no diff cursor, so the emphasis bg shows
+    let buf = split_frame(&mut app, 142);
+    let out = dump(&buf);
+    let row = |text: &str| out.lines().position(|l| l.contains(text)).unwrap();
+
+    let (left, right) = halves(out.lines().nth(row("zero")).unwrap());
+    assert!(left.trim().is_empty(), "an insertion leaves the old half blank: {left:?}");
+    assert!(right.contains(" 1 zero"), "{right:?}");
+
+    let (left, right) = halves(out.lines().nth(row("one")).unwrap());
+    assert!(left.contains(" 1 one") && right.contains(" 2 one"), "{left:?} | {right:?}");
+
+    let y = row("TWO;");
+    let (left, right) = halves(out.lines().nth(y).unwrap());
+    assert!(left.contains(" 2 let total = two;"), "{left:?}");
+    assert!(right.contains(" 3 let total = TWO;"), "{right:?}");
+    let emphasized = |xs: std::ops::Range<u16>, glyph: &str| {
+        xs.into_iter().any(|x| {
+            buf.cell((x, y as u16)).is_some_and(|c| c.symbol() == glyph && c.bg == EMPH_INS_BG)
+        })
+    };
+    assert!(emphasized(71..141, "T"), "the new half emphasizes its changed word");
+    assert!(!emphasized(1..70, "t"), "the old half never takes the insertion's emphasis");
+}
+
+#[test]
+fn the_cursor_fill_crosses_a_blank_half() {
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    app.focus = Focus::Diff;
+    split_frame(&mut app, 142);
+    app.diff_cursor = app.visible.iter().position(|v| v.new_no() == Some(1)).unwrap();
+    let buf = split_frame(&mut app, 142);
+    let y = dump(&buf).lines().position(|l| l.contains("zero")).unwrap() as u16;
+    let filled =
+        (1..70u16).filter(|&x| buf.cell((x, y)).is_some_and(|c| c.bg == CURSOR_BG)).count();
+    assert!(filled > 60, "the blank old half takes the cursor fill: {filled}");
+    assert_eq!(buf.cell((70, y)).unwrap().bg, CURSOR_BG, "the divider too, so the row is one band");
+}
+
+#[test]
+fn a_held_split_narrower_than_its_gutters_keeps_the_divider_in_place() {
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    app.focus = Focus::Diff;
+    split_frame(&mut app, 142);
+    app.toggle_select();
+    let out = dump(&split_frame(&mut app, 13));
+    assert!(app.split_on_screen(), "the selection holds split");
+    let body = out.lines().filter(|l| l.starts_with('│'));
+    for line in body {
+        let line: Vec<char> = line.chars().collect();
+        assert_eq!(line[6], '│', "the divider stays at its column:\n{out}");
+    }
+}
+
+#[test]
+fn a_split_row_wraps_as_tall_as_its_taller_half() {
+    let r = Repo::init();
+    r.write("w.rs", "short\nkeep\n");
+    r.commit_all("init");
+    r.write("w.rs", &format!("{}\nkeep\n", "long ".repeat(30)));
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    let gap = |app: &mut App| {
+        let out = dump(&split_frame(app, 142));
+        let row = |text: &str| out.lines().position(|l| l.contains(text)).unwrap();
+        row("keep") - row("short")
+    };
+    app.wrap = true;
+    assert!(gap(&mut app) >= 3, "the long new half wraps, and its old half pads beside it");
+    app.wrap = false;
+    assert_eq!(gap(&mut app), 1, "unwrapped, every row is one line");
+}
+
+#[test]
+fn an_unwrapped_long_half_stops_at_the_divider() {
+    let r = Repo::init();
+    r.write("w.rs", &format!("{}\nkeep\n", "x".repeat(120)));
+    r.commit_all("init");
+    r.write("w.rs", "short\nkeep\n");
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    app.wrap = false;
+    let out = dump(&split_frame(&mut app, 142));
+    let line = out.lines().find(|l| l.contains("short")).unwrap();
+    let (left, right) = halves(line);
+    assert!(left.ends_with('x'), "the old half runs to its edge: {left:?}");
+    assert!(!right.contains('x'), "and no further: {right:?}");
+}
+
+#[test]
+fn the_split_key_shows_where_it_acts_and_names_its_destination() {
+    let r = split_repo();
+    let mut app = app_on(&r);
+    app.toggle_navigator_hidden();
+    let out = dump(&split_frame(&mut app, 142));
+    assert!(!out.contains("| split"), "`|` stays off the footer's main row: {out}");
+    app.toggle_keys();
+    let out = dump(&split_frame(&mut app, 142));
+    assert!(out.contains("| split"), "{out}");
+
+    app.toggle_split();
+    let out = dump(&split_frame(&mut app, 142));
+    assert!(out.contains("| unified"), "the label names the destination: {out}");
+
+    let out = dump(&split_frame(&mut app, 96));
+    assert!(!out.contains("| split") && !out.contains("| unified"), "too narrow, `|` hides");
+}
+
+#[test]
+fn a_split_text_selection_paints_only_its_column() {
+    use herdr_reviewr::model::Side;
+    use herdr_reviewr::selection::{Point, Surface, TextDrag};
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    app.focus = Focus::Files;
+    split_frame(&mut app, 142);
+    let row = app.visible.iter().position(|v| v.new_no() == Some(3)).unwrap();
+    app.gesture = herdr_reviewr::selection::Gesture::Text {
+        drag: TextDrag {
+            surface: Surface::Read { side: Some(Side::New) },
+            anchor: Point { row, chr: 0 },
+            extent: Point { row, chr: 8 },
+        },
+        count: 1,
+    };
+    let buf = split_frame(&mut app, 142);
+    let y = dump(&buf).lines().position(|l| l.contains("TWO;")).unwrap() as u16;
+    let sel_bg = app.palette().fill(Fill::Selection);
+    let selected = |xs: std::ops::Range<u16>| {
+        xs.filter(|&x| buf.cell((x, y)).unwrap().style().bg == Some(sel_bg)).count()
+    };
+    assert_eq!(selected(71..141), 9, "`let total` in the new column");
+    assert_eq!(selected(1..70), 0, "nothing in the old column");
+}
+
+#[test]
+fn a_rendered_line_wider_than_the_pane_never_tints_the_border() {
+    use herdr_reviewr::selection::{Point, Surface, TextDrag};
+    let r = Repo::init();
+    r.write("doc.md", "# T\n");
+    r.commit_all("init");
+    r.write("doc.md", &format!("> > > > > > > > - - - - - - - - {}\n", "x".repeat(30)));
+    let mut app = app_on_rendered(&r);
+    app.toggle_navigator_hidden();
+    app.focus = Focus::Files;
+    render_size(&app, 40, 20);
+    let row = app.visible.len() - 1;
+    app.gesture = herdr_reviewr::selection::Gesture::Text {
+        drag: TextDrag {
+            surface: Surface::Read { side: None },
+            anchor: Point { row, chr: 0 },
+            extent: Point { row, chr: 999 },
+        },
+        count: 1,
+    };
+    let buf = render_size(&app, 40, 20);
+    let y = dump(&buf).lines().position(|l| l.contains('x')).unwrap() as u16;
+    let sel_bg = app.palette().fill(Fill::Selection);
+    assert!(buf.cell((38, y)).unwrap().style().bg == Some(sel_bg), "the line is selected");
+    assert!(buf.cell((39, y)).unwrap().style().bg != Some(sel_bg), "the border keeps its fill");
+}
+
+#[test]
+fn find_highlights_a_match_in_the_half_that_holds_it() {
+    let r = split_repo();
+    let mut app = app_on_split(&r);
+    app.toggle_navigator_hidden();
+    app.focus = Focus::Files;
+    app.open_find();
+    for ch in "two;".chars() {
+        app.input_push(ch);
+    }
+    let buf = split_frame(&mut app, 142);
+    let y = dump(&buf).lines().position(|l| l.contains("TWO;")).unwrap() as u16;
+    let fill = app.palette().fill(Fill::Highlight);
+    let lit =
+        |xs: std::ops::Range<u16>| xs.filter(|&x| buf.cell((x, y)).unwrap().bg == fill).count();
+    assert_eq!(lit(1..70), 4, "`two;` lights in the old half");
+    assert_eq!(lit(71..141), 4, "and, ignoring case, `TWO;` in the new");
+
+    app.close_find();
+    app.open_find();
+    for ch in "Two".chars() {
+        app.input_push(ch);
+    }
+    let buf = split_frame(&mut app, 142);
+    let lit =
+        |xs: std::ops::Range<u16>| xs.filter(|&x| buf.cell((x, y)).unwrap().bg == fill).count();
+    assert_eq!(lit(1..141), 0, "a cased query matches neither half");
 }

@@ -19,6 +19,8 @@ fn git_command(repo: &Path) -> std::process::Command {
         // Single-threaded, so a refresh's wall time bounds its CPU (the pacing budget's measure).
         .args(["-c", "diff.autoRefreshIndex=false", "-c", "core.preloadIndex=false"])
         .args(["-c", "index.threads=1"])
+        // No fsmonitor program or git hook the repo's config names runs unasked.
+        .args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"])
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env_remove("GIT_DIFF_OPTS");
     cmd
@@ -124,11 +126,18 @@ pub fn worktree_of(path: &Path) -> Worktree {
 
 /// The worktree's own git dir and the common dir, canonical; the same in a main checkout.
 pub fn git_dirs(repo: &Path) -> Option<(PathBuf, PathBuf)> {
-    let out = git(repo, &["rev-parse", "--absolute-git-dir", "--git-common-dir"]).ok()?;
-    let mut lines = out.lines();
-    let dir = PathBuf::from(lines.next()?);
-    let common = repo.join(lines.next()?);
+    let (dir, common) = dirs(repo).ok()?;
     Some((dir.canonicalize().ok()?, common.canonicalize().ok()?))
+}
+
+/// The worktree's own git dir and the common dir, as one `rev-parse` names them.
+fn dirs(repo: &Path) -> Result<(PathBuf, PathBuf)> {
+    let out = git(repo, &["rev-parse", "--absolute-git-dir", "--git-common-dir"])?;
+    let mut lines = out.lines();
+    let (Some(dir), Some(common)) = (lines.next(), lines.next()) else {
+        bail!("git rev-parse named no git dir in {}", repo.display());
+    };
+    Ok((PathBuf::from(dir), repo.join(common)))
 }
 
 /// The global ignore file git reads: `core.excludesFile`, else git's default under the XDG dir.
@@ -213,6 +222,9 @@ pub struct ForgeHosts<'a> {
     pub gitlab: Option<&'a str>,
     pub azure_devops: Option<&'a str>,
 }
+
+/// The host an SSH alias stands for, `None` when unknown: [`ssh_hostname`] outside tests.
+pub(crate) type SshAlias = fn(&str) -> Option<String>;
 
 /// A canonical forge repository target: the forge, its hostname, and the repository path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -335,18 +347,25 @@ enum RemoteTransport {
 }
 
 /// Classify one repository URL against the built-in and configured forge hosts.
-fn classify_remote(url: &str, hosts: &ForgeHosts<'_>) -> RepositoryIdentity {
+fn classify_remote(url: &str, hosts: &ForgeHosts<'_>, alias: SshAlias) -> RepositoryIdentity {
     let Some((transport, host, path, has_port)) = split_remote(url) else {
         return RepositoryIdentity::Hostless;
     };
     if host.is_empty() {
         return RepositoryIdentity::Hostless;
     }
-    let host = host.to_ascii_lowercase();
+    let mut host = host.to_ascii_lowercase();
     if transport == RemoteTransport::Unsupported
         || (transport == RemoteTransport::Hosted && has_port)
     {
         return RepositoryIdentity::Unsupported(host);
+    }
+    // An SSH alias names the forge host it stands for; https hosts have no aliases.
+    if transport == RemoteTransport::Ssh
+        && forge_for_host(&host, hosts).is_none()
+        && let Some(real) = alias(&host)
+    {
+        host = real;
     }
     let Some(forge) = forge_for_host(&host, hosts) else {
         return RepositoryIdentity::Unsupported(host);
@@ -441,6 +460,24 @@ fn percent_decode(segment: &str) -> Option<String> {
         }
     }
     String::from_utf8(bytes).ok()
+}
+
+/// The host ssh connects to for `host`, read from `ssh -G` as `gh` does; `None` when ssh can't say.
+pub(crate) fn ssh_hostname(host: &str) -> Option<String> {
+    if !crate::config::valid_host_syntax(host) {
+        return None;
+    }
+    let mut cmd = crate::proc::command("ssh");
+    cmd.args(["-G", "--", host]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let config = crate::proc::run_tree(cmd, || std::time::Instant::now() >= deadline).ok()?;
+    hostname_line(&config)
+}
+
+/// The `hostname` line of `ssh -G` output, lowercased.
+fn hostname_line(config: &str) -> Option<String> {
+    let host = config.lines().find_map(|line| line.strip_prefix("hostname "))?.trim();
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 /// Split a Git remote URL into transport, host, and path for scheme and scp-style forms.
@@ -575,6 +612,7 @@ pub(crate) fn pr_local(
     repo: &Path,
     base_flag: Option<&str>,
     hosts: &ForgeHosts<'_>,
+    alias: SshAlias,
 ) -> Result<PrLocalState, GitFail> {
     let Some(branch) = checked_out_branch(repo)? else {
         return Ok(PrLocalState::default());
@@ -585,7 +623,7 @@ pub(crate) fn pr_local(
     let config = GitConfig::read(repo)?;
     let remote_list = remote_names(&config);
     let tips = remote_tips(repo, &remote_list)?;
-    let mut remotes = Remotes::new(repo, &config, hosts);
+    let mut remotes = Remotes::new(repo, &config, hosts, alias);
     let push_remote_record = config.get(&format!("branch.{branch}.pushremote"));
     // A nameless base is recognized by a tracking tip sitting on it.
     let tracks_base_tip = |remote: &str, name: &str| {
@@ -844,7 +882,75 @@ pub fn list_branches(repo: &Path) -> Result<Vec<BranchRow>, GitFail> {
 
 /// The checked-out branch's bare name, `None` when `HEAD` is detached.
 pub fn checked_out_branch(repo: &Path) -> Result<Option<String>, GitFail> {
-    git_tristate(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+    Ok(git_tristate(repo, &["symbolic-ref", "--quiet", "HEAD"])?.as_deref().and_then(branch_name))
+}
+
+/// A branch ref's bare name; git's short form reads `heads/main` beside a tag `main`.
+fn branch_name(full: &str) -> Option<String> {
+    full.strip_prefix("refs/heads/").map(str::to_string)
+}
+
+/// `path` as the OS resolves it, so two spellings of one directory compare equal.
+pub fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// One worktree of this clone: where it is, its `HEAD`, and its branch when one is checked out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Checkout {
+    pub path: PathBuf,
+    pub head: Option<String>,
+    pub branch: Option<String>,
+}
+
+/// The worktrees of the clone at canonical `common`, minus the bare, the prunable and the unlocatable.
+pub fn worktrees(common: &Path, known: &[&Path]) -> Result<Vec<Checkout>, GitFail> {
+    // No `-z`: it needs git 2.36, and the line form is the same fields.
+    let listed = parse_worktrees(&git_strict(common, &["worktree", "list", "--porcelain"])?);
+    // A submodule, `--separate-git-dir` or a symlinked `.git` lists its main worktree as the git dir.
+    let locate = |mut c: Checkout| {
+        if canonical(&c.path) == common {
+            let own = known.iter().find(|k| git_dirs(k).is_some_and(|(own, _)| own == common));
+            c.path = own.map(|k| k.to_path_buf()).or_else(|| toplevel(&c.path))?;
+        }
+        Some(c)
+    };
+    Ok(listed.into_iter().filter_map(locate).collect())
+}
+
+/// How a checkout reads: its branch, else `detached <short sha>`.
+pub fn checkout_name(branch: Option<String>, head: Option<&str>) -> Option<String> {
+    branch.or_else(|| head.map(|h| format!("detached {}", abbreviate_oid(h))))
+}
+
+/// Read `git worktree list --porcelain`: a field per line, a blank line ending each record.
+fn parse_worktrees(out: &str) -> Vec<Checkout> {
+    let mut rows = Vec::new();
+    let mut record: Option<(Checkout, bool)> = None;
+    for field in out.lines() {
+        let (key, value) = field.split_once(' ').unwrap_or((field, ""));
+        match (key, record.as_mut()) {
+            ("", _) => {
+                if let Some((entry, false)) = record.take() {
+                    rows.push(entry);
+                }
+            }
+            ("worktree", _) => {
+                let entry = Checkout { path: PathBuf::from(value), head: None, branch: None };
+                record = Some((entry, false));
+            }
+            ("HEAD", Some((entry, _))) => entry.head = Some(value.to_string()),
+            ("branch", Some((entry, _))) => {
+                entry.branch = branch_name(value);
+            }
+            ("bare" | "prunable", Some((_, skip))) => *skip = true,
+            _ => {}
+        }
+    }
+    if let Some((entry, false)) = record {
+        rows.push(entry);
+    }
+    rows
 }
 
 /// The `origin` remote-tracking tips as `(OID, bare name)`, `origin/HEAD` excluded.
@@ -957,9 +1063,10 @@ fn beyond_all_bases(repo: &Path, oid: &str, bases: &[String]) -> Result<bool, Gi
 pub(crate) fn remote_identities(
     repo: &Path,
     hosts: &ForgeHosts<'_>,
+    alias: SshAlias,
 ) -> Result<(RepositoryIdentity, Option<RepoTarget>), GitFail> {
-    let upstream = remote_identity(repo, "upstream", hosts)?;
-    let origin = remote_identity(repo, "origin", hosts);
+    let upstream = remote_identity(repo, "upstream", hosts, alias)?;
+    let origin = remote_identity(repo, "origin", hosts, alias);
     let origin_target = match &origin {
         Ok(RepositoryIdentity::Repository(target)) => Some(target.clone()),
         _ => None,
@@ -974,13 +1081,14 @@ fn remote_identity(
     repo: &Path,
     remote: &str,
     hosts: &ForgeHosts<'_>,
+    alias: SshAlias,
 ) -> Result<RepositoryIdentity, GitFail> {
     let args = ["remote", "get-url", "--", remote];
     let out = run_git(repo, &args)?;
     if out.status.success() {
         let url = std::str::from_utf8(&out.stdout)
             .map_err(|e| GitFail(git_error(&args, "returned invalid UTF-8", e)))?;
-        return Ok(classify_remote(url.trim(), hosts));
+        return Ok(classify_remote(url.trim(), hosts, alias));
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.to_lowercase().contains("no such remote") {
@@ -1173,12 +1281,18 @@ struct Remotes<'a> {
     repo: &'a Path,
     config: &'a GitConfig,
     hosts: &'a ForgeHosts<'a>,
+    alias: SshAlias,
     seen: Vec<((String, bool), Option<RepoTarget>)>,
 }
 
 impl<'a> Remotes<'a> {
-    fn new(repo: &'a Path, config: &'a GitConfig, hosts: &'a ForgeHosts<'a>) -> Self {
-        Self { repo, config, hosts, seen: Vec::new() }
+    fn new(
+        repo: &'a Path,
+        config: &'a GitConfig,
+        hosts: &'a ForgeHosts<'a>,
+        alias: SshAlias,
+    ) -> Self {
+        Self { repo, config, hosts, alias, seen: Vec::new() }
     }
 
     /// The forge repository a remote or URL names, with git's rewrites; push falls back to fetch.
@@ -1193,7 +1307,7 @@ impl<'a> Remotes<'a> {
             // A deleted remote's name prints back verbatim and names no host.
             git_strict(self.repo, &["ls-remote", "--get-url", "--", value])?
         };
-        let repo = match classify_remote(url.trim(), self.hosts) {
+        let repo = match classify_remote(url.trim(), self.hosts, self.alias) {
             RepositoryIdentity::Repository(target) => Some(target),
             _ if push && is_named_remote(self.config, value) => self.resolve(value, false)?,
             _ => None,
@@ -1513,7 +1627,7 @@ static OWN_REF_WRITES: Mutex<Vec<(PathBuf, &str, Option<String>)>> = Mutex::new(
 /// Note this process's write to the private ref `name` of `repo`, keyed by its canonical git dir.
 fn record_own_ref(repo: &Path, name: &'static str, value: Option<&str>) {
     let Ok(dir) = git_dir(repo) else { return };
-    let dir = dir.canonicalize().unwrap_or(dir);
+    let dir = canonical(&dir);
     let mut writes = OWN_REF_WRITES.lock().unwrap_or_else(PoisonError::into_inner);
     writes.retain(|(d, written, _)| !(*d == dir && *written == name));
     writes.push((dir, name, value.map(str::to_string)));
@@ -1862,6 +1976,11 @@ fn git_dir(repo: &Path) -> Result<PathBuf> {
     Ok(session(repo)?.git_dir.clone())
 }
 
+/// `repo`'s canonical common dir, asked once per worktree like its git dir; `None` outside a repo.
+pub fn common_dir(repo: &Path) -> Option<PathBuf> {
+    Some(session(repo).ok()?.common_dir.clone())
+}
+
 /// What reviewr keeps about one worktree for the session: its git dir, its index copy, its last
 /// build's untracked counts, and the blob sizes it has asked for.
 #[derive(Default)]
@@ -1869,6 +1988,8 @@ struct RepoSession {
     /// What `<repo>/.git` held when the git dir was read: a linked worktree's pointer, else `None`.
     pointer: Option<String>,
     git_dir: PathBuf,
+    /// The clone's common dir, canonical: the worktree picker lists from it.
+    common_dir: PathBuf,
     copy: Mutex<Option<IndexCopy>>,
     /// Where the session copy's index file lives, so a snapshot seeds from it without its lock.
     copy_file: Mutex<Option<PathBuf>>,
@@ -1876,35 +1997,67 @@ struct RepoSession {
     sizes: Mutex<HashMap<String, u64>>,
 }
 
-/// Every live session by worktree.
-static SESSIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<RepoSession>>>> = OnceLock::new();
+/// Every live session by worktree, and how many leases hold each worktree's.
+#[derive(Default)]
+struct Sessions {
+    live: HashMap<PathBuf, Arc<RepoSession>>,
+    leases: HashMap<PathBuf, usize>,
+}
+
+static SESSIONS: OnceLock<Mutex<Sessions>> = OnceLock::new();
+
+fn sessions() -> std::sync::MutexGuard<'static, Sessions> {
+    SESSIONS.get_or_init(Mutex::default).lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// `repo`'s session, made on first use and again when `.git` points elsewhere (a re-added worktree).
 fn session(repo: &Path) -> Result<Arc<RepoSession>> {
-    let sessions = SESSIONS.get_or_init(Mutex::default);
     let pointer = std::fs::read_to_string(repo.join(".git")).ok();
     let current = |s: &&Arc<RepoSession>| s.pointer == pointer;
-    if let Some(found) =
-        sessions.lock().unwrap_or_else(PoisonError::into_inner).get(repo).filter(current)
-    {
+    if let Some(found) = sessions().live.get(repo).filter(current) {
         return Ok(Arc::clone(found));
     }
-    let git_dir = PathBuf::from(git(repo, &["rev-parse", "--absolute-git-dir"])?.trim());
-    let mut sessions = sessions.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(found) = sessions.get(repo).filter(current) {
+    let (git_dir, common_dir) = dirs(repo)?;
+    let common_dir = canonical(&common_dir);
+    let mut sessions = sessions();
+    if let Some(found) = sessions.live.get(repo).filter(current) {
         return Ok(Arc::clone(found));
     }
-    let made = RepoSession { pointer, git_dir, ..RepoSession::default() };
+    let made = RepoSession { pointer, git_dir, common_dir, ..RepoSession::default() };
     let made = Arc::new(made);
-    sessions.insert(repo.to_path_buf(), Arc::clone(&made));
+    sessions.live.insert(repo.to_path_buf(), Arc::clone(&made));
     Ok(made)
 }
 
-/// Drop every session, so each index copy no other thread holds leaves the git dir now.
-pub fn end_sessions() {
-    if let Some(sessions) = SESSIONS.get() {
-        sessions.lock().unwrap_or_else(PoisonError::into_inner).clear();
+/// A hold on `repo`'s session for as long as its holder runs git there; the last one ends it.
+#[must_use]
+#[derive(Debug)]
+pub struct SessionLease(PathBuf);
+
+pub fn lease_session(repo: &Path) -> SessionLease {
+    *sessions().leases.entry(repo.to_path_buf()).or_default() += 1;
+    SessionLease(repo.to_path_buf())
+}
+
+impl Drop for SessionLease {
+    fn drop(&mut self) {
+        let mut sessions = sessions();
+        let Some(held) = sessions.leases.get_mut(&self.0) else { return };
+        *held -= 1;
+        if *held == 0 {
+            sessions.leases.remove(&self.0);
+            // Dropped outside the lock: an index copy's removal is file work.
+            let ended = sessions.live.remove(&self.0);
+            drop(sessions);
+            drop(ended);
+        }
     }
+}
+
+/// Drop every session at exit, so each index copy no other thread holds leaves the git dir now.
+pub fn end_sessions() {
+    let ended = std::mem::take(&mut *sessions());
+    drop(ended);
 }
 
 /// The persisted turn baseline tree for this worktree, if a baseline exists.
@@ -1988,6 +2141,16 @@ pub fn parent_or_empty(repo: &Path, sha: &str) -> Option<String> {
 /// `HEAD`'s commit, `None` while unborn.
 pub fn head_oid(repo: &Path) -> Option<String> {
     git_line(repo, &["rev-parse", "--verify", "-q", "HEAD"])
+}
+
+/// `HEAD`'s commit and branch in one read: a detached `HEAD` has no branch, an unborn one no commit.
+pub fn head_and_branch(repo: &Path) -> (Option<String>, Option<String>) {
+    let Some(out) = git_line(repo, &["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"]) else {
+        return (None, checked_out_branch(repo).ok().flatten());
+    };
+    let mut lines = out.lines();
+    let head = lines.next().map(str::to_string);
+    (head, lines.next().and_then(branch_name))
 }
 
 /// `sha`'s subject line, for the header paint.
@@ -2153,8 +2316,8 @@ fn all_files_listed(repo: &Path, specs: &[String]) -> Result<Vec<WorktreeEntry>>
         "--others",
         "--ignored",
         "--exclude-standard",
+        // `--no-empty-directory` would also drop an ignored dir under an untracked one.
         "--directory",
-        "--no-empty-directory",
         "-z",
     ]);
     for (path, is_dir) in ignored_entries(repo, &ignored)? {
@@ -2534,6 +2697,36 @@ mod tests {
 
     const NONE: ForgeHosts<'_> = ForgeHosts { github: None, gitlab: None, azure_devops: None };
 
+    /// Classify with no SSH alias known, so no test reads this machine's ssh config.
+    fn classify(url: &str, hosts: &ForgeHosts<'_>) -> RepositoryIdentity {
+        classify_remote(url, hosts, |_| None)
+    }
+
+    #[test]
+    fn worktree_listing_keeps_checkouts_and_drops_bare_and_prunable() {
+        let out = concat!(
+            "worktree /r\nHEAD aaa\nbranch refs/heads/main\n\n",
+            "worktree /bare\nbare\n\n",
+            "worktree /w/detached\nHEAD bbb\ndetached\n\n",
+            "worktree /tmp/gone\nHEAD ddd\nbranch refs/heads/old\nprunable gitdir points nowhere\n\n",
+            // The last record, with no blank line after it.
+            "worktree /w/locked\nHEAD ccc\nbranch refs/heads/feat/x\nlocked why\n",
+        );
+        let rows = super::parse_worktrees(out);
+        let shown: Vec<_> = rows
+            .iter()
+            .map(|r| (r.path.to_str().unwrap(), r.head.as_deref(), r.branch.as_deref()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("/r", Some("aaa"), Some("main")),
+                ("/w/detached", Some("bbb"), None),
+                ("/w/locked", Some("ccc"), Some("feat/x")),
+            ]
+        );
+    }
+
     #[test]
     fn a_path_limited_build_merges_untracked_counts_and_never_shrinks_them() {
         let (dir, git) = crate::test_support::test_repo();
@@ -2736,39 +2929,36 @@ mod tests {
         };
         // HTTPS, with and without `.git` and a trailing slash.
         assert_eq!(
-            classify_remote("https://github.com/owner/repo.git", &NONE),
+            classify("https://github.com/owner/repo.git", &NONE),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("https://github.com/owner/repo", &NONE),
+            classify("https://github.com/owner/repo", &NONE),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("https://github.com/owner/repo/", &NONE),
+            classify("https://github.com/owner/repo/", &NONE),
             repo("github.com", "owner", "repo")
         );
         // scp-like SSH, and the `ssh://` scheme form with a port.
         assert_eq!(
-            classify_remote("git@github.com:owner/repo.git", &NONE),
+            classify("git@github.com:owner/repo.git", &NONE),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("ssh://git@github.com/owner/repo.git", &NONE),
+            classify("ssh://git@github.com/owner/repo.git", &NONE),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("ssh://git@github.com:22/owner/repo.git", &NONE),
+            classify("ssh://git@github.com:22/owner/repo.git", &NONE),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote("git://github.com/owner/repo", &NONE),
+            classify("git://github.com/owner/repo", &NONE),
             repo("github.com", "owner", "repo")
         );
         assert_eq!(
-            classify_remote(
-                "https://github.company.com/owner/repo.git",
-                &github("github.company.com")
-            ),
+            classify("https://github.company.com/owner/repo.git", &github("github.company.com")),
             repo("github.company.com", "owner", "repo")
         );
     }
@@ -2781,30 +2971,30 @@ mod tests {
             )
         };
         assert_eq!(
-            classify_remote("https://gitlab.com/owner/repo.git", &NONE),
+            classify("https://gitlab.com/owner/repo.git", &NONE),
             repo("gitlab.com", &["owner", "repo"])
         );
         assert_eq!(
-            classify_remote("git@gitlab.com:owner/repo.git", &NONE),
+            classify("git@gitlab.com:owner/repo.git", &NONE),
             repo("gitlab.com", &["owner", "repo"])
         );
         // Nested groups keep the full namespace path.
         assert_eq!(
-            classify_remote("https://gitlab.com/group/subgroup/project.git", &NONE),
+            classify("https://gitlab.com/group/subgroup/project.git", &NONE),
             repo("gitlab.com", &["group", "subgroup", "project"])
         );
         assert_eq!(
-            classify_remote("git@git.corp.example:team/sub/repo.git", &gitlab("git.corp.example")),
+            classify("git@git.corp.example:team/sub/repo.git", &gitlab("git.corp.example")),
             repo("git.corp.example", &["team", "sub", "repo"])
         );
         // A GitHub target and a GitLab target on the same path are different targets.
         let RepositoryIdentity::Repository(on_github) =
-            classify_remote("https://github.com/owner/repo", &NONE)
+            classify("https://github.com/owner/repo", &NONE)
         else {
             panic!("expected a repository identity");
         };
         let RepositoryIdentity::Repository(on_gitlab) =
-            classify_remote("https://gitlab.com/owner/repo", &NONE)
+            classify("https://gitlab.com/owner/repo", &NONE)
         else {
             panic!("expected a repository identity");
         };
@@ -2813,66 +3003,132 @@ mod tests {
         assert_eq!(on_gitlab.forge(), Forge::GitLab);
         // A single-segment GitLab path is malformed, not unsupported.
         assert_eq!(
-            classify_remote("https://gitlab.com/owner", &NONE),
+            classify("https://gitlab.com/owner", &NONE),
             RepositoryIdentity::Malformed("gitlab.com".to_string())
         );
+    }
+
+    /// `~/.ssh/config` with `Host github-second` / `HostName github.com`, and nothing else.
+    fn second_account(host: &str) -> Option<String> {
+        (host == "github-second").then(|| "github.com".to_string())
+    }
+
+    #[test]
+    fn the_hostname_line_of_ssh_g_names_the_real_host() {
+        let config = "host github-second\nuser git\nhostname GitHub.com\nport 22\n";
+        assert_eq!(super::hostname_line(config).as_deref(), Some("github.com"));
+        assert_eq!(super::hostname_line("host x\nuser git\n"), None);
+    }
+
+    #[test]
+    fn an_ssh_alias_classifies_as_the_host_it_stands_for() {
+        assert_eq!(
+            classify_remote("git@github-second:owner/repo.git", &NONE, second_account),
+            RepositoryIdentity::Repository(RepoTarget::new("github.com", "owner", "repo").unwrap())
+        );
+        assert_eq!(
+            classify_remote("ssh://git@github-second/owner/repo.git", &NONE, second_account),
+            RepositoryIdentity::Repository(RepoTarget::new("github.com", "owner", "repo").unwrap())
+        );
+        // https has no aliases: a look-alike host stays unsupported whatever ssh says.
+        assert_eq!(
+            classify_remote("https://github-second/owner/repo", &NONE, |_| {
+                Some("github.com".to_string())
+            }),
+            RepositoryIdentity::Unsupported("github-second".to_string())
+        );
+        // An alias for an unconfigured server names the host `gitlab_host` must match.
+        let corp = |host: &str| (host == "corp").then(|| "git.corp.example".to_string());
+        assert_eq!(
+            classify_remote("git@corp:team/repo.git", &NONE, corp),
+            RepositoryIdentity::Unsupported("git.corp.example".to_string())
+        );
+        assert!(matches!(
+            classify_remote("git@corp:team/repo.git", &gitlab("git.corp.example"), corp),
+            RepositoryIdentity::Repository(target) if target.host() == "git.corp.example"
+        ));
+    }
+
+    #[test]
+    fn a_branch_pushed_through_an_ssh_alias_finds_its_head() {
+        let (dir, git) = crate::test_support::test_repo();
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        git(&["remote", "add", "origin", "git@github-second:owner/repo.git"]);
+        git(&["update-ref", "refs/remotes/origin/main", "main"]);
+        git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        git(&["switch", "-qc", "work"]);
+        std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "feature"]);
+        git(&["update-ref", "refs/remotes/origin/work", "work"]);
+        git(&["config", "branch.work.remote", "origin"]);
+        git(&["config", "branch.work.merge", "refs/heads/work"]);
+
+        let heads = |alias: super::SshAlias| -> Vec<String> {
+            super::pr_local(dir.path(), None, &NONE, alias)
+                .unwrap()
+                .heads
+                .iter()
+                .map(|h| {
+                    format!("{}/{}/{}:{}", h.repo.host(), h.repo.owner(), h.repo.name(), h.name)
+                })
+                .collect()
+        };
+        assert_eq!(heads(second_account), ["github.com/owner/repo:work"]);
+        assert!(heads(|_| None).is_empty(), "without the alias the push names no repository");
     }
 
     #[test]
     fn repository_identity_rejects_aliases_and_keeps_failure_states_distinct() {
         assert_eq!(
-            classify_remote("git@github.com-work:owner/repo.git", &NONE),
+            classify("git@github.com-work:owner/repo.git", &NONE),
             RepositoryIdentity::Unsupported("github.com-work".to_string())
         );
         assert_eq!(
-            classify_remote(
-                "git@github.company.com-work:owner/repo.git",
-                &github("github.company.com")
-            ),
+            classify("git@github.company.com-work:owner/repo.git", &github("github.company.com")),
             RepositoryIdentity::Unsupported("github.company.com-work".to_string())
         );
         assert_eq!(
-            classify_remote("https://github.com-attacker/owner/repo", &NONE),
+            classify("https://github.com-attacker/owner/repo", &NONE),
             RepositoryIdentity::Unsupported("github.com-attacker".to_string())
         );
         assert_eq!(
-            classify_remote(
-                "https://github.company.com-work/owner/repo",
-                &github("github.company.com")
-            ),
+            classify("https://github.company.com-work/owner/repo", &github("github.company.com")),
             RepositoryIdentity::Unsupported("github.company.com-work".to_string())
         );
         assert_eq!(
-            classify_remote("git@gitlab.com-work:owner/repo.git", &NONE),
+            classify("git@gitlab.com-work:owner/repo.git", &NONE),
             RepositoryIdentity::Unsupported("gitlab.com-work".to_string())
         );
         assert_eq!(
-            classify_remote("https://bitbucket.org/owner/repo", &NONE),
+            classify("https://bitbucket.org/owner/repo", &NONE),
             RepositoryIdentity::Unsupported("bitbucket.org".to_string())
         );
         assert_eq!(
-            classify_remote("https://github.com/owner", &NONE),
+            classify("https://github.com/owner", &NONE),
             RepositoryIdentity::Malformed("github.com".to_string())
         );
         assert_eq!(
-            classify_remote("https://github.com", &NONE),
+            classify("https://github.com", &NONE),
             RepositoryIdentity::Malformed("github.com".to_string())
         );
         assert_eq!(
-            classify_remote(
+            classify(
                 "https://github.company.com:8443/owner/repo.git",
                 &github("github.company.com")
             ),
             RepositoryIdentity::Unsupported("github.company.com".to_string())
         );
-        assert_eq!(classify_remote("/tmp/repo", &NONE), RepositoryIdentity::Hostless);
-        assert_eq!(classify_remote("file:///tmp/repo", &NONE), RepositoryIdentity::Hostless);
+        assert_eq!(classify("/tmp/repo", &NONE), RepositoryIdentity::Hostless);
+        assert_eq!(classify("file:///tmp/repo", &NONE), RepositoryIdentity::Hostless);
         assert_eq!(
-            classify_remote("file://github.com/owner/repo", &NONE),
+            classify("file://github.com/owner/repo", &NONE),
             RepositoryIdentity::Unsupported("github.com".to_string())
         );
         assert_eq!(
-            classify_remote("ftp://github.com/owner/repo", &NONE),
+            classify("ftp://github.com/owner/repo", &NONE),
             RepositoryIdentity::Unsupported("github.com".to_string())
         );
     }
@@ -2886,46 +3142,43 @@ mod tests {
         };
         // The https `_git` form, with and without `.git`, plus case-insensitive hosts.
         assert_eq!(
-            classify_remote("https://dev.azure.com/org/project/_git/repo", &NONE),
+            classify("https://dev.azure.com/org/project/_git/repo", &NONE),
             repo("dev.azure.com", "org", "project", "repo")
         );
         assert_eq!(
-            classify_remote("https://DEV.AZURE.COM/org/project/_git/repo.git", &NONE),
+            classify("https://DEV.AZURE.COM/org/project/_git/repo.git", &NONE),
             repo("dev.azure.com", "org", "project", "repo")
         );
         // A repository named after its project omits the project segment.
         assert_eq!(
-            classify_remote("https://dev.azure.com/org/_git/repo", &NONE),
+            classify("https://dev.azure.com/org/_git/repo", &NONE),
             repo("dev.azure.com", "org", "repo", "repo")
         );
         // The v3 ssh forms normalize to the https host, so both clones are one target.
         assert_eq!(
-            classify_remote("git@ssh.dev.azure.com:v3/org/project/repo", &NONE),
+            classify("git@ssh.dev.azure.com:v3/org/project/repo", &NONE),
             repo("dev.azure.com", "org", "project", "repo")
         );
         assert_eq!(
-            classify_remote("ssh://git@ssh.dev.azure.com/v3/org/project/repo", &NONE),
+            classify("ssh://git@ssh.dev.azure.com/v3/org/project/repo", &NONE),
             repo("dev.azure.com", "org", "project", "repo")
         );
         // The legacy organization hosts, with the wildcard match and the org hoist.
         assert_eq!(
-            classify_remote("https://org.visualstudio.com/project/_git/repo", &NONE),
+            classify("https://org.visualstudio.com/project/_git/repo", &NONE),
             repo("org.visualstudio.com", "org", "project", "repo")
         );
         assert_eq!(
-            classify_remote(
-                "https://org.visualstudio.com/DefaultCollection/project/_git/repo",
-                &NONE
-            ),
+            classify("https://org.visualstudio.com/DefaultCollection/project/_git/repo", &NONE),
             repo("org.visualstudio.com", "org", "project", "repo")
         );
         assert_eq!(
-            classify_remote("org@vs-ssh.visualstudio.com:v3/org/project/repo", &NONE),
+            classify("org@vs-ssh.visualstudio.com:v3/org/project/repo", &NONE),
             repo("org.visualstudio.com", "org", "project", "repo")
         );
         // A self-hosted server recognized through `azure_devops_host`, collection first.
         assert_eq!(
-            classify_remote(
+            classify(
                 "https://tfs.corp.example/collection/project/_git/repo",
                 &azure_devops("tfs.corp.example")
             ),
@@ -2933,21 +3186,21 @@ mod tests {
         );
         // A project named with a space travels percent-encoded and is addressed decoded.
         assert_eq!(
-            classify_remote("https://dev.azure.com/extruct/Extruct%20AI/_git/reviewr-qa", &NONE),
+            classify("https://dev.azure.com/extruct/Extruct%20AI/_git/reviewr-qa", &NONE),
             repo("dev.azure.com", "extruct", "Extruct AI", "reviewr-qa")
         );
         // Every casing and clone form is one target.
         assert_eq!(
-            classify_remote("https://dev.azure.com/Extruct/project/_git/repo", &NONE),
+            classify("https://dev.azure.com/Extruct/project/_git/repo", &NONE),
             repo("dev.azure.com", "extruct", "project", "repo")
         );
         assert_eq!(
-            classify_remote("Org@vs-ssh.visualstudio.com:v3/Extruct/project/repo", &NONE),
+            classify("Org@vs-ssh.visualstudio.com:v3/Extruct/project/repo", &NONE),
             repo("extruct.visualstudio.com", "extruct", "project", "repo")
         );
         // Self-hosted, `DefaultCollection` is the collection and survives.
         assert_eq!(
-            classify_remote(
+            classify(
                 "https://tfs.corp.example/DefaultCollection/proj/_git/repo",
                 &azure_devops("tfs.corp.example")
             ),
@@ -2955,7 +3208,7 @@ mod tests {
         );
         // A broken escape is a malformed remote, not a silent misread.
         assert_eq!(
-            classify_remote("https://dev.azure.com/org/Bad%2/_git/repo", &NONE),
+            classify("https://dev.azure.com/org/Bad%2/_git/repo", &NONE),
             RepositoryIdentity::Malformed("dev.azure.com".to_string())
         );
     }
@@ -2964,38 +3217,38 @@ mod tests {
     fn repository_identity_rejects_malformed_azure_devops_paths() {
         // A project URL is not a repository, and extra segments are not an identity.
         assert_eq!(
-            classify_remote("https://dev.azure.com/org/project", &NONE),
+            classify("https://dev.azure.com/org/project", &NONE),
             RepositoryIdentity::Malformed("dev.azure.com".to_string())
         );
         assert_eq!(
-            classify_remote("https://dev.azure.com/org/project/_git/repo/extra", &NONE),
+            classify("https://dev.azure.com/org/project/_git/repo/extra", &NONE),
             RepositoryIdentity::Malformed("dev.azure.com".to_string())
         );
         // A virtual directory's four-part path is malformed, never misread.
         assert_eq!(
-            classify_remote(
+            classify(
                 "https://tfs.corp.example/tfs/collection/project/_git/repo",
                 &azure_devops("tfs.corp.example")
             ),
             RepositoryIdentity::Malformed("tfs.corp.example".to_string())
         );
         assert_eq!(
-            classify_remote("https://dev.azure.com", &NONE),
+            classify("https://dev.azure.com", &NONE),
             RepositoryIdentity::Malformed("dev.azure.com".to_string())
         );
         // The wildcard needs an organization label; the bare domain stays unsupported.
         assert_eq!(
-            classify_remote("https://visualstudio.com/org/project/_git/repo", &NONE),
+            classify("https://visualstudio.com/org/project/_git/repo", &NONE),
             RepositoryIdentity::Unsupported("visualstudio.com".to_string())
         );
         // An unrecognized host never reaches the Azure DevOps path shaping.
         assert_eq!(
-            classify_remote("https://dev.azure.com.evil.example/org/project/_git/repo", &NONE),
+            classify("https://dev.azure.com.evil.example/org/project/_git/repo", &NONE),
             RepositoryIdentity::Unsupported("dev.azure.com.evil.example".to_string())
         );
         // An option-shaped segment can never become an `az` argument.
         assert_eq!(
-            classify_remote("https://dev.azure.com/org/--project/_git/repo", &NONE),
+            classify("https://dev.azure.com/org/--project/_git/repo", &NONE),
             RepositoryIdentity::Malformed("dev.azure.com".to_string())
         );
     }

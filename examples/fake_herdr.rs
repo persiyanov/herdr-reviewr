@@ -62,6 +62,13 @@ fn main() -> ExitCode {
             }
             answer(&dir.display().to_string())
         }
+        ["plugin", "list", ..] => match read(&dir.join("pluginsfail")) {
+            Some(failure) => fail(&failure),
+            None => answer(
+                &read(&dir.join("plugins.json"))
+                    .unwrap_or_else(|| r#"{"result":{"plugins":[]}}"#.to_owned()),
+            ),
+        },
         ["plugin", "pane", "open", ..] => {
             if let Some(failure) = read(&dir.join("openfail")) {
                 return fail(&failure);

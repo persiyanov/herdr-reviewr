@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -103,7 +104,7 @@ pub enum SendError {
     /// herdr failed a call the send made.
     Herdr(HerdrError),
     /// The named agent waits on a permission or confirm prompt, which would drop a paste.
-    AtPrompt(String),
+    AtPrompt,
     /// The workspace holds no agent to send to.
     NoAgent,
     /// The review is over the send cap, so it cannot go as one paste.
@@ -120,7 +121,7 @@ impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Herdr(error) => error.fmt(f),
-            Self::AtPrompt(name) => write!(f, "{name} is at a prompt"),
+            Self::AtPrompt => write!(f, "the agent is at a prompt"),
             Self::NoAgent => write!(f, "no agent in the workspace"),
             Self::TooLarge => write!(f, "the review is over the {MAX_REQUEST_BYTES}-byte send cap"),
         }
@@ -220,8 +221,17 @@ pub(crate) struct PaneEntry {
     /// The live foreground process's cwd, which can differ from the launch cwd.
     #[serde(default, deserialize_with = "non_empty")]
     pub(crate) foreground_cwd: Option<String>,
+    /// The launch cwd, where a pane started.
+    #[serde(default, deserialize_with = "non_empty")]
+    pub(crate) cwd: Option<String>,
+    /// The tab the pane sits in.
+    #[serde(default, deserialize_with = "non_empty")]
+    pub(crate) tab_id: Option<String>,
     #[serde(default, deserialize_with = "non_empty")]
     label: Option<String>,
+    /// The agent herdr detects in the pane; absent for a shell or a plugin pane.
+    #[serde(default, deserialize_with = "non_empty")]
+    pub(crate) agent: Option<String>,
 }
 
 impl PaneList {
@@ -234,6 +244,26 @@ impl PaneList {
     pub(crate) fn pane(&self, pane: &str) -> Option<&PaneEntry> {
         self.panes.iter().find(|entry| entry.pane_id == pane)
     }
+}
+
+/// The checkouts herdr manages for its installed plugins; a linked plugin's folder is the user's.
+pub(crate) fn managed_plugin_dirs() -> Result<Vec<PathBuf>, HerdrError> {
+    #[derive(Deserialize)]
+    struct Plugins {
+        plugins: Vec<Plugin>,
+    }
+    #[derive(Deserialize)]
+    struct Plugin {
+        #[serde(default)]
+        source: Option<Source>,
+    }
+    #[derive(Deserialize)]
+    struct Source {
+        #[serde(default)]
+        managed_path: Option<PathBuf>,
+    }
+    let list: Plugins = answer(&call(&["plugin", "list", "--json"])?)?;
+    Ok(list.plugins.into_iter().filter_map(|plugin| plugin.source?.managed_path).collect())
 }
 
 /// The processes herdr reports in a pane's foreground: the group on unix, one process on Windows.
@@ -341,6 +371,16 @@ pub(crate) fn rename_tab(tab: &str, label: &str) -> Result<(), HerdrError> {
     call(&["tab", "rename", tab, label]).map(drop)
 }
 
+/// A zero resize from pane `pane`: herdr applies the layout's geometry to every pane it touches.
+pub(crate) fn claim_geometry(pane: &str) -> Result<(), HerdrError> {
+    call(&["pane", "resize", "--pane", pane, "--direction", "right", "--amount", "0"]).map(drop)
+}
+
+/// Switch to tab `tab`.
+pub(crate) fn focus_tab(tab: &str) -> Result<(), HerdrError> {
+    call(&["tab", "focus", tab]).map(drop)
+}
+
 /// How long a startup or exit path waits for herdr; the call itself runs on.
 const ANSWER_BOUND: Duration = Duration::from_secs(2);
 
@@ -354,9 +394,9 @@ fn herdr_on_thread(args: Vec<String>) -> mpsc::Receiver<Result<String, HerdrErro
     rx
 }
 
-/// The socket and pane id the herdr connection needs; `None` outside herdr.
-pub fn connection_target() -> Option<(OsString, String)> {
-    Some((var_os("HERDR_SOCKET_PATH")?, var("HERDR_PANE_ID")?))
+/// The socket the herdr connection dials; `None` outside herdr.
+pub fn socket_path() -> Option<OsString> {
+    var_os("HERDR_SOCKET_PATH")
 }
 
 /// This pane's (workspace, pane) ids: the environment's at launch, then what the herdr
@@ -422,42 +462,68 @@ fn agent_list() -> Result<Vec<AgentPane>, HerdrError> {
     parse_agents(&call(&["agent", "list"])?)
 }
 
-/// What `Send` does: one agent sends, several open the picker, none refuses.
-pub fn send_target(ids: &PaneIds) -> Result<SendTarget, SendError> {
-    let (ws, me) = (ids.workspace.clone(), ids.pane.clone());
+/// The lone agent, or the lone one in reviewr's tab, unless `choose`; else the picker over all.
+pub fn send_target(ids: &PaneIds, choose: bool) -> Result<SendTarget, SendError> {
+    let (ws, me) = (ids.workspace.as_deref(), ids.pane.as_deref());
     let agents = agent_list()?;
     // Candidates: agents in our workspace other than our pane, in herdr's own order.
-    let picked = candidates(&agents, ws.as_deref(), me.as_deref());
-    match picked.len() {
-        0 => Err(SendError::NoAgent),
-        // The sole-agent send shows no row, so only the picker pays for the tab-label call.
-        1 => Ok(SendTarget::One(picked[0].choice(&HashMap::new()))),
-        _ => {
-            let tabs = tab_labels(ws.as_deref());
-            Ok(SendTarget::Many(picked.into_iter().map(|agent| agent.choice(&tabs)).collect()))
-        }
+    let picked = candidates(&agents, ws, me);
+    if picked.is_empty() {
+        return Err(SendError::NoAgent);
+    }
+    // Both lookups are best effort, so they share one wait; only picker rows show tab labels.
+    let shows_picker = choose || picked.len() > 1;
+    let (tabs, panes) = std::thread::scope(|scope| {
+        let tabs = scope.spawn(|| if shows_picker { tab_labels(ws) } else { HashMap::new() });
+        let panes = scope.spawn(|| ws.and_then(|ws| PaneList::of(ws).ok()));
+        (tabs.join().unwrap_or_default(), panes.join().ok().flatten())
+    });
+    Ok(target_among(&picked, &tabs, panes.as_ref(), me, choose))
+}
+
+/// The only agent in reviewr's own tab sends, unless the reviewer chose to pick; else the picker.
+fn target_among(
+    picked: &[&AgentPane],
+    tabs: &HashMap<String, String>,
+    panes: Option<&PaneList>,
+    me: Option<&str>,
+    choose: bool,
+) -> SendTarget {
+    let my_tab = me.and_then(|me| panes?.pane(me)?.tab_id.as_deref());
+    let mut beside = picked.iter().filter(|agent| Some(agent.tab_id.as_str()) == my_tab);
+    let lone = match picked {
+        [only] => Some(only),
+        _ => match (beside.next(), beside.next()) {
+            (Some(agent), None) => Some(agent),
+            _ => None,
+        },
+    };
+    match lone.filter(|_| !choose) {
+        Some(agent) => SendTarget::One(agent.choice(tabs, panes)),
+        None => SendTarget::Many(picked.iter().map(|agent| agent.choice(tabs, panes)).collect()),
     }
 }
 
 impl AgentPane {
-    /// This pane as a picker row.
-    fn choice(&self, tabs: &HashMap<String, String>) -> AgentChoice {
+    /// This pane as a picker row, named by its pane's label when `panes` has one.
+    fn choice(&self, tabs: &HashMap<String, String>, panes: Option<&PaneList>) -> AgentChoice {
+        let label = panes.and_then(|panes| panes.pane(&self.pane_id)?.label.as_deref());
         AgentChoice {
             pane_id: self.pane_id.clone(),
-            name: self.row_name(),
+            name: self.row_name(label),
             state: self.row_state(),
             tab: tabs.get(&self.tab_id).cloned().unwrap_or_default(),
         }
     }
 
-    /// The agent's `name`, else `display_agent`, else its kind, else the pane id.
-    fn row_name(&self) -> String {
-        [&self.name, &self.display_agent, &self.agent]
+    /// The agent's name, else its pane label, display agent, kind, or pane id.
+    fn row_name(&self, pane_label: Option<&str>) -> String {
+        [self.name.as_deref(), pane_label, self.display_agent.as_deref(), self.agent.as_deref()]
             .into_iter()
             .flatten()
             .next()
-            .cloned()
-            .unwrap_or_else(|| self.pane_id.clone())
+            .unwrap_or(&self.pane_id)
+            .to_owned()
     }
 
     /// The state's label from `state_labels`, else herdr's own spelling, never `unknown`.
@@ -520,6 +586,7 @@ fn parse_agents(json: &str) -> Result<Vec<AgentPane>, HerdrError> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentSample {
     pub cwd: Option<String>,
+    pub workspace: String,
     pub status: Status,
 }
 
@@ -528,8 +595,15 @@ pub struct AgentSample {
 pub(crate) struct Sampled {
     /// The real agents other than our own pane, each by its pane.
     pub agents: Vec<(String, AgentSample)>,
-    /// The cwd of each entry herdr shaped unexpectedly, which may be an agent.
-    pub odd: Vec<Option<String>>,
+    /// Each entry herdr shaped unexpectedly, which may be an agent.
+    pub odd: Vec<OddEntry>,
+}
+
+/// An entry herdr shaped unexpectedly: the place it names, as far as it reads.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OddEntry {
+    pub cwd: Option<String>,
+    pub workspace: Option<String>,
 }
 
 /// Read a session snapshot's agent list; our own pane `me` is left out.
@@ -544,7 +618,11 @@ pub(crate) fn samples_of(agents: &serde_json::Value, me: Option<&str>) -> Option
             Err(_)
                 if matches!(&entry["agent"], serde_json::Value::Null)
                     || entry["agent"].as_str() == Some("") => {}
-            Err(_) => odd.push(entry["cwd"].as_str().filter(|c| !c.is_empty()).map(str::to_string)),
+            Err(_) => {
+                let text =
+                    |key: &str| entry[key].as_str().filter(|v| !v.is_empty()).map(Into::into);
+                odd.push(OddEntry { cwd: text("cwd"), workspace: text("workspace_id") });
+            }
         }
     }
     Some(Sampled { agents: samples_among(readable, me), odd })
@@ -556,7 +634,12 @@ fn samples_among(agents: Vec<AgentPane>, me: Option<&str>) -> Vec<(String, Agent
         .into_iter()
         .filter(|agent| agent.is_agent_other_than(me))
         .map(|agent| {
-            (agent.pane_id.clone(), AgentSample { status: agent.status(), cwd: agent.cwd })
+            let sample = AgentSample {
+                status: agent.status(),
+                cwd: agent.cwd,
+                workspace: agent.workspace_id,
+            };
+            (agent.pane_id, sample)
         })
         .collect()
 }
@@ -587,9 +670,7 @@ fn readiness_in(agents: &[AgentPane], pane: &str) -> Result<(), SendError> {
             logln!("agent pane {pane} is gone");
             Err(HerdrError::PaneGone.into())
         }
-        Some(agent) if agent.status() == Status::Blocked => {
-            Err(SendError::AtPrompt(agent.row_name()))
-        }
+        Some(agent) if agent.status() == Status::Blocked => Err(SendError::AtPrompt),
         Some(_) => Ok(()),
     }
 }
@@ -900,8 +981,59 @@ mod tests {
         ws: Option<&str>,
         me: Option<&str>,
         tabs: &HashMap<String, String>,
+        panes: Option<&super::PaneList>,
     ) -> Vec<AgentChoice> {
-        super::candidates(agents, ws, me).into_iter().map(|agent| agent.choice(tabs)).collect()
+        super::candidates(agents, ws, me)
+            .into_iter()
+            .map(|agent| agent.choice(tabs, panes))
+            .collect()
+    }
+
+    #[test]
+    fn send_goes_to_the_only_agent_beside_reviewr_else_the_picker_opens() {
+        use super::{PaneList, SendTarget, target_among};
+        let list = |json: serde_json::Value| -> PaneList {
+            serde_json::from_value(serde_json::json!({ "panes": json })).unwrap()
+        };
+        let panes = list(serde_json::json!([
+            {"pane_id": "w1:p9", "tab_id": "w1:t1"},
+            {"pane_id": "w1:p1", "tab_id": "w1:t1", "label": "api-refactor"},
+            {"pane_id": "w1:p2", "tab_id": "w1:t2", "label": "docs"},
+        ]));
+        let (claude, codex) = (agent("w1:p1", "w1:t1", "w1"), agent("w1:p2", "w1:t2", "w1"));
+        let tabs = HashMap::new();
+        let target = |picked: &[&AgentPane], panes: Option<&PaneList>| match target_among(
+            picked,
+            &tabs,
+            panes,
+            Some("w1:p9"),
+            false,
+        ) {
+            SendTarget::One(row) => format!("one {} {}", row.pane_id, row.name),
+            SendTarget::Many(rows) => {
+                let names: Vec<_> = rows.iter().map(|row| row.name.as_str()).collect();
+                format!("picker {}", names.join(","))
+            }
+        };
+
+        // A lone agent takes the send wherever it sits, named by its pane's label.
+        assert_eq!(target(&[&codex], Some(&panes)), "one w1:p2 docs");
+        // The agent beside reviewr takes the send, named by its pane's label.
+        assert_eq!(target(&[&claude, &codex], Some(&panes)), "one w1:p1 api-refactor");
+        // Two beside it, or none, and the picker opens over every agent.
+        let twin = agent("w1:p3", "w1:t1", "w1");
+        assert_eq!(
+            target(&[&claude, &twin, &codex], Some(&panes)),
+            "picker api-refactor,claude,docs"
+        );
+        let alone = list(serde_json::json!([{"pane_id": "w1:p9", "tab_id": "w1:t5"}]));
+        assert_eq!(target(&[&claude, &codex], Some(&alone)), "picker claude,claude");
+        // Without the pane list, reviewr's tab is unknown, so the picker opens.
+        assert_eq!(target(&[&claude, &codex], None), "picker claude,claude");
+        // Choosing opens the picker even over the one agent beside reviewr.
+        let chosen = target_among(&[&claude], &tabs, Some(&panes), Some("w1:p9"), true);
+        let SendTarget::Many(rows) = chosen else { panic!("choosing always opens the picker") };
+        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["api-refactor"]);
     }
 
     #[test]
@@ -917,7 +1049,7 @@ mod tests {
         }
         // A prompt drops a paste.
         let blocked = super::readiness_in(&[at("blocked")], "w8:p1");
-        assert_eq!(blocked, Err(super::SendError::AtPrompt("claude".into())));
+        assert_eq!(blocked, Err(super::SendError::AtPrompt));
         let gone = Err(super::SendError::Herdr(HerdrError::PaneGone));
         assert_eq!(super::readiness_in(&[at("idle")], "w8:p9"), gone);
         // A pane whose agent exited is listed without one: the send goes nowhere near it.
@@ -933,12 +1065,20 @@ mod tests {
             {"pane_id": "w2:p1", "agent": "codex", "tab_id": null, "cwd": "/elsewhere"},
             {"pane_id": "w2:p2", "agent": "codex"},
             {"pane_id": "w2:p3", "tab_id": null, "cwd": "/w"},
-            {"pane_id": "w2:p4", "agent": {"name": "codex"}, "cwd": "/reshaped"},
+            {"pane_id": "w2:p4", "agent": {"name": "codex"}, "cwd": "/reshaped", "workspace_id": "w2"},
             {"pane_id": "w1:p9", "agent": "claude", "tab_id": null},
         ]);
         let sampled = super::samples_of(&list, Some("w1:p9")).expect("a list");
         assert_eq!(sampled.agents.len(), 1, "the readable agent still counts");
-        let odd = [Some("/elsewhere".to_string()), None, Some("/reshaped".to_string())];
+        let entry = |cwd: Option<&str>, workspace: Option<&str>| super::OddEntry {
+            cwd: cwd.map(str::to_string),
+            workspace: workspace.map(str::to_string),
+        };
+        let odd = [
+            entry(Some("/elsewhere"), None),
+            entry(None, None),
+            entry(Some("/reshaped"), Some("w2")),
+        ];
         assert_eq!(
             sampled.odd, odd,
             "a shell pane and our own pane are no agents, a reshaped one is"
@@ -948,15 +1088,18 @@ mod tests {
 
     #[test]
     fn sampling_keeps_every_tab_and_workspace() {
-        // Membership rides the agent's cwd, never its pane's tab or workspace.
+        // Membership is turn tracking's to decide, so every agent comes with its workspace.
         let agents = vec![
             AgentPane { cwd: Some("/w/one".into()), ..agent("w8:p1", "w8:t1", "w8") },
             AgentPane { cwd: Some("/w/two".into()), ..agent("w8:p2", "w8:t2", "w8") },
             AgentPane { cwd: Some("/w/three".into()), ..agent("w9:p1", "w9:t1", "w9") },
         ];
-        let cwds: Vec<_> =
-            super::samples_among(agents, None).into_iter().filter_map(|(_, s)| s.cwd).collect();
-        assert_eq!(cwds, ["/w/one", "/w/two", "/w/three"]);
+        let seats: Vec<_> = super::samples_among(agents, None)
+            .into_iter()
+            .map(|(_, s)| (s.cwd.unwrap(), s.workspace))
+            .collect();
+        let seat = |cwd: &str, ws: &str| (cwd.to_string(), ws.to_string());
+        assert_eq!(seats, [seat("/w/one", "w8"), seat("/w/two", "w8"), seat("/w/three", "w9")]);
     }
 
     #[test]
@@ -989,24 +1132,27 @@ mod tests {
     }
 
     #[test]
-    fn a_row_name_prefers_the_rename_then_the_display_agent_then_the_kind() {
+    fn a_row_name_prefers_the_rename_then_the_pane_label_then_the_display_agent_then_the_kind() {
+        let renamed = named("w8:p1", "w8:t1", "w8", Some("release-bot"));
         // `herdr agent rename` sets `name`, which wins.
-        assert_eq!(named("w8:p1", "w8:t1", "w8", Some("release-bot")).row_name(), "release-bot");
-        // `--clear` leaves the key present and null, which falls through like an absent one.
+        assert_eq!(renamed.row_name(Some("wiki-revision")), "release-bot");
+        let displayed =
+            AgentPane { display_agent: Some("Claude".into()), ..agent("w8:p1", "w8:t1", "w8") };
+        // A pane label outranks the display agent, since the border shows it.
+        assert_eq!(displayed.row_name(Some("wiki-revision")), "wiki-revision");
+        assert_eq!(displayed.row_name(None), "Claude");
         let cleared = named("w8:p1", "w8:t1", "w8", None);
-        assert_eq!(cleared.row_name(), "claude");
-        // With no kind either, the pane id keeps the row and the success line from going blank.
+        // `--clear` leaves the key present and null, which falls through like an absent one.
+        assert_eq!(cleared.row_name(None), "claude");
         let anonymous = AgentPane { agent: None, ..agent("w8:p1", "w8:t1", "w8") };
-        assert_eq!(anonymous.row_name(), "w8:p1");
-        let displayed = AgentPane {
-            agent: None,
-            display_agent: Some("Claude".into()),
-            ..agent("w8:p1", "w8:t1", "w8")
-        };
-        assert_eq!(displayed.row_name(), "Claude");
+        // With no kind either, the pane id keeps the row and the success line from going blank.
+        assert_eq!(anonymous.row_name(None), "w8:p1");
         // An empty name parses as no name, so it falls through too.
         let emptied = r#"{"result":{"agents":[{"agent":"codex","agent_status":"idle","pane_id":"w8:p2","tab_id":"w8:t1","workspace_id":"w8","name":"","display_agent":""}]}}"#;
-        assert_eq!(super::parse_agents(emptied).unwrap()[0].row_name(), "codex");
+        let parsed = super::parse_agents(emptied).unwrap();
+        assert_eq!(parsed[0].row_name(None), "codex");
+        // A pane label identifies the pane even when herdr sends empty agent names.
+        assert_eq!(parsed[0].row_name(Some("wiki-revision")), "wiki-revision");
     }
 
     #[test]
@@ -1020,7 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_rows_are_every_workspace_agent_in_herdr_order_with_its_tab_label() {
+    fn picker_rows_are_every_workspace_agent_in_herdr_order_with_its_pane_and_tab_labels() {
         let agents = vec![
             agent("w8:p1", "w8:t1", "w8"),
             non_agent_pane("w8:p4", "w8:t1", "w8"),
@@ -1030,13 +1176,17 @@ mod tests {
         let mut tabs = HashMap::new();
         tabs.insert("w8:t1".to_string(), "Grip Outreach".to_string());
         // w8:t2 has no label, so that row shows its state alone.
-        let rows = rows(&agents, Some("w8"), Some("w8:p9"), &tabs);
+        let panes: super::PaneList = serde_json::from_value(serde_json::json!({"panes": [
+            {"pane_id": "w8:p1", "label": "wiki-revision"}, {"pane_id": "w8:p2", "label": ""}
+        ]}))
+        .unwrap();
+        let rows = rows(&agents, Some("w8"), Some("w8:p9"), &tabs, Some(&panes));
         assert_eq!(
             rows,
             vec![
                 AgentChoice {
                     pane_id: "w8:p1".into(),
-                    name: "claude".into(),
+                    name: "wiki-revision".into(),
                     state: "working".into(),
                     tab: "Grip Outreach".into(),
                 },
@@ -1058,7 +1208,7 @@ mod tests {
             non_agent_pane("w3:p4", "w3:t1", "w3"),
             agent("w3:p5", "w3:t1", "w3"),
         ];
-        let rows_of = |ws| rows(&agents, ws, Some("w3:p5"), &HashMap::new());
+        let rows_of = |ws| rows(&agents, ws, Some("w3:p5"), &HashMap::new(), None);
         let picked: Vec<_> = rows_of(Some("w3")).iter().map(|r| r.pane_id.clone()).collect();
         assert_eq!(picked, ["w3:p1"]);
         // No workspace id means no candidates — never every agent on the machine.
@@ -1070,11 +1220,11 @@ mod tests {
         // Exactly what herdr 0.7.5 emits: no `name`, no `display_agent`, no `state_labels`.
         let json = r#"{"result":{"agents":[{"agent":"claude","agent_status":"idle","pane_id":"w8:p1","tab_id":"w8:t1","workspace_id":"w8"}]}}"#;
         let parsed = parse_agents(json).unwrap();
-        assert_eq!(parsed[0].row_name(), "claude");
+        assert_eq!(parsed[0].row_name(None), "claude");
         assert_eq!(parsed[0].row_state(), "idle");
         // And with `name` explicitly null, as `herdr agent rename --clear` leaves it.
         let cleared = r#"{"result":{"agents":[{"agent":"codex","agent_status":"idle","pane_id":"w8:p2","tab_id":"w8:t1","workspace_id":"w8","name":null}]}}"#;
-        assert_eq!(parse_agents(cleared).unwrap()[0].row_name(), "codex");
+        assert_eq!(parse_agents(cleared).unwrap()[0].row_name(None), "codex");
     }
 
     /// A herdr that accepts and never answers holds the exchange only until its deadline.

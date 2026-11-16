@@ -2,12 +2,14 @@
 
 use crate::diff::Row;
 use crate::file_list::{self, RowKind};
+use crate::model::Side;
+use crate::split::Visible;
 
 /// Where a text drag lives, locked at mouse-down (`TS-ONE-SURFACE`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
-    /// The read pane's rows, character-precise.
-    Read,
+    /// The read pane's rows, character-precise, confined to the split half it started in.
+    Read { side: Option<Side> },
     /// The `PR` read pane's painted lines: character-precise painted text.
     Painted,
     /// One comment card's text, character-precise, confined to the card it started on.
@@ -61,16 +63,13 @@ impl TextDrag {
     }
 }
 
-/// A `Read` selection's text: each spanned line once, cut at the ends, folds skipped.
+/// A `Read` selection's text: each spanned line once, on `side`, cut at the ends, gaps skipped.
 #[must_use]
-pub fn read_text(rows: &[Row], a: Point, b: Point) -> String {
+pub fn read_text(rows: &[Visible], side: Option<Side>, a: Point, b: Point) -> String {
     let hi_row = b.row.min(rows.len().saturating_sub(1));
     let mut out = Vec::new();
     for (i, row) in rows.iter().enumerate().take(hi_row + 1).skip(a.row) {
-        if !row.is_content() {
-            continue;
-        }
-        let text = row.text();
+        let Some(text) = row.text_row(side).map(Row::text) else { continue };
         let from = if i == a.row { a.chr } else { 0 };
         let to = if i == hi_row { Some(b.chr) } else { None };
         out.push(slice_chars(&text, from, to));
@@ -149,26 +148,39 @@ pub fn copied_status(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::Span;
+    use crate::diff::{Row, Span};
+    use crate::split::Pair;
 
     fn spans(text: &str) -> Vec<Span> {
         vec![Span { text: text.into(), color: (0, 0, 0) }]
     }
 
-    fn ctx(text: &str) -> Row {
+    fn context(text: &str) -> Row {
         Row::Context { old_no: 1, new_no: 1, spans: spans(text) }
     }
 
-    fn del(text: &str) -> Row {
+    fn ctx(text: &str) -> Visible {
+        Visible::Row(context(text))
+    }
+
+    fn deletion(text: &str) -> Row {
         Row::Deletion { old_no: 1, spans: spans(text), emphasis: vec![], cr: false }
     }
 
-    fn ins(text: &str) -> Row {
+    fn insertion(text: &str) -> Row {
         Row::Insertion { new_no: 1, spans: spans(text), emphasis: vec![], cr: false }
     }
 
-    fn fold(hidden: usize) -> Row {
-        Row::Fold { lines: (0..hidden).map(|_| ctx("hidden")).collect() }
+    fn del(text: &str) -> Visible {
+        Visible::Row(deletion(text))
+    }
+
+    fn ins(text: &str) -> Visible {
+        Visible::Row(insertion(text))
+    }
+
+    fn fold(hidden: usize) -> Visible {
+        Visible::Row(Row::Fold { lines: (0..hidden).map(|_| context("hidden")).collect() })
     }
 
     fn point(row: usize, chr: usize) -> Point {
@@ -177,37 +189,50 @@ mod tests {
 
     #[test]
     fn endpoints_order_by_row_then_char_and_include_both_ends() {
-        let drag = TextDrag { surface: Surface::Read, anchor: point(3, 7), extent: point(1, 2) };
+        let surface = Surface::Read { side: None };
+        let drag = TextDrag { surface, anchor: point(3, 7), extent: point(1, 2) };
         assert_eq!(drag.ordered(), (point(1, 2), point(3, 7)));
-        let same_row =
-            TextDrag { surface: Surface::Read, anchor: point(2, 9), extent: point(2, 4) };
+        let same_row = TextDrag { surface, anchor: point(2, 9), extent: point(2, 4) };
         assert_eq!(same_row.ordered(), (point(2, 4), point(2, 9)));
     }
 
     #[test]
     fn read_text_slices_the_end_rows_and_takes_middles_whole() {
         let rows = vec![ctx("let alpha = 1;"), ctx("let beta = 2;"), ctx("let gamma = 3;")];
-        let got = read_text(&rows, point(0, 4), point(2, 8));
+        let got = read_text(&rows, None, point(0, 4), point(2, 8));
         assert_eq!(got, "alpha = 1;\nlet beta = 2;\nlet gamma");
     }
 
     #[test]
     fn read_text_on_one_row_takes_the_inclusive_span() {
         let rows = vec![ctx("let alpha = 1;")];
-        assert_eq!(read_text(&rows, point(0, 4), point(0, 8)), "alpha");
+        assert_eq!(read_text(&rows, None, point(0, 4), point(0, 8)), "alpha");
     }
 
     #[test]
     fn read_text_skips_folds_and_takes_change_rows() {
         let rows = vec![ctx("a"), fold(2), del("removed"), ins("added")];
-        assert_eq!(read_text(&rows, point(0, 0), point(3, 4)), "a\nremoved\nadded");
+        assert_eq!(read_text(&rows, None, point(0, 0), point(3, 4)), "a\nremoved\nadded");
+    }
+
+    #[test]
+    fn read_text_on_split_rows_reads_one_half_and_skips_blank_halves() {
+        let rows = vec![
+            Visible::Pair(Pair::Both { old: deletion("old one"), new: insertion("new one") }),
+            Visible::Pair(Pair::New(insertion("added"))),
+            fold(2),
+            Visible::Pair(Pair::Old(deletion("gone"))),
+        ];
+        let (a, b) = (point(0, 4), point(3, 99));
+        assert_eq!(read_text(&rows, Some(Side::Old), a, b), "one\ngone");
+        assert_eq!(read_text(&rows, Some(Side::New), a, point(1, 99)), "one\nadded");
     }
 
     #[test]
     fn read_text_clamps_past_the_end() {
         let rows = vec![ctx("ab")];
-        assert_eq!(read_text(&rows, point(0, 0), point(9, 99)), "ab");
-        assert_eq!(read_text(&rows, point(0, 1), point(0, 99)), "b");
+        assert_eq!(read_text(&rows, None, point(0, 0), point(9, 99)), "ab");
+        assert_eq!(read_text(&rows, None, point(0, 1), point(0, 99)), "b");
     }
 
     #[test]
@@ -243,7 +268,13 @@ mod tests {
             FileRow {
                 depth: 0,
                 name: "sub".into(),
-                kind: RowKind::Dir { path: "sub".into(), expanded: true, has_change: false },
+                kind: RowKind::Dir {
+                    path: "sub".into(),
+                    expanded: true,
+                    has_change: false,
+                    additions: 0,
+                    deletions: 0,
+                },
                 ignored: false,
             },
             FileRow {

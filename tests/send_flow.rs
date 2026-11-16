@@ -10,7 +10,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use common::{Repo, app_on, fake_herdr, herdr_calls, herdr_error};
+use common::{Repo, UnifiedRow as _, app_on, fake_herdr, herdr_calls, herdr_error};
 use herdr_reviewr::app::{App, Focus, Mode};
 use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::ui;
@@ -32,6 +32,12 @@ const ONE_AGENT: &str = r#"{"result":{"agents":[
 
 /// A line break as the request's JSON spells it, CRLF on Windows.
 const NL: &str = if cfg!(windows) { r"\r\n" } else { r"\n" };
+
+/// The review's worktree line as the request's JSON spells it.
+fn worktree_line(app: &App) -> String {
+    let line = serde_json::to_string(&format!("Worktree: {}", app.repo.display())).unwrap();
+    line.trim_matches('"').to_owned()
+}
 
 /// What the fake socket does with each request it reads.
 #[derive(Clone, Copy, Debug)]
@@ -248,6 +254,16 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert_eq!(app.status, "sent 1 comment to claude");
     assert_eq!(app.last_sent_pane.as_deref(), Some("w8:p1"));
 
+    // `S` opens the picker even over that one agent, and `esc` leaves the comments unsent.
+    write_comment(&mut app, "chosen");
+    press(&mut app, KeyCode::Char('S'), area, &keymap);
+    assert_eq!(app.mode, Mode::Picker, "`send-to` always picks");
+    assert_eq!(app.picker_rows.len(), 1);
+    press(&mut app, KeyCode::Esc, area, &keymap);
+    assert_eq!((app.mode.clone(), app.store.len()), (Mode::Normal, 1));
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    assert!(app.store.is_empty(), "`s` still sends straight to the one agent");
+
     // An agent at a prompt takes no send, read at the send itself.
     agents(&fake_dir, TWO_AGENTS);
     write_comment(&mut app, "two");
@@ -271,10 +287,11 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert_eq!(app.status, "sent 1 comment to codex");
     assert_eq!(app.last_sent_pane.as_deref(), Some("w8:p2"));
     // The whole request herdr received.
+    let worktree = worktree_line(&app);
     assert_eq!(
         socket.requests().last().unwrap(),
         &format!(
-            r#"{{"id":"reviewr:send","method":"pane.send_text","params":{{"pane_id":"w8:p2","text":"\u001b[200~a.rs:2{NL}+beta{NL}two\u001b[201~"}}}}"#
+            r#"{{"id":"reviewr:send","method":"pane.send_text","params":{{"pane_id":"w8:p2","text":"\u001b[200~{worktree}{NL}{NL}a.rs:2{NL}+beta{NL}two\u001b[201~"}}}}"#
         )
     );
     assert!(herdr_calls(&fake_dir).contains("agent focus w8:p2"), "a send focuses its pane");
@@ -362,9 +379,10 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
             press(&mut app, KeyCode::Char(tab), area, &keymap);
         }
         press(&mut app, KeyCode::Char('q'), area, &keymap);
-        assert!(app.confirming_quit && !app.should_quit, "unsent comments make `q` ask: {tab}");
+        let asked = app.question == Some(herdr_reviewr::app::Question::Quit);
+        assert!(asked && !app.should_quit, "unsent comments make `q` ask: {tab}");
         press(&mut app, KeyCode::Char('s'), area, &keymap);
-        assert!(!app.confirming_quit && !app.should_quit, "{tab}");
+        assert!(app.question.is_none() && !app.should_quit, "{tab}");
         assert!(app.store.is_empty(), "the answer sent them: {tab}");
         assert_eq!(app.status, "sent 1 comment to claude", "{tab}");
     }
@@ -385,8 +403,9 @@ fn a_send_consumes_the_comments_only_on_a_result_reply() {
     let keymap = Keymap::default();
     let area = Rect::new(0, 0, 80, 24);
     write_comment(&mut app, "naming");
+    let worktree = worktree_line(&app);
     let request = format!(
-        r#"{{"id":"reviewr:send","method":"pane.send_text","params":{{"pane_id":"w8:p1","text":"\u001b[200~a.rs:2{NL}+beta{NL}naming\u001b[201~"}}}}"#
+        r#"{{"id":"reviewr:send","method":"pane.send_text","params":{{"pane_id":"w8:p1","text":"\u001b[200~{worktree}{NL}{NL}a.rs:2{NL}+beta{NL}naming\u001b[201~"}}}}"#
     );
 
     for (reply, status) in [
@@ -431,10 +450,11 @@ fn a_long_review_sends_whole_and_one_over_the_cap_refuses() {
     press(&mut app, KeyCode::Char('s'), area, &keymap);
     assert!(app.store.is_empty(), "a review just under the cap sends");
     assert_eq!(app.status, "sent 1 comment to claude");
+    let worktree = worktree_line(&app);
     assert_eq!(
         socket.requests().last().unwrap(),
         &format!(
-            r#"{{"id":"reviewr:send","method":"pane.send_text","params":{{"pane_id":"w8:p1","text":"\u001b[200~a.rs:2{NL}+beta{NL}{long}\u001b[201~"}}}}"#
+            r#"{{"id":"reviewr:send","method":"pane.send_text","params":{{"pane_id":"w8:p1","text":"\u001b[200~{worktree}{NL}{NL}a.rs:2{NL}+beta{NL}{long}\u001b[201~"}}}}"#
         )
     );
 
