@@ -24,12 +24,20 @@ fn dump(buffer: &Buffer) -> String {
     for y in 0..area.height {
         for x in 0..area.width {
             if let Some(cell) = buffer.cell((x, y)) {
-                out.push_str(cell.symbol());
+                out.push_str(visible(cell.symbol()));
             }
         }
         out.push('\n');
     }
     out
+}
+
+/// A cell's text without its OSC 8 hyperlink wrapper.
+fn visible(symbol: &str) -> &str {
+    match symbol.strip_prefix("\x1b]8;;").and_then(|s| s.split_once("\x1b\\")) {
+        Some((_, rest)) => rest.split_once("\x1b]8;;").map_or(rest, |(text, _)| text),
+        None => symbol,
+    }
 }
 
 fn render(app: &App) -> String {
@@ -5459,4 +5467,30 @@ fn find_highlights_a_match_in_the_half_that_holds_it() {
     let lit =
         |xs: std::ops::Range<u16>| xs.filter(|&x| buf.cell((x, y)).unwrap().bg == fill).count();
     assert_eq!(lit(1..141), 0, "a cased query matches neither half");
+}
+
+#[test]
+fn the_pr_chip_paints_as_an_osc8_hyperlink_for_herdrs_ctrl_click() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{PrSnapshot, PrView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.set_tab(Tab::Pr).unwrap();
+    let url = "https://github.com/o/r/pull/7";
+    app.pr =
+        PrView::Pr(Box::new(PrSnapshot { number: 7, url: url.into(), ..common::pr_snapshot() }));
+    let buf = render_size(&app, 100, 12);
+    let last = buf.cell((99, 0)).unwrap().symbol();
+    assert_eq!(
+        last,
+        format!("\x1b]8;;{url}\x1b\\↗\x1b]8;;\x1b\\"),
+        "the chip's arrow links the PR"
+    );
+    assert!(!buf.cell((0, 0)).unwrap().symbol().contains("\x1b]8"), "the tabs stay plain");
+
+    // A URL that is not http(s) paints as plain text.
+    app.pr = PrView::Pr(Box::new(PrSnapshot { url: "file:///x".into(), ..common::pr_snapshot() }));
+    assert_eq!(render_size(&app, 100, 12).cell((99, 0)).unwrap().symbol(), "↗");
 }
