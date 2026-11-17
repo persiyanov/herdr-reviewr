@@ -1,14 +1,3 @@
-<div align="center">
-  <sup>Special thanks to:</sup>
-  <br><br>
-  <a href="https://getmoshi.app/?utm_source=herdr-reviewr&utm_medium=readme&utm_campaign=sponsor"><img alt="Moshi" width="120" src="assets/sponsors/moshi.svg"></a>
-
-### [Moshi: Terminals weren’t made for phones. Moshi is.](https://getmoshi.app/?utm_source=herdr-reviewr&utm_medium=readme&utm_campaign=sponsor)
-[A mobile terminal designed for AI coding agents.](https://getmoshi.app/?utm_source=herdr-reviewr&utm_medium=readme&utm_campaign=sponsor)<br>
-
-  <hr />
-</div>
-
 # herdr-reviewr
 
 [![CI](https://github.com/persiyanov/herdr-reviewr/actions/workflows/ci.yml/badge.svg)](https://github.com/persiyanov/herdr-reviewr/actions/workflows/ci.yml)

@@ -9,6 +9,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - **Ctrl-click opens a PR link on your own machine under `herdr --remote`**: the PR tab's `#number ↗` chip and every http(s) link in rendered markdown paint as terminal hyperlinks (OSC 8), which herdr opens in the browser where its client runs.
 
+## [0.52.2] — 2026-11-15
+
+### Fixed
+- **A markdown file's front matter reads as YAML** in both the rendered and the source view, not as a rule over a heading.
+- **Code in rendered markdown wraps at spaces**, as the diff does, instead of mid-word.
+
 ## [0.52.1] — 2026-11-08
 
 ### Changed
