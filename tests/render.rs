@@ -4287,11 +4287,8 @@ fn a_wide_glyph_author_keeps_the_age_column() {
         .lines()
         .skip(1)
         .filter(|l| l.contains("  ") && (l.contains("Test") || l.contains("田")))
-        // The test backend dumps one char per cell, so a char index is a column.
-        .map(|l| {
-            let cells: Vec<char> = l.trim_end_matches([' ', '│']).chars().collect();
-            cells.iter().rposition(|c| *c == ' ').unwrap()
-        })
+        // One char per cell; right-aligned ages like `9s` and `10s` share their end, not their start.
+        .map(|l| l.trim_end_matches([' ', '│']).chars().count())
         .collect();
     assert!(out.contains("田"), "{out}");
     assert!(ages.len() >= 2 && ages.iter().all(|&a| a == ages[0]), "ages align:\n{out}");
